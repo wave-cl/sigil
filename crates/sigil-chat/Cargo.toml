@@ -11,4 +11,17 @@ sigil = { path = "../sigil" }
 sigil-ui = { path = "../sigil-ui" }
 sqex-chat = { workspace = true }
 sqnr-core = { workspace = true }
+sqnr = { workspace = true }
+sqex-proto = { workspace = true }
+sqex-voice = { workspace = true }
+sigil-net = { path = "../sigil-net" }
 tokio = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+sqexd = { workspace = true }
+squic = { workspace = true }
+tempfile = "3"
+toml = "0.8"
+hex = "0.4"
+ed25519-dalek = { version = "2", features = ["rand_core"] }

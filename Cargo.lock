@@ -5701,12 +5701,23 @@ dependencies = [
 name = "sigil-chat"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "egui",
+ "egui_kittest",
+ "hex",
  "sigil",
+ "sigil-net",
  "sigil-ui",
  "sqex-chat",
+ "sqex-proto",
+ "sqex-voice",
+ "sqexd",
+ "sqnr",
  "sqnr-core",
+ "squic",
+ "tempfile",
  "tokio",
+ "toml 0.8.2",
 ]
 
 [[package]]

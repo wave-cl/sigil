@@ -43,7 +43,13 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
 
     for row in rows {
         ui.horizontal(|ui| {
-            speaking_dot(ui, row.speaking, &theme);
+            crate::dot(
+                ui,
+                row.speaking,
+                theme.speaking,
+                theme.text_muted,
+                if row.speaking { "speaking" } else { "silent" },
+            );
             ui.add(egui::Label::new(egui::RichText::new(&row.key).monospace()).selectable(true));
             ui.add(
                 egui::ProgressBar::new(row.level.clamp(0.0, 1.0))
@@ -64,36 +70,4 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
             format!("{connecting} more in the room, not yet connected"),
         );
     }
-}
-
-/// A filled disc while somebody is speaking, a ring while they are not.
-///
-/// Painted rather than written. The obvious spelling is a `●` and a `○`, and
-/// the first is not in the default font — it renders as a tofu box, which the
-/// accessibility assertions cannot see and a snapshot caught immediately.
-///
-/// Filled versus hollow, not green versus grey: the state has to survive being
-/// read by somebody who cannot tell the two colours apart. It carries a text
-/// label as well, because a screen reader saying "black circle" helps nobody.
-fn speaking_dot(ui: &mut egui::Ui, speaking: bool, theme: &ColorTheme) {
-    let size = egui::vec2(tokens::SPACING_MD, tokens::SPACING_MD);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let centre = rect.center();
-    let radius = tokens::SPACING_XS + 1.0;
-    if speaking {
-        ui.painter().circle_filled(centre, radius, theme.speaking);
-    } else {
-        ui.painter().circle_stroke(
-            centre,
-            radius,
-            egui::Stroke::new(tokens::STROKE_MEDIUM, theme.text_muted),
-        );
-    }
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Label,
-            true,
-            if speaking { "speaking" } else { "silent" },
-        )
-    });
 }
