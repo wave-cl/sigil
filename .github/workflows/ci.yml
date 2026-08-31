@@ -11,9 +11,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # sigil depends on the sqex crates by path. See docs/dependencies.md: a
-  # release pins them to a git tag instead, at which point the second checkout
-  # below can go.
+  # sigil depends on the sqex crates by path, so sqex is checked out beside it.
+  # See docs/dependencies.md: a release pins them to a git tag instead, at which
+  # point the second checkout can go. sqex, sqnr and squic are all public, so
+  # none of this needs a secret -- CI runs on a fork with no configuration.
   SQEX_REF: sigil-voice-engine
 
 jobs:
@@ -35,14 +36,7 @@ jobs:
         with:
           repository: wave-cl/sqex
           ref: ${{ env.SQEX_REF }}
-          token: ${{ secrets.SQEX_TOKEN }}
           path: sqex-sigil
-
-      # sqnr and squic are private git dependencies over https, so cargo needs
-      # credentials for them too.
-      - name: Let cargo fetch the private git dependencies
-        run: |
-          git config --global url."https://x-access-token:${{ secrets.SQEX_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -99,11 +93,7 @@ jobs:
         with:
           repository: wave-cl/sqex
           ref: ${{ env.SQEX_REF }}
-          token: ${{ secrets.SQEX_TOKEN }}
           path: sqex-sigil
-      - name: Let cargo fetch the private git dependencies
-        run: |
-          git config --global url."https://x-access-token:${{ secrets.SQEX_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -139,11 +129,7 @@ jobs:
         with:
           repository: wave-cl/sqex
           ref: ${{ env.SQEX_REF }}
-          token: ${{ secrets.SQEX_TOKEN }}
           path: sqex-sigil
-      - name: Let cargo fetch the private git dependencies
-        run: |
-          git config --global url."https://x-access-token:${{ secrets.SQEX_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
       - name: System dependencies
         run: |

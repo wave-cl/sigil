@@ -104,8 +104,8 @@ Two things it needs that an ordinary repository does not:
   checks `wave-cl/sqex` out beside it under that name. The path is the contract.
   When the sqex dependencies move to a git tag (see `docs/dependencies.md`) that
   step can go.
-- **`secrets.SQEX_TOKEN`.** sqex is private, and so are the `sqnr` and `squic`
-  git dependencies, so cargo is given credentials for `github.com` as well.
+sqex, sqnr and squic-rust are all public, so CI needs **no secrets** and runs
+unchanged on a fork.
 
 ### Why there is a job called `complete`
 
