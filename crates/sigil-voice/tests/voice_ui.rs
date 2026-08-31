@@ -203,7 +203,23 @@ fn minting_a_room_produces_a_usable_secret() {
         .split(" | ")
         .find(|s| s.parse::<sigil_net::RoomId>().is_ok())
         .unwrap_or_else(|| panic!("no parseable room secret on screen: {said}"));
-    assert_eq!(minted.len(), 44, "a room secret is a base58 32-byte value");
+    // A length *floor*, not an equality. base58 is not fixed-width, and 32
+    // random bytes are shorter than the maximum more often than one would
+    // guess. Measured over 20,000 values: 44 chars 94.4% of the time, 43 chars
+    // 5.5%, and 41-42 about one time in a thousand.
+    //
+    // `assert_eq!(len, 44)` therefore failed roughly one run in eighteen, and I
+    // put the first such failure down to a stale build without looking. A
+    // corrected guess of `43..=44` would still have failed one run in a
+    // thousand -- which is the worse bug, because it comes back only when
+    // somebody else is watching.
+    //
+    // The parse above is the real check. This only catches a truncation.
+    assert!(
+        minted.len() >= 40,
+        "a room secret should not be this short ({} chars): {minted}",
+        minted.len()
+    );
 }
 
 /// Drive the app with an account *and* a ring already arrived.

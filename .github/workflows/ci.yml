@@ -1,0 +1,193 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# One run per branch. A superseded run proves nothing and costs a runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # sigil depends on the sqex crates by path. See docs/dependencies.md: a
+  # release pins them to a git tag instead, at which point the second checkout
+  # below can go.
+  SQEX_REF: sigil-voice-engine
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything that does not need a second platform: formatting, lints, and the
+  # tests, on Linux.
+  # ---------------------------------------------------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sigil
+
+      # sigil's manifest names ../sqex-sigil, so sqex has to land beside it
+      # under that name. A worktree locally, a checkout here; the path is the
+      # contract.
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/sqex
+          ref: ${{ env.SQEX_REF }}
+          token: ${{ secrets.SQEX_TOKEN }}
+          path: sqex-sigil
+
+      # sqnr and squic are private git dependencies over https, so cargo needs
+      # credentials for them too.
+      - name: Let cargo fetch the private git dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SQEX_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          # cmake             libopus is built from source
+          # libasound2-dev    cpal's ALSA backend, and the fallback with no PipeWire
+          # libpipewire-0.3-dev  the preferred Linux audio backend
+          # libgtk-3-dev      the tray speaks StatusNotifierItem through GTK,
+          #                   even though sigil draws with wgpu
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libasound2-dev libpipewire-0.3-dev libgtk-3-dev \
+            libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sigil
+
+      - name: Check
+        working-directory: sigil
+        run: cargo check --workspace --all-targets
+
+      - name: Format
+        working-directory: sigil
+        run: |
+          cargo fmt -p sigil -p sigil-ui -p sigil-net -p sigil-platform \
+                    -p sigil-voice -p sigil-chat -p sigil-shell -- --check
+
+      - name: Clippy
+        working-directory: sigil
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Runs the real audio path: tone in, WAV out, through an in-process sqexd
+      # and a real Opus encoder, with no sound hardware anywhere. That is the
+      # Linux half of the call actually being exercised rather than assumed.
+      - name: Tests
+        working-directory: sigil
+        run: scripts/run-tests
+
+  # ---------------------------------------------------------------------------
+  # The same, on macOS. It is half the supported platforms and the audio
+  # backend is a different one.
+  # ---------------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sigil
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/sqex
+          ref: ${{ env.SQEX_REF }}
+          token: ${{ secrets.SQEX_TOKEN }}
+          path: sqex-sigil
+      - name: Let cargo fetch the private git dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SQEX_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sigil
+      - name: Tests
+        working-directory: sigil
+        run: scripts/run-tests
+      # The bundle is not optional on macOS: notifications and the microphone
+      # both depend on its Info.plist keys, and both fail silently without
+      # them. Building it here catches a broken plist before somebody discovers
+      # it as a call with no sound.
+      - name: Build sigil.app
+        working-directory: sigil
+        run: |
+          scripts/macos-app
+          plutil -lint target/sigil.app/Contents/Info.plist
+          for key in NSMicrophoneUsageDescription CFBundleIdentifier CFBundleURLTypes; do
+            /usr/libexec/PlistBuddy -c "Print :$key" target/sigil.app/Contents/Info.plist >/dev/null \
+              || { echo "::error::sigil.app is missing $key"; exit 1; }
+          done
+
+  # ---------------------------------------------------------------------------
+  # Pixels. Rendered with a software rasterizer so the output is the same on
+  # every machine; a GPU would give a different answer per runner.
+  # ---------------------------------------------------------------------------
+  snapshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sigil
+      - uses: actions/checkout@v4
+        with:
+          repository: wave-cl/sqex
+          ref: ${{ env.SQEX_REF }}
+          token: ${{ secrets.SQEX_TOKEN }}
+          path: sqex-sigil
+      - name: Let cargo fetch the private git dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SQEX_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libasound2-dev libpipewire-0.3-dev libgtk-3-dev \
+            libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev \
+            mesa-vulkan-drivers
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sigil
+      - name: Snapshots
+        working-directory: sigil
+        run: scripts/snapshot-test
+
+  # ---------------------------------------------------------------------------
+  # The tick.
+  #
+  # This job exists because a green check can mean *nothing ran*. A matrix that
+  # resolved empty, a path filter that excluded everything, a job skipped
+  # because one it needed was skipped -- all of those are green, and none of
+  # them checked anything.
+  #
+  # So this names every job that must have run and asserts each one *succeeded*
+  # rather than merely not failing. `skipped` and `cancelled` are failures here.
+  # ---------------------------------------------------------------------------
+  complete:
+    if: always()
+    needs: [linux, macos, snapshots]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job must have actually run
+        run: |
+          set -eu
+          fail=0
+          check() {
+            printf '%-12s %s\n' "$1" "$2"
+            [ "$2" = "success" ] || fail=1
+          }
+          check linux     "${{ needs.linux.result }}"
+          check macos     "${{ needs.macos.result }}"
+          check snapshots "${{ needs.snapshots.result }}"
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::a required job did not run to success (skipped and cancelled count as failure)"
+            exit 1
+          fi
+          echo "all required jobs ran and passed"

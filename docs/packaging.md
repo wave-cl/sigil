@@ -92,3 +92,36 @@ xdg-mime query default x-scheme-handler/sigil
 `packaging/icon.py` draws it at any size, with no dependencies. It is generated
 rather than checked in so it cannot drift from the disc the tray draws, and so
 there is no binary blob in the repository that nobody can diff.
+
+## CI
+
+`.github/workflows/ci.yml` is the single source of truth, and `./check` runs its
+steps locally by reading it — so the two cannot drift.
+
+Two things it needs that an ordinary repository does not:
+
+- **A second checkout.** sigil's manifest names `../sqex-sigil`, so the workflow
+  checks `wave-cl/sqex` out beside it under that name. The path is the contract.
+  When the sqex dependencies move to a git tag (see `docs/dependencies.md`) that
+  step can go.
+- **`secrets.SQEX_TOKEN`.** sqex is private, and so are the `sqnr` and `squic`
+  git dependencies, so cargo is given credentials for `github.com` as well.
+
+### Why there is a job called `complete`
+
+A green tick can mean *nothing ran*. A matrix that resolved empty, a path filter
+that excluded everything, a job skipped because one it needed was skipped — all
+of those are green, and none of them checked anything.
+
+So `complete` names every job that must have run and asserts each one
+**succeeded** rather than merely not failing: `skipped` and `cancelled` are
+failures there. Branch protection should require `complete`, not the individual
+jobs.
+
+### Why there is a test floor
+
+`cargo test` exits 0 when it runs no tests. `scripts/run-tests` counts what
+passed and compares it against `scripts/test-floor`, so losing tests fails CI
+until somebody lowers the number in a diff. It is set to the exact current
+count, not a round number below it — the point is that losing one test is
+enough.

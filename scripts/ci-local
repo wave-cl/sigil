@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Run CI's own steps, locally, from the workflow file.
+
+The workflow is the single source of truth. A `check` script that lists the
+same commands by hand is a second source, and the two drift -- usually in the
+direction where local passes and CI does not, discovered after pushing.
+
+So this reads `.github/workflows/ci.yml` and runs the `run:` steps of the jobs
+that make sense here, skipping the ones that only mean something on a runner
+(checkouts, toolchain actions, apt).
+
+    scripts/ci-local            # the jobs for this platform
+    scripts/ci-local --list     # what it would run
+    scripts/ci-local linux      # one job
+
+No PyYAML: it is not installed everywhere and this needs a small enough subset
+of YAML that asking for a dependency to read four keys is the wrong trade.
+"""
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+WORKFLOW = REPO / ".github/workflows/ci.yml"
+
+# Steps that are the runner's business and nobody else's: installing system
+# packages, and giving cargo credentials for the private git dependencies.
+# Everything else is meant to run here too -- that is the point.
+SKIP_STEP = re.compile(r"apt-get|git config --global url\.", re.I)
+# Jobs that cannot run on this machine.
+PLATFORM_ONLY = {"macos": "darwin", "snapshots": "linux"}
+
+
+def jobs() -> dict[str, list[tuple[str, str]]]:
+    """Job name -> [(step name, shell command)]. A deliberately small parser."""
+    text = WORKFLOW.read_text()
+    out: dict[str, list[tuple[str, str]]] = {}
+    job = None
+    step_name = None
+    run_lines: list[str] | None = None
+    run_indent = 0
+
+    for raw in text.splitlines():
+        # A job header: exactly two spaces of indent, under `jobs:`.
+        m = re.match(r"^  ([a-z][\w-]*):\s*$", raw)
+        if m and not raw.startswith("    "):
+            if job and run_lines is not None:
+                out[job].append((step_name or "run", dedent(run_lines)))
+            job, run_lines = m.group(1), None
+            out.setdefault(job, [])
+            continue
+        if job is None:
+            continue
+
+        if run_lines is not None:
+            # Still inside a `run: |` block?
+            if raw.strip() == "" or (len(raw) - len(raw.lstrip())) >= run_indent:
+                run_lines.append(raw)
+                continue
+            out[job].append((step_name or "run", dedent(run_lines)))
+            run_lines = None
+
+        name = re.match(r"^\s*- name:\s*(.+)$", raw)
+        if name:
+            step_name = name.group(1).strip()
+            continue
+        # The block form first: `run: |` also matches the one-liner pattern,
+        # since `|` is a non-space character, and taking it as a command runs
+        # a literal pipe.
+        block = re.match(r"^(\s*)run:\s*\|\s*$", raw)
+        if block:
+            run_indent = len(block.group(1)) + 2
+            run_lines = []
+            continue
+        one = re.match(r"^(\s*)run:\s*(\S.*)$", raw)
+        if one:
+            out[job].append((step_name or "run", one.group(2).strip()))
+            continue
+
+    if job and run_lines is not None:
+        out[job].append((step_name or "run", dedent(run_lines)))
+    return out
+
+
+def dedent(lines: list[str]) -> str:
+    body = [l for l in lines if l.strip()]
+    if not body:
+        return ""
+    pad = min(len(l) - len(l.lstrip()) for l in body)
+    return "\n".join(l[pad:] for l in lines).strip()
+
+
+def main() -> int:
+    here = "darwin" if sys.platform == "darwin" else "linux"
+    found = jobs()
+    wanted = [a for a in sys.argv[1:] if not a.startswith("-")]
+    listing = "--list" in sys.argv
+
+    ran = 0
+    for job, steps in found.items():
+        if job == "complete":
+            continue  # it asserts about the runner's own jobs
+        if wanted and job not in wanted:
+            continue
+        need = PLATFORM_ONLY.get(job)
+        if not wanted and need and need != here:
+            print(f"-- skipping {job}: needs {need}, this is {here}")
+            continue
+        for step_name, cmd in steps:
+            if not cmd or SKIP_STEP.search(cmd):
+                continue
+            # `working-directory: sigil` on the runner is the repo root here.
+            print(f"\n== {job}: {step_name}\n$ {cmd}")
+            if listing:
+                continue
+            result = subprocess.run(cmd, shell=True, cwd=REPO)
+            if result.returncode != 0:
+                print(f"\nfailed: {job} / {step_name}", file=sys.stderr)
+                return result.returncode
+            ran += 1
+
+    if listing:
+        return 0
+    # The same trap the `complete` job guards against, one level down: running
+    # nothing is not the same as passing.
+    if ran == 0:
+        print("\nerror: no steps ran. Nothing was checked.", file=sys.stderr)
+        return 1
+    print(f"\nok — {ran} steps")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

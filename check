@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# Runs the CI-like checks in one go. Mirrors what .github/workflows runs, so a
-# clean run here means a clean run there.
-set -eux
-
-# Package list is explicit rather than `--all`. sigil depends on the sqex
-# crates by path for local co-development, and `cargo fmt --all` walks into
-# those too -- reformatting 68 files of a repo whose formatting is
-# hand-maintained and whose CI does not run rustfmt at all. Name our own
-# packages and nobody else's.
-SIGIL_PKGS=(-p sigil -p sigil-ui -p sigil-net -p sigil-platform \
-            -p sigil-voice -p sigil-chat -p sigil-shell)
-
-cargo check --workspace --all-targets
-cargo fmt "${SIGIL_PKGS[@]}" -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+#
+# Run what CI runs.
+#
+# This used to list the commands itself, which made it a second source of truth
+# beside the workflow -- and two sources drift, reliably in the direction where
+# local passes and CI does not, discovered after pushing. It now delegates to
+# scripts/ci-local, which reads .github/workflows/ci.yml and runs its steps.
+#
+#   ./check              # the jobs that make sense on this machine
+#   ./check --list       # what it would run, without running it
+set -euo pipefail
+exec "$(dirname "${BASH_SOURCE[0]}")/scripts/ci-local" "$@"

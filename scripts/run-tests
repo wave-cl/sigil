@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Run the tests, and refuse to pass vacuously.
+#
+#   scripts/run-tests            # the workspace
+#   scripts/run-tests --floor N  # require at least N passing
+#
+# `cargo test` exits 0 when it runs no tests at all. So does a job whose build
+# matched nothing, or whose filter excluded everything. A green tick is
+# therefore not evidence that anything was checked — it is evidence that
+# nothing failed, which is a different and much weaker claim.
+#
+# This counts what actually passed and compares it to a floor committed to the
+# repository. Deleting tests then fails CI until somebody lowers the floor on
+# purpose, in a diff, where it can be argued about.
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo"
+
+floor_file="$repo/scripts/test-floor"
+floor="$(cat "$floor_file" 2>/dev/null || echo 1)"
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --floor) floor="$2"; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+
+log="$(mktemp)"
+trap 'rm -f "$log"' EXIT
+
+set +e
+cargo test --workspace ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+set -e
+if [[ $status -ne 0 ]]; then
+    echo "tests failed" >&2
+    exit $status
+fi
+
+# Sum the "test result: ok. N passed" lines. Doc-test and empty suites report
+# zero and contribute nothing, which is what we want: only real assertions
+# count towards the floor.
+passed=$(grep -Eo '^test result: ok\. [0-9]+ passed' "$log" \
+         | grep -Eo '[0-9]+' | paste -sd+ - | bc 2>/dev/null || echo 0)
+passed=${passed:-0}
+
+echo
+echo "passing tests: $passed (floor $floor)"
+if [[ "$passed" -lt "$floor" ]]; then
+    cat >&2 <<MSG
+
+error: only $passed tests passed, and the floor is $floor.
+
+Either tests were lost, or the build matched less than it should have. Both
+look identical from the exit code, which is why this check exists. If the drop
+is deliberate, lower the number in scripts/test-floor in the same commit.
+MSG
+    exit 1
+fi
