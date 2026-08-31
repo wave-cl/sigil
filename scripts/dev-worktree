@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# Point sigil's sqex path dependencies at a private git worktree.
+#
+#   scripts/dev-worktree            # create it and wire sigil up
+#   scripts/dev-worktree --status   # show what is wired where
+#   scripts/dev-worktree --remove   # unwire, and remove the worktree
+#
+# Why: sigil depends on the sqex crates by path, so a `cargo build` here
+# compiles whatever branch ../sqex happens to have checked out. When something
+# else is working in that tree -- another session, or you in another terminal --
+# that means two problems at once: the branch moves underneath the build, and
+# both fight over cargo's target-directory lock, which looks exactly like a very
+# slow compile.
+#
+# A worktree gives this checkout its own branch and its own working copy of the
+# same repository, and `.cargo/config.toml` (gitignored) redirects the path
+# dependencies onto it. Nothing committed changes, so a fresh clone still builds
+# against a plain ../sqex.
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+sqex="$(cd "$repo/../sqex" && pwd)"
+tree="$repo/../sqex-sigil"
+branch="sigil-voice-engine"
+config="$repo/.cargo/config.toml"
+
+case "${1:-create}" in
+  --status)
+    echo "sqex repo:  $sqex"
+    echo "worktree:   $tree"
+    git -C "$sqex" worktree list
+    if [[ -f "$config" ]]; then
+        echo "override:   $config"
+        grep -E '^\s*"' "$config" || true
+    else
+        echo "override:   none -- sigil builds against $sqex directly"
+    fi
+    exit 0
+    ;;
+  --remove)
+    rm -f "$config"
+    git -C "$sqex" worktree remove "$tree" 2>/dev/null \
+        || echo "note: worktree not removed (uncommitted changes?); remove it by hand" >&2
+    echo "unwired. sigil now builds against $sqex."
+    exit 0
+    ;;
+esac
+
+if [[ ! -d "$tree" ]]; then
+    # Branch from main, not from whatever the shared tree has checked out.
+    git -C "$sqex" worktree add "$tree" -b "$branch" main
+fi
+
+mkdir -p "$repo/.cargo"
+{
+    echo "# Local development override -- gitignored, created by scripts/dev-worktree."
+    echo "#"
+    echo "# Redirects sigil's sqex path dependencies onto a private git worktree so"
+    echo "# this checkout does not share a branch or a target directory with anything"
+    echo "# else using $sqex. Delete this file (or run --remove) to go back."
+    echo "paths = ["
+    for c in sqex-proto sqex-discovery sqex-voice sqex-chat sqexd; do
+        echo "    \"$tree/crates/$c\","
+    done
+    echo "]"
+} > "$config"
+
+echo "worktree: $tree (branch $branch)"
+echo "override: $config"
+echo
+echo "Verify with: cargo metadata --format-version 1 | grep sqex-voice"

@@ -18,7 +18,7 @@ sqex-discovery = { workspace = true }
 sqex-voice = { workspace = true }
 
 [dev-dependencies]
-sqexd = { path = "../../../sqex/crates/sqexd" }
+sqexd = { workspace = true }
 squic = { workspace = true }
 tempfile = "3"
 toml = "0.8"
