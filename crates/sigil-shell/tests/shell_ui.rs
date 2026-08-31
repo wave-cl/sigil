@@ -40,7 +40,9 @@ fn harness(dark: bool) -> Harness<'static> {
             unread: 3,
         }),
     ];
-    let mut shell = sigil_shell::Shell::new(apps);
+    // No platform: this is headless, with no tray and no notification
+    // daemon, and it should not pretend to have either.
+    let mut shell = sigil_shell::Shell::new(apps, None);
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -171,4 +173,45 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
         said.contains("available") || said.contains("unavailable"),
         "each is marked, in words: {said}"
     );
+}
+
+fn platform_harness() -> Harness<'static> {
+    use sigil_platform::Platform;
+    use sigil_shell::PlatformApp;
+    let mut app = PlatformApp::new(Platform::new());
+    Harness::builder()
+        .with_size(egui::vec2(760.0, 480.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_LG as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = sigil::navigator::Navigator::default();
+                    let mut account = sigil::account::Account::Missing {
+                        path: "nowhere".into(),
+                    };
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        account: &mut account,
+                        hidden: false,
+                        notify: &sigil::Silent,
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+        })
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn desktop_pane_dark() {
+    let mut h = platform_harness();
+    h.run();
+    h.snapshot("desktop_pane_dark");
 }

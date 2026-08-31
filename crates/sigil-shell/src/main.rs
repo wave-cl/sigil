@@ -83,6 +83,12 @@ fn main() -> eframe::Result<()> {
     }
 
     tracing_subscriber::fmt()
+        // stderr, not stdout. A window has no console to read, so these are
+        // for whoever ran sigil from one or is reading a redirect -- and stdout
+        // through a pipe is block-buffered, so a killed process loses
+        // everything it had to say. That is how the first attempt at this
+        // produced an empty log.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "sigil=info,sigil_net=info".into()),
@@ -102,6 +108,32 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::install(&cc.egui_ctx, theme::light(), theme::dark());
+
+            // Built here, and only here: the tray must be created on the main
+            // thread — the macOS menu bar and Linux's GTK context both insist —
+            // and eframe's creator is the one place that is guaranteed to be.
+            let platform = sigil_platform::Platform::new();
+
+            // Said at startup as well as drawn in the Desktop pane. The first
+            // question about a notification that never appeared is whether it
+            // was ever possible, and an answer in the log is one somebody can
+            // paste into a bug report.
+            for capability in platform.capabilities() {
+                match capability.support.reason() {
+                    None => tracing::info!("{}: available", capability.name),
+                    Some(why) => tracing::warn!("{}: unavailable — {why}", capability.name),
+                }
+            }
+            if !platform.can_reach_you_when_away() {
+                // Worth saying loudly rather than letting somebody find out by
+                // missing a call: with neither notifications nor a tray, sigil
+                // is a telephone only while its window is open.
+                tracing::warn!(
+                    "no notifications and no tray on this desktop: calls will only \
+                     reach you while sigil's window is open"
+                );
+            }
+
             let apps: Vec<Box<dyn App>> = vec![
                 Box::new(sigil_voice::VoiceApp::new()),
                 Box::new(sigil_chat::ChatApp::new()),
@@ -110,7 +142,7 @@ fn main() -> eframe::Result<()> {
                 )),
             ];
             Ok(Box::new(Sigil {
-                shell: Shell::new(apps),
+                shell: Shell::new(apps, Some(platform)),
             }))
         }),
     )

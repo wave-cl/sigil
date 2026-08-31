@@ -48,10 +48,27 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(apps: Vec<Box<dyn App>>) -> Self {
+    /// Build the shell.
+    ///
+    /// The desktop is a **parameter, not a builder step**. It used to be
+    /// `with_platform`, and `main` forgot to call it — so the real binary ran
+    /// with no notifier and no tray, and a ring was drawn but never announced.
+    /// Nothing caught it: the tests pass their own notifier, and a missing one
+    /// is silence, which is what a working notifier looks like from inside a
+    /// test. Making it an argument makes forgetting it a compile error.
+    ///
+    /// `None` is for tests and headless rendering, which have no tray and no
+    /// notification daemon and should not pretend otherwise.
+    pub fn new(apps: Vec<Box<dyn App>>, platform: Option<sigil_platform::Platform>) -> Self {
         assert!(!apps.is_empty(), "a shell with no apps has nothing to show");
         let mut opened = vec![false; apps.len()];
         opened[0] = true;
+        let (notify, tray): (Box<dyn Notify>, Option<sigil_platform::Tray>) = match platform {
+            Some(sigil_platform::Platform { notifier, tray, .. }) => {
+                (Box::new(notifier), Some(tray))
+            }
+            None => (Box::new(sigil::Silent), None),
+        };
         Self {
             apps,
             nav: NavStack::new(NavEntry::app_only(AppId(0))),
@@ -61,22 +78,10 @@ impl Shell {
             navigator: Navigator::default(),
             chrome_visible: true,
             account: Account::discover(None),
-            platform: Box::new(sigil::Silent),
-            tray: None,
+            platform: notify,
+            tray,
             shown_unread: 0,
         }
-    }
-
-    /// Give the shell the desktop's own facilities.
-    ///
-    /// Separate from `new` so the shell can be built and rendered headlessly by
-    /// a test, which has no tray and no notification daemon and should not be
-    /// made to pretend otherwise.
-    pub fn with_platform(mut self, platform: sigil_platform::Platform) -> Self {
-        let sigil_platform::Platform { notifier, tray, .. } = platform;
-        self.platform = Box::new(notifier);
-        self.tray = Some(tray);
-        self
     }
 
     /// Start with a particular identity, rather than whatever `~/.sqnr` holds.
