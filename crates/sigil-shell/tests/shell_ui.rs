@@ -175,10 +175,37 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
     );
 }
 
+/// A fixed report, so the snapshot is of the *layout* and not of whichever
+/// machine took it. The real pane says what this desktop can do, which differs
+/// on every desktop -- snapshotting that compared macOS against Linux and found
+/// eleven thousand differing pixels, correctly.
+///
+/// One row available and one not, so both states are drawn.
+fn a_report() -> sigil_shell::Report {
+    use sigil_platform::{Capability, Support};
+    sigil_shell::Report {
+        session: "an example desktop".into(),
+        capabilities: vec![
+            Capability::new(
+                "Notifications",
+                "tells you about a call or a message when sigil is not in front",
+                Support::Yes,
+            ),
+            Capability::new(
+                "Global shortcuts",
+                "mute and push-to-talk while sigil is not focused",
+                Support::no("this session cannot claim a key combination"),
+            ),
+        ],
+        reachable_when_away: true,
+        autostart: Support::Yes,
+        autostart_enabled: false,
+    }
+}
+
 fn platform_harness() -> Harness<'static> {
-    use sigil_platform::Platform;
     use sigil_shell::PlatformApp;
-    let mut app = PlatformApp::new(Platform::new());
+    let mut app = PlatformApp::from_report(a_report());
     Harness::builder()
         .with_size(egui::vec2(760.0, 480.0))
         .build_ui(move |ui| {

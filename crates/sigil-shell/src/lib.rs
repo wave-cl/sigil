@@ -8,5 +8,5 @@
 mod platform_app;
 mod shell;
 
-pub use platform_app::PlatformApp;
+pub use platform_app::{PlatformApp, Report};
 pub use shell::Shell;
