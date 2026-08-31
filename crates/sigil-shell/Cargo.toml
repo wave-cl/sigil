@@ -1,0 +1,23 @@
+[package]
+name = "sigil-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The sigil binary: eframe shell, tab strip, column deck."
+
+[dependencies]
+eframe = { workspace = true }
+egui = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sigil = { path = "../sigil" }
+sigil-ui = { path = "../sigil-ui" }
+sigil-net = { path = "../sigil-net" }
+sigil-platform = { path = "../sigil-platform" }
+sigil-voice = { path = "../sigil-voice" }
+sigil-chat = { path = "../sigil-chat" }
+
+[[bin]]
+name = "sigil"
+path = "src/main.rs"

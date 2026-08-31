@@ -1,0 +1,12 @@
+[package]
+name = "sigil-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared sigil widgets: identicons, roster rows, level meters."
+
+[dependencies]
+egui = { workspace = true }
+egui_extras = { workspace = true }
+sigil = { path = "../sigil" }
+sqnr-core = { workspace = true }

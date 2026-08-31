@@ -1,0 +1,6 @@
+[toolchain]
+# Matches the sqex workspace, whose crates sigil links. Pinning stable to a
+# minor version keeps new clippy lints from surprising CI between commits;
+# bump deliberately, fixing any new lints in the same commit.
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]

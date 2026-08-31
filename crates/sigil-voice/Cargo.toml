@@ -1,0 +1,15 @@
+[package]
+name = "sigil-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Calls and rooms as a sigil App."
+
+[dependencies]
+egui = { workspace = true }
+sigil = { path = "../sigil" }
+sigil-ui = { path = "../sigil-ui" }
+sigil-net = { path = "../sigil-net" }
+sqex-voice = { workspace = true }
+sqnr-core = { workspace = true }
+tokio = { workspace = true }

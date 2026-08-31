@@ -1,0 +1,14 @@
+[package]
+name = "sigil-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Messaging as a sigil App."
+
+[dependencies]
+egui = { workspace = true }
+sigil = { path = "../sigil" }
+sigil-ui = { path = "../sigil-ui" }
+sqex-chat = { workspace = true }
+sqnr-core = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "sigil-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop capabilities: tray, notifications, hotkeys, deep links -- each reporting whether this desktop supports it."
+
+[dependencies]
+tracing = { workspace = true }
+tray-icon = { workspace = true }
+global-hotkey = { workspace = true }
+notify-rust = { workspace = true }
+auto-launch = { workspace = true }
+image = { workspace = true }

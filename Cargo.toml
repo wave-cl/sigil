@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sigil",
+    "crates/sigil-ui",
+    "crates/sigil-net",
+    "crates/sigil-platform",
+    "crates/sigil-voice",
+    "crates/sigil-chat",
+    "crates/sigil-shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# --- the sqex stack -------------------------------------------------------
+# Path deps for local co-development, which is how sqex itself works against
+# sqnr. A release pins these to git tags instead; see docs/dependencies.md.
+sqex-proto = { path = "../sqex/crates/sqex-proto" }
+sqex-discovery = { path = "../sqex/crates/sqex-discovery" }
+sqex-voice = { path = "../sqex/crates/sqex-voice" }
+sqex-chat = { path = "../sqex/crates/sqex-chat" }
+sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.7.1" }
+sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.7.1" }
+squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.18.0" }
+
+# --- gui ------------------------------------------------------------------
+# Upstream egui, not notedeck's damus-io forks. 0.36 moved eframe::App to a
+# `logic`/`ui` split, where `logic` runs even while the window is hidden --
+# which is what lets a call keep running when sigil is closed to the tray.
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11"] }
+egui = "0.36"
+egui_extras = { version = "0.36", features = ["all_loaders"] }
+egui-wgpu = "0.36"
+
+# --- desktop integration --------------------------------------------------
+tray-icon = "0.24"
+global-hotkey = "0.8"
+notify-rust = "4"
+rfd = "0.17"
+auto-launch = "0.6"
+
+# --- runtime --------------------------------------------------------------
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+dirs = "6"
+bs58 = "0.5"
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+libc = "0.2"
+
+[workspace.dependencies.egui_kittest]
+version = "0.36"
+features = ["wgpu", "snapshot"]
+
+[profile.release]
+lto = true
+codegen-units = 1
