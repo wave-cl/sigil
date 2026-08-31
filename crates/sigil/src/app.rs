@@ -18,6 +18,7 @@
 use std::any::Any;
 use std::rc::Rc;
 
+use crate::account::Account;
 use crate::navigator::Navigator;
 
 /// A badge on an app's tab, its tray entry, and the dock icon.
@@ -72,6 +73,10 @@ pub struct AppContext<'a> {
     /// Queue navigation here. Apps never touch the real stack; the shell
     /// drains this after render. See [`crate::navigator`].
     pub navigator: &'a mut Navigator,
+    /// The identity sigil acts as. Shared, because voice and chat are the same
+    /// person: two apps unlocking the same file separately would ask for the
+    /// passphrase twice and disagree about who you are.
+    pub account: &'a mut Account,
     /// True while the main window is hidden — closed to the tray. An app
     /// should keep working and stop doing anything only a viewer would want,
     /// like animating.
@@ -173,8 +178,12 @@ mod tests {
         let mut drew = false;
         let output = ctx.run_ui(Default::default(), |ui| {
             let mut nav = Navigator::default();
+            let mut account = Account::Missing {
+                path: "nowhere".into(),
+            };
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
+                account: &mut account,
                 hidden: false,
             };
             // The point is that this does not panic on a token the app has

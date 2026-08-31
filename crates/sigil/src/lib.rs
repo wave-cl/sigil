@@ -10,6 +10,7 @@
 //! Nothing here knows about calls or messages. `sigil-voice` and `sigil-chat`
 //! do, and the shell knows about neither.
 
+pub mod account;
 pub mod app;
 pub mod deck;
 pub mod nav;
@@ -17,6 +18,7 @@ pub mod navigator;
 pub mod theme;
 pub mod tokens;
 
+pub use account::{Account, Unlocked};
 pub use app::{App, AppAction, AppContext, AppResponse, TabNotifications};
 pub use deck::{Layout, layout};
 pub use nav::{Discarded, NavStack};

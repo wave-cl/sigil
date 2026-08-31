@@ -28,6 +28,20 @@ impl eframe::App for Sigil {
 }
 
 fn main() -> eframe::Result<()> {
+    // A multi-thread runtime, entered for the life of the process rather than
+    // blocked on. eframe owns the main thread and the event loop; the runtime
+    // exists so that a call spawned from a button click has an executor to run
+    // on, and keeps running while the interface goes on drawing.
+    //
+    // Held in `main` deliberately: dropping a runtime waits for its tasks, and
+    // doing that in a destructor somewhere down the tree would mean a hang on
+    // quit with no obvious cause.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the tokio runtime");
+    let _guard = runtime.enter();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

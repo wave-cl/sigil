@@ -80,9 +80,16 @@ fn the_rail_shows_each_app_and_badges_the_unread_one() {
     h.run();
     // Walk the whole tree: the rail's labels are nested several frames deep,
     // and direct children of the root are the panels, not the buttons.
+    // Both label and value: accesskit puts an interactive widget's text in the
+    // former and a plain one's in the latter, so reading only labels sees the
+    // buttons and none of the prose.
     fn labels(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
-        if let Some(l) = node.accesskit_node().label() {
+        let n = node.accesskit_node();
+        if let Some(l) = n.label() {
             out.push(l.to_string());
+        }
+        if let Some(v) = n.value() {
+            out.push(v.to_string());
         }
         for child in node.children() {
             labels(child, out);

@@ -34,7 +34,8 @@ pub enum Phase {
     /// Not started.
     #[default]
     Idle,
-    /// Dialling the exchange.
+    /// Finding the exchange, then dialling it. Discovery may involve a DNSSEC
+    /// lookup, so this is not always instant.
     Connecting,
     /// Connected, waiting for the peer to name us in return. Consent is
     /// mutual, so this can last as long as the other person takes.
@@ -183,6 +184,31 @@ impl CallHandle {
     }
 }
 
+/// Where to dial: an exchange already resolved, or the layers to resolve one
+/// from.
+///
+/// Discovery is a DNSSEC lookup and belongs on the task with everything else,
+/// not in front of the interface — a window must not stop painting while a
+/// name is looked up.
+pub enum Dial {
+    /// An exchange already known, as tests and a settings pane both have.
+    At(Endpoint),
+    /// Resolve one first. See [`crate::discovery::layers`].
+    Discover(Box<[sqex_discovery::Layer; 3]>),
+}
+
+impl From<Endpoint> for Dial {
+    fn from(e: Endpoint) -> Self {
+        Dial::At(e)
+    }
+}
+
+impl From<[sqex_discovery::Layer; 3]> for Dial {
+    fn from(l: [sqex_discovery::Layer; 3]) -> Self {
+        Dial::Discover(Box::new(l))
+    }
+}
+
 /// Place a call, on a task of its own.
 ///
 /// `wake` is called whenever anything changes — pass `egui`'s
@@ -191,13 +217,14 @@ impl CallHandle {
 /// sixty frames a second through an hour of quiet would be the largest single
 /// consumer of power in the application.
 pub fn spawn_call(
-    endpoint: Endpoint,
+    dial: impl Into<Dial>,
     signer: SoftwareSigner,
     peer: PubKey,
     wait: u64,
     opts: CallOpts,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> CallHandle {
+    let dial = dial.into();
     let (state_tx, state_rx) = watch::channel(CallState {
         phase: Phase::Connecting,
         peer: Some(peer),
@@ -215,6 +242,10 @@ pub fn spawn_call(
             wake,
         };
         let result = async {
+            let endpoint = match dial {
+                Dial::At(e) => e,
+                Dial::Discover(layers) => engine::resolve(&layers, &mut bridge).await?,
+            };
             let (client, session, id) =
                 engine::establish(endpoint, &signer, peer, wait, &mut bridge).await?;
             engine::call(client, session, id, opts, &mut bridge).await

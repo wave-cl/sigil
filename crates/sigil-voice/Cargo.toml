@@ -12,4 +12,9 @@ sigil-ui = { path = "../sigil-ui" }
 sigil-net = { path = "../sigil-net" }
 sqex-voice = { workspace = true }
 sqnr-core = { workspace = true }
+sqnr = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+tempfile = "3"

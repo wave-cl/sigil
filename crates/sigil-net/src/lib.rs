@@ -5,6 +5,11 @@
 //! network.
 
 pub mod call;
+pub mod discovery;
 
-pub use call::{CallHandle, CallState, Phase, spawn_call};
+pub use call::{CallHandle, CallState, Dial, Phase, spawn_call};
 pub use sqex_voice::engine::{CallOpts, Endpoint, Event};
+
+/// Re-exported so an interface can build a layer without depending on
+/// `sqex-discovery` directly.
+pub use sqex_discovery::Layer;

@@ -5684,11 +5684,16 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "sigil"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "dirs",
+ "ed25519-dalek",
  "egui",
+ "hex",
  "serde",
  "serde_json",
+ "sqnr",
  "sqnr-core",
+ "tempfile",
  "tracing",
 ]
 
@@ -5774,11 +5779,14 @@ name = "sigil-voice"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "egui_kittest",
  "sigil",
  "sigil-net",
  "sigil-ui",
  "sqex-voice",
+ "sqnr",
  "sqnr-core",
+ "tempfile",
  "tokio",
 ]
 

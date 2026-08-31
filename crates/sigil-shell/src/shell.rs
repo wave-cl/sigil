@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use sigil::account::Account;
 use sigil::app::{App, AppAction, AppContext};
 use sigil::navigator::{AppId, NavEntry, NavRequest, Navigator};
 use sigil::{ColorTheme, NavStack, tokens};
@@ -35,6 +36,8 @@ pub struct Shell {
     previous: usize,
     navigator: Navigator,
     chrome_visible: bool,
+    /// One identity for the whole application. See `AppContext::account`.
+    account: Account,
 }
 
 impl Shell {
@@ -50,7 +53,15 @@ impl Shell {
             previous: 0,
             navigator: Navigator::default(),
             chrome_visible: true,
+            account: Account::discover(None),
         }
+    }
+
+    /// Start with a particular identity, rather than whatever `~/.sqnr` holds.
+    /// Used by tests, which must never reach for the real one.
+    pub fn with_account(mut self, account: Account) -> Self {
+        self.account = account;
+        self
     }
 
     /// Which app is on screen — read off the top of the history, never stored.
@@ -67,6 +78,7 @@ impl Shell {
             }
             let mut ctx = AppContext {
                 navigator: &mut self.navigator,
+                account: &mut self.account,
                 hidden,
             };
             app.update(&mut ctx, egui_ctx);
@@ -137,6 +149,7 @@ impl Shell {
         let entry = self.nav.top().clone();
         let mut ctx = AppContext {
             navigator: &mut self.navigator,
+            account: &mut self.account,
             hidden: false,
         };
         let response = self.apps[active].render_nav(&mut ctx, ui, &entry.token);
@@ -172,6 +185,7 @@ impl Shell {
                 if let Some(app) = self.apps.get_mut(slot) {
                     let mut ctx = AppContext {
                         navigator: &mut self.navigator,
+                        account: &mut self.account,
                         hidden: false,
                     };
                     app.dispose(&mut ctx, &entry.token);
