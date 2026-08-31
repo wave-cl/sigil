@@ -5,7 +5,7 @@
 //! *says* matters more than what it looks like and is cheaper to check.
 
 use egui_kittest::Harness;
-use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sigil::account::Account;
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
@@ -147,4 +147,60 @@ fn voice_idle_dark() {
     let mut h = harness(unlocked_account(dir.path()), true);
     h.run();
     h.snapshot("voice_idle_dark");
+}
+
+/// A room secret on screen must always carry what it means. This is the
+/// security model, and it is not what a group chat trains people to expect:
+/// there is no owner, nobody can be removed, and anyone given it can pass it
+/// on. `/kick` in chat removes somebody and rotates the key; a room cannot, and
+/// the two must never look like the same control.
+#[test]
+fn a_room_secret_always_says_it_cannot_be_taken_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = unlocked_account(dir.path());
+    let mut h = harness(account, true);
+    h.run();
+
+    // Before minting, there is a way in and the caveat is not yet shouted.
+    let before = text_of(&h);
+    assert!(
+        before.contains("Join"),
+        "there is a way into a room: {before}"
+    );
+    assert!(
+        before.contains("New room"),
+        "and a way to mint one: {before}"
+    );
+
+    // Mint one, and the warning must appear alongside it.
+    h.get_by_label("New room").click();
+    h.run();
+    let after = text_of(&h);
+    assert!(
+        after.contains("cannot be taken back"),
+        "a secret on screen says what holding it means: {after}"
+    );
+    assert!(
+        after.contains("mint a new room"),
+        "and what to do instead of removing somebody: {after}"
+    );
+}
+
+/// Minting puts a real secret in the field -- one that parses back as a room.
+#[test]
+fn minting_a_room_produces_a_usable_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = unlocked_account(dir.path());
+    let mut h = harness(account, true);
+    h.run();
+    h.get_by_label("New room").click();
+    h.run();
+
+    let said = text_of(&h);
+    // The field's contents reach the tree as a value; find the one that parses.
+    let minted = said
+        .split(" | ")
+        .find(|s| s.parse::<sigil_net::RoomId>().is_ok())
+        .unwrap_or_else(|| panic!("no parseable room secret on screen: {said}"));
+    assert_eq!(minted.len(), 44, "a room secret is a base58 32-byte value");
 }

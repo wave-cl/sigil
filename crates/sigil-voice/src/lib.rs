@@ -12,7 +12,9 @@
 use sigil::account::Account;
 use sigil::app::{App, AppContext, AppResponse};
 use sigil::{ColorTheme, tokens};
-use sigil_net::{CallHandle, CallOpts, CallState, Phase, discovery, spawn_call};
+use sigil_net::{
+    CallHandle, CallOpts, CallState, Phase, RoomId, discovery, spawn_call, spawn_room,
+};
 use sqnr::config::Config;
 use sqnr_core::PubKey;
 
@@ -31,6 +33,9 @@ pub struct VoiceApp {
     /// The key typed into the call field, and why it was refused if it was.
     peer_input: String,
     peer_trouble: Option<String>,
+    /// The room secret typed in, or one just minted and not yet joined.
+    room_input: String,
+    room_trouble: Option<String>,
     /// The passphrase field, when the identity is sealed. Held here rather than
     /// in `Account` because it is a transient piece of interface, not a
     /// property of the identity.
@@ -53,6 +58,8 @@ impl VoiceApp {
         Self {
             peer_input: String::new(),
             peer_trouble: None,
+            room_input: String::new(),
+            room_trouble: None,
             passphrase: String::new(),
             call: None,
             log: Vec::new(),
@@ -75,6 +82,19 @@ impl VoiceApp {
         self.call.as_ref().map(|c| c.state()).unwrap_or_default()
     }
 
+    /// The exchange to dial, or why we cannot.
+    ///
+    /// Shared by calling and joining so that both refuse for the same reasons
+    /// in the same words — two copies of this drifted apart in the CLI once,
+    /// which is why resolution itself lives in one place.
+    fn where_to(&self) -> Result<[sigil_net::Layer; 3], String> {
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config);
+        if !discovery::any_configured(&layers) {
+            return Err("no exchange configured — set SQEX_SERVER or ~/.sqnr/config".into());
+        }
+        Ok(layers)
+    }
+
     fn place_call(&mut self, account: &Account, egui_ctx: &egui::Context) {
         self.peer_trouble = None;
         let Some(unlocked) = account.unlocked() else {
@@ -94,12 +114,13 @@ impl VoiceApp {
             self.peer_trouble = Some("that is you — a call needs somebody else".into());
             return;
         }
-        let layers = discovery::layers(discovery::nothing_explicit(), &self.config);
-        if !discovery::any_configured(&layers) {
-            self.peer_trouble =
-                Some("no exchange configured — set SQEX_SERVER or ~/.sqnr/config".into());
-            return;
-        }
+        let layers = match self.where_to() {
+            Ok(l) => l,
+            Err(e) => {
+                self.peer_trouble = Some(e);
+                return;
+            }
+        };
 
         let wake = egui_ctx.clone();
         self.call = Some(spawn_call(
@@ -110,6 +131,37 @@ impl VoiceApp {
             CallOpts::default(),
             // The only thing that makes this interface redraw. Everything else
             // is idle, which is what lets a silent call cost nothing.
+            move || wake.request_repaint(),
+        ));
+        self.log.clear();
+    }
+
+    fn join_room(&mut self, account: &Account, egui_ctx: &egui::Context) {
+        self.room_trouble = None;
+        let Some(unlocked) = account.unlocked() else {
+            self.room_trouble = Some("unlock your identity first".into());
+            return;
+        };
+        let room: RoomId = match self.room_input.trim().parse() {
+            Ok(r) => r,
+            Err(e) => {
+                self.room_trouble = Some(format!("that is not a room secret: {e}"));
+                return;
+            }
+        };
+        let layers = match self.where_to() {
+            Ok(l) => l,
+            Err(e) => {
+                self.room_trouble = Some(e);
+                return;
+            }
+        };
+        let wake = egui_ctx.clone();
+        self.call = Some(spawn_room(
+            layers,
+            unlocked.signer(),
+            room,
+            CallOpts::default(),
             move || wake.request_repaint(),
         ));
         self.log.clear();
@@ -219,17 +271,64 @@ impl VoiceApp {
         if let Some(trouble) = &self.peer_trouble {
             ui.colored_label(theme.destructive, trouble);
         }
+
+        ui.add_space(tokens::SPACING_XL);
+        self.room_entry_ui(ctx, ui, theme);
         self.log_ui(ui, theme);
     }
 
-    /// A call in progress.
+    /// Minting or joining a room.
+    fn room_entry_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.heading("Rooms");
+        ui.colored_label(
+            theme.text_secondary,
+            "A room is named by a secret, and holding it is what being in the room \
+             consists of.",
+        );
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.room_input)
+                    .hint_text("room secret, base58")
+                    .desired_width(420.0),
+            );
+            if ui.button("Join").clicked() {
+                self.join_room(ctx.account, ui.ctx());
+            }
+            if ui.button("New room").clicked() {
+                self.room_input = RoomId::generate().to_base58();
+                self.room_trouble = None;
+            }
+        });
+        if let Some(trouble) = &self.room_trouble {
+            ui.colored_label(theme.destructive, trouble);
+        }
+        if !self.room_input.is_empty() {
+            // Said wherever a secret is on screen, because it is the whole
+            // security model and it is not what people expect from a group
+            // chat: there is no owner, nobody can be removed, and anyone you
+            // give it to can pass it on. Excluding somebody means a new room.
+            ui.colored_label(
+                theme.warning,
+                "Anyone you give this to is in the room, and can give it to anyone else. \
+                 It cannot be taken back — to leave somebody out, mint a new room.",
+            );
+        }
+    }
+
+    /// A call or a room in progress.
     fn call_ui(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
         let state = self.state();
-        ui.heading(match state.phase {
-            Phase::Connecting => "Connecting…",
-            Phase::Waiting => "Waiting for them to answer",
-            _ => "On a call",
+        let in_room = state.room.is_some();
+        ui.heading(match (state.phase, in_room) {
+            (Phase::Connecting, _) => "Connecting…",
+            (Phase::Waiting, _) => "Waiting for them to answer",
+            (_, true) => "In a room",
+            (_, false) => "On a call",
         });
+
+        if in_room {
+            self.roster_ui(&state, ui);
+        }
 
         if let Some(peer) = state.peer {
             ui.horizontal(|ui| {
@@ -257,7 +356,8 @@ impl VoiceApp {
         }
         ui.add_space(tokens::SPACING_MD);
 
-        if ui.button("Hang up").clicked()
+        let leave = if in_room { "Leave" } else { "Hang up" };
+        if ui.button(leave).clicked()
             && let Some(call) = &self.call
         {
             call.hang_up();
@@ -268,6 +368,30 @@ impl VoiceApp {
             ui.colored_label(theme.text_secondary, egui::RichText::new(stats).monospace());
         }
         self.log_ui(ui, theme);
+    }
+
+    /// Who is in the room, and who is talking.
+    ///
+    /// The drawing is `sigil_ui::roster`, which takes plain data; this only
+    /// maps the protocol's `PeerStatus` onto it. Keeping the widget free of the
+    /// wire format is what lets it be tested against a five-person room without
+    /// arranging one.
+    fn roster_ui(&self, state: &CallState, ui: &mut egui::Ui) {
+        ui.add_space(tokens::SPACING_SM);
+        let rows: Vec<sigil_ui::Row> = state
+            .present
+            .iter()
+            .map(|p| sigil_ui::Row {
+                key: p.identity.to_string(),
+                speaking: p.speaking,
+                level: p.level,
+                detail: format!(
+                    "loss {:.0}% · conceal {} · buf {}",
+                    p.loss_pct, p.concealed, p.buffered
+                ),
+            })
+            .collect();
+        sigil_ui::roster(ui, &rows, state.connecting);
     }
 
     fn log_ui(&self, ui: &mut egui::Ui, theme: &ColorTheme) {

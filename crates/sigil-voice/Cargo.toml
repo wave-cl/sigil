@@ -16,5 +16,6 @@ sqnr = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+sigil-net = { path = "../sigil-net" }
 egui_kittest = { workspace = true }
 tempfile = "3"

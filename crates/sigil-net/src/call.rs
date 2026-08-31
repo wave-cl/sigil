@@ -23,7 +23,8 @@
 
 use std::sync::Arc;
 
-use sqex_voice::engine::{self, CallOpts, Endpoint, Event, Report};
+use sqex_proto::room::RoomId;
+use sqex_voice::engine::{self, CallOpts, Endpoint, Event, PeerStatus, Report};
 use sqnr_core::{PubKey, SoftwareSigner};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -68,6 +69,15 @@ pub struct CallState {
     /// Nothing has arrived from the peer at all. A distinct flag rather than a
     /// log line, because the interface should be able to say so loudly.
     pub deaf: bool,
+    /// Who else is in the room, sorted and stable, with who is speaking.
+    /// Empty for a two-party call.
+    pub present: Vec<PeerStatus>,
+    /// Members whose session is not up yet. They are in the room and cannot be
+    /// heard, which is a different thing from not being there.
+    pub connecting: usize,
+    /// The room this is, if it is a room. Held so the interface can offer the
+    /// secret again — it is the only way anyone else gets in.
+    pub room: Option<RoomId>,
 }
 
 impl CallState {
@@ -110,6 +120,10 @@ impl Report for Bridge {
                 s.final_stats = Some(line.clone());
             }
             Event::Deaf => s.deaf = true,
+            Event::Present { peers, connecting } => {
+                s.present = peers.clone();
+                s.connecting = *connecting;
+            }
             // The rest are narrative: they say what happened, not what is true.
             Event::Pinned { .. }
             | Event::StillWaiting { .. }
@@ -257,6 +271,71 @@ pub fn spawn_call(
         // forever.
         ending.send_modify(|s| {
             s.phase = Phase::Ended;
+            if let Err(e) = &result {
+                s.trouble = Some(e.clone());
+            }
+        });
+        (ending_wake)();
+        result
+    });
+
+    CallHandle {
+        state: state_rx,
+        events: events_rx,
+        task,
+    }
+}
+
+/// Join a room, on a task of its own.
+///
+/// A room is not a call with more people in it. Nobody is dialled: holding the
+/// secret *is* being a member, so this connects and then keeps a session to
+/// each person who turns up. There is no owner, and nobody to answer.
+///
+/// That difference is worth keeping visible in the interface as well as here.
+/// A room's membership cannot be revoked — anyone holding the secret is in, and
+/// can pass it on — so leaving somebody out means minting a new room. It must
+/// not be made to look like a channel where somebody can be removed.
+pub fn spawn_room(
+    dial: impl Into<Dial>,
+    signer: SoftwareSigner,
+    room: RoomId,
+    opts: CallOpts,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> CallHandle {
+    let (state_tx, state_rx) = watch::channel(CallState {
+        phase: Phase::Connecting,
+        room: Some(room),
+        ..CallState::default()
+    });
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let wake = Arc::new(wake);
+    let dial = dial.into();
+
+    let ending = state_tx.clone();
+    let ending_wake = wake.clone();
+    let task = tokio::spawn(async move {
+        let mut bridge = Bridge {
+            state: state_tx,
+            events: events_tx,
+            wake,
+        };
+        let result = async {
+            let endpoint = match dial {
+                Dial::At(e) => e,
+                Dial::Discover(layers) => engine::resolve(&layers, &mut bridge).await?,
+            };
+            let client = engine::connect(endpoint, &signer, &mut bridge).await?;
+            engine::room_call(client, &signer, room, opts, &mut bridge).await
+        }
+        .await;
+
+        ending.send_modify(|s| {
+            s.phase = Phase::Ended;
+            // Everyone is unreachable once the room is left; leaving them on
+            // screen would show a roster of people who cannot hear you.
+            s.present.clear();
+            s.connecting = 0;
             if let Err(e) = &result {
                 s.trouble = Some(e.clone());
             }

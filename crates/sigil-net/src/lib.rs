@@ -7,8 +7,11 @@
 pub mod call;
 pub mod discovery;
 
-pub use call::{CallHandle, CallState, Dial, Phase, spawn_call};
-pub use sqex_voice::engine::{CallOpts, Endpoint, Event};
+pub use call::{CallHandle, CallState, Dial, Phase, spawn_call, spawn_room};
+pub use sqex_voice::engine::{CallOpts, Endpoint, Event, PeerStatus};
+
+/// A room is named by a secret, and holding it is what membership consists of.
+pub use sqex_proto::room::RoomId;
 
 /// Re-exported so an interface can build a layer without depending on
 /// `sqex-discovery` directly.

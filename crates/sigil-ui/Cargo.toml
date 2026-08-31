@@ -9,4 +9,6 @@ description = "Shared sigil widgets: identicons, roster rows, level meters."
 egui = { workspace = true }
 egui_extras = { workspace = true }
 sigil = { path = "../sigil" }
-sqnr-core = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
