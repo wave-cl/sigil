@@ -6,8 +6,10 @@
 
 pub mod call;
 pub mod discovery;
+pub mod ring;
 
 pub use call::{CallHandle, CallState, Dial, Phase, spawn_call, spawn_room};
+pub use ring::{Incoming, ListenerState, RingListener, listen};
 pub use sqex_voice::engine::{CallOpts, Endpoint, Event, PeerStatus};
 
 /// A room is named by a secret, and holding it is what membership consists of.

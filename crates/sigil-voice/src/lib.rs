@@ -13,7 +13,8 @@ use sigil::account::Account;
 use sigil::app::{App, AppContext, AppResponse};
 use sigil::{ColorTheme, tokens};
 use sigil_net::{
-    CallHandle, CallOpts, CallState, Phase, RoomId, discovery, spawn_call, spawn_room,
+    CallHandle, CallOpts, CallState, Incoming, Phase, RingListener, RoomId, discovery, listen,
+    spawn_call, spawn_room,
 };
 use sqnr::config::Config;
 use sqnr_core::PubKey;
@@ -41,6 +42,14 @@ pub struct VoiceApp {
     /// property of the identity.
     passphrase: String,
     call: Option<CallHandle>,
+    /// Listens for somebody calling us, for as long as the identity is
+    /// unlocked. Started once; not restarted per call.
+    listener: Option<RingListener>,
+    /// Rings that have arrived and not been answered. The newest is the one
+    /// shown; the rest are already history.
+    ringing: Vec<Incoming>,
+    /// Calls that rang while we were busy or away, newest first.
+    missed: Vec<Incoming>,
     /// What the engine has said, newest last.
     log: Vec<String>,
     /// The exchange, read once at startup. Re-read when settings can change it.
@@ -62,9 +71,38 @@ impl VoiceApp {
             room_trouble: None,
             passphrase: String::new(),
             call: None,
+            listener: None,
+            ringing: Vec::new(),
+            missed: Vec::new(),
             log: Vec::new(),
             config: Config::load(),
         }
+    }
+
+    /// Pretend somebody rang, so the ringing interface can be tested without
+    /// arranging a second client, an exchange and a caller.
+    #[doc(hidden)]
+    pub fn ring_for_test(&mut self, from: PubKey) {
+        self.ringing.push(Incoming { from, at: 0 });
+    }
+
+    /// Point at an exchange without reading `~/.sqnr/config`, which a test must
+    /// never depend on.
+    #[doc(hidden)]
+    pub fn set_exchange_for_test(&mut self, host: &str, key: &str) {
+        self.config.server = Some(host.to_string());
+        self.config.server_key = Some(key.to_string());
+    }
+
+    /// Whether a ring listener is running.
+    ///
+    /// Exposed for one reason: this was once wired up in `render` instead of
+    /// `update` and therefore never started at all, and every test passed
+    /// because they injected rings directly. Nothing observed the listener, so
+    /// nothing noticed a phone that could not ring.
+    #[doc(hidden)]
+    pub fn listening_for_test(&self) -> bool {
+        self.listener.is_some()
     }
 
     fn note(&mut self, line: String) {
@@ -93,6 +131,33 @@ impl VoiceApp {
             return Err("no exchange configured — set SQEX_SERVER or ~/.sqnr/config".into());
         }
         Ok(layers)
+    }
+
+    /// Start listening for calls, once, as soon as there is an identity to
+    /// listen as.
+    ///
+    /// Not tied to a call: the whole point is to be listening when there is no
+    /// call, which is most of the time.
+    fn start_listening(&mut self, account: &Account, egui_ctx: &egui::Context) {
+        if self.listener.is_some() {
+            return;
+        }
+        let Some(unlocked) = account.unlocked() else {
+            return;
+        };
+        let Ok(layers) = self.where_to() else { return };
+        let wake = egui_ctx.clone();
+        self.listener = Some(listen(layers, unlocked.signer(), move || {
+            wake.request_repaint()
+        }));
+    }
+
+    /// Answer whoever is ringing: open a session with them, which is what
+    /// consent consists of here.
+    fn answer(&mut self, from: PubKey, account: &Account, egui_ctx: &egui::Context) {
+        self.ringing.retain(|r| r.from != from);
+        self.peer_input = from.to_string();
+        self.place_call(account, egui_ctx);
     }
 
     fn place_call(&mut self, account: &Account, egui_ctx: &egui::Context) {
@@ -172,12 +237,33 @@ impl App for VoiceApp {
     /// Runs every pass, for every opened app, and while the window is hidden.
     /// Draining here rather than in `render` is what keeps a call's history
     /// intact while you are reading messages in the other tab.
-    fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
-        let Some(call) = self.call.as_mut() else {
-            return;
-        };
-        for event in call.drain() {
-            self.note(event.describe());
+    fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
+        // Runs for every opened app and while the window is hidden, which is
+        // exactly when a call has to be able to arrive. Starting the listener
+        // here rather than in `render` is what lets the phone ring while
+        // somebody is reading messages in the other tab, or nothing at all.
+        self.start_listening(ctx.account, egui_ctx);
+
+        if let Some(listener) = self.listener.as_mut() {
+            let arrived = listener.drain();
+            let busy = self.call.is_some();
+            for ring in arrived {
+                // Somebody already in a call is not rung at; it goes straight
+                // to missed. A second ring over a live conversation is an
+                // interruption nobody asked for, and the caller learns nothing
+                // either way.
+                if busy {
+                    self.missed.insert(0, ring);
+                } else if !self.ringing.iter().any(|r| r.from == ring.from) {
+                    self.ringing.push(ring);
+                }
+            }
+        }
+
+        if let Some(call) = self.call.as_mut() {
+            for event in call.drain() {
+                self.note(event.describe());
+            }
         }
     }
 
@@ -189,11 +275,23 @@ impl App for VoiceApp {
             self.identity_ui(ctx, ui, &theme);
             return AppResponse::default();
         }
+        // A ring outranks everything else on screen. It is the one thing here
+        // that is somebody else waiting on an answer.
+        if let Some(ring) = self.ringing.last().copied() {
+            return self.ringing_ui(ring, ctx, ui, &theme);
+        }
         match self.state().phase {
             Phase::Idle | Phase::Ended => self.idle_ui(ctx, ui, &theme),
             Phase::Connecting | Phase::Waiting | Phase::Live => self.call_ui(ui, &theme),
         }
         AppResponse::default()
+    }
+
+    /// Badge the tab with anything ringing plus anything missed, so a call
+    /// that arrived while somebody was reading messages is visible from the
+    /// other tab rather than only on this one.
+    fn tab_notifications(&self) -> sigil::TabNotifications {
+        sigil::TabNotifications::count((self.ringing.len() + self.missed.len()) as u32)
     }
 
     fn title(&self) -> &str {
@@ -202,6 +300,65 @@ impl App for VoiceApp {
 }
 
 impl VoiceApp {
+    /// Somebody is calling.
+    ///
+    /// The key is shown in full and the name is not shown at all, because a
+    /// ring is not authenticated: who sent it is the exchange's observation of
+    /// who connected, not a signature. Presenting that as an established
+    /// identity would be a lie the interface told on the protocol's behalf.
+    ///
+    /// Answering is safe regardless, and it is worth knowing why. Accepting
+    /// opens a session with *the identity named*, and the session derives from
+    /// that identity's key — so a forged ring cannot connect you to the forger.
+    /// It buys them a call that never establishes.
+    fn ringing_ui(
+        &mut self,
+        ring: Incoming,
+        ctx: &mut AppContext<'_>,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) -> AppResponse {
+        ui.add_space(tokens::SPACING_XL);
+        ui.heading("Incoming call");
+        ui.add_space(tokens::SPACING_SM);
+        ui.colored_label(theme.text_secondary, "from");
+        ui.add(
+            egui::Label::new(egui::RichText::new(ring.from.to_string()).monospace())
+                .selectable(true),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        ui.colored_label(
+            theme.text_muted,
+            "Who a ring says it is from is the exchange's word, not a signature. \
+             Answering opens a session with this key and nobody else.",
+        );
+        ui.add_space(tokens::SPACING_LG);
+
+        let mut answered = None;
+        let mut declined = false;
+        ui.horizontal(|ui| {
+            if ui.button("Answer").clicked() {
+                answered = Some(ring.from);
+            }
+            if ui.button("Decline").clicked() {
+                declined = true;
+            }
+        });
+        if let Some(from) = answered {
+            self.answer(from, ctx.account, ui.ctx());
+        }
+        if declined {
+            // Declining is silent. There is no way to tell a caller "no"
+            // without telling them you are here, and somebody who does not
+            // want to be reached by them should not be made to announce it.
+            self.ringing.retain(|r| r.from != ring.from);
+            self.missed.insert(0, ring);
+        }
+        // Bring the window forward: a call is the one thing here worth
+        // interrupting whatever else somebody is looking at.
+        AppResponse::action(sigil::AppAction::Present)
+    }
+
     /// Unlocking, without a terminal prompt anywhere in sight.
     fn identity_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.heading("Identity");
@@ -274,7 +431,57 @@ impl VoiceApp {
 
         ui.add_space(tokens::SPACING_XL);
         self.room_entry_ui(ctx, ui, theme);
+        self.missed_ui(ui, theme);
+        self.listening_ui(ui, theme);
         self.log_ui(ui, theme);
+    }
+
+    /// Calls that rang while we were busy or away.
+    fn missed_ui(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
+        if self.missed.is_empty() {
+            return;
+        }
+        ui.add_space(tokens::SPACING_XL);
+        ui.heading("Missed");
+        for ring in self.missed.clone() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(ring.from.to_string()).monospace())
+                        .selectable(true),
+                );
+                if ui.button("Call back").clicked() {
+                    self.peer_input = ring.from.to_string();
+                    self.missed.retain(|m| m.from != ring.from);
+                }
+            });
+        }
+        if ui.button("Clear missed").clicked() {
+            self.missed.clear();
+        }
+        let _ = theme;
+    }
+
+    /// Whether calls can arrive at all.
+    ///
+    /// Said out loud when it is not working. A phone that has quietly stopped
+    /// ringing is worse than one that is obviously broken: the failure is
+    /// invisible precisely when it matters, because nothing happening looks
+    /// exactly like nobody calling.
+    fn listening_ui(&self, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some(listener) = &self.listener else {
+            return;
+        };
+        let state = listener.state();
+        if state.listening {
+            return;
+        }
+        ui.add_space(tokens::SPACING_MD);
+        ui.colored_label(
+            theme.destructive,
+            state
+                .trouble
+                .unwrap_or_else(|| "not listening for calls".into()),
+        );
     }
 
     /// Minting or joining a room.

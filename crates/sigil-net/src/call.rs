@@ -260,8 +260,20 @@ pub fn spawn_call(
                 Dial::At(e) => e,
                 Dial::Discover(layers) => engine::resolve(&layers, &mut bridge).await?,
             };
-            let (client, session, id) =
-                engine::establish(endpoint, &signer, peer, wait, &mut bridge).await?;
+            let mut client = engine::dial(endpoint, &signer, peer, &mut bridge).await?;
+            // Ring before waiting, so the other end has a reason to answer.
+            // Best effort on purpose: a ring that does not arrive costs a call
+            // that has to be arranged another way, and refusing to place the
+            // call at all would be worse. Somebody who was already expecting
+            // this does not need the ring, and their session opens regardless.
+            if let Err(e) = sqex_voice::ring::ring(&mut client, peer).await {
+                bridge.event(Event::BadFrame {
+                    seq: 0,
+                    why: format!("could not ring: {e}"),
+                });
+            }
+            let (session, id) =
+                engine::rendezvous(&mut client, &signer, peer, wait, &mut bridge).await?;
             engine::call(client, session, id, opts, &mut bridge).await
         }
         .await;

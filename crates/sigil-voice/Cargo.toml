@@ -19,3 +19,5 @@ tokio = { workspace = true }
 sigil-net = { path = "../sigil-net" }
 egui_kittest = { workspace = true }
 tempfile = "3"
+ed25519-dalek = "2"
+tokio = { workspace = true }

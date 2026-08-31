@@ -204,3 +204,160 @@ fn minting_a_room_produces_a_usable_secret() {
         .unwrap_or_else(|| panic!("no parseable room secret on screen: {said}"));
     assert_eq!(minted.len(), 44, "a room secret is a base58 32-byte value");
 }
+
+/// Drive the app with an account *and* a ring already arrived.
+fn ringing_harness(account: Account, from: sqnr_core::PubKey) -> Harness<'static> {
+    let mut app = VoiceApp::new();
+    app.ring_for_test(from);
+    let mut account = account;
+    Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_LG as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        account: &mut account,
+                        hidden: false,
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+        })
+}
+
+fn a_key() -> sqnr_core::PubKey {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    sqnr_core::PubKey::new(sk.verifying_key().to_bytes())
+}
+
+/// A ring shows the caller's key in full and does not claim it is proven.
+///
+/// Who a ring says it is from is the exchange's observation of who connected,
+/// not a signature. An interface that presented that as an established identity
+/// would be telling a lie on the protocol's behalf.
+#[test]
+fn a_ring_shows_the_key_and_does_not_claim_it_is_proven() {
+    let dir = tempfile::tempdir().unwrap();
+    let caller = a_key();
+    let mut h = ringing_harness(unlocked_account(dir.path()), caller);
+    h.run();
+    let said = text_of(&h);
+
+    assert!(said.contains("Incoming call"), "{said}");
+    assert!(
+        said.contains(&caller.to_string()),
+        "the key, in full: {said}"
+    );
+    assert!(said.contains("Answer"), "{said}");
+    assert!(said.contains("Decline"), "{said}");
+    assert!(
+        said.contains("not a signature"),
+        "it says what the caller's name is worth: {said}"
+    );
+}
+
+/// Declining is silent, and the call lands in Missed rather than vanishing.
+/// There is no way to say "no" to a caller without telling them you are there,
+/// and somebody who does not want to be reached should not have to announce it.
+#[test]
+fn declining_is_silent_and_the_call_is_remembered() {
+    let dir = tempfile::tempdir().unwrap();
+    let caller = a_key();
+    let mut h = ringing_harness(unlocked_account(dir.path()), caller);
+    h.run();
+    h.get_by_label("Decline").click();
+    h.run();
+
+    let said = text_of(&h);
+    assert!(!said.contains("Incoming call"), "the ring is gone: {said}");
+    assert!(said.contains("Missed"), "and remembered: {said}");
+    assert!(
+        said.contains(&caller.to_string()),
+        "with who it was: {said}"
+    );
+    assert!(
+        said.contains("Call back"),
+        "and a way to answer it late: {said}"
+    );
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn voice_ringing_dark() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = ringing_harness(unlocked_account(dir.path()), a_key());
+    h.run();
+    h.snapshot("voice_ringing_dark");
+}
+
+/// The listener must start on its own, from `update`, as soon as there is an
+/// identity to listen as.
+///
+/// This exists because it once did not: it was wired into `render` rather than
+/// `update`, so it never ran, and every ringing test passed anyway because they
+/// inject a ring rather than receive one. Nothing observed the listener, so
+/// nothing noticed that the phone could not ring.
+/// A `tokio::test` because `listen` spawns, and spawning without a runtime
+/// panics. That is the right behaviour — the shell enters a runtime for the
+/// life of the process — but it means this cannot be a plain `#[test]`.
+#[tokio::test]
+async fn the_listener_starts_by_itself_once_the_identity_is_open() {
+    use sigil::app::App;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut account = unlocked_account(dir.path());
+    let ctx = egui::Context::default();
+
+    let mut app = VoiceApp::new();
+    app.set_exchange_for_test("127.0.0.1:1", "1111111111111111111111111111111111111111111");
+    assert!(
+        !app.listening_for_test(),
+        "nothing is listening before the first pass"
+    );
+
+    let mut nav = Navigator::default();
+    let mut app_ctx = AppContext {
+        navigator: &mut nav,
+        account: &mut account,
+        hidden: false,
+    };
+    app.update(&mut app_ctx, &ctx);
+    assert!(
+        app.listening_for_test(),
+        "one pass with an open identity is enough to start listening"
+    );
+}
+
+/// And it must not start without one: there is nothing to listen *as*, and
+/// trying would ask for a signer that does not exist.
+#[tokio::test]
+async fn nothing_listens_while_the_identity_is_sealed() {
+    use sigil::app::App;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity");
+    sqnr::identity::generate(&path, Some("open sesame")).unwrap();
+    let mut account = Account::discover(Some(path));
+    let ctx = egui::Context::default();
+
+    let mut app = VoiceApp::new();
+    app.set_exchange_for_test("127.0.0.1:1", "1111111111111111111111111111111111111111111");
+    let mut nav = Navigator::default();
+    let mut app_ctx = AppContext {
+        navigator: &mut nav,
+        account: &mut account,
+        hidden: false,
+    };
+    app.update(&mut app_ctx, &ctx);
+    assert!(!app.listening_for_test());
+}
