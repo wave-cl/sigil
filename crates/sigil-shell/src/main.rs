@@ -42,6 +42,46 @@ fn main() -> eframe::Result<()> {
         .expect("build the tokio runtime");
     let _guard = runtime.enter();
 
+    // One sigil at a time, claimed before anything else opens. sqex-chat
+    // flocks the account store anyway, so a second instance would fail later
+    // and less clearly; this turns that into a refusal with a pid in it.
+    let data = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("sigil");
+    let _instance = match sigil_platform::instance::claim(&data) {
+        Ok(i) => i,
+        Err(why) => {
+            eprintln!("sigil: {why}");
+            // A second launch is usually somebody trying to bring the running
+            // one forward. Saying so beats a bare exit code.
+            eprintln!("       the running sigil holds this account's store.");
+            std::process::exit(1);
+        }
+    };
+
+    // A link on the command line is an *offer*. Parsed here so a malformed one
+    // is refused before a window opens, and never acted on: `sigil://room/...`
+    // joining silently would put somebody in a conversation they did not
+    // choose, which cannot be undone because membership is holding the secret.
+    let offered = std::env::args().nth(1).and_then(|arg| {
+        if !arg.starts_with("sigil://") {
+            return None;
+        }
+        match sigil_platform::deeplink::parse(&arg) {
+            Ok(link) => Some(link),
+            Err(why) => {
+                eprintln!("sigil: {why}");
+                None
+            }
+        }
+    });
+    if let Some(link) = &offered {
+        tracing::info!(
+            "opened with a link, awaiting confirmation: {}",
+            sigil_platform::deeplink::confirmation(link)
+        );
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -65,6 +105,9 @@ fn main() -> eframe::Result<()> {
             let apps: Vec<Box<dyn App>> = vec![
                 Box::new(sigil_voice::VoiceApp::new()),
                 Box::new(sigil_chat::ChatApp::new()),
+                Box::new(sigil_shell::PlatformApp::new(
+                    sigil_platform::Platform::new(),
+                )),
             ];
             Ok(Box::new(Sigil {
                 shell: Shell::new(apps),

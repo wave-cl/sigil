@@ -19,7 +19,7 @@ pub mod theme;
 pub mod tokens;
 
 pub use account::{Account, Unlocked};
-pub use app::{App, AppAction, AppContext, AppResponse, TabNotifications};
+pub use app::{App, AppAction, AppContext, AppResponse, Notify, Silent, TabNotifications};
 pub use deck::{Layout, layout};
 pub use nav::{Discarded, NavStack};
 pub use navigator::{ActiveEntry, AppId, NavEntry, NavRequest, Navigator};

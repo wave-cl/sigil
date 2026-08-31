@@ -244,10 +244,7 @@ async fn run(
         sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
     let mut chat = Chat::new(client, seed, me, endpoint.server, store);
     // So a lost connection can be rebuilt without restarting the session.
-    chat.dials(
-        endpoint.address,
-        endpoint.server.as_bytes().to_owned(),
-    );
+    chat.dials(endpoint.address, endpoint.server.as_bytes().to_owned());
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
 
     state.send_modify(|s| s.me = Some(me));

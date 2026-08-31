@@ -5,6 +5,8 @@
 //! tests in `tests/`, which is the only way to see what it looks like without a
 //! screen.
 
+mod platform_app;
 mod shell;
 
+pub use platform_app::PlatformApp;
 pub use shell::Shell;

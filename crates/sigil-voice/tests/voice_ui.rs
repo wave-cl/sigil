@@ -42,6 +42,7 @@ fn harness(account: Account, dark: bool) -> Harness<'static> {
                         navigator: &mut nav,
                         account: &mut account,
                         hidden: false,
+                        notify: &sigil::Silent,
                     };
                     let _ = app.render(&mut app_ctx, ui);
                 });
@@ -229,6 +230,7 @@ fn ringing_harness(account: Account, from: sqnr_core::PubKey) -> Harness<'static
                         navigator: &mut nav,
                         account: &mut account,
                         hidden: false,
+                        notify: &sigil::Silent,
                     };
                     let _ = app.render(&mut app_ctx, ui);
                 });
@@ -330,6 +332,7 @@ async fn the_listener_starts_by_itself_once_the_identity_is_open() {
         navigator: &mut nav,
         account: &mut account,
         hidden: false,
+        notify: &sigil::Silent,
     };
     app.update(&mut app_ctx, &ctx);
     assert!(
@@ -357,7 +360,56 @@ async fn nothing_listens_while_the_identity_is_sealed() {
         navigator: &mut nav,
         account: &mut account,
         hidden: false,
+        notify: &sigil::Silent,
     };
     app.update(&mut app_ctx, &ctx);
     assert!(!app.listening_for_test());
+}
+
+/// A ring is said out loud, not only drawn.
+///
+/// Without this a call reaches only somebody already looking at the window,
+/// which is a dialler rather than a telephone — and it is the reason the whole
+/// desktop-integration crate exists.
+#[tokio::test]
+async fn an_arriving_ring_is_announced() {
+    use sigil::app::{App, Notify};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Heard(Mutex<Vec<(String, String)>>);
+    impl Notify for Heard {
+        fn post(&self, summary: &str, body: &str) -> bool {
+            self.0.lock().unwrap().push((summary.into(), body.into()));
+            true
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut account = unlocked_account(dir.path());
+    let ctx = egui::Context::default();
+    let heard = Heard::default();
+    let caller = a_key();
+
+    let mut app = VoiceApp::new();
+    // A ring that arrived from the listener, as `update` would see it.
+    app.deliver_ring_for_test(caller);
+
+    let mut nav = Navigator::default();
+    let mut app_ctx = AppContext {
+        navigator: &mut nav,
+        account: &mut account,
+        hidden: true,
+        notify: &heard,
+    };
+    app.update(&mut app_ctx, &ctx);
+
+    let said = heard.0.lock().unwrap().clone();
+    assert_eq!(said.len(), 1, "one ring, said once: {said:?}");
+    assert_eq!(said[0].0, "Incoming call");
+    assert!(
+        said[0].1.contains(&caller.to_string()),
+        "and names the caller in full: {:?}",
+        said[0].1
+    );
 }

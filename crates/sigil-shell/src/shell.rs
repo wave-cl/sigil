@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use sigil::account::Account;
+use sigil::app::Notify;
 use sigil::app::{App, AppAction, AppContext};
 use sigil::navigator::{AppId, NavEntry, NavRequest, Navigator};
 use sigil::{ColorTheme, NavStack, tokens};
@@ -38,6 +39,12 @@ pub struct Shell {
     chrome_visible: bool,
     /// One identity for the whole application. See `AppContext::account`.
     account: Account,
+    /// What the desktop can do, and somewhere to say things out loud. Built on
+    /// the main thread by the shell's owner, because the tray insists on it.
+    platform: Box<dyn Notify>,
+    tray: Option<sigil_platform::Tray>,
+    /// The badge last given to the tray, so it is only set when it changes.
+    shown_unread: u32,
 }
 
 impl Shell {
@@ -54,7 +61,22 @@ impl Shell {
             navigator: Navigator::default(),
             chrome_visible: true,
             account: Account::discover(None),
+            platform: Box::new(sigil::Silent),
+            tray: None,
+            shown_unread: 0,
         }
+    }
+
+    /// Give the shell the desktop's own facilities.
+    ///
+    /// Separate from `new` so the shell can be built and rendered headlessly by
+    /// a test, which has no tray and no notification daemon and should not be
+    /// made to pretend otherwise.
+    pub fn with_platform(mut self, platform: sigil_platform::Platform) -> Self {
+        let sigil_platform::Platform { notifier, tray, .. } = platform;
+        self.platform = Box::new(notifier);
+        self.tray = Some(tray);
+        self
     }
 
     /// Start with a particular identity, rather than whatever `~/.sqnr` holds.
@@ -80,10 +102,23 @@ impl Shell {
                 navigator: &mut self.navigator,
                 account: &mut self.account,
                 hidden,
+                notify: self.platform.as_ref(),
             };
             app.update(&mut ctx, egui_ctx);
         }
+        self.badge_tray();
         self.apply_nav();
+    }
+
+    /// Keep the tray's tooltip current, and only when it changes: setting it
+    /// every pass would be a D-Bus round trip fifty times a second.
+    fn badge_tray(&mut self) {
+        let Some(tray) = &self.tray else { return };
+        let unread: u32 = self.apps.iter().map(|a| a.tab_notifications().count).sum();
+        if unread != self.shown_unread {
+            tray.set_unread(unread);
+            self.shown_unread = unread;
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -151,6 +186,7 @@ impl Shell {
             navigator: &mut self.navigator,
             account: &mut self.account,
             hidden: false,
+            notify: &sigil::Silent,
         };
         let response = self.apps[active].render_nav(&mut ctx, ui, &entry.token);
         match response.action {
@@ -187,6 +223,7 @@ impl Shell {
                         navigator: &mut self.navigator,
                         account: &mut self.account,
                         hidden: false,
+                        notify: &sigil::Silent,
                     };
                     app.dispose(&mut ctx, &entry.token);
                 }

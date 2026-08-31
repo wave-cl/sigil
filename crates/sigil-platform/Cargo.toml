@@ -12,3 +12,11 @@ global-hotkey = { workspace = true }
 notify-rust = { workspace = true }
 auto-launch = { workspace = true }
 image = { workspace = true }
+sigil = { path = "../sigil" }
+sqnr-core = { workspace = true }
+rfd = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+tempfile = "3"

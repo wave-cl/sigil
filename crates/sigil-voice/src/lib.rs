@@ -48,6 +48,9 @@ pub struct VoiceApp {
     /// Rings that have arrived and not been answered. The newest is the one
     /// shown; the rest are already history.
     ringing: Vec<Incoming>,
+    /// Rings handed over by the listener but not yet dealt with. Emptied on
+    /// each pass; a seam a test can push into so a ring travels the real path.
+    delivered: Vec<Incoming>,
     /// Calls that rang while we were busy or away, newest first.
     missed: Vec<Incoming>,
     /// What the engine has said, newest last.
@@ -73,17 +76,26 @@ impl VoiceApp {
             call: None,
             listener: None,
             ringing: Vec::new(),
+            delivered: Vec::new(),
             missed: Vec::new(),
             log: Vec::new(),
             config: Config::load(),
         }
     }
 
-    /// Pretend somebody rang, so the ringing interface can be tested without
-    /// arranging a second client, an exchange and a caller.
+    /// Pretend somebody rang and it has already been answered for, so the
+    /// ringing interface can be drawn without arranging a caller.
     #[doc(hidden)]
     pub fn ring_for_test(&mut self, from: PubKey) {
         self.ringing.push(Incoming { from, at: 0 });
+    }
+
+    /// Pretend a ring arrived *from the listener*, so it goes through the same
+    /// path a real one does — including being announced. Injecting straight
+    /// into `ringing` would skip the notification and test nothing about it.
+    #[doc(hidden)]
+    pub fn deliver_ring_for_test(&mut self, from: PubKey) {
+        self.delivered.push(Incoming { from, at: 0 });
     }
 
     /// Point at an exchange without reading `~/.sqnr/config`, which a test must
@@ -246,6 +258,10 @@ impl App for VoiceApp {
 
         if let Some(listener) = self.listener.as_mut() {
             let arrived = listener.drain();
+            self.delivered.extend(arrived);
+        }
+        {
+            let arrived = std::mem::take(&mut self.delivered);
             let busy = self.call.is_some();
             for ring in arrived {
                 // Somebody already in a call is not rung at; it goes straight
@@ -255,6 +271,14 @@ impl App for VoiceApp {
                 if busy {
                     self.missed.insert(0, ring);
                 } else if !self.ringing.iter().any(|r| r.from == ring.from) {
+                    // Say it out loud. This is the whole reason the desktop
+                    // integration exists: without it a call only reaches
+                    // somebody already looking at the window, which is not a
+                    // telephone. The window is raised as well, because a
+                    // notification can be off at the desktop level with nothing
+                    // here able to tell.
+                    ctx.notify
+                        .post("Incoming call", &format!("from {}", ring.from));
                     self.ringing.push(ring);
                 }
             }

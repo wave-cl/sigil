@@ -107,3 +107,68 @@ fn the_rail_shows_each_app_and_badges_the_unread_one() {
         "an app with unread messages is badged in the rail: {joined}"
     );
 }
+
+/// The desktop pane must say what each capability is *for*, so an unavailable
+/// row tells somebody what they lose rather than only that something is
+/// missing — and must give the reason, not merely the fact.
+#[test]
+fn the_desktop_pane_explains_what_is_missing_and_why() {
+    use sigil_platform::Platform;
+    use sigil_shell::PlatformApp;
+
+    let mut app = PlatformApp::new(Platform::new());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = sigil::navigator::Navigator::default();
+            let mut account = sigil::account::Account::Missing {
+                path: "nowhere".into(),
+            };
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                account: &mut account,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    harness.run();
+
+    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
+        let n = node.accesskit_node();
+        if let Some(l) = n.label() {
+            out.push(l.to_string());
+        }
+        if let Some(v) = n.value() {
+            out.push(v.to_string());
+        }
+        for c in node.children() {
+            walk(c, out);
+        }
+    }
+    let mut found = Vec::new();
+    walk(harness.root(), &mut found);
+    let said = found.join(" | ");
+
+    for name in [
+        "Notifications",
+        "Tray icon",
+        "Global shortcuts",
+        "Start at login",
+    ] {
+        assert!(said.contains(name), "every capability is listed: {said}");
+    }
+    // What each is for, not only its name.
+    assert!(
+        said.contains("when sigil is not in front"),
+        "a row says what it is for: {said}"
+    );
+    // Every row is marked available or not, in words rather than colour alone.
+    assert!(
+        said.contains("available") || said.contains("unavailable"),
+        "each is marked, in words: {said}"
+    );
+}

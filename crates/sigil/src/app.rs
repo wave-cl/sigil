@@ -81,6 +81,29 @@ pub struct AppContext<'a> {
     /// should keep working and stop doing anything only a viewer would want,
     /// like animating.
     pub hidden: bool,
+    /// Somewhere to say something out loud when sigil is not in front.
+    ///
+    /// Returns whether it went out, and a caller with nothing else to fall back
+    /// on must not rely on it: notifications can be off at the desktop level
+    /// with nothing here able to tell.
+    pub notify: &'a dyn Notify,
+}
+
+/// Telling somebody something when they are not looking at sigil.
+///
+/// A trait so that `sigil` needs no dependency on the desktop crates, and so a
+/// test can watch what would have been said without a notification daemon.
+pub trait Notify {
+    fn post(&self, summary: &str, body: &str) -> bool;
+}
+
+/// Says nothing, for tests and for a session with no desktop at all.
+pub struct Silent;
+
+impl Notify for Silent {
+    fn post(&self, _summary: &str, _body: &str) -> bool {
+        false
+    }
 }
 
 /// One hosted application: voice, chat, and whatever follows.
@@ -185,6 +208,7 @@ mod tests {
                 navigator: &mut nav,
                 account: &mut account,
                 hidden: false,
+                notify: &Silent,
             };
             // The point is that this does not panic on a token the app has
             // never seen -- it quietly draws the app instead.

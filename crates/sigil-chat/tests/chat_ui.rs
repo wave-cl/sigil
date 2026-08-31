@@ -30,6 +30,7 @@ fn harness(account: Account) -> Harness<'static> {
                         navigator: &mut nav,
                         account: &mut account,
                         hidden: false,
+                        notify: &sigil::Silent,
                     };
                     let _ = app.render(&mut app_ctx, ui);
                 });
