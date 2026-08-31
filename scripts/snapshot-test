@@ -34,14 +34,26 @@ if [[ "$(uname -s)" == "Darwin" && -n "$update" ]]; then
 fi
 
 if [[ "$(uname -s)" == "Linux" ]]; then
+    # Search rather than assume a filename. The obvious path is
+    # /usr/share/vulkan/icd.d/lvp_icd.<arch>.json, and hardcoding it failed on
+    # a GitHub runner that had lavapipe installed under a different name --
+    # with an error saying to install the package that was already there,
+    # which is the least useful thing a check can say.
     if [[ -n "${LAVAPIPE_ICD:-}" ]]; then
         icd="$LAVAPIPE_ICD"
-    elif [[ -f "/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json" ]]; then
-        icd="/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json"
     else
-        echo "error: lavapipe ICD not found; install mesa-vulkan-drivers." >&2
+        icd="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -z "$icd" ]]; then
+        echo "error: no lavapipe ICD found." >&2
+        echo "  installed Vulkan ICDs:" >&2
+        ls -1 /usr/share/vulkan/icd.d/ 2>/dev/null | sed 's/^/    /' >&2 \
+            || echo "    (none -- /usr/share/vulkan/icd.d does not exist)" >&2
+        echo "  Debian/Ubuntu: sudo apt install mesa-vulkan-drivers" >&2
+        echo "  Fedora:        sudo dnf install mesa-vulkan-drivers" >&2
         exit 1
     fi
+    echo "using software rasterizer: $icd"
     export VK_ICD_FILENAMES="$icd"
 fi
 
