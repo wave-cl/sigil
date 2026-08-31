@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#
+# Build the Linux packages.
+#
+#   scripts/linux-packages          # deb and rpm for this architecture
+#   scripts/linux-packages --deb    # just the deb
+#
+# Needs cargo-deb and cargo-generate-rpm:
+#
+#   cargo install cargo-deb cargo-generate-rpm
+#
+# Build dependencies on the machine doing the building:
+#
+#   cmake                     libopus is built from source
+#   pkg-config
+#   libasound2-dev            cpal's ALSA backend, and the fallback when
+#                             PipeWire is absent
+#   libpipewire-0.3-dev       the preferred Linux audio backend
+#   libgtk-3-dev              the tray icon speaks StatusNotifierItem through
+#                             GTK; this is not optional even though sigil draws
+#                             with wgpu
+#   libx11-dev libxkbcommon-dev libwayland-dev
+#   mesa-vulkan-drivers       or another Vulkan ICD
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo"
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "error: this builds Linux packages and must run on Linux." >&2
+    echo "       On macOS, use scripts/macos-app." >&2
+    exit 1
+fi
+
+want_deb=1
+want_rpm=1
+for arg in "$@"; do
+    case "$arg" in
+        --deb) want_rpm=0 ;;
+        --rpm) want_deb=0 ;;
+    esac
+done
+
+# The icon the packages install. Drawn rather than checked in, so it cannot
+# drift from the one the tray draws.
+mkdir -p packaging/icons
+python3 packaging/icon.py 256 packaging/icons/sigil-256.png
+
+cargo build -p sigil-shell --release
+
+if [[ $want_deb == 1 ]]; then
+    cargo deb -p sigil-shell --no-build
+fi
+if [[ $want_rpm == 1 ]]; then
+    cargo generate-rpm -p crates/sigil-shell
+fi
+
+echo
+echo "packages under target/debian and target/generate-rpm"
+echo
+echo "After installing, check the link handler actually took:"
+echo "    xdg-mime query default x-scheme-handler/sigil     # expects sigil.desktop"
+echo "A registration nothing has read looks exactly like sigil ignoring the link."

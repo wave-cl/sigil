@@ -30,3 +30,35 @@ sqnr-core = { workspace = true }
 [[bin]]
 name = "sigil"
 path = "src/main.rs"
+
+# --- Linux packages -----------------------------------------------------------
+# deb and rpm rather than AppImage or flatpak, which is what notedeck ships and
+# what a distribution's own tooling expects. A flatpak would be worth revisiting
+# later, since it would make the XDG portal paths -- global shortcuts especially
+# -- first-class rather than best-effort.
+
+[package.metadata.deb]
+name = "sigil"
+maintainer = "sigil"
+copyright = "sigil contributors"
+extended-description = """Voice calls and end-to-end encrypted chat over sQUIC, in one window. Brings together what sqex-voice and sqex-chat do separately."""
+section = "net"
+priority = "optional"
+assets = [
+    ["../../target/release/sigil", "usr/bin/sigil", "755"],
+    ["../../packaging/sigil.desktop", "usr/share/applications/sigil.desktop", "644"],
+    ["../../packaging/icons/sigil-256.png", "usr/share/icons/hicolor/256x256/apps/sigil.png", "644"],
+]
+# libopus is built from source and statically linked, so it is not listed.
+# ALSA and the X11/Wayland libraries are resolved by $auto from the binary.
+depends = "$auto"
+maintainer-scripts = "../../packaging/deb"
+
+[package.metadata.generate-rpm]
+name = "sigil"
+summary = "Voice and chat over sQUIC"
+assets = [
+    { source = "../../target/release/sigil", dest = "/usr/bin/sigil", mode = "755" },
+    { source = "../../packaging/sigil.desktop", dest = "/usr/share/applications/sigil.desktop", mode = "644" },
+    { source = "../../packaging/icons/sigil-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/sigil.png", mode = "644" },
+]

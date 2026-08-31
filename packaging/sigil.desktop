@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=sigil
+Comment=Voice and chat over sQUIC
+Exec=sigil %u
+Icon=sigil
+Terminal=false
+Categories=Network;InstantMessaging;Telephony;
+# Registers sigil:// links. A link is only ever an offer -- sigil opens and
+# asks, and joining a room in particular is never silent, because membership is
+# holding the secret and cannot be taken back.
+MimeType=x-scheme-handler/sigil;
+# So the tray icon and a single-instance launch behave under desktops that read
+# it, and so `sigil` started from a link reuses the running window.
+StartupNotify=true
+StartupWMClass=sigil

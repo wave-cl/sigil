@@ -60,14 +60,28 @@ fn probe() -> Support {
         }
         #[cfg(target_os = "macos")]
         Session::MacOs => {
-            // `set_application` fails when the running binary is not inside a
-            // bundle, which is exactly the `cargo run` case. Better to say so
-            // than to post into nothing.
+            // Binding the bundle id is the operative question — if this
+            // succeeds, posting works — so it is what gets asked, rather than
+            // whether the executable happens to sit inside a `.app`.
+            //
+            // Those are not the same question, and the difference surprised me
+            // enough to be worth writing down. A bare `cargo run` binary fails
+            // this on a machine that has never seen sigil.app, and reports
+            // unavailable, correctly. But once the bundle has been run *once*,
+            // macOS knows `org.squic.sigil`, and from then on the bare binary
+            // binds it happily and really can post. So this can say "available"
+            // for an unbundled binary on a developer's machine and "unavailable"
+            // for the same binary on somebody else's.
+            //
+            // That is the right behaviour — it answers "can this post here",
+            // which is what a caller needs — but it means an unbundled build
+            // must never be taken as evidence that shipping one would work.
             match notify_rust::set_application(BUNDLE_ID) {
                 Ok(()) => Support::Yes,
                 Err(_) => Support::no(
-                    "macOS only lets a bundled application notify; run the built \
-                     sigil.app rather than the bare binary",
+                    "macOS routes notifications by bundle identifier and this build \
+                     has none registered; run the built sigil.app rather than the \
+                     bare binary",
                 ),
             }
         }

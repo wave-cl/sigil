@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# Build sigil.app.
+#
+#   scripts/macos-app            # release build, ad-hoc signed
+#   scripts/macos-app --debug    # faster, for checking bundle behaviour
+#
+# The bundle is not a distribution nicety. Two things only work inside one:
+#
+#   - **Notifications.** macOS lets a *bundle* post them, identified by its
+#     CFBundleIdentifier. A bare binary cannot, and fails silently -- so an
+#     unbundled sigil draws an incoming call and never announces it.
+#   - **The microphone.** A bundle without NSMicrophoneUsageDescription is
+#     denied audio input, and the failure looks like a silent call rather than
+#     a permissions error, which is a much worse thing to debug.
+#
+# Written by hand rather than with cargo-bundle. The plist keys above are the
+# entire reason the bundle exists, and hand-writing it keeps them visible here
+# instead of spread across manifest metadata.
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile=release
+flag=--release
+for arg in "$@"; do
+    case "$arg" in
+        --debug) profile=debug; flag="" ;;
+    esac
+done
+
+app="$repo/target/sigil.app"
+contents="$app/Contents"
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -1)"
+
+echo "building sigil ($profile)…"
+# shellcheck disable=SC2086
+cargo build -p sigil-shell $flag
+
+rm -rf "$app"
+mkdir -p "$contents/MacOS" "$contents/Resources"
+# `install`, never `cp`: cp reuses the destination inode, so overwriting a
+# running binary corrupts the process that is executing it.
+install -m 755 "$repo/target/$profile/sigil" "$contents/MacOS/sigil"
+
+echo "drawing the icon…"
+iconset="$(mktemp -d)/sigil.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    python3 "$repo/packaging/icon.py" "$size" "$iconset/icon_${size}x${size}.png"
+    python3 "$repo/packaging/icon.py" "$((size * 2))" "$iconset/icon_${size}x${size}@2x.png"
+done
+iconutil -c icns "$iconset" -o "$contents/Resources/sigil.icns"
+
+cat > "$contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>sigil</string>
+    <key>CFBundleDisplayName</key><string>sigil</string>
+    <key>CFBundleExecutable</key><string>sigil</string>
+    <!-- Must match BUNDLE_ID in sigil-platform's notify module: macOS routes a
+         notification by this, and a mismatch means none are shown. -->
+    <key>CFBundleIdentifier</key><string>org.squic.sigil</string>
+    <key>CFBundleVersion</key><string>${version}</string>
+    <key>CFBundleShortVersionString</key><string>${version}</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>sigil.icns</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <!-- Without this the app is denied the microphone, and a call is silent
+         with no error anywhere. The text is shown to the person being asked,
+         so it says what sigil wants it for rather than that it wants it. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>sigil uses your microphone for voice calls. Audio is encrypted end to end; the exchange that carries a call cannot listen to it.</string>
+    <!-- sigil:// links. Registered by the bundle so that clicking one opens
+         sigil, which then *asks* -- a link is an offer, never an action. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>org.squic.sigil.link</string>
+            <key>CFBundleURLSchemes</key><array><string>sigil</string></array>
+        </dict>
+    </array>
+</dict>
+</plist>
+PLIST
+
+# Ad-hoc signature, so it runs on this machine. A distributable build needs a
+# Developer ID and notarisation -- see docs/packaging.md.
+#
+# Signing last, and never over a running copy: macOS invalidates the signature
+# of a binary overwritten in place and SIGKILLs it, which shows up as a bare
+# `Killed: 9` with no output at all.
+codesign --force --deep -s - "$app" 2>/dev/null
+
+echo
+echo "built $app"
+echo "run it with: open $app     (or $contents/MacOS/sigil to see its log)"
