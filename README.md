@@ -18,9 +18,12 @@ Needs Rust 1.98.0 (pinned in `rust-toolchain.toml`) and **cmake**, which the
 Opus codec builds itself with.
 
 On Linux, also: `pkg-config`, `libasound2-dev`, `libpipewire-0.3-dev`,
-GTK3 dev headers (for the tray icon), `libpcsclite-dev` (sqnr links a YubiKey
-signer even though sigil only uses software identities), and the
-X11/Wayland/Vulkan dev packages.
+GTK3 dev headers and `libxdo-dev` (both for the tray icon), `libpcsclite-dev`
+(sqnr links a YubiKey signer even though sigil only uses software identities),
+and the X11/Wayland/Vulkan dev packages.
+
+The last two are **link**-time requirements, so `cargo check` passes without
+them and only a real build fails.
 `cargo build --no-default-features` drops the PipeWire backend if those headers
 are not available.
 

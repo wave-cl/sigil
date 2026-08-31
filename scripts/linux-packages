@@ -19,6 +19,7 @@
 #   libgtk-3-dev              the tray icon speaks StatusNotifierItem through
 #                             GTK; this is not optional even though sigil draws
 #                             with wgpu
+#   libxdo-dev                tray-icon uses libxdo to raise a window on X11
 #   libpcsclite-dev           sqnr links a YubiKey signer through pcsc-sys.
 #                             sigil never uses a card -- one cannot be a
 #                             transport key -- but the dependency is
