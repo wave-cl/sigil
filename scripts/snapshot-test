@@ -63,3 +63,17 @@ fi
 
 cd "$repo"
 cargo test --workspace -- --ignored
+
+# Updating writes whatever was drawn and calls it correct, so an unstable
+# snapshot -- one whose content varies per run or per machine -- passes the
+# update and fails the next check. Two of mine did exactly that, and CI found
+# both. So after an update, verify.
+if [[ -n "$update" ]]; then
+    echo
+    echo "verifying the updated snapshots are stable…"
+    UPDATE_SNAPSHOTS= cargo test --workspace -- --ignored
+    echo
+    echo "stable. If that had failed, the snapshot depends on something that"
+    echo "changes between runs -- a generated key, the machine's capabilities --"
+    echo "and the fix is to render fixed data, not to update it again."
+fi

@@ -144,8 +144,12 @@ fn voice_locked_dark() {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn voice_idle_dark() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(unlocked_account(dir.path()), true);
+    // A *fixed* identity. This screen shows the key in full, and
+    // `sqnr::identity::generate` mints a random one -- so with a generated
+    // account the snapshot renders differently every run and can never pass
+    // twice. Mine was written by UPDATE_SNAPSHOTS and never checked until CI
+    // checked it.
+    let mut h = harness(Account::unlocked_for_test([4u8; 32]), true);
     h.run();
     h.snapshot("voice_idle_dark");
 }

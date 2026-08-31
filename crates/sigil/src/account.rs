@@ -120,6 +120,23 @@ impl Account {
         })
     }
 
+    /// An open account from a fixed seed, touching no filesystem.
+    ///
+    /// For snapshots. `sqnr::identity::generate` mints a **random** key, and
+    /// any view that shows the key in full — which the call screen does, and
+    /// should, since a key is the only thing that identifies somebody — then
+    /// renders differently on every run. A snapshot of that can never pass
+    /// twice, and mine did not: it was written by `UPDATE_SNAPSHOTS` and never
+    /// checked until CI checked it.
+    ///
+    /// Tests that do not draw the key should keep using a generated identity;
+    /// a fixed seed is a worse default everywhere else.
+    #[doc(hidden)]
+    pub fn unlocked_for_test(seed: [u8; 32]) -> Account {
+        let signer = SoftwareSigner::new(ed25519_dalek::SigningKey::from_bytes(&seed));
+        Account::unlocked_from(signer, PathBuf::from("/dev/null/test-identity"))
+    }
+
     /// Try `passphrase`. On failure the account stays locked and remembers why.
     ///
     /// Returns whether it opened, so the interface can clear the field on
