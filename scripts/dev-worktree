@@ -1,72 +1,74 @@
 #!/usr/bin/env bash
 #
-# Point sigil's sqex path dependencies at a private git worktree.
+# Create the sqex worktree that sigil builds against.
 #
-#   scripts/dev-worktree            # create it and wire sigil up
-#   scripts/dev-worktree --status   # show what is wired where
-#   scripts/dev-worktree --remove   # unwire, and remove the worktree
+#   scripts/dev-worktree            # create it
+#   scripts/dev-worktree --status   # show where things point
+#   scripts/dev-worktree --remove   # remove it
 #
-# Why: sigil depends on the sqex crates by path, so a `cargo build` here
-# compiles whatever branch ../sqex happens to have checked out. When something
-# else is working in that tree -- another session, or you in another terminal --
-# that means two problems at once: the branch moves underneath the build, and
-# both fight over cargo's target-directory lock, which looks exactly like a very
-# slow compile.
+# sigil's Cargo.toml names `../sqex-sigil` for its sqex path dependencies. That
+# is a **git worktree** of the sqex repository -- the same repo, a separate
+# branch, a separate working copy, a separate target directory -- and this
+# creates it.
 #
-# A worktree gives this checkout its own branch and its own working copy of the
-# same repository, and `.cargo/config.toml` (gitignored) redirects the path
-# dependencies onto it. Nothing committed changes, so a fresh clone still builds
-# against a plain ../sqex.
+# Why not just point at ../sqex: a path dependency compiles whatever branch that
+# tree has checked out. Share it with anything else and two things go wrong at
+# once. The branch moves underneath the build with no warning, and both cargo
+# processes contend for the target-directory lock -- which is indistinguishable
+# from a very slow compile, and cost thirteen minutes here before anyone noticed
+# nothing was being compiled at all.
+#
+# An earlier attempt did this with a `paths` override in .cargo/config.toml.
+# Cargo rejects that: overriding a path dependency whose own dependencies are
+# also overridden "has altered the original list of dependencies", is documented
+# as producing spurious rebuilds and a wrong crate graph, and is due to become a
+# hard error. Naming the worktree in the manifest keeps one consistent graph.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-sqex="$(cd "$repo/../sqex" && pwd)"
-tree="$repo/../sqex-sigil"
+sqex="$(cd "$repo/../sqex" 2>/dev/null && pwd || true)"
+tree="$(cd "$repo/.." && pwd)/sqex-sigil"
 branch="sigil-voice-engine"
-config="$repo/.cargo/config.toml"
+
+if [[ -z "$sqex" ]]; then
+    echo "error: no sqex checkout at $repo/../sqex" >&2
+    echo "       clone it there first; the worktree is made from it." >&2
+    exit 1
+fi
 
 case "${1:-create}" in
   --status)
-    echo "sqex repo:  $sqex"
-    echo "worktree:   $tree"
-    git -C "$sqex" worktree list
-    if [[ -f "$config" ]]; then
-        echo "override:   $config"
-        grep -E '^\s*"' "$config" || true
+    echo "sqex repo: $sqex"
+    echo "worktree:  $tree"
+    if [[ -d "$tree" ]]; then
+        echo "branch:    $(git -C "$tree" branch --show-current)"
+        echo "head:      $(git -C "$tree" log --oneline -1)"
     else
-        echo "override:   none -- sigil builds against $sqex directly"
+        echo "branch:    (worktree does not exist -- run without arguments)"
     fi
+    echo
+    git -C "$sqex" worktree list
+    echo
+    echo "what cargo actually resolves:"
+    cargo metadata --format-version 1 --manifest-path "$repo/Cargo.toml" 2>/dev/null \
+      | tr ',' '\n' | grep -o '"[^"]*crates/sqex[^"]*/Cargo.toml"' | sort -u \
+      || echo "  (cargo metadata failed -- is the worktree present?)"
     exit 0
     ;;
   --remove)
-    rm -f "$config"
     git -C "$sqex" worktree remove "$tree" 2>/dev/null \
-        || echo "note: worktree not removed (uncommitted changes?); remove it by hand" >&2
-    echo "unwired. sigil now builds against $sqex."
+      || echo "note: not removed (uncommitted changes?); remove it by hand" >&2
     exit 0
     ;;
 esac
 
-if [[ ! -d "$tree" ]]; then
-    # Branch from main, not from whatever the shared tree has checked out.
+if [[ -d "$tree" ]]; then
+    echo "already there: $tree ($(git -C "$tree" branch --show-current))"
+else
+    # From main, not from whatever the shared tree has checked out.
     git -C "$sqex" worktree add "$tree" -b "$branch" main
 fi
 
-mkdir -p "$repo/.cargo"
-{
-    echo "# Local development override -- gitignored, created by scripts/dev-worktree."
-    echo "#"
-    echo "# Redirects sigil's sqex path dependencies onto a private git worktree so"
-    echo "# this checkout does not share a branch or a target directory with anything"
-    echo "# else using $sqex. Delete this file (or run --remove) to go back."
-    echo "paths = ["
-    for c in sqex-proto sqex-discovery sqex-voice sqex-chat sqexd; do
-        echo "    \"$tree/crates/$c\","
-    done
-    echo "]"
-} > "$config"
-
-echo "worktree: $tree (branch $branch)"
-echo "override: $config"
 echo
-echo "Verify with: cargo metadata --format-version 1 | grep sqex-voice"
+echo "sigil now builds against $tree."
+echo "Check it with: scripts/dev-worktree --status"

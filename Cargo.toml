@@ -19,13 +19,18 @@ license = "MIT"
 # --- the sqex stack -------------------------------------------------------
 # Path deps for local co-development, which is how sqex itself works against
 # sqnr. A release pins these to git tags instead; see docs/dependencies.md.
-sqex-proto = { path = "../sqex/crates/sqex-proto" }
-sqex-discovery = { path = "../sqex/crates/sqex-discovery" }
-sqex-voice = { path = "../sqex/crates/sqex-voice" }
-sqex-chat = { path = "../sqex/crates/sqex-chat" }
+#
+# `../sqex-sigil` is a **git worktree** of the sqex repository, not a second
+# clone -- `scripts/dev-worktree` creates it. It exists so this checkout has its
+# own branch and its own target directory, rather than compiling whatever
+# `../sqex` happens to have checked out while somebody else works in it.
+sqex-proto = { path = "../sqex-sigil/crates/sqex-proto" }
+sqex-discovery = { path = "../sqex-sigil/crates/sqex-discovery" }
+sqex-voice = { path = "../sqex-sigil/crates/sqex-voice" }
+sqex-chat = { path = "../sqex-sigil/crates/sqex-chat" }
 # Only ever a dev-dependency: tests drive a real exchange in-process, because a
 # client that was only tested against a mock has tested the mock.
-sqexd = { path = "../sqex/crates/sqexd" }
+sqexd = { path = "../sqex-sigil/crates/sqexd" }
 sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.7.1" }
 sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.7.1" }
 squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.18.0" }

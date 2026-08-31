@@ -50,14 +50,28 @@ scripts/dev-worktree --status   # show what is wired where
 scripts/dev-worktree --remove   # unwire and remove it
 ```
 
-The wiring is a `paths` override in `.cargo/config.toml`, which is
-**gitignored**. Nothing committed points at the worktree, so a fresh clone with
-a plain `../sqex` alongside it still builds. The override is verifiable:
+The manifest names `../sqex-sigil` directly, and the script creates a worktree
+there. So a fresh clone needs one command before it builds, and in exchange the
+crate graph is unambiguous.
+
+### Why not a `.cargo/config.toml` override
+
+The obvious alternative is to keep the manifest pointing at `../sqex` and
+redirect with a gitignored `paths` override. That was tried first, and cargo
+refuses it:
+
+> path override for crate `sqex-voice` has altered the original list of
+> dependencies … This is currently allowed but is known to produce buggy
+> behavior with spurious recompiles and changes to the crate graph … In the
+> future, however, this message will become a hard error.
+
+The reason is structural rather than incidental: the sqex crates depend on each
+other by path, so overriding one changes the resolved dependencies of the
+others, and `paths` was never meant to reshape a graph. Naming the worktree in
+the manifest keeps exactly one copy of each crate in the graph.
+
+Verify what is actually being compiled — resolution is easy to assume:
 
 ```bash
-cargo metadata --format-version 1 | grep sqex-voice
+scripts/dev-worktree --status
 ```
-
-If that prints a path under `sqex-sigil/`, the override is live. If it prints
-one under `sqex/`, it is not, and you are sharing a tree with whoever else is
-in it.
