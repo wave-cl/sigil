@@ -3,7 +3,15 @@
 # clean run here means a clean run there.
 set -eux
 
+# Package list is explicit rather than `--all`. sigil depends on the sqex
+# crates by path for local co-development, and `cargo fmt --all` walks into
+# those too -- reformatting 68 files of a repo whose formatting is
+# hand-maintained and whose CI does not run rustfmt at all. Name our own
+# packages and nobody else's.
+SIGIL_PKGS=(-p sigil -p sigil-ui -p sigil-net -p sigil-platform \
+            -p sigil-voice -p sigil-chat -p sigil-shell)
+
 cargo check --workspace --all-targets
-cargo fmt --all -- --check
+cargo fmt "${SIGIL_PKGS[@]}" -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

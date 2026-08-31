@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# Render the snapshot tests deterministically.
+#
+#   scripts/snapshot-test            # verify against the committed PNGs
+#   scripts/snapshot-test --update   # regenerate them
+#
+# Snapshots are #[ignore]d so an ordinary `cargo test` never needs a GPU.
+#
+# Determinism is the whole difficulty. On Linux we force a CPU rasterizer
+# (lavapipe) via the Vulkan loader, which must be told *before the process
+# starts* because it caches ICDs. macOS has no lavapipe, so an `--update` there
+# runs inside a container that does -- otherwise a Mac and CI would generate
+# different pixels for identical code and every snapshot would look like a
+# regression to whoever ran it second.
+set -euo pipefail
+
+# Timezone-dependent renders (a message timestamp) must not differ between a
+# developer's machine and CI's UTC runners.
+export TZ=UTC
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+update=""
+for arg in "$@"; do
+    case "$arg" in
+        --update) update="1" ;;
+    esac
+done
+
+if [[ "$(uname -s)" == "Darwin" && -n "$update" ]]; then
+    echo "note: updating snapshots on macOS renders with Metal, which will not" >&2
+    echo "      match CI's software rasterizer. Commit these only if CI agrees," >&2
+    echo "      or run this in a Linux container." >&2
+fi
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -n "${LAVAPIPE_ICD:-}" ]]; then
+        icd="$LAVAPIPE_ICD"
+    elif [[ -f "/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json" ]]; then
+        icd="/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json"
+    else
+        echo "error: lavapipe ICD not found; install mesa-vulkan-drivers." >&2
+        exit 1
+    fi
+    export VK_ICD_FILENAMES="$icd"
+fi
+
+if [[ -n "$update" ]]; then
+    export UPDATE_SNAPSHOTS=1
+fi
+
+cd "$repo"
+cargo test --workspace -- --ignored

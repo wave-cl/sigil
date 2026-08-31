@@ -18,6 +18,13 @@ sigil-platform = { path = "../sigil-platform" }
 sigil-voice = { path = "../sigil-voice" }
 sigil-chat = { path = "../sigil-chat" }
 
+[lib]
+name = "sigil_shell"
+path = "src/lib.rs"
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+
 [[bin]]
 name = "sigil"
 path = "src/main.rs"

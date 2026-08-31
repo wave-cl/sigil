@@ -69,7 +69,14 @@ fn ephemeral() -> (x25519_dalek::StaticSecret, [u8; 32]) {
 
 async fn open_session(client: &mut Client, peer: PubKey, eph_pub: [u8; 32]) -> OpenAck {
     let (code, body) = client
-        .post("/session/open", Open { peer, ephemeral: eph_pub }.encode())
+        .post(
+            "/session/open",
+            Open {
+                peer,
+                ephemeral: eph_pub,
+            }
+            .encode(),
+        )
         .await
         .unwrap();
     assert_eq!(code, 200, "{}", String::from_utf8_lossy(&body));
@@ -112,8 +119,12 @@ async fn one_identity_holds_a_chat_and_a_voice_connection_at_once() {
     // Connection 2 of 2 for each identity: voice, as the *same* identity.
     // If an exchange refused a second connection per identity, this is where it
     // would show.
-    let mut a_voice = Client::connect_as(addr, &server_pub, &a_seed).await.unwrap();
-    let mut b_voice = Client::connect_as(addr, &server_pub, &b_seed).await.unwrap();
+    let mut a_voice = Client::connect_as(addr, &server_pub, &a_seed)
+        .await
+        .unwrap();
+    let mut b_voice = Client::connect_as(addr, &server_pub, &b_seed)
+        .await
+        .unwrap();
     assert!(
         a_voice.max_datagram_size().is_some(),
         "the voice connection must carry datagrams"
@@ -150,20 +161,33 @@ async fn one_identity_holds_a_chat_and_a_voice_connection_at_once() {
         let sealed = a_sess.seal_datagram(seq, b"twenty milliseconds").unwrap();
         a_voice
             .send_datagram(
-                DatagramFrame { session_id: sid, seq, ciphertext: sealed }.encode(),
+                DatagramFrame {
+                    session_id: sid,
+                    seq,
+                    ciphertext: sealed,
+                }
+                .encode(),
             )
             .unwrap();
     }
 
     // A message out on the chat connection, *between* the datagrams and the read.
-    a_chat.send(&channel, "and a message at the same time").await.unwrap();
+    a_chat
+        .send(&channel, "and a message at the same time")
+        .await
+        .unwrap();
 
     // More media, after the chat request.
     for seq in 5..10u64 {
         let sealed = a_sess.seal_datagram(seq, b"twenty milliseconds").unwrap();
         a_voice
             .send_datagram(
-                DatagramFrame { session_id: sid, seq, ciphertext: sealed }.encode(),
+                DatagramFrame {
+                    session_id: sid,
+                    seq,
+                    ciphertext: sealed,
+                }
+                .encode(),
             )
             .unwrap();
     }
@@ -198,14 +222,24 @@ async fn one_identity_holds_a_chat_and_a_voice_connection_at_once() {
     // what a real session does for as long as the call lasts.
     let sealed = a_sess.seal_datagram(10, b"still here").unwrap();
     a_voice
-        .send_datagram(DatagramFrame { session_id: sid, seq: 10, ciphertext: sealed }.encode())
+        .send_datagram(
+            DatagramFrame {
+                session_id: sid,
+                seq: 10,
+                ciphertext: sealed,
+            }
+            .encode(),
+        )
         .unwrap();
     let bytes = tokio::time::timeout(Duration::from_secs(2), b_voice.read_datagram())
         .await
         .expect("a datagram should still arrive after chat traffic")
         .unwrap();
     let frame = DatagramFrame::decode(&bytes).unwrap();
-    assert_eq!(b_sess.open(frame.seq, &frame.ciphertext).unwrap(), b"still here");
+    assert_eq!(
+        b_sess.open(frame.seq, &frame.ciphertext).unwrap(),
+        b"still here"
+    );
 }
 
 /// The cost of holding two connections, measured rather than assumed.
@@ -223,11 +257,17 @@ async fn a_voice_datagram_reaches_every_connection_the_identity_holds() {
     let (a_seed, a_id) = identity(1);
     let (b_seed, b_id) = identity(2);
 
-    let mut a_voice = Client::connect_as(addr, &server_pub, &a_seed).await.unwrap();
-    let mut b_voice = Client::connect_as(addr, &server_pub, &b_seed).await.unwrap();
+    let mut a_voice = Client::connect_as(addr, &server_pub, &a_seed)
+        .await
+        .unwrap();
+    let mut b_voice = Client::connect_as(addr, &server_pub, &b_seed)
+        .await
+        .unwrap();
     // A second connection for Bob that never opens a session and never reads —
     // standing in for the one chat would be using.
-    let b_other = Client::connect_as(addr, &server_pub, &b_seed).await.unwrap();
+    let b_other = Client::connect_as(addr, &server_pub, &b_seed)
+        .await
+        .unwrap();
 
     let (a_eph, a_eph_pub) = ephemeral();
     let (b_eph, b_eph_pub) = ephemeral();
@@ -242,7 +282,14 @@ async fn a_voice_datagram_reaches_every_connection_the_identity_holds() {
 
     let sealed = a_sess.seal_datagram(0, b"one frame").unwrap();
     a_voice
-        .send_datagram(DatagramFrame { session_id: sid, seq: 0, ciphertext: sealed }.encode())
+        .send_datagram(
+            DatagramFrame {
+                session_id: sid,
+                seq: 0,
+                ciphertext: sealed,
+            }
+            .encode(),
+        )
         .unwrap();
 
     // The connection that holds the session opens it, as expected.
@@ -251,7 +298,10 @@ async fn a_voice_datagram_reaches_every_connection_the_identity_holds() {
         .expect("the session's own connection receives the frame")
         .unwrap();
     let frame = DatagramFrame::decode(&bytes).unwrap();
-    assert_eq!(b_sess.open(frame.seq, &frame.ciphertext).unwrap(), b"one frame");
+    assert_eq!(
+        b_sess.open(frame.seq, &frame.ciphertext).unwrap(),
+        b"one frame"
+    );
 
     // And so does the other one — same bytes, and it has no use for them.
     let also = tokio::time::timeout(Duration::from_secs(2), b_other.read_datagram()).await;
