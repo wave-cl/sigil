@@ -5691,6 +5691,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6088,7 +6099,7 @@ dependencies = [
 
 [[package]]
 name = "sqex-chat"
-version = "0.24.1"
+version = "0.28.4"
 dependencies = [
  "bs58",
  "chacha20poly1305",
@@ -6114,7 +6125,7 @@ dependencies = [
 
 [[package]]
 name = "sqex-discovery"
-version = "0.24.1"
+version = "0.28.4"
 dependencies = [
  "bs58",
  "dirs",
@@ -6126,7 +6137,7 @@ dependencies = [
 
 [[package]]
 name = "sqex-proto"
-version = "0.24.1"
+version = "0.28.4"
 dependencies = [
  "bs58",
  "chacha20poly1305",
@@ -6141,7 +6152,7 @@ dependencies = [
 
 [[package]]
 name = "sqex-voice"
-version = "0.24.1"
+version = "0.28.4"
 dependencies = [
  "clap",
  "cpal",
@@ -6160,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "sqexd"
-version = "0.24.1"
+version = "0.28.4"
 dependencies = [
  "bs58",
  "bytes",
@@ -6189,8 +6200,8 @@ dependencies = [
 
 [[package]]
 name = "sqnr"
-version = "0.7.1"
-source = "git+https://github.com/wave-cl/sqnr?tag=v0.7.1#b4f778fe12fd7ba203cc8a75d61123587fa37a16"
+version = "0.10.4"
+source = "git+https://github.com/wave-cl/sqnr?tag=v0.10.4#bf9bad086c87770e5cd23f83a1d81b1eb89ecb1c"
 dependencies = [
  "argon2",
  "bs58",
@@ -6211,6 +6222,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha1",
  "sqnr-core",
  "squic",
  "tokio",
@@ -6220,8 +6232,8 @@ dependencies = [
 
 [[package]]
 name = "sqnr-core"
-version = "0.7.1"
-source = "git+https://github.com/wave-cl/sqnr?tag=v0.7.1#b4f778fe12fd7ba203cc8a75d61123587fa37a16"
+version = "0.10.4"
+source = "git+https://github.com/wave-cl/sqnr?tag=v0.10.4#bf9bad086c87770e5cd23f83a1d81b1eb89ecb1c"
 dependencies = [
  "bs58",
  "ed25519-dalek",
@@ -6232,8 +6244,8 @@ dependencies = [
 
 [[package]]
 name = "squic"
-version = "0.18.0"
-source = "git+https://github.com/wave-cl/squic-rust?tag=v0.18.0#7256348ba5f12bacd91b8d1e458ef51c3eb15570"
+version = "0.25.1"
+source = "git+https://github.com/wave-cl/squic-rust?tag=v0.25.1#a4ce4108473a3c0feced54f896d4136514fc5803"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
@@ -6241,6 +6253,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac",
+ "libc",
  "quinn",
  "quinn-proto",
  "rand 0.9.5",
