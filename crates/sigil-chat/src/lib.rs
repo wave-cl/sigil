@@ -1155,7 +1155,7 @@ impl ChatApp {
             let field = sigil_ui::field(
                 ui,
                 &mut self.panes.entry(at.clone()).or_default().searching,
-                "Search conversations",
+                "Search chats",
                 width,
             );
             if field.changed() {
