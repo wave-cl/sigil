@@ -316,8 +316,12 @@ fn declining_is_silent_and_the_call_is_remembered() {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn voice_ringing_dark() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = ringing_harness(unlocked_account(dir.path()), a_key());
+    // A fixed account, like `voice_idle_dark`. It was safe with a generated
+    // one only because nothing in this view happens to draw our own key, which
+    // is a property of the view rather than of the test -- and the moment it
+    // stopped being true the snapshot would fail on CI with nothing pointing
+    // at the cause.
+    let mut h = ringing_harness(Account::unlocked_for_test([6u8; 32]), a_key());
     h.run();
     h.snapshot("voice_ringing_dark");
 }
@@ -432,4 +436,36 @@ async fn an_arriving_ring_is_announced() {
         "and names the caller in full: {:?}",
         said[0].1
     );
+}
+
+/// Drawing the same state twice must produce the same thing.
+///
+/// The cheap general form of the check that `voice_idle_dark` learned the hard
+/// way: a generated identity renders a different key every run, so any
+/// snapshot of a view that draws one can never pass twice. No renderer, no
+/// PNG, no platform — anything non-deterministic reaching the screen shows up
+/// here, in a test that names the problem, rather than as a pixel diff on CI.
+#[test]
+fn the_same_state_draws_the_same_way_twice() {
+    let read = || {
+        let mut h = harness(Account::unlocked_for_test([4u8; 32]), true);
+        h.run();
+        text_of(&h)
+    };
+    assert_eq!(
+        read(),
+        read(),
+        "something drawn here changes between runs, so no snapshot of it can pass twice"
+    );
+}
+
+/// The ringing view, likewise.
+#[test]
+fn the_ringing_view_draws_the_same_way_twice() {
+    let read = || {
+        let mut h = ringing_harness(Account::unlocked_for_test([6u8; 32]), a_key());
+        h.run();
+        text_of(&h)
+    };
+    assert_eq!(read(), read());
 }

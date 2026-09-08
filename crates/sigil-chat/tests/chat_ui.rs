@@ -55,10 +55,20 @@ fn text_of(h: &Harness<'static>) -> String {
     found.join(" | ")
 }
 
+/// An open identity with a **random** key.
+///
+/// Right for a behaviour test and **wrong for a snapshot**: `generate` mints a
+/// fresh key every run, and any view that draws a key in full then renders
+/// differently every time. Use [`fixed`] where pixels are compared.
 fn unlocked(dir: &std::path::Path) -> Account {
     let path = dir.join("identity");
     sqnr::identity::generate(&path, None).unwrap();
     Account::discover(Some(path))
+}
+
+/// An open identity whose key is the same on every run. Touches no filesystem.
+fn fixed() -> Account {
+    Account::unlocked_for_test([5u8; 32])
 }
 
 #[test]
@@ -127,8 +137,38 @@ fn a_bad_key_is_refused_in_place() {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn chat_dark() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(unlocked(dir.path()));
+    // A fixed key, because this pane draws one in full and a generated key
+    // makes a snapshot that can never pass twice.
+    let mut h = harness(fixed());
     h.run();
     h.snapshot("chat_dark");
+}
+
+/// Drawing the same state twice must produce the same thing.
+///
+/// # Why this exists
+///
+/// `chat_dark` began failing the moment a view drew the account key in full,
+/// because its identity was **generated** — a fresh key every run, so the
+/// snapshot could never pass twice. It was not caught locally because
+/// `snapshot-test --update` followed by one verify only proves the file that
+/// was just written matches the run that wrote it.
+///
+/// This is the cheap general form of that check: no renderer, no PNG, no
+/// platform. Anything non-deterministic that reaches the screen — a generated
+/// key, a live clock, a map iterated in hash order — shows up here as two
+/// different readings of the same state, in the test that names the problem
+/// rather than in a pixel diff on CI.
+#[test]
+fn the_same_state_draws_the_same_way_twice() {
+    let read = || {
+        let mut h = harness(fixed());
+        h.run();
+        text_of(&h)
+    };
+    assert_eq!(
+        read(),
+        read(),
+        "something drawn here changes between runs, so no snapshot of it can pass twice"
+    );
 }
