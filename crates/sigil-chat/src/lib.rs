@@ -74,7 +74,11 @@ impl ChatApp {
         let Some(unlocked) = account.unlocked() else {
             return;
         };
-        let layers = discovery::layers(discovery::nothing_explicit(), &self.config);
+        let layers = discovery::layers(
+            discovery::nothing_explicit(),
+            &self.config,
+            Some(unlocked.path()),
+        );
         if !discovery::any_configured(&layers) {
             return;
         }

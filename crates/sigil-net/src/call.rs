@@ -214,7 +214,11 @@ pub enum Dial {
     /// An exchange already known, as tests and a settings pane both have.
     At(Endpoint),
     /// Resolve one first. See [`crate::discovery::layers`].
-    Discover(Box<[sqex_discovery::Layer; 3]>),
+    ///
+    /// A `Vec` rather than a fixed-size array: the layer count varies now that
+    /// the identity's SIP-38 handle contributes one only when there is an
+    /// identity with a handle.
+    Discover(Vec<sqex_discovery::Layer>),
 }
 
 impl From<Endpoint> for Dial {
@@ -223,9 +227,9 @@ impl From<Endpoint> for Dial {
     }
 }
 
-impl From<[sqex_discovery::Layer; 3]> for Dial {
-    fn from(l: [sqex_discovery::Layer; 3]) -> Self {
-        Dial::Discover(Box::new(l))
+impl From<Vec<sqex_discovery::Layer>> for Dial {
+    fn from(l: Vec<sqex_discovery::Layer>) -> Self {
+        Dial::Discover(l)
     }
 }
 

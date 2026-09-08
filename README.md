@@ -30,3 +30,20 @@ are not available.
 ```
 ./check
 ```
+
+## Running it
+
+```bash
+scripts/macos-app && ./target/sigil.app/Contents/MacOS/sigil
+```
+
+The bundle is what makes notifications and the microphone work; running the
+binary inside it rather than `open`ing the app keeps its log on the terminal.
+`cargo run -p sigil-shell` is fine for iterating, but cannot notify.
+
+The exchange comes from the identity's primary SIP-38 handle, so nothing needs
+configuring. To see which layer named it:
+
+```bash
+cargo run -p sigil-net --example where
+```

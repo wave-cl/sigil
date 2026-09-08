@@ -137,8 +137,11 @@ impl VoiceApp {
     /// Shared by calling and joining so that both refuse for the same reasons
     /// in the same words — two copies of this drifted apart in the CLI once,
     /// which is why resolution itself lives in one place.
-    fn where_to(&self) -> Result<[sigil_net::Layer; 3], String> {
-        let layers = discovery::layers(discovery::nothing_explicit(), &self.config);
+    fn where_to(&self, account: &Account) -> Result<Vec<sigil_net::Layer>, String> {
+        // The identity's own handle names its exchange (SIP-38), so an account
+        // that is open needs nothing configured anywhere.
+        let identity = account.unlocked().map(|u| u.path());
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, identity);
         if !discovery::any_configured(&layers) {
             return Err("no exchange configured — set SQEX_SERVER or ~/.sqnr/config".into());
         }
@@ -157,7 +160,9 @@ impl VoiceApp {
         let Some(unlocked) = account.unlocked() else {
             return;
         };
-        let Ok(layers) = self.where_to() else { return };
+        let Ok(layers) = self.where_to(account) else {
+            return;
+        };
         let wake = egui_ctx.clone();
         self.listener = Some(listen(layers, unlocked.signer(), move || {
             wake.request_repaint()
@@ -191,7 +196,7 @@ impl VoiceApp {
             self.peer_trouble = Some("that is you — a call needs somebody else".into());
             return;
         }
-        let layers = match self.where_to() {
+        let layers = match self.where_to(account) {
             Ok(l) => l,
             Err(e) => {
                 self.peer_trouble = Some(e);
@@ -226,7 +231,7 @@ impl VoiceApp {
                 return;
             }
         };
-        let layers = match self.where_to() {
+        let layers = match self.where_to(account) {
             Ok(l) => l,
             Err(e) => {
                 self.room_trouble = Some(e);
