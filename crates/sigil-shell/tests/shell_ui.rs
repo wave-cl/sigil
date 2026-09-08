@@ -151,6 +151,39 @@ fn a_sealed_identity_gets_the_opening_screen_and_no_rail() {
     assert!(!said.contains("Chat (3)"), "the rail is up too: {said}");
 }
 
+/// You can type your passphrase the moment the window opens.
+///
+/// It is the only thing on screen and the only thing to do with it, so making
+/// somebody click it first is asking them to tell the program what it already
+/// knows.
+#[test]
+fn the_passphrase_box_has_the_keyboard_from_launch() {
+    fn focused_field(node: egui_kittest::Node<'_>) -> bool {
+        let n = node.accesskit_node();
+        // A password field's accessibility value is deliberately empty, which
+        // is the whole point of one — so what is asked is where the keyboard
+        // *is*, not what arrived.
+        // Two roles: egui gives a masked field `PasswordInput` and a plain
+        // one `TextInput`, and this box is the former.
+        let role = format!("{:?}", n.role());
+        if (role == "PasswordInput" || role == "TextInput") && n.is_focused() {
+            return true;
+        }
+        node.children().any(focused_field)
+    }
+
+    let mut h = sealed(true);
+    // Twice: focus is asked for while the first pass is being drawn, so it is
+    // the *next* tree that carries it.
+    h.run();
+    h.run();
+    assert!(
+        focused_field(h.root()),
+        "nothing has the keyboard, so somebody has to click before typing: {}",
+        said(&h)
+    );
+}
+
 /// The rail must show an unread count, because that badge is the only thing
 /// telling you a message arrived while you were on a call. Checked through the
 /// accessibility tree, so it needs no renderer and runs in ordinary CI.

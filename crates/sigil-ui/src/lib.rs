@@ -35,6 +35,31 @@ pub use identicon::{avatar, identicon, identicon_of};
 /// label stays outside it and stays visible, because a hint never reaches the
 /// accessibility tree at all.
 pub fn field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32) -> egui::Response {
+    field_as(ui, buf, hint, width, false)
+}
+
+/// The same, for something that must not be shown as it is typed.
+///
+/// A separate function rather than a flag at every call site, so that a field
+/// which should be masked cannot be written unmasked by leaving an argument
+/// off — and so the two share the one rule about how tall a field is and where
+/// its text sits in it.
+pub fn password_field(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    field_as(ui, buf, hint, width, true)
+}
+
+fn field_as(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    hint: &str,
+    width: f32,
+    password: bool,
+) -> egui::Response {
     // The vertical padding is **measured against the line**, not a token. A
     // fixed 8px in a 40px box leaves the text sitting a few pixels above
     // centre — not enough to name, enough to look wrong in every field at
@@ -44,6 +69,7 @@ pub fn field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32) -> egu
     ui.add_sized(
         [width, sigil::tokens::FIELD_MD],
         egui::TextEdit::singleline(buf)
+            .password(password)
             .hint_text(hint)
             .margin(egui::Margin::symmetric(
                 sigil::tokens::SPACING_MD as i8,

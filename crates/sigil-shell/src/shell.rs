@@ -58,6 +58,12 @@ struct Welcome {
     /// its own small cruelty.
     passphrase: String,
     trouble: Option<String>,
+    /// Whether the box has been given the keyboard once.
+    ///
+    /// Once, not every pass: asking for focus on every frame takes it back
+    /// from anything else on the screen — the identity dropdown could not be
+    /// opened, because the box grabbed the keyboard again the instant it was.
+    focused: bool,
 }
 
 pub struct Shell {
@@ -319,6 +325,10 @@ impl Shell {
                                     self.accounts.use_path(path.clone());
                                     self.welcome.passphrase.clear();
                                     self.welcome.trouble = None;
+                                    // A different identity wants a different
+                                    // passphrase, so the box is where the
+                                    // keyboard should be again.
+                                    self.welcome.focused = false;
                                 }
                             }
                             if found.is_empty() {
@@ -339,16 +349,24 @@ impl Shell {
 
                     if matches!(self.accounts.active(), Account::Locked { .. }) {
                         ui.label("Passphrase");
-                        let field = ui.add_sized(
-                            [CARD_WIDTH, tokens::FIELD_MD],
-                            egui::TextEdit::singleline(&mut self.welcome.passphrase)
-                                .password(true)
-                                .margin(egui::Margin::symmetric(
-                                    tokens::SPACING_MD as i8,
-                                    tokens::SPACING_SM as i8,
-                                ))
-                                .hint_text("the passphrase that seals this identity"),
+                        // The shared field, so its text sits in the middle of
+                        // its box like every other one. It had a fixed 8px of
+                        // padding in a 40px box, which leaves the words riding
+                        // high — the same thing that was wrong in all of them.
+                        let field = sigil_ui::password_field(
+                            ui,
+                            &mut self.welcome.passphrase,
+                            "the passphrase that seals this identity",
+                            CARD_WIDTH,
                         );
+                        // Typing works from the moment the window opens. This
+                        // is the only thing on screen and the only thing to do
+                        // with it, so making somebody click it first is asking
+                        // them to tell the program what it already knows.
+                        if !self.welcome.focused {
+                            self.welcome.focused = true;
+                            field.request_focus();
+                        }
                         let entered =
                             field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.add_space(tokens::SPACING_SM);
