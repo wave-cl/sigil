@@ -19,6 +19,32 @@ pub use dot::dot;
 // Re-exported from the host crate, where the `App` trait names one -- see
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.
 pub use identicon::{avatar, identicon, identicon_of};
+
+/// A text field, at the size a text field should be.
+///
+/// # Why this exists rather than a `TextEdit` at each call site
+///
+/// Every field in sigil was egui's default: one line of text tall, with a
+/// placeholder that vanished the moment anybody typed. Two problems in one
+/// control. It reads as a rule somebody wrote on rather than a box to fill in,
+/// and it is a small target; and the only thing saying what it was for
+/// disappeared exactly when somebody might have wanted to check.
+///
+/// So: [`tokens::FIELD_MD`] tall, padded, and the hint is a **sentence about
+/// what the field does** rather than a one-word restatement of its label. The
+/// label stays outside it and stays visible, because a hint never reaches the
+/// accessibility tree at all.
+pub fn field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32) -> egui::Response {
+    ui.add_sized(
+        [width, sigil::tokens::FIELD_MD],
+        egui::TextEdit::singleline(buf)
+            .hint_text(hint)
+            .margin(egui::Margin::symmetric(
+                sigil::tokens::SPACING_MD as i8,
+                sigil::tokens::SPACING_SM as i8,
+            )),
+    )
+}
 pub use message::{
     Bubble, BubbleAction, Receipt, bubble, day_separator, reaction_chip, system_line,
     unread_divider, unread_pill,

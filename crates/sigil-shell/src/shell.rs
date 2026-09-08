@@ -23,6 +23,39 @@ use sigil::{ColorTheme, NavStack, tokens};
 /// than a wide rail.
 const RAIL_WIDTH: f32 = 104.0;
 
+/// The opening screen's card. Wide enough for a passphrase somebody actually
+/// chose, and narrow enough to read as one thing to do.
+const CARD_WIDTH: f32 = 420.0;
+
+/// An identity's name, as somebody would say it: the file's name, with the
+/// default one called what it is rather than "identity".
+fn name_of(path: &std::path::Path) -> String {
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some("identity") => "identity (the default)".to_string(),
+        Some(name) => name.to_string(),
+        None => path.display().to_string(),
+    }
+}
+
+/// The opening screen: which identity, and its passphrase.
+///
+/// # Why the shell owns this
+///
+/// Unlocking used to be each app's own business — chat said "unlock your
+/// identity to start chatting" and voice drew a passphrase box — so the first
+/// thing anybody met depended on which tab happened to be in front, and
+/// neither of them could offer the identities sitting in the same folder.
+/// There is one identity in front at a time and one place to choose it, so
+/// there is one screen.
+#[derive(Default)]
+struct Welcome {
+    /// **Never persisted, and cleared only on success.** Making somebody
+    /// retype a long passphrase because the program threw it away on a typo is
+    /// its own small cruelty.
+    passphrase: String,
+    trouble: Option<String>,
+}
+
 pub struct Shell {
     apps: Vec<Box<dyn App>>,
     /// The global history. Its top says both where we are and which app we are
@@ -52,6 +85,9 @@ pub struct Shell {
     tray: Option<sigil_platform::Tray>,
     /// The badge last given to the tray, so it is only set when it changes.
     shown_unread: u32,
+    /// The opening screen's state: which identity is chosen, and what has been
+    /// typed at it. See [`Shell::welcome`].
+    welcome: Welcome,
     /// Whether roster changes are written to disk.
     ///
     /// Off for a shell built with a fixed roster, which is what tests do. A
@@ -96,6 +132,7 @@ impl Shell {
             platform: notify,
             tray,
             shown_unread: 0,
+            welcome: Welcome::default(),
             remember: true,
         }
     }
@@ -189,6 +226,19 @@ impl Shell {
         self.handle_shell_keys(ui.ctx());
 
         let theme = ColorTheme::current(ui.ctx());
+        // Nothing sealed gets a rail. Every app behind it would be a tab onto
+        // an identity that cannot do anything, and offering four of those is
+        // offering a choice that does not exist yet.
+        if !self.accounts.active().is_unlocked() {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(theme.surface_primary)
+                        .inner_margin(egui::Margin::same(tokens::SPACING_LG as i8)),
+                )
+                .show(ui, |ui| self.welcome(ui, &theme));
+            return;
+        }
         // Panels rather than a bare horizontal layout: a panel takes the full
         // height of its parent and reserves its width, which is what makes the
         // rail a rail rather than a box the size of its text.
@@ -214,6 +264,109 @@ impl Shell {
         self.handle_fallback_keys(ui.ctx());
         self.remember_focus(ui.ctx());
         self.apply_nav();
+    }
+
+    /// Choose an identity, and open it.
+    ///
+    /// Centred and large, because it is the only thing on screen and the only
+    /// decision to make. The list is **every identity in `~/.sqnr`**, not only
+    /// the ones sigil happens to have been holding: somebody who made a second
+    /// identity with `sqnr` should find it here rather than having to know
+    /// about a roster file.
+    fn welcome(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let found = Accounts::found();
+        let active = self.accounts.active_index();
+        let chosen = self.accounts.active().path().to_path_buf();
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.22);
+            ui.allocate_ui_with_layout(
+                egui::vec2(CARD_WIDTH, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.heading("Open an identity");
+                    ui.colored_label(
+                        theme.text_secondary,
+                        "Your key is what identifies you. Everything sigil does is done as \
+                         one of these.",
+                    );
+                    ui.add_space(tokens::SPACING_LG);
+
+                    ui.label("Identity");
+                    // A name, not a path: the folder is the same for all of
+                    // them and repeating it eight times says nothing.
+                    let label = name_of(&chosen);
+                    egui::ComboBox::from_id_salt("sigil_welcome_identity")
+                        .width(CARD_WIDTH)
+                        .height(320.0)
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for path in &found {
+                                let selected = *path == chosen;
+                                if ui
+                                    .selectable_label(selected, name_of(path))
+                                    .on_hover_text(path.display().to_string())
+                                    .clicked()
+                                    && !selected
+                                {
+                                    self.accounts.use_path(path.clone());
+                                    self.welcome.passphrase.clear();
+                                    self.welcome.trouble = None;
+                                }
+                            }
+                            if found.is_empty() {
+                                ui.colored_label(
+                                    theme.text_muted,
+                                    "No identities in ~/.sqnr. Make one with `sqnr identity \
+                                     new`.",
+                                );
+                            }
+                        });
+
+                    ui.add_space(tokens::SPACING_MD);
+                    // What is actually wrong with the file, when something is.
+                    // "Missing" and "sealed" want completely different things
+                    // from somebody and look identical from a blank box.
+                    ui.colored_label(theme.text_secondary, self.accounts.active().describe());
+                    ui.add_space(tokens::SPACING_MD);
+
+                    if matches!(self.accounts.active(), Account::Locked { .. }) {
+                        ui.label("Passphrase");
+                        let field = ui.add_sized(
+                            [CARD_WIDTH, tokens::FIELD_MD],
+                            egui::TextEdit::singleline(&mut self.welcome.passphrase)
+                                .password(true)
+                                .margin(egui::Margin::symmetric(
+                                    tokens::SPACING_MD as i8,
+                                    tokens::SPACING_SM as i8,
+                                ))
+                                .hint_text("the passphrase that seals this identity"),
+                        );
+                        let entered =
+                            field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.add_space(tokens::SPACING_SM);
+                        let go = ui
+                            .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Unlock"))
+                            .clicked();
+                        if entered || go {
+                            let passphrase = std::mem::take(&mut self.welcome.passphrase);
+                            if self.accounts.unlock(active, &passphrase) {
+                                self.welcome.trouble = None;
+                            } else {
+                                // Said here, and the box left empty rather
+                                // than holding a passphrase that did not work.
+                                self.welcome.trouble =
+                                    Some("That passphrase did not open it.".into());
+                            }
+                        }
+                    }
+                    if let Some(trouble) = &self.welcome.trouble {
+                        ui.add_space(tokens::SPACING_SM);
+                        ui.colored_label(theme.destructive, trouble);
+                    }
+                },
+            );
+        });
     }
 
     /// The app rail: one icon per app, with its unread badge.

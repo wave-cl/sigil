@@ -338,6 +338,72 @@ impl Accounts {
         self.generation += 1;
     }
 
+    /// Every identity file in `~/.sqnr`, oldest name first.
+    ///
+    /// # Why a scan and not a list
+    ///
+    /// sqnr writes identities into one directory and nothing keeps an index of
+    /// them, so the directory *is* the index. `identity` is the default one
+    /// and `identity-<something>` is the rest; a name with a dot in it is a
+    /// sidecar (`identity.handles`) and not an identity, and `config` and
+    /// `known_servers` are not either.
+    ///
+    /// Nothing here is opened, and nothing needs a passphrase: this answers
+    /// *what is there*, which is what somebody choosing between them needs
+    /// before they have typed anything.
+    pub fn found() -> Vec<PathBuf> {
+        let Some(dir) = sqnr::identity::default_identity_path()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+        else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| {
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    (n == "identity" || n.starts_with("identity-")) && !n.contains('.')
+                })
+            })
+            .collect();
+        // The default first, then the rest by name, so the order is the same
+        // every time somebody opens the program. A directory listing is not.
+        out.sort_by_key(|p| {
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            (name != "identity", name)
+        });
+        out
+    }
+
+    /// Make `path` the account on screen, adding it to the roster if it is new.
+    ///
+    /// Returns its index. An identity already held is switched to rather than
+    /// opened twice — a second `Account` for one key would take a second store
+    /// lock against itself and be refused, which is the right refusal in the
+    /// wrong place.
+    pub fn use_path(&mut self, path: PathBuf) -> usize {
+        if let Some(i) = self
+            .entries
+            .iter()
+            .position(|h| h.account.path() == path.as_path())
+        {
+            self.switch_to(i);
+            return i;
+        }
+        let i = self.add(path);
+        self.switch_to(i);
+        i
+    }
+
     /// Where the roster is remembered, if this machine has anywhere to put it.
     pub fn remembered_at() -> Option<PathBuf> {
         dirs::data_local_dir().map(|d| d.join("sigil").join("accounts.json"))

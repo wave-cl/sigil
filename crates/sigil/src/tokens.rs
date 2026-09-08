@@ -35,6 +35,13 @@ pub const AVATAR_MD: f32 = 38.0;
 pub const AVATAR_LG: f32 = 48.0;
 pub const AVATAR_XL: f32 = 80.0;
 
+/// A text field's height.
+///
+/// Bigger than a line of text on purpose: a field the height of its own
+/// characters reads as a rule somebody wrote on, and is a small target. The
+/// hint inside says what the field is for, so it needs room for a sentence.
+pub const FIELD_MD: f32 = 40.0;
+
 pub const BUTTON_SM: f32 = 28.0;
 pub const BUTTON_MD: f32 = 34.0;
 pub const BUTTON_LG: f32 = 44.0;

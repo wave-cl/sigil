@@ -876,10 +876,12 @@ impl ChatApp {
         // A visible label, not only a hint: a hint disappears the moment
         // somebody types and never reaches the accessibility tree at all.
         ui.label("Write to");
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().adding)
-                .hint_text("their key, or name@domain")
-                .desired_width(f32::INFINITY),
+        let width = ui.available_width();
+        let field = sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().adding,
+            "paste their key, or type name@domain",
+            width,
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(tokens::SPACING_XS);
@@ -954,17 +956,20 @@ impl ChatApp {
         ui.heading("Your profile");
         ui.add_space(tokens::SPACING_SM);
         ui.label("Name");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().name)
-                .hint_text("display name")
-                .desired_width(f32::INFINITY),
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().name,
+            "what you would like to be called",
+            width,
         );
         ui.add_space(tokens::SPACING_XS);
         ui.label("Title");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().title)
-                .hint_text("title")
-                .desired_width(f32::INFINITY),
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().title,
+            "what you do, if you want it shown",
+            width,
         );
         // Said next to the field rather than in a help page. A title asserts
         // standing, and somebody typing one should know that nothing behind
@@ -1001,10 +1006,12 @@ impl ChatApp {
         ui.heading("Add an exchange");
         ui.add_space(tokens::SPACING_SM);
         ui.label("Exchange");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().exchange)
-                .hint_text("a domain, or host:port")
-                .desired_width(f32::INFINITY),
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().exchange,
+            "a domain, or host:port",
+            width,
         );
         ui.colored_label(
             theme.text_muted,
@@ -1080,12 +1087,12 @@ impl ChatApp {
         ui.horizontal(|ui| {
             let control = tokens::BUTTON_MD + ui.spacing().item_spacing.x * 2.0;
             ui.add_sized([label_width, tokens::BUTTON_MD], egui::Label::new("Search"));
-            let field = ui.add(
-                egui::TextEdit::singleline(
-                    &mut self.panes.entry(at.clone()).or_default().searching,
-                )
-                .hint_text("your messages")
-                .desired_width(ui.available_width() - control),
+            let width = ui.available_width() - control;
+            let field = sigil_ui::field(
+                ui,
+                &mut self.panes.entry(at.clone()).or_default().searching,
+                "search what you have here",
+                width,
             );
             if field.changed() {
                 let query = self.pane(at).searching.clone();
@@ -1699,12 +1706,11 @@ impl ChatApp {
             // ran off the edge of the window.
             let controls = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 2.0;
             let width = (ui.available_width() - controls).max(80.0);
-            let field = ui.add(
-                egui::TextEdit::singleline(
-                    &mut self.panes.entry(at.clone()).or_default().composing,
-                )
-                .hint_text("Write a message")
-                .desired_width(width),
+            let field = sigil_ui::field(
+                ui,
+                &mut self.panes.entry(at.clone()).or_default().composing,
+                "write a message, or / for a command",
+                width,
             );
             // Typing is published from the fact that the text changed, not from
             // the field having focus: a box somebody is sitting in front of and
@@ -1784,9 +1790,11 @@ impl ChatApp {
 
         ui.horizontal(|ui| {
             let pane = self.panes.entry(at.clone()).or_default();
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut pane.query)
-                    .hint_text("search, or leave empty for everything"),
+            let field = sigil_ui::field(
+                ui,
+                &mut pane.query,
+                "name a channel, or leave empty for everything",
+                320.0,
             );
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if entered || ui.button("Search").clicked() {
@@ -1883,12 +1891,11 @@ impl ChatApp {
             ui.add_space(tokens::SPACING_SM);
             ui.horizontal(|ui| {
                 ui.label("Invite");
-                ui.add(
-                    egui::TextEdit::singleline(
-                        &mut self.panes.entry(at.clone()).or_default().inviting,
-                    )
-                    .hint_text("their key or name@domain")
-                    .desired_width(240.0),
+                sigil_ui::field(
+                    ui,
+                    &mut self.panes.entry(at.clone()).or_default().inviting,
+                    "paste their key, or type name@domain",
+                    280.0,
                 );
                 if ui.button("Add").clicked() {
                     let typed = self.pane(at).inviting.trim().to_string();
@@ -2040,11 +2047,11 @@ impl ChatApp {
         ui.add_enabled_ui(state.i_am_admin, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Name");
-                ui.add(
-                    egui::TextEdit::singleline(
-                        &mut self.panes.entry(at.clone()).or_default().channel_name,
-                    )
-                    .desired_width(240.0),
+                sigil_ui::field(
+                    ui,
+                    &mut self.panes.entry(at.clone()).or_default().channel_name,
+                    "what this channel is called",
+                    280.0,
                 );
                 if ui.button("Set").clicked() {
                     let name = self.pane(at).channel_name.clone();
@@ -2053,11 +2060,11 @@ impl ChatApp {
             });
             ui.horizontal(|ui| {
                 ui.label("Topic");
-                ui.add(
-                    egui::TextEdit::singleline(
-                        &mut self.panes.entry(at.clone()).or_default().channel_topic,
-                    )
-                    .desired_width(240.0),
+                sigil_ui::field(
+                    ui,
+                    &mut self.panes.entry(at.clone()).or_default().channel_topic,
+                    "a line about what it is for",
+                    280.0,
                 );
                 if ui.button("Set").clicked() {
                     let topic = self.pane(at).channel_topic.clone();
@@ -2487,10 +2494,11 @@ impl ChatApp {
         );
         ui.horizontal(|ui| {
             ui.label("Its key");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().linking)
-                    .hint_text("base58")
-                    .desired_width(260.0),
+            sigil_ui::field(
+                ui,
+                &mut self.panes.entry(at.clone()).or_default().linking,
+                "the new device's key, in base58",
+                300.0,
             );
             if ui.button("Write credential").clicked() {
                 let typed = self.pane(at).linking.trim().to_string();

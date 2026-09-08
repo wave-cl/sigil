@@ -29,7 +29,49 @@ impl App for Stub {
     }
 }
 
+/// Everything the screen says.
+///
+/// Walks the whole tree: the rail's labels are nested several frames deep, and
+/// the root's direct children are the panels rather than the buttons. Both
+/// label and value, because accesskit puts an interactive widget's text in the
+/// former and a plain one's in the latter -- reading only labels sees the
+/// buttons and none of the prose.
+fn said(h: &Harness<'static>) -> String {
+    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
+        let n = node.accesskit_node();
+        if let Some(l) = n.label() {
+            out.push(l.to_string());
+        }
+        if let Some(v) = n.value() {
+            out.push(v.to_string());
+        }
+        for child in node.children() {
+            walk(child, out);
+        }
+    }
+    let mut found = Vec::new();
+    walk(h.root(), &mut found);
+    found.join(" | ")
+}
+
 fn harness(dark: bool) -> Harness<'static> {
+    // Open, because the shell shows the opening screen instead of the rail
+    // while nothing is unlocked -- see `welcome_dark`, which is that screen.
+    with_account(dark, sigil::Account::unlocked_for_test([4u8; 32]))
+}
+
+/// The shell as somebody meets it: nothing open yet.
+fn sealed(dark: bool) -> Harness<'static> {
+    with_account(
+        dark,
+        sigil::Account::Locked {
+            path: "/tmp/sigil-test/identity".into(),
+            trouble: None,
+        },
+    )
+}
+
+fn with_account(dark: bool, account: sigil::Account) -> Harness<'static> {
     let apps: Vec<Box<dyn App>> = vec![
         Box::new(Stub {
             title: "Calls",
@@ -48,12 +90,8 @@ fn harness(dark: bool) -> Harness<'static> {
     // draws however many accounts the person running it happens to have. That
     // is the "snapshot the layout, not the machine" lesson again, and it would
     // have shown up as CI disagreeing with every developer.
-    let mut shell =
-        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
-            sigil::Account::Missing {
-                path: "nowhere".into(),
-            },
-        ]));
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![account]));
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -84,6 +122,35 @@ fn shell_light() {
     h.snapshot("shell_light");
 }
 
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn welcome_dark() {
+    let mut h = sealed(true);
+    h.run();
+    h.snapshot("welcome_dark");
+}
+
+/// Nothing sealed gets a rail.
+///
+/// Every app behind it would be a tab onto an identity that cannot do
+/// anything, so the whole window is the one decision there is to make.
+#[test]
+fn a_sealed_identity_gets_the_opening_screen_and_no_rail() {
+    let mut h = sealed(true);
+    h.run();
+    let said = said(&h);
+    assert!(
+        said.contains("Open an identity"),
+        "the opening screen is not there: {said}"
+    );
+    assert!(
+        said.contains("Passphrase"),
+        "and it does not ask for anything: {said}"
+    );
+    // The apps are not offered while there is nobody to be them.
+    assert!(!said.contains("Chat (3)"), "the rail is up too: {said}");
+}
+
 /// The rail must show an unread count, because that badge is the only thing
 /// telling you a message arrived while you were on a call. Checked through the
 /// accessibility tree, so it needs no renderer and runs in ordinary CI.
@@ -91,26 +158,7 @@ fn shell_light() {
 fn the_rail_shows_each_app_and_badges_the_unread_one() {
     let mut h = harness(true);
     h.run();
-    // Walk the whole tree: the rail's labels are nested several frames deep,
-    // and direct children of the root are the panels, not the buttons.
-    // Both label and value: accesskit puts an interactive widget's text in the
-    // former and a plain one's in the latter, so reading only labels sees the
-    // buttons and none of the prose.
-    fn labels(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
-        let n = node.accesskit_node();
-        if let Some(l) = n.label() {
-            out.push(l.to_string());
-        }
-        if let Some(v) = n.value() {
-            out.push(v.to_string());
-        }
-        for child in node.children() {
-            labels(child, out);
-        }
-    }
-    let mut found = Vec::new();
-    labels(h.root(), &mut found);
-    let joined = found.join(" | ");
+    let joined = said(&h);
     assert!(
         joined.contains("Calls"),
         "the rail lists every app: {joined}"
