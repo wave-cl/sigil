@@ -1033,11 +1033,26 @@ async fn a_name_is_claimed_and_a_taken_one_is_said_in_words() {
             || alice
                 .state()
                 .note
-                .is_some_and(|n| n.contains("ada is yours here")),
+                .is_some_and(|n| n.said.contains("ada is yours here")),
             20
         )
         .await,
         "the claim was not granted, or not said: {:?}",
+        alice.state().note
+    );
+
+    // The handle that follows a claim is **not** asserted here, and cannot be:
+    // this dials an address, and `name@203.0.113.1` is not a handle. Production
+    // always resolves a domain first, which is where `set_domain` gets its
+    // answer; `domain_of` in `sigil-net` covers picking it out of the layers,
+    // and `a_claimed_name_becomes_a_handle` in `sqex-chat` covers the rest of
+    // the chain with a domain in hand.
+
+    // A confirmation is about something just done, so it stops being true.
+    let gone = until(|| alice.state().note.is_none(), 20).await;
+    assert!(
+        gone,
+        "the note is still on screen: {:?}",
         alice.state().note
     );
 
@@ -1047,7 +1062,7 @@ async fn a_name_is_claimed_and_a_taken_one_is_said_in_words() {
             || bob
                 .state()
                 .note
-                .is_some_and(|n| n.contains("already somebody else")),
+                .is_some_and(|n| n.said.contains("already somebody else")),
             20
         )
         .await,

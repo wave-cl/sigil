@@ -658,6 +658,22 @@ impl ChatApp {
                     ui.colored_label(colour, state.link.word());
                 }
                 sigil_ui::dot(ui, up, colour, colour, state.link.word());
+
+                // Whatever was just done, at the other end of the row. It was
+                // above the transcript, where it pushed every message down by
+                // a line for a moment and then let them back up.
+                //
+                // A note is about an **action** and a trouble is about a
+                // state; the state is rebuilt every refresh, so merging them
+                // would put each confirmation on screen for less than a tick.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if let Some(note) = &state.note {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&note.said).color(theme.success))
+                                .truncate(),
+                        );
+                    }
+                });
             });
         });
         if let Some(trouble) = &state.trouble {
@@ -954,7 +970,7 @@ impl ChatApp {
                     Dialog::Compose => self.compose_dialog(at, ui, theme),
                     Dialog::Profile => self.profile_dialog(at, ui, theme),
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
-                    Dialog::Name => self.name_dialog(at, state, ui, theme),
+                    Dialog::Name => self.name_dialog(at, ui, theme),
                 }
             });
         if response.should_close() {
@@ -1096,7 +1112,7 @@ impl ChatApp {
     /// to exactly one account, and is what lets anybody write to you as
     /// `name@domain`. They are two different things that both get called a
     /// name, so they get two dialogs and each says which it is.
-    fn name_dialog(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn name_dialog(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.heading("Claim a name");
         ui.add_space(tokens::SPACING_SM);
         ui.label("Name");
@@ -1132,10 +1148,6 @@ impl ChatApp {
                 pane.dialog = None;
             }
         });
-        // The exchange's answer, where the question was asked.
-        if let Some(note) = &state.note {
-            ui.colored_label(theme.text_secondary, note);
-        }
     }
 
     /// Connect this identity to another exchange.
@@ -1487,12 +1499,6 @@ impl ChatApp {
                     );
                 }
             });
-        }
-        // A note is about something just done and a trouble is about a state.
-        // Kept apart because the state is rebuilt every refresh, and merged
-        // they would put every confirmation on screen for less than a tick.
-        if let Some(note) = &state.note {
-            ui.colored_label(theme.success, note);
         }
         self.trouble_ui(&state.trouble_with, ui, theme);
 

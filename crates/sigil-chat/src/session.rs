@@ -203,6 +203,26 @@ impl Standing {
     }
 }
 
+/// How long a confirmation stays on screen.
+///
+/// Five seconds: long enough to read a sentence, short enough to be gone
+/// before it becomes furniture. **Every note, not one of them.** A
+/// confirmation that stays until something else happens to replace it is a
+/// claim about the present that stopped being true minutes ago.
+pub const NOTE_SECS: u64 = 5;
+
+/// A confirmation of something just done, and when it was said.
+///
+/// The time is carried with the words rather than beside them, because the two
+/// have to move together: a note whose clock was set somewhere else is a note
+/// that expires at the wrong moment or never.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    pub said: String,
+    /// Unix seconds. See [`NOTE_SECS`].
+    pub at: u64,
+}
+
 /// How far a message is known to have got.
 ///
 /// **Under-claiming is the only safe direction.** `Read` means *everybody* in
@@ -295,7 +315,7 @@ pub struct ChatState {
     /// **Separate from `trouble`**, which is about the state of the
     /// conversation and is rebuilt by every refresh. Merged, every
     /// confirmation would be on screen for less than a tick.
-    pub note: Option<String>,
+    pub note: Option<Note>,
     /// Who is in the open conversation.
     pub members: Vec<Member>,
     /// Whether we may rename, invite, remove and rotate here.
@@ -902,6 +922,17 @@ async fn run(
     let client =
         sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
     let mut chat = Chat::new(client, seed, me, endpoint.server, store);
+    // The exchange's domain, for showing SIP-38 handles as `name@domain`.
+    //
+    // **Nothing set this.** `Chat::handle` needs a domain to compose one, so
+    // it returned `None` for every account including our own — and a name
+    // claimed at this exchange still read as unregistered afterwards, with
+    // the claim having actually worked. Read off the same layers the
+    // connection was made from, and only when they name a domain: an address
+    // is not one, and `name@203.0.113.1` is not a handle.
+    if let Dial::Discover(layers) = &dial {
+        chat.set_domain(sigil_net::domain_of(layers));
+    }
     // So a lost connection can be rebuilt without restarting the session.
     chat.dials(endpoint.address, endpoint.server.as_bytes().to_owned());
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
@@ -939,6 +970,24 @@ async fn run(
                     desk.note(event, me);
                 }
                 desk.age();
+                // A confirmation is about something just done, so it stops
+                // being true. Cleared here rather than left for whatever
+                // happens next to overwrite -- see `NOTE_SECS`.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Checked before modifying: `send_modify` reports a change
+                // whether or not anything changed, and a watch that always
+                // says so wakes the interface on every tick for nothing.
+                if state
+                    .borrow()
+                    .note
+                    .as_ref()
+                    .is_some_and(|n| now.saturating_sub(n.at) >= NOTE_SECS)
+                {
+                    state.send_modify(|s| s.note = None);
+                }
                 if desk.restructure {
                     // **Cleared only on success.** Clearing it first meant a
                     // rebuild that failed -- which is what every rebuild does
@@ -2205,7 +2254,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                             "The exchange answered {other}, which this                                           version does not know."
                         ),
                     };
-                    state.send_modify(|s| s.note = Some(said));
+                    note(state, said);
                 }
                 Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
             }
@@ -2764,7 +2813,11 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
 /// keeping the two in one field puts every confirmation on screen for less than
 /// a tick, which is to say it is never read.
 fn note(state: &watch::Sender<ChatState>, said: String) {
-    state.send_modify(|s| s.note = Some(said));
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    state.send_modify(|s| s.note = Some(Note { said, at }));
 }
 
 fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {
