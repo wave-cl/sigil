@@ -185,6 +185,9 @@ fn a_conversation() -> ChatState {
         i_am_admin: true,
         topic: String::new(),
         ringing: Vec::new(),
+        devices: Vec::new(),
+        linked: None,
+        credential: None,
         divider: Some(3),
         unread_on_open: 2,
     }
@@ -192,6 +195,31 @@ fn a_conversation() -> ChatState {
 
 fn harness(dark: bool) -> Harness<'static> {
     harness_with(a_conversation(), dark)
+}
+
+/// A harness showing one of the app's inner routes, through `render_nav` —
+/// the same path the shell takes, so a route that draws nothing fails here.
+fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
+        })
 }
 
 fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
@@ -411,4 +439,49 @@ fn our_own_call_is_shown_as_ringing_out_not_as_an_incoming_ring() {
         "answering a call you are placing is nonsense: {said}"
     );
     assert!(said.contains("Cancel"), "{said}");
+}
+
+/// An account with nothing else linked is told what that costs.
+///
+/// This is the one warning in the client that is about **permanent** loss. An
+/// epoch key arrives sealed against a one-time prekey and opening it spends
+/// that prekey, so the exchange will hand over the same envelope tomorrow and
+/// it will not open. The copy on this disk is the only one that will ever
+/// exist, and a second linked device is the only backup there can be — losing
+/// the store with nothing linked loses those conversations for everybody in
+/// them, not only for the person who lost the machine.
+#[test]
+fn an_account_with_no_second_device_is_told_the_store_is_the_only_copy() {
+    let mut state = a_conversation();
+    state.devices = vec![sigil_chat::Linked {
+        device: me(),
+        added: NOW - DAY,
+        not_after: NOW + 90 * DAY,
+        is_this_one: true,
+    }];
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("only copy"),
+        "the warning has to say the store is unrecoverable: {said}"
+    );
+    assert!(
+        said.contains("Link a second device"),
+        "and what to do about it: {said}"
+    );
+}
+
+/// A revoked device says so, rather than looking broken.
+///
+/// Otherwise it is learned only by being refused as a stranger to every
+/// conversation it can see, which reads as everything being broken rather than
+/// as this one fact about this one machine.
+#[test]
+fn a_revoked_device_says_it_has_been_revoked() {
+    let mut state = a_conversation();
+    state.linked = Some(false);
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    assert!(text_of(&h).contains("revoked"), "{}", text_of(&h));
 }

@@ -179,6 +179,23 @@ pub struct ChatState {
     pub i_am_admin: bool,
     /// The open conversation's topic, when it has one.
     pub topic: String,
+    /// Every device registered to this account.
+    ///
+    /// **First class, not buried.** An epoch key arrives sealed against a
+    /// one-time prekey and opening it spends the prekey, so the copy on this
+    /// disk is the only one that will ever exist — and a linked device is the
+    /// only backup of it there can be. Losing this store with no second device
+    /// loses those conversations permanently, for everybody in them.
+    pub devices: Vec<Linked>,
+    /// Whether this client still acts for its account.
+    ///
+    /// `None` when it was never linked: an account with no registered device
+    /// *is* its own device and there is nothing to check. `Some(false)` means
+    /// revoked — otherwise learned only by being refused as a stranger to
+    /// every conversation it can see.
+    pub linked: Option<bool>,
+    /// A credential just written, for another device to register with.
+    pub credential: Option<String>,
     /// Calls ringing right now, in **any** conversation.
     ///
     /// Not only the one on screen: a call is the thing that most needs to
@@ -192,6 +209,18 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// One device registered to this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linked {
+    pub device: PubKey,
+    pub added: u64,
+    /// When its credential expires. A registration expires with it, and there
+    /// is deliberately no second lifetime.
+    pub not_after: u64,
+    /// This one — the client you are looking at.
+    pub is_this_one: bool,
 }
 
 /// A file carried by a message.
@@ -510,6 +539,31 @@ pub enum Cmd {
     },
     /// Set the open channel's picture, or clear it.
     SetChannelAvatar(Option<std::path::PathBuf>),
+
+    // ---- devices (SIP-20/22) --------------------------------------------
+    /// Re-read the device list.
+    Devices,
+    /// Write a credential for another device to register itself with.
+    ///
+    /// The credential names both keys in the clear to whoever holds it, and it
+    /// is **evidence, not authority**: it says which account vouches for a
+    /// key, and entitles that key to nothing on its own.
+    LinkDevice {
+        device: PubKey,
+        days: u64,
+    },
+    /// Withdraw a device.
+    ///
+    /// **The revocation outlives the credential**, and has to: everything
+    /// needed to register is on the stolen machine, so deleting the mapping
+    /// alone would be undone by one request. A found device comes back only
+    /// with a credential the account signed *after* the revocation — the one
+    /// thing that was never on it.
+    RevokeDevice(PubKey),
+    /// Hand the open channel's key to our own other devices.
+    ResealToSiblings,
+    /// Ask an exchange that does not admit us to let us in (SIP-24).
+    RequestAdmission(String),
 }
 
 pub struct ChatHandle {
@@ -1188,6 +1242,31 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
     publish(chat, state, desk, me);
 }
 
+/// Re-read who this account's devices are, and whether we are still one.
+async fn refresh_devices(chat: &mut Chat, state: &watch::Sender<ChatState>) {
+    let this = chat.device();
+    let devices = match chat.my_devices().await {
+        Ok(devices) => devices
+            .into_iter()
+            .map(|d| Linked {
+                device: d.device,
+                added: d.added,
+                not_after: d.not_after,
+                is_this_one: d.device == this,
+            })
+            .collect(),
+        Err(e) => {
+            trouble(state, e);
+            return;
+        }
+    };
+    let linked = chat.still_linked().await.ok().flatten();
+    state.send_modify(|s| {
+        s.devices = devices;
+        s.linked = linked;
+    });
+}
+
 /// The longest edge of a thumbnail, in pixels.
 ///
 /// It rides inside the message, which is capped, so this has to stay small
@@ -1701,6 +1780,59 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             let Some(channel) = desk.open else { return };
             chat.typing(&channel, on).await;
         }
+
+        Cmd::Devices => refresh_devices(chat, state).await,
+        Cmd::LinkDevice { device, days } => {
+            match chat.issue_credential(&device, days * 24 * 60 * 60) {
+                Ok(credential) => {
+                    let encoded = bs58::encode(credential.encode()).into_string();
+                    state.send_modify(|s| s.credential = Some(encoded));
+                    note(
+                        state,
+                        "Give this to the other device. It names both keys in the clear, \
+                         so hand it over the way you would a key."
+                            .into(),
+                    );
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::RevokeDevice(device) => match chat.revoke_device(&device).await {
+            Ok(()) => {
+                refresh_devices(chat, state).await;
+                note(
+                    state,
+                    "Revoked. Rotate the key in any conversation that device could read: \
+                     it keeps everything it was already given."
+                        .into(),
+                );
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::ResealToSiblings => {
+            let Some(channel) = desk.open else { return };
+            match chat.reseal_to_siblings(&channel).await {
+                Ok(0) => note(
+                    state,
+                    "Your other devices already hold this conversation's key.".into(),
+                ),
+                Ok(n) => note(state, format!("Handed the key to {n} of your devices.")),
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::RequestAdmission(label) => match chat.request_admission(&label).await {
+            // The reply is identical whatever happens, on purpose: a route
+            // that answered differently would be an oracle for whether an
+            // account is admitted. So this reports that it was *sent*, and
+            // claims nothing about what came of it.
+            Ok(()) => note(
+                state,
+                "Asked. The exchange answers the same either way, so there is nothing \
+                 here to watch — an administrator has to decide."
+                    .into(),
+            ),
+            Err(e) => trouble(state, e),
+        },
 
         Cmd::SendFile(path) => {
             let Some(channel) = desk.open else { return };

@@ -3,8 +3,8 @@
 pub mod session;
 
 pub use session::{
-    Attached, ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Receipt,
-    Ring, Summary, Trouble,
+    Attached, ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Linked, Member, Person,
+    Receipt, Ring, Summary, Trouble,
 };
 
 use std::collections::HashMap;
@@ -30,6 +30,8 @@ pub enum Route {
     Members,
     /// The open conversation's name, topic and retention.
     Settings,
+    /// Which devices act for this account, and how to link or revoke one.
+    Devices,
 }
 
 /// What is being typed, per identity.
@@ -57,6 +59,8 @@ struct Pane {
     editing: Option<u64>,
     /// The directory search box.
     query: String,
+    /// The key of a device being linked.
+    linking: String,
     /// The key being invited to the open channel.
     inviting: String,
     /// The channel settings fields.
@@ -82,6 +86,7 @@ impl Default for Pane {
             announced_typing: false,
             editing: None,
             query: String::new(),
+            linking: String::new(),
             inviting: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
@@ -344,6 +349,7 @@ impl App for ChatApp {
             Route::Directory => self.directory_view(ctx, ui),
             Route::Members => self.members_view(ctx, ui),
             Route::Settings => self.settings_view(ctx, ui),
+            Route::Devices => self.devices_view(ctx, ui),
         }
     }
 
@@ -354,6 +360,7 @@ impl App for ChatApp {
                 Route::Directory => "Public channels",
                 Route::Members => "Members",
                 Route::Settings => "Channel settings",
+                Route::Devices => "Devices",
             }
             .to_string(),
         )
@@ -695,6 +702,10 @@ impl ChatApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     ctx.navigator.push_here(Route::Settings);
+                }
+                if ui.button("Devices").clicked() {
+                    self.send_as(Some(me), Cmd::Devices);
+                    ctx.navigator.push_here(Route::Devices);
                 }
                 // Calling from inside the conversation, with audio. The
                 // terminal client does the whole SIP-36 exchange and then
@@ -1646,5 +1657,143 @@ impl ChatApp {
                     });
                 });
             });
+    }
+}
+
+impl ChatApp {
+    /// Which devices act for this account.
+    ///
+    /// # Why this is a screen and not a settings row
+    ///
+    /// An epoch key arrives sealed against a **one-time** prekey, and opening
+    /// it spends that prekey. Ask the exchange for the same envelope tomorrow
+    /// and it hands over the same bytes, and they will not open. So the copy on
+    /// this disk is the only one that will ever exist — and a second linked
+    /// device is the only backup of it there can be.
+    ///
+    /// Losing this store with nothing else linked loses those conversations
+    /// permanently, for everybody in them and not only for you.
+    fn devices_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(me) = Self::showing(ctx) else {
+            return AppResponse::default();
+        };
+        let state = self.state_of(Some(me));
+
+        ui.horizontal(|ui| {
+            if ui.button("← Back").clicked() {
+                ctx.navigator.back();
+            }
+            ui.heading("Devices");
+            if ui.button("Refresh").clicked() {
+                self.send_as(Some(me), Cmd::Devices);
+            }
+        });
+
+        if state.linked == Some(false) {
+            // Otherwise learned only by being refused as a stranger to every
+            // conversation this client can see, which reads as everything
+            // being broken rather than as this one fact.
+            ui.colored_label(
+                theme.destructive,
+                "This device has been revoked. It can no longer act for the account, and \
+                 nothing it sends will be accepted.",
+            );
+        }
+
+        ui.add_space(tokens::SPACING_SM);
+        if state.devices.len() <= 1 {
+            ui.colored_label(
+                theme.warning,
+                "Nothing else is linked. The conversations on this machine cannot be \
+                 recovered from the exchange — opening a key spends it, so what is here \
+                 is the only copy. Link a second device and it becomes the backup.",
+            );
+            ui.add_space(tokens::SPACING_SM);
+        }
+
+        for device in &state.devices {
+            let key = device.device.to_string();
+            ui.horizontal(|ui| {
+                sigil_ui::identicon(ui, &key, tokens::AVATAR_SM);
+                ui.add_space(tokens::SPACING_SM);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(sigil_ui::message::short(&key));
+                        if device.is_this_one {
+                            ui.colored_label(theme.accent, "this device");
+                        }
+                    });
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&key).monospace().small())
+                            .selectable(true),
+                    );
+                    ui.colored_label(
+                        theme.text_muted,
+                        egui::RichText::new(format!(
+                            "linked {} · credential expires {}",
+                            sigil_ui::brief(device.added, self.now()),
+                            sigil_ui::brief(device.not_after, self.now())
+                        ))
+                        .small(),
+                    );
+                });
+                if !device.is_this_one {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("Revoke").color(theme.destructive),
+                            ))
+                            .on_hover_text(
+                                "It stops acting for you. It keeps every key it was already \
+                                 given, so rotate anything it could read.",
+                            )
+                            .clicked()
+                        {
+                            self.send_as(Some(me), Cmd::RevokeDevice(device.device));
+                        }
+                    });
+                }
+            });
+            ui.separator();
+        }
+
+        ui.add_space(tokens::SPACING_MD);
+        ui.heading("Link another device");
+        ui.colored_label(
+            theme.text_secondary,
+            "Write a credential here, then give it to the other device. It names both \
+             keys in the clear, so hand it over the way you would hand over a key.",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Its key");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().linking)
+                    .hint_text("base58")
+                    .desired_width(260.0),
+            );
+            if ui.button("Write credential").clicked() {
+                let typed = self.pane(me).linking.trim().to_string();
+                match typed.parse::<PubKey>() {
+                    Ok(device) => {
+                        self.pane(me).linking.clear();
+                        self.send_as(Some(me), Cmd::LinkDevice { device, days: 90 });
+                    }
+                    Err(e) => self.pane(me).add_trouble = Some(format!("that is not a key: {e}")),
+                }
+            }
+        });
+        if let Some(credential) = &state.credential {
+            ui.add_space(tokens::SPACING_SM);
+            ui.add(
+                egui::TextEdit::multiline(&mut credential.clone())
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            if ui.button("Copy").clicked() {
+                ui.ctx().copy_text(credential.clone());
+            }
+        }
+        AppResponse::default()
     }
 }
