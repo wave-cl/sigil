@@ -114,6 +114,14 @@ pub struct ChatState {
     pub typing: bool,
     /// What is wrong with the open conversation, if anything.
     pub trouble_with: Trouble,
+    /// Everybody we can put a name to, keyed by account.
+    ///
+    /// One map for the whole interface rather than a lookup per view, so there
+    /// is a single answer to "what is this person called" and no view can
+    /// quietly disagree with another.
+    pub people: HashMap<PubKey, Person>,
+    /// Our own profile, for the pane that edits it.
+    pub mine: Person,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -122,6 +130,45 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// How somebody can be named.
+///
+/// **None of this is attested.** A SIP-21 profile is self-declared: the
+/// exchange stores it and vouches for none of it. A handle is bound at the
+/// exchange, so it says more, but it still is not the person. The key is the
+/// only thing that identifies somebody, which is why every view that shows a
+/// name keeps the key one gesture away.
+///
+/// A profile that is **withheld, absent, or blocked answers identically** by
+/// design (SIP-4's rule, and SIP-21 keeps it). So `None` here means "we cannot
+/// name them", never "they have nothing" and never "they blocked you" — the
+/// interface must not invent a distinction the protocol refuses to make.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Person {
+    /// Self-declared display name.
+    pub name: Option<String>,
+    /// Self-declared standing. **Never rendered as a badge, in channel-role
+    /// styling, or beside a verification mark** — SIP-21 makes those MUSTs,
+    /// because a title asserts authority directly and "Exchange
+    /// Administrator" does the social engineering by itself.
+    pub title: Option<String>,
+    /// `name@domain`, bound at the exchange (SIP-38).
+    pub handle: Option<String>,
+}
+
+impl Person {
+    /// What to call them, falling back to the key, which is never wrong.
+    pub fn label(&self, key: &PubKey) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.handle.clone())
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Person::default()
+    }
 }
 
 /// What is wrong with a conversation, as against what is in it.
@@ -206,6 +253,8 @@ pub enum Cmd {
     Reconnect,
     /// Put the open conversation away. What "back" means in a single pane.
     Close,
+    /// Publish a display name and title (SIP-21). Empty clears them.
+    SetProfile { name: String, title: String },
 }
 
 pub struct ChatHandle {
@@ -389,6 +438,7 @@ async fn run(
                         Err(e) => state.send_modify(|s| s.trouble = Some(e)),
                     }
                 }
+                learn_names(&mut chat, &mut desk).await;
                 refresh(&mut chat, &state, &mut desk, me).await;
                 (wake)();
             }
@@ -479,6 +529,8 @@ struct Desk {
     dirty: HashSet<[u8; 32]>,
     /// The conversation list itself needs rebuilding from the exchange.
     restructure: bool,
+    /// Accounts whose profile an event says has moved on.
+    restale: HashSet<PubKey>,
     /// Ticks since the list was last rebuilt.
     ///
     /// A backstop, not the mechanism. Events are what make this responsive,
@@ -495,6 +547,7 @@ impl Default for Desk {
             channels: HashMap::new(),
             open: None,
             dirty: HashSet::new(),
+            restale: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
             since_sync: 0,
@@ -548,8 +601,13 @@ impl Desk {
                 self.restructure = true;
                 self.dirty.extend(self.channels.keys().copied());
             }
-            Event::Profile { .. }
-            | Event::Admission
+            // A profile changed. Refetching is the *only* way to know: a
+            // cached name that has moved on looks exactly like a correct one,
+            // so this must ignore the cache rather than merely revalidate it.
+            Event::Profile { account } => {
+                self.restale.insert(account);
+            }
+            Event::Admission
             | Event::Heartbeat
             | Event::Ringing { .. }
             | Event::CrossCall { .. }
@@ -788,8 +846,85 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
     publish(chat, state, desk, me);
 }
 
+/// Learn what everybody on screen is called.
+///
+/// Two fetches with different meanings, and they must not be merged:
+/// `refresh_profiles` fills in people we cannot name yet and is cheap because
+/// it honours the cache; `refetch_profiles` ignores the cache and is the only
+/// correct answer to a SIP-30 `Profile` event, since a name that has moved on
+/// looks exactly like one that has not.
+async fn learn_names(chat: &mut Chat, desk: &mut Desk) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let stale: Vec<PubKey> = desk.restale.drain().collect();
+    if !stale.is_empty() {
+        let _ = chat.refetch_profiles(&stale, now).await;
+    }
+
+    // Everybody a view could name: the other party in each direct message, and
+    // whoever has said anything in the conversation on screen. Not every member
+    // of every channel -- that is a request per person per rebuild for names
+    // nobody is looking at.
+    let mut want: Vec<PubKey> = Vec::new();
+    let mut add = |a: PubKey| {
+        if a != chat.me && !want.contains(&a) {
+            want.push(a);
+        }
+    };
+    for known in desk.channels.values() {
+        if let Some(peer) = known.peer {
+            add(peer);
+        }
+    }
+    if let Some(open) = desk.open
+        && let Some(known) = desk.channels.get(&open)
+    {
+        for m in known.timeline.messages() {
+            add(m.account);
+        }
+    }
+    if !want.is_empty() {
+        let _ = chat.refresh_profiles(&want, now).await;
+    }
+}
+
+/// Everything we can say about who somebody is, read back out of the store.
+fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
+    let mut out = HashMap::new();
+    let look = |account: PubKey, out: &mut HashMap<PubKey, Person>| {
+        out.entry(account).or_insert_with(|| Person {
+            name: chat.display_name(&account),
+            title: chat.title_of(&account),
+            handle: chat.handle(&account),
+        });
+    };
+    for known in desk.channels.values() {
+        if let Some(peer) = known.peer {
+            look(peer, &mut out);
+        }
+    }
+    if let Some(open) = desk.open
+        && let Some(known) = desk.channels.get(&open)
+    {
+        let authors: Vec<PubKey> = known.timeline.messages().map(|m| m.account).collect();
+        for a in authors {
+            look(a, &mut out);
+        }
+    }
+    out
+}
+
 /// Build what the interface draws from what the task holds.
 fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) {
+    let people = people_of(chat, desk);
+    let mine = Person {
+        name: chat.display_name(&me),
+        title: chat.title_of(&me),
+        handle: chat.handle(&me),
+    };
     // Most recent first, the way every chat client orders a conversation list.
     // `mine()` hands them back in join order, which says nothing about where
     // anything is happening.
@@ -799,7 +934,18 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     let mut summaries: Vec<Summary> = desk
         .channels
         .iter()
-        .map(|(c, k)| k.summary(*c, &me))
+        .map(|(c, k)| {
+            let mut summary = k.summary(*c, &me);
+            // A direct message's row names a *person*, so a published name
+            // wins over the local label -- which is only what we happened to
+            // call them, and is often just their key repeated back.
+            if let Some(peer) = k.peer
+                && let Some(named) = people.get(&peer).and_then(|p| p.name.clone())
+            {
+                summary.label = named;
+            }
+            summary
+        })
         .collect();
     summaries.sort_by(|a, b| {
         b.at.unwrap_or(0)
@@ -819,9 +965,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                 .map(|m| Line {
                     seq: m.seq,
                     who: m.account,
-                    // Names arrive with the profile work; until then the key,
-                    // which is never wrong and never an assertion.
-                    name: None,
+                    name: people.get(&m.account).and_then(|p| p.name.clone()),
                     mine: m.account == me,
                     at: m.posted,
                     text: m.post.body_text().unwrap_or_default().to_string(),
@@ -842,6 +986,8 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         s.lines = lines;
         s.typing = typing;
         s.trouble_with = trouble;
+        s.people = people;
+        s.mine = mine;
     });
 }
 
@@ -916,6 +1062,23 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 .unwrap_or(0);
             let _ = chat.store().add_contact(&who, &label, now);
             desk.restructure = true;
+        }
+        Cmd::SetProfile { name, title } => {
+            let profile = sqex_proto::profile::Profile {
+                name,
+                title,
+                ..Default::default()
+            };
+            match chat.set_profile(profile).await {
+                // Read it straight back rather than assuming: the exchange
+                // holds the record and a published profile is what everybody
+                // else will see, not what we asked for.
+                Ok(()) => desk.restale.insert(chat.me),
+                Err(e) => {
+                    state.send_modify(|s| s.trouble = Some(e.to_string()));
+                    false
+                }
+            };
         }
         Cmd::Reconnect => chat.reconnect_now(),
     }

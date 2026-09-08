@@ -2,7 +2,7 @@
 
 pub mod session;
 
-pub use session::{ChatHandle, ChatState, Closing, Cmd, Line, LinkState, Summary, Trouble};
+pub use session::{ChatHandle, ChatState, Closing, Cmd, Line, LinkState, Person, Summary, Trouble};
 
 use std::collections::HashMap;
 
@@ -33,6 +33,12 @@ struct Pane {
     /// The key being added as a contact.
     adding: String,
     add_trouble: Option<String>,
+    /// The profile editor is open.
+    editing_profile: bool,
+    /// What is being typed into it. Held separately from the published
+    /// profile so cancelling really cancels.
+    name: String,
+    title: String,
 }
 
 pub struct ChatApp {
@@ -352,12 +358,84 @@ impl App for ChatApp {
 }
 
 impl ChatApp {
+    /// Who you are here, and what everybody else sees.
+    ///
+    /// Your own key in full, your SIP-38 handle if you have one, and the
+    /// SIP-21 profile you publish. The profile is **self-declared and attested
+    /// by nobody**, which the pane says rather than leaving somebody to infer
+    /// it from a field that looks like an account setting.
+    fn me_ui(&mut self, me: PubKey, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let key = me.to_string();
+        ui.horizontal(|ui| {
+            sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
+            ui.add_space(tokens::SPACING_SM);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(state.mine.label(&me)).strong());
+                match &state.mine.handle {
+                    Some(handle) => {
+                        ui.colored_label(theme.text_secondary, egui::RichText::new(handle).small());
+                    }
+                    None => {
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new("no name at this exchange").small(),
+                        );
+                    }
+                }
+            });
+        });
+        // In full, selectable, and not behind anything. A name is an assertion
+        // and this is not (SIP-21) -- it is the only thing that identifies you
+        // to somebody who wants to write to you.
+        ui.add(egui::Label::new(egui::RichText::new(&key).monospace().small()).selectable(true));
+
+        let pane = self.panes.entry(me).or_default();
+        if !pane.editing_profile {
+            if ui.button("Edit profile").clicked() {
+                pane.editing_profile = true;
+                pane.name = state.mine.name.clone().unwrap_or_default();
+                pane.title = state.mine.title.clone().unwrap_or_default();
+            }
+        } else {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().name)
+                    .hint_text("display name"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().title)
+                    .hint_text("title"),
+            );
+            // Said next to the field rather than in a help page. A title
+            // asserts standing, and somebody typing one should know that
+            // nothing behind it is checked.
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(
+                    "Both are what you say about yourself. Nobody verifies either.",
+                )
+                .small(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Publish").clicked() {
+                    let pane = self.panes.entry(me).or_default();
+                    let (name, title) = (pane.name.clone(), pane.title.clone());
+                    pane.editing_profile = false;
+                    self.send_as(Some(me), Cmd::SetProfile { name, title });
+                }
+                if ui.button("Cancel").clicked() {
+                    self.panes.entry(me).or_default().editing_profile = false;
+                }
+            });
+        }
+        ui.add_space(tokens::SPACING_SM);
+        ui.separator();
+    }
+
     /// The conversation list.
     fn list_ui(&mut self, me: PubKey, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         let now = self.now();
-        ui.horizontal(|ui| {
-            ui.heading("Conversations");
-        });
+        self.me_ui(me, state, ui, theme);
+        ui.heading("Conversations");
         ui.add_space(tokens::SPACING_XS);
 
         ui.horizontal(|ui| {
@@ -572,9 +650,11 @@ impl ChatApp {
                 && state.divider != Some(line.seq);
 
             let key = line.who.to_string();
+            let title = state.people.get(&line.who).and_then(|p| p.title.as_deref());
             let bubble = sigil_ui::Bubble {
                 key: &key,
                 name: line.name.as_deref(),
+                title,
                 text: &line.text,
                 at: &sigil_ui::clock(line.at),
                 mine: line.mine,

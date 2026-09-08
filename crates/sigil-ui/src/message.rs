@@ -62,6 +62,14 @@ pub struct Bubble<'a> {
     pub key: &'a str,
     /// Their display name, if a profile has been seen. Never shown alone.
     pub name: Option<&'a str>,
+    /// Their self-declared title.
+    ///
+    /// **Not drawn beside the name.** SIP-21 forbids rendering a title as a
+    /// badge, in channel-role styling, or next to a verification mark, because
+    /// it asserts standing directly and nobody attests it — "Exchange
+    /// Administrator" does the social engineering by itself. It belongs where
+    /// somebody goes looking for it, next to the key.
+    pub title: Option<&'a str>,
     pub text: &'a str,
     /// A short time, already formatted. The full one belongs on hover.
     pub at: &'a str,
@@ -316,13 +324,18 @@ fn faded(text: egui::Color32, over: egui::Color32) -> egui::Color32 {
 
 /// Who said it: the name if there is one, and the key always reachable.
 fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
+    // Whatever is shown, the key is what it leads to.
+    let behind = match b.title {
+        Some(title) => format!("{}\n{title} — self-declared, verified by nobody", b.key),
+        None => b.key.to_string(),
+    };
     match b.name {
         Some(name) => {
             // A profile name is self-declared and nobody attests it, so it is
             // drawn as ordinary text and the key is one hover away. It must
             // never be styled as though the exchange vouched for it.
             ui.label(egui::RichText::new(name).strong().color(theme.accent))
-                .on_hover_text(b.key.to_string());
+                .on_hover_text(behind);
         }
         None => {
             ui.label(
@@ -331,7 +344,7 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
                     .monospace()
                     .color(theme.accent),
             )
-            .on_hover_text(b.key.to_string());
+            .on_hover_text(behind);
         }
     }
 }
