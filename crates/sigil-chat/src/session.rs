@@ -36,8 +36,8 @@ use sqex_proto::channel::{
 };
 use sqex_proto::events::Event;
 use sqex_proto::message::{
-    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, MEDIA_AUDIO, RING_ACCEPTED, RING_DECLINED,
-    RING_ENDED, RING_RINGING,
+    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, CALL_FAILED, CALL_MISSED, MEDIA_AUDIO,
+    RING_ACCEPTED, RING_DECLINED, RING_ENDED, RING_RINGING,
 };
 use sqex_proto::timeline::Timeline;
 use sqnr_core::{PubKey, SoftwareSigner};
@@ -1619,6 +1619,11 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         })
         .unwrap_or_default();
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     // What happened *to* the channel, from the exchange's own signed entries.
     let events: Vec<Happened> = open
         .map(|(_, k)| {
@@ -1628,8 +1633,29 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     .and_then(|p| p.name.clone())
                     .unwrap_or_else(|| short(who))
             };
+            // In a direct message the membership *is* the channel: it is made
+            // when you first write, both of you are added, and the key is
+            // rotated -- three lines of machinery at the head of every
+            // conversation, before a word has been said.
+            //
+            // So they are left out of a DM and kept everywhere else. What
+            // stays in a DM is everything that tells somebody something they
+            // did not already know by opening it: a removal, a retention
+            // change, and above all replication -- another operator holding a
+            // copy of your one-to-one conversation is not housekeeping.
+            let plumbing = [
+                EVENT_CREATED,
+                EVENT_ADDED,
+                EVENT_JOINED,
+                EVENT_ROTATED,
+                EVENT_PROMOTED,
+                EVENT_DEMOTED,
+                EVENT_RENAMED,
+            ];
+            let dm = k.peer.is_some();
             k.timeline
                 .events()
+                .filter(|h| !(dm && plumbing.contains(&h.what.event)))
                 .map(|h| {
                     let (actor, subject) = (h.what.actor, h.what.subject);
                     let (who, them) = (named(&actor), named(&subject));
@@ -1705,6 +1731,67 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         })
         .unwrap_or_default();
 
+    // A call that happened is a thing that happened here.
+    //
+    // `Timeline` folds a SIP-36 invitation into a `CallRecord` rather than a
+    // message, so without this a call leaves the transcript with no trace at
+    // all -- somebody scrolling back sees a silence where a conversation was.
+    // One still ringing is left out: the banner has it, and it is not history
+    // yet.
+    let mut events = events;
+    if let Some((_, k)) = open {
+        let named = |who: &PubKey| {
+            people
+                .get(who)
+                .and_then(|p| p.name.clone())
+                .unwrap_or_else(|| short(who))
+        };
+        for call in k.timeline.calls() {
+            let Some(outcome) = call.outcome(now) else {
+                continue;
+            };
+            let mine = call.account == me;
+            let them = named(&call.account);
+            let said = match outcome {
+                CALL_ANSWERED => {
+                    let secs = call.ended.map(|(_, d, _)| d).unwrap_or(0);
+                    let length = match secs {
+                        0 => String::new(),
+                        s if s < 60 => format!(", {s}s"),
+                        s => format!(", {}m {}s", s / 60, s % 60),
+                    };
+                    if mine {
+                        format!("You called{length}")
+                    } else {
+                        format!("{them} called{length}")
+                    }
+                }
+                // Missed is **derived**, not recorded: a caller whose client
+                // died posts no ending, and a reader that waited for one would
+                // show the call ringing for ever.
+                CALL_MISSED if mine => "You called, no answer".to_string(),
+                CALL_MISSED => format!("Missed call from {them}"),
+                CALL_DECLINED if mine => "Your call was declined".to_string(),
+                CALL_DECLINED => format!("{them} declined"),
+                CALL_CANCELLED if mine => "You cancelled the call".to_string(),
+                CALL_CANCELLED => format!("{them} cancelled the call"),
+                CALL_FAILED => "The call did not connect".to_string(),
+                _ => format!("A call from {them}"),
+            };
+            events.push(Happened {
+                seq: call.seq,
+                at: call.posted,
+                said,
+                actor: call.account,
+                subject: call.account,
+                caveat: None,
+            });
+        }
+        // Back into the exchange's own order: the calls were appended and the
+        // transcript walks this list against the messages by sequence number.
+        events.sort_by_key(|e| e.seq);
+    }
+
     // Calls ringing anywhere, not only in the conversation on screen.
     //
     // Derived from the **log** and not from a signal: SIP-36 is explicit that
@@ -1713,10 +1800,6 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     // caller crashed stops ringing on its own rather than for ever. The one
     // thing taken from a signal is `answered`, because answering writes no
     // entry and the log therefore cannot say it.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     let mut ringing: Vec<Ring> = Vec::new();
     for (channel, known) in &desk.channels {
         for call in known.timeline.calls() {

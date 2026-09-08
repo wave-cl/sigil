@@ -406,6 +406,41 @@ async fn a_group_is_created_invited_to_and_read() {
     .await;
     assert!(read, "and can read it: {:?}", bob.state().lines);
 
+    // A direct message shows none of this. The membership *is* the channel --
+    // made on the first word, both of you added, key rotated -- and putting
+    // three lines of machinery at the head of every one-to-one conversation
+    // buries what was actually said.
+    //
+    // Asserted here rather than in a test of its own, because the same run has
+    // both kinds open and the interesting property is the **difference**: a
+    // filter that suppressed everything, or nothing, would pass one half.
+    bob.send(Cmd::OpenDm(a_id));
+    let dm = until(
+        || {
+            bob.state().open.is_some_and(|c| {
+                bob.state()
+                    .conversations
+                    .iter()
+                    .any(|s| s.channel == c && s.peer == Some(a_id))
+            })
+        },
+        15,
+    )
+    .await;
+    // Not an `if let`: without this the assertion below would be skipped and
+    // the test would pass having checked nothing at all.
+    assert!(dm, "the direct message should open: {:?}", bob.state().open);
+    assert!(
+        !bob.state()
+            .events
+            .iter()
+            .any(|e| e.said.contains("made this channel") || e.said.contains("added")),
+        "a direct message opens with its own plumbing on screen: {:?}",
+        bob.state().events
+    );
+    bob.send(Cmd::Show(channel));
+    assert!(until(|| bob.state().open == Some(channel), 15).await);
+
     // And the group's own history: the exchange signs an entry for creating it
     // and for every member added, and both belong in the conversation.
     //
@@ -733,6 +768,28 @@ async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
         "a declined call stops ringing for both sides: alice={:?} bob={:?}",
         alice.state().ringing,
         bob.state().ringing
+    );
+
+    // And it stays in the conversation. `Timeline` folds an invitation into a
+    // `CallRecord` rather than a message, so a call that is over leaves the
+    // transcript with nothing in it -- somebody scrolling back finds a silence
+    // where a conversation was, and cannot tell a call that was refused from
+    // one that never happened.
+    let recorded = until(
+        || {
+            alice
+                .state()
+                .events
+                .iter()
+                .any(|e| e.said.contains("declined"))
+        },
+        WAIT,
+    )
+    .await;
+    assert!(
+        recorded,
+        "the caller keeps a record of the refusal: {:?}",
+        alice.state().events
     );
 
     alice.stop();
