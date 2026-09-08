@@ -1006,6 +1006,73 @@ fn ones_own_message_keeps_its_controls_on_the_left() {
     );
 }
 
+/// The controls sit against the middle of the message, not its top edge.
+#[test]
+fn the_controls_are_vertically_centred_on_the_message() {
+    // **One's own message**, which is the side with an alignment of its own:
+    // the other side is a plain `horizontal`, which centres already, so a test
+    // that hovered one of theirs would pass whatever this branch did.
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].mine = true;
+    state.lines[n - 1].text = "the first line\nand a second one\nand a third".into();
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let bubble = h.get_by_label_contains("and a third").rect();
+    h.get_by_label_contains("and a third").hover();
+    h.step();
+    h.step();
+    let reply = h.get_by_label("Reply").rect();
+    // **The controls begin no higher than the words do.** Top-aligned they
+    // begin at the frame's padding, above the first line; centred on a bubble
+    // of three lines they begin well down it. Stated against the text's own
+    // rect because the frame's is not in the accessibility tree.
+    assert!(
+        reply.top() >= bubble.top(),
+        "the controls are pinned to the top edge: {reply:?} against {bubble:?}"
+    );
+}
+
+/// Opening the reaction picker does not take it away again.
+///
+/// It is drawn below its button, which is outside the region that reveals the
+/// controls — so moving the pointer down into the picker left that region, the
+/// controls stopped being drawn, and the picker went with them. Visible and
+/// unreachable, which is the same defect the controls themselves had when they
+/// were under the bubble.
+#[test]
+fn a_picker_survives_the_pointer_leaving_the_message() {
+    let mut h = harness(true);
+    h.run();
+    h.get_by_label_contains("the second one, then").hover();
+    h.step();
+    h.step();
+    h.get_by_label("React").click();
+    h.step();
+    // An emoji the picker offers and **this conversation does not already
+    // carry**: the fixture has a `👍 2` chip on another message, so looking
+    // for a thumb finds one whether or not the picker ever opened.
+    let picker = '\u{1f389}';
+    assert!(
+        text_of(&h).contains(picker),
+        "the picker did not open: {}",
+        text_of(&h)
+    );
+
+    // The pointer moves off the message. The controls have to still be there,
+    // or the picker goes with them — it is drawn by the same pass.
+    h.get_by_label_contains("Yesterday").hover();
+    h.step();
+    h.step();
+    assert!(
+        text_of(&h).contains(picker),
+        "the picker vanished as the pointer left the message: {}",
+        text_of(&h)
+    );
+}
+
 /// A ring shows the caller's key in full, and does not dress it as proven.
 ///
 /// Carried over from the voice app, which used to own ringing. The rule did

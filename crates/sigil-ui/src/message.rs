@@ -392,7 +392,10 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
         // right edge, and the controls go to its left. The previous shape was
         // `top_down(Align::Max)` with the frame as a direct child, which
         // right-aligns one thing and has nowhere to put a second.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        // `Center`, so the controls sit against the middle of the bubble
+        // rather than its top edge. On a bubble of several lines a top-aligned
+        // row reads as belonging to the first one.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let bubble = ui
                 .scope_builder(
                     egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Max)),
@@ -455,7 +458,28 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
         .expand2(egui::vec2(0.0, tokens::SPACING_XS))
         .translate(egui::vec2(if b.mine { -aside } else { aside } / 2.0, 0.0))
         .expand2(egui::vec2(aside / 2.0, 0.0));
-    if !ui.rect_contains_pointer(reach) || b.redacted {
+    let over = ui.rect_contains_pointer(reach);
+
+    // **A menu opened from these keeps them up.**
+    //
+    // The reaction picker and the rest are drawn below their button, which is
+    // outside `reach` — so moving the pointer down into one left the region,
+    // the controls stopped being drawn, and the popup went with them. The
+    // picker was visible and could not be reached, which is the same defect as
+    // the controls themselves had when they were under the bubble.
+    //
+    // One slot in memory rather than a flag per message: only one message can
+    // be under the pointer at a time, so remembering *which* is enough, and
+    // the alternative is inventing a stable identity for a message that the
+    // widget deliberately does not have.
+    let slot = egui::Id::new("sigil-message-controls");
+    let me = ui.id();
+    if over {
+        ui.ctx().data_mut(|d| d.insert_temp(slot, me));
+    }
+    let holding = egui::Popup::is_any_open(ui.ctx())
+        && ui.ctx().data(|d| d.get_temp::<egui::Id>(slot)) == Some(me);
+    if !(over || holding) || b.redacted {
         return;
     }
     if crate::icon_button(ui, crate::Icon::Reply).clicked() {
