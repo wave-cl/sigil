@@ -196,6 +196,13 @@ pub struct ChatState {
     pub linked: Option<bool>,
     /// A credential just written, for another device to register with.
     pub credential: Option<String>,
+    /// Who we are blocking.
+    pub blocked: Vec<PubKey>,
+    /// What a local search turned up.
+    pub hits: Vec<Hit>,
+    /// A message search has been run, so an empty `hits` means "nothing
+    /// matched" rather than "nobody has looked".
+    pub searched_messages: bool,
     /// Calls ringing right now, in **any** conversation.
     ///
     /// Not only the one on screen: a call is the thing that most needs to
@@ -209,6 +216,22 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// One message a local search turned up.
+///
+/// **Local only.** The exchange holds ciphertext and could not search it if it
+/// wanted to, so this covers what this client has fetched and opened and
+/// nothing else — which is a real limit and not a bug, and the interface says
+/// so rather than presenting an empty result as "nothing was ever said".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub channel: [u8; 32],
+    pub seq: u64,
+    /// What the conversation it was found in is called.
+    pub label: String,
+    pub text: String,
+    pub at: u64,
 }
 
 /// One device registered to this account.
@@ -564,6 +587,41 @@ pub enum Cmd {
     ResealToSiblings,
     /// Ask an exchange that does not admit us to let us in (SIP-24).
     RequestAdmission(String),
+
+    // ---- people, names, and the rest -------------------------------------
+    /// Block somebody, or stop blocking them.
+    ///
+    /// **Refused invisibly.** The exchange answers on the blocker's behalf, so
+    /// a blocked person is told nothing — but it is *inferable* from a
+    /// delivery cursor that stops moving, and the interface must not claim
+    /// otherwise.
+    SetBlocked {
+        who: PubKey,
+        blocked: bool,
+    },
+    /// Re-read who we are blocking.
+    Blocked,
+    /// Open a conversation with somebody named `name@domain` (SIP-38).
+    OpenByName(String),
+    /// Attach an existing file to another conversation and post the reference.
+    ///
+    /// **By reference: the bytes stay where they are.** The exchange stores one
+    /// copy however many conversations point at it, and the blob dies with its
+    /// last attachment. Attaching before posting, because a message naming a
+    /// blob the destination has no claim on is one its readers cannot fetch.
+    Forward {
+        seq: u64,
+        index: usize,
+        to: [u8; 32],
+    },
+    /// Search what this client holds. **Local only** — the exchange cannot
+    /// read a sealed entry, so it could not search one if it wanted to.
+    Search(String),
+    /// SIP-35: let another exchange carry a copy of this channel, or stop it.
+    Replicate {
+        exchange: PubKey,
+        on: bool,
+    },
 }
 
 pub struct ChatHandle {
@@ -1242,6 +1300,14 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
     publish(chat, state, desk, me);
 }
 
+/// Re-read who we are blocking.
+async fn refresh_blocked(chat: &mut Chat, state: &watch::Sender<ChatState>) {
+    match chat.blocked().await {
+        Ok(blocked) => state.send_modify(|s| s.blocked = blocked),
+        Err(e) => trouble(state, e),
+    }
+}
+
 /// Re-read who this account's devices are, and whether we are still one.
 async fn refresh_devices(chat: &mut Chat, state: &watch::Sender<ChatState>) {
     let this = chat.device();
@@ -1779,6 +1845,109 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::Typing(on) => {
             let Some(channel) = desk.open else { return };
             chat.typing(&channel, on).await;
+        }
+
+        Cmd::SetBlocked { who, blocked } => match chat.set_block(&who, blocked).await {
+            Ok(()) => {
+                refresh_blocked(chat, state).await;
+                note(
+                    state,
+                    if blocked {
+                        "Blocked. They are told nothing — though somebody watching their \
+                         own delivery mark stop moving could work it out."
+                            .into()
+                    } else {
+                        "Unblocked.".to_string()
+                    },
+                );
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::Blocked => refresh_blocked(chat, state).await,
+        Cmd::OpenByName(name) => match chat.resolve_name(&name).await {
+            Ok(who) => {
+                Box::pin(apply(chat, Cmd::OpenDm(who), state, desk)).await;
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::Forward { seq, index, to } => {
+            let Some(channel) = desk.open else { return };
+            if to == channel {
+                return trouble(state, "that is the conversation it is already in");
+            }
+            let Some(attachment) = desk
+                .channels
+                .get(&channel)
+                .and_then(|k| k.timeline.messages().find(|m| m.seq == seq))
+                .and_then(|m| m.post.attachments().nth(index).cloned())
+            else {
+                return trouble(state, "that file is no longer in the conversation");
+            };
+            // Attach first, then post. A message naming a blob the destination
+            // has no claim on is a message its readers cannot fetch.
+            if let Err(e) = chat.attach(&to, &attachment.blob).await {
+                return trouble(state, e);
+            }
+            let post = sqex_proto::message::Post {
+                parts: vec![sqex_proto::message::Part::Attachment(attachment)],
+                ..Default::default()
+            };
+            match chat.send_post(&to, post).await {
+                Ok(_) => {
+                    desk.dirty.insert(to);
+                    // Said plainly, because it is the consequence people miss:
+                    // the key travels inside the message.
+                    note(
+                        state,
+                        "Forwarded. Whoever is there can now open the file.".into(),
+                    );
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Search(query) => {
+            let needle = query.trim().to_lowercase();
+            let mut hits = Vec::new();
+            if !needle.is_empty() {
+                for (channel, known) in &desk.channels {
+                    for m in known.timeline.messages() {
+                        let text = m.post.body_text().unwrap_or_default();
+                        if m.redacted || !text.to_lowercase().contains(&needle) {
+                            continue;
+                        }
+                        hits.push(Hit {
+                            channel: *channel,
+                            seq: m.seq,
+                            label: known.label.clone(),
+                            text: text.to_string(),
+                            at: m.posted,
+                        });
+                    }
+                }
+                // Newest first: a search for a word said often wants the last
+                // time, not the first.
+                hits.sort_by_key(|h| std::cmp::Reverse(h.at));
+            }
+            state.send_modify(|s| {
+                s.hits = hits;
+                s.searched_messages = true;
+            });
+        }
+        Cmd::Replicate { exchange, on } => {
+            let Some(channel) = desk.open else { return };
+            match chat.replicate(&channel, &exchange, on).await {
+                Ok(()) => note(
+                    state,
+                    if on {
+                        "That exchange may now carry a copy of this conversation. It cannot \
+                         read it, and this cannot be taken back for what it already has."
+                            .into()
+                    } else {
+                        "Withdrawn. It keeps whatever it already pulled.".to_string()
+                    },
+                ),
+                Err(e) => trouble(state, e),
+            }
         }
 
         Cmd::Devices => refresh_devices(chat, state).await,

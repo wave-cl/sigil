@@ -188,6 +188,9 @@ fn a_conversation() -> ChatState {
         devices: Vec::new(),
         linked: None,
         credential: None,
+        blocked: Vec::new(),
+        hits: Vec::new(),
+        searched_messages: false,
         divider: Some(3),
         unread_on_open: 2,
     }

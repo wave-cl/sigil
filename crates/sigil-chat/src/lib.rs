@@ -3,8 +3,8 @@
 pub mod session;
 
 pub use session::{
-    Attached, ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Linked, Member, Person,
-    Receipt, Ring, Summary, Trouble,
+    Attached, ChatHandle, ChatState, Closing, Cmd, Found, Hit, Line, LinkState, Linked, Member,
+    Person, Receipt, Ring, Summary, Trouble,
 };
 
 use std::collections::HashMap;
@@ -61,6 +61,10 @@ struct Pane {
     query: String,
     /// The key of a device being linked.
     linking: String,
+    /// The message search box.
+    searching: String,
+    /// The message whose file is being forwarded.
+    forwarding: Option<u64>,
     /// The key being invited to the open channel.
     inviting: String,
     /// The channel settings fields.
@@ -87,6 +91,8 @@ impl Default for Pane {
             editing: None,
             query: String::new(),
             linking: String::new(),
+            searching: String::new(),
+            forwarding: None,
             inviting: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
@@ -606,7 +612,7 @@ impl ChatApp {
             ui.label("Write to");
             ui.add(
                 egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().adding)
-                    .hint_text("their key, base58")
+                    .hint_text("their key, or name@domain")
                     .desired_width(ui.available_width() - 50.0),
             );
         });
@@ -619,7 +625,18 @@ impl ChatApp {
                     self.send_as(Some(me), Cmd::OpenDm(who));
                     self.pane(me).adding.clear();
                 }
-                Err(e) => self.pane(me).add_trouble = Some(format!("that is not a key: {e}")),
+                // Not a key, so try it as a SIP-38 name. A name is looked up
+                // at the exchange and resolves to exactly one account, which
+                // is the whole of what makes it usable here.
+                Err(_) if typed.contains('@') => {
+                    self.pane(me).add_trouble = None;
+                    self.send_as(Some(me), Cmd::OpenByName(typed));
+                    self.pane(me).adding.clear();
+                }
+                Err(e) => {
+                    self.pane(me).add_trouble =
+                        Some(format!("not a key, and not a name@domain: {e}"))
+                }
             }
         }
         if let Some(t) = self.panes.get(&me).and_then(|p| p.add_trouble.as_ref()) {
@@ -628,8 +645,69 @@ impl ChatApp {
         if ui.button("Find a public channel").clicked() {
             ctx.navigator.push_here(Route::Directory);
         }
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().searching)
+                    .hint_text("your messages")
+                    .desired_width(ui.available_width() - 20.0),
+            );
+            if field.changed() {
+                let query = self.pane(me).searching.clone();
+                self.send_as(Some(me), Cmd::Search(query));
+            }
+        });
 
         ui.add_space(tokens::SPACING_SM);
+
+        // A search replaces the list while there is one. The list is still
+        // there underneath, and clearing the box brings it back.
+        if !self.pane(me).searching.trim().is_empty() {
+            // Said every time, not once in a help page: an empty result here
+            // means "not in what this client has opened", which is a different
+            // fact from "never said", and only this client can tell them apart.
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(
+                    "Searches what this client has opened. The exchange holds ciphertext \
+                     and cannot search it.",
+                )
+                .small(),
+            );
+            if state.hits.is_empty() {
+                ui.colored_label(
+                    theme.text_secondary,
+                    if state.searched_messages {
+                        "Nothing here matched."
+                    } else {
+                        "…"
+                    },
+                );
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for hit in &state.hits {
+                        let response = ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&hit.label).strong().small());
+                            ui.colored_label(
+                                theme.text_secondary,
+                                egui::RichText::new(sigil_ui::message::short(&hit.text)).small(),
+                            );
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(sigil_ui::brief(hit.at, now)).small(),
+                            );
+                        });
+                        if response.response.interact(egui::Sense::click()).clicked() {
+                            self.send_as(Some(me), Cmd::Show(hit.channel));
+                        }
+                        ui.separator();
+                    }
+                });
+            return;
+        }
 
         if state.conversations.is_empty() {
             ui.colored_label(
@@ -749,6 +827,9 @@ impl ChatApp {
                     n => format!("Members ({n})"),
                 };
                 if ui.button(label).clicked() {
+                    // Asked for here rather than on a tick: the block list is
+                    // only ever looked at on this screen.
+                    self.send_as(Some(me), Cmd::Blocked);
                     ctx.navigator.push_here(Route::Members);
                 }
             });
@@ -948,6 +1029,49 @@ impl ChatApp {
             ui.colored_label(theme.text_muted, "typing…");
         }
 
+        // Where to forward a file to. A list rather than a key field: the
+        // destination is always somewhere you are already in.
+        if let Some(seq) = self.pane(me).forwarding {
+            ui.add_space(tokens::SPACING_SM);
+            egui::Frame::NONE
+                .fill(theme.surface_elevated)
+                .corner_radius(tokens::RADIUS_MD)
+                .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+                .show(ui, |ui| {
+                    ui.label("Forward to");
+                    // Said before the click, not after: forwarding hands over
+                    // the key to the file, and everybody in the destination can
+                    // then open it.
+                    ui.colored_label(
+                        theme.warning,
+                        egui::RichText::new(
+                            "Whoever is there will be able to open it — the key travels \
+                             inside the message.",
+                        )
+                        .small(),
+                    );
+                    for convo in &state.conversations {
+                        if Some(convo.channel) == state.open {
+                            continue;
+                        }
+                        if ui.selectable_label(false, &convo.label).clicked() {
+                            self.pane(me).forwarding = None;
+                            self.send_as(
+                                Some(me),
+                                Cmd::Forward {
+                                    seq,
+                                    index: 0,
+                                    to: convo.channel,
+                                },
+                            );
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pane(me).forwarding = None;
+                    }
+                });
+        }
+
         if let Some((seq, text, who, did)) = acted {
             if let Some(emoji) = did.react {
                 self.send_as(Some(me), Cmd::React { target: seq, emoji });
@@ -966,6 +1090,9 @@ impl ChatApp {
             }
             if did.copy_key {
                 ui.ctx().copy_text(who.to_string());
+            }
+            if did.forward {
+                self.pane(me).forwarding = Some(seq);
             }
             if let Some(index) = did.save {
                 // The dialog is native and blocking, which is fine here: it is
@@ -1292,6 +1419,30 @@ impl ChatApp {
                                             Cmd::Grant {
                                                 who: member.account,
                                                 admin,
+                                            },
+                                        );
+                                    }
+                                    let blocked = state.blocked.contains(&member.account);
+                                    if ui
+                                        .button(if blocked { "Unblock" } else { "Block" })
+                                        .on_hover_text(if blocked {
+                                            "They can reach you again."
+                                        } else {
+                                            // Never over-claimed: the exchange
+                                            // answers on your behalf and tells
+                                            // them nothing, but a delivery
+                                            // mark that stops moving is a
+                                            // thing somebody can notice.
+                                            "You stop hearing from them. They are told nothing, \
+                                             though it can be worked out."
+                                        })
+                                        .clicked()
+                                    {
+                                        self.send_as(
+                                            Some(me),
+                                            Cmd::SetBlocked {
+                                                who: member.account,
+                                                blocked: !blocked,
                                             },
                                         );
                                     }

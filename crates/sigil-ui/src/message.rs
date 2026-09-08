@@ -182,6 +182,8 @@ pub struct BubbleAction {
     pub copy_key: bool,
     /// Save the file at this index.
     pub save: Option<usize>,
+    /// Forward the file it carries somewhere else.
+    pub forward: bool,
 }
 
 impl BubbleAction {
@@ -389,6 +391,10 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                 }
                 if ui.button("Copy key").clicked() {
                     action.copy_key = true;
+                    ui.close();
+                }
+                if !b.attachments.is_empty() && ui.button("Forward file").clicked() {
+                    action.forward = true;
                     ui.close();
                 }
             });
