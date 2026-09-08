@@ -3,8 +3,19 @@
 //! Deliberately knows nothing of the protocol: everything here takes plain
 //! data, so this does not become a second place the wire format is understood.
 
+pub mod clock;
+pub mod conversation_row;
 pub mod dot;
+pub mod identicon;
+pub mod message;
 pub mod roster;
 
+pub use clock::{brief, clock, day_label, day_of, stamp};
+pub use conversation_row::{ConversationRow, conversation_row};
 pub use dot::dot;
+pub use identicon::{avatar, identicon, identicon_of};
+pub use message::{
+    Bubble, BubbleAction, Receipt, bubble, day_separator, reaction_chip, unread_divider,
+    unread_pill,
+};
 pub use roster::{Row, roster};

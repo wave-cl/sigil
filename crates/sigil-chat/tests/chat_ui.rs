@@ -99,9 +99,16 @@ fn somebody_can_be_added_by_key() {
         "the field is labelled, not only hinted: {said}"
     );
     assert!(said.contains("Add"), "{said}");
+    // The property, not the wording: an empty list has to say *both* that it
+    // is empty and what to do about it. A bare "nothing here" leaves somebody
+    // looking for a control that is already on screen.
     assert!(
-        said.contains("Nobody yet"),
-        "an empty list says what to do about it: {said}"
+        said.contains("No conversations yet"),
+        "an empty list says it is empty: {said}"
+    );
+    assert!(
+        said.contains("key"),
+        "and says what to do about it, which needs their key: {said}"
     );
 }
 

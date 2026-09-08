@@ -73,6 +73,12 @@ pub struct ColorTheme {
 
     // Semantic actions.
     pub accent: Color32,
+    /// The accent, muted enough to sit *behind* text.
+    ///
+    /// [`accent`](Self::accent) is a foreground colour and putting body text on
+    /// it fails contrast in the light theme. This is the one for a filled
+    /// surface — a sent message's bubble, a selected row.
+    pub accent_muted: Color32,
     pub destructive: Color32,
     pub warning: Color32,
     pub success: Color32,
@@ -117,6 +123,7 @@ pub fn dark() -> ColorTheme {
         text_muted: D_TEXT_3,
 
         accent: ACCENT,
+        accent_muted: ACCENT_DIM,
         destructive: DESTRUCTIVE,
         warning: WARNING,
         success: SUCCESS,
@@ -156,6 +163,7 @@ pub fn light() -> ColorTheme {
         text_muted: L_TEXT_3,
 
         accent: ACCENT_DIM,
+        accent_muted: ACCENT,
         destructive: DESTRUCTIVE,
         warning: Color32::from_rgb(0xA8, 0x6A, 0x00),
         success: Color32::from_rgb(0x1E, 0x8E, 0x5A),
@@ -341,6 +349,16 @@ mod tests {
                     "{name}/{surface_name}: muted text contrast {r:.2} is below 3.0"
                 );
             }
+
+            // A sent message is body text on `accent_muted`, so that pair has
+            // to clear the *body* bar rather than the large-text one. Getting
+            // this wrong makes your own messages the unreadable ones, in one
+            // theme only, which is exactly the sort of thing that ships.
+            let r = ratio(t.text_primary, t.accent_muted);
+            assert!(
+                r >= 4.5,
+                "{name}: body text on a sent bubble is {r:.2}, below 4.5"
+            );
         }
     }
 }

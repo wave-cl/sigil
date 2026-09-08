@@ -5749,6 +5749,7 @@ dependencies = [
 name = "sigil-chat"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "ed25519-dalek",
  "egui",
  "egui_kittest",
@@ -5838,6 +5839,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "egui_kittest",
+ "jiff",
  "sigil",
 ]
 

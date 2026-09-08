@@ -53,6 +53,10 @@ pub struct ChatApp {
     /// will exist tomorrow. A test that reconciled against the real path would
     /// also take its `flock`, and refuse the person running it their own client.
     store_root: Option<std::path::PathBuf>,
+    /// A pinned clock, for snapshots. See `set_now_for_test`.
+    now: Option<u64>,
+    /// A state to draw instead of a session's. See `show_state_for_test`.
+    fixed: Option<ChatState>,
 }
 
 impl Default for ChatApp {
@@ -69,6 +73,8 @@ impl ChatApp {
             panes: HashMap::new(),
             config: Config::load(),
             store_root: None,
+            now: None,
+            fixed: None,
         }
     }
 
@@ -76,6 +82,25 @@ impl ChatApp {
     #[doc(hidden)]
     pub fn set_store_root_for_test(&mut self, root: std::path::PathBuf) {
         self.store_root = Some(root);
+    }
+
+    /// Pin the clock. A day separator says "Today", which is different
+    /// tomorrow, so a snapshot taken against the real clock passes until it
+    /// does not and then looks like a regression in whatever changed last.
+    #[doc(hidden)]
+    pub fn set_now_for_test(&mut self, now: u64) {
+        self.now = Some(now);
+    }
+
+    /// Now, in seconds. Only used for how a time is *written* — never for
+    /// deciding what is true, which the exchange's own stamps settle.
+    fn now(&self) -> u64 {
+        self.now.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        })
     }
 
     /// Point at an exchange without reading `~/.sqnr/config`.
@@ -105,9 +130,27 @@ impl ChatApp {
     }
 
     fn state_of(&self, me: Option<PubKey>) -> ChatState {
+        if let Some(fixed) = &self.fixed {
+            return fixed.clone();
+        }
         me.and_then(|me| self.sessions.get(&me))
             .map(|s| s.state())
             .unwrap_or_default()
+    }
+
+    /// Draw this state instead of a session's.
+    ///
+    /// A snapshot of a transcript needs messages in it, and arranging real ones
+    /// means two identities, an exchange and a conversation — which is an
+    /// integration test, and a slow one, for a question about layout.
+    ///
+    /// **It replaces the data and nothing else.** `render` is the same code on
+    /// the same path either way, so this cannot hide a bug in how a message is
+    /// drawn — only in how one is fetched, which is what `chat_session.rs`
+    /// covers against a real `sqexd`.
+    #[doc(hidden)]
+    pub fn show_state_for_test(&mut self, state: ChatState) {
+        self.fixed = Some(state);
     }
 
     fn pane(&mut self, me: PubKey) -> &mut Pane {
@@ -249,14 +292,43 @@ impl App for ChatApp {
         }
         ui.separator();
 
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(280.0);
-                self.list_ui(me, &state, ui, &theme);
-            });
-            ui.separator();
-            ui.vertical(|ui| self.transcript_ui(me, &state, ui, &theme));
-        });
+        // Two panes when there is room, one when there is not -- decided at
+        // **runtime** from the width actually available, never from the
+        // platform. Narrowing a desktop window has to collapse the layout
+        // live, and a phone-shaped window on a desktop is a real thing.
+        //
+        // `sigil::layout` is the shared rule for this, so the deck and the
+        // conversation view cannot drift into two answers about what "narrow"
+        // means.
+        match sigil::layout(ui.available_width(), 2) {
+            sigil::Layout::Single => {
+                // One pane: the list until something is open, then the
+                // conversation with a way back. Not both squeezed together --
+                // two unusable columns are worse than one usable one.
+                match state.open {
+                    None => self.list_ui(me, &state, ui, &theme),
+                    Some(_) => {
+                        if ui.button("← Conversations").clicked() {
+                            self.send_as(Some(me), Cmd::Close);
+                        }
+                        self.transcript_ui(me, &state, ui, &theme);
+                    }
+                }
+            }
+            sigil::Layout::Shared { column_width } | sigil::Layout::Scrolling { column_width } => {
+                egui::Panel::left("chat_list")
+                    .resizable(false)
+                    .exact_size(column_width.min(360.0))
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                        right: tokens::SPACING_MD as i8,
+                        ..Default::default()
+                    }))
+                    .show(ui, |ui| self.list_ui(me, &state, ui, &theme));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| self.transcript_ui(me, &state, ui, &theme));
+            }
+        }
         AppResponse::default()
     }
 
@@ -280,8 +352,14 @@ impl App for ChatApp {
 }
 
 impl ChatApp {
+    /// The conversation list.
     fn list_ui(&mut self, me: PubKey, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Conversations");
+        let now = self.now();
+        ui.horizontal(|ui| {
+            ui.heading("Conversations");
+        });
+        ui.add_space(tokens::SPACING_XS);
+
         ui.horizontal(|ui| {
             // A visible label, not only a placeholder: a hint disappears the
             // moment somebody types, and it never reaches the accessibility
@@ -290,54 +368,65 @@ impl ChatApp {
             ui.add(
                 egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().adding)
                     .hint_text("their key, base58")
-                    .desired_width(180.0),
+                    .desired_width(ui.available_width() - 50.0),
             );
-            if ui.button("Add").clicked() {
-                let typed = self.pane(me).adding.trim().to_string();
-                match typed.parse::<PubKey>() {
-                    Ok(who) => {
-                        self.pane(me).add_trouble = None;
-                        self.send_as(Some(me), Cmd::AddContact(who, String::new()));
-                        self.send_as(Some(me), Cmd::OpenDm(who));
-                        self.pane(me).adding.clear();
-                    }
-                    Err(e) => self.pane(me).add_trouble = Some(format!("that is not a key: {e}")),
-                }
-            }
         });
+        if ui.button("Add").clicked() {
+            let typed = self.pane(me).adding.trim().to_string();
+            match typed.parse::<PubKey>() {
+                Ok(who) => {
+                    self.pane(me).add_trouble = None;
+                    self.send_as(Some(me), Cmd::AddContact(who, String::new()));
+                    self.send_as(Some(me), Cmd::OpenDm(who));
+                    self.pane(me).adding.clear();
+                }
+                Err(e) => self.pane(me).add_trouble = Some(format!("that is not a key: {e}")),
+            }
+        }
         if let Some(t) = self.panes.get(&me).and_then(|p| p.add_trouble.as_ref()) {
             ui.colored_label(theme.destructive, t);
         }
+
         ui.add_space(tokens::SPACING_SM);
 
         if state.conversations.is_empty() {
             ui.colored_label(
-                theme.text_muted,
-                "Nobody yet. Add somebody by their key to write to them first.",
+                theme.text_secondary,
+                "No conversations yet. Write to somebody by their key.",
             );
+            return;
         }
-        for convo in &state.conversations {
-            // Selected by channel, never by position: the list reorders as
-            // conversations move, and an index would follow whoever happened to
-            // land there.
-            let selected = state.open == Some(convo.channel);
-            let label = if convo.unread > 0 {
-                format!("{} ({})", convo.label, convo.unread)
-            } else {
-                convo.label.clone()
-            };
-            if ui.selectable_label(selected, label).clicked() {
-                self.send_as(Some(me), Cmd::Show(convo.channel));
-            }
-            if convo.waiting {
-                ui.colored_label(
-                    theme.text_muted,
-                    "waiting for them to run a client — nothing can be sealed to them yet",
-                );
-            }
-        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for convo in &state.conversations {
+                    let id = bs58::encode(convo.channel).into_string();
+                    let key = convo.peer.map(|p| p.to_string());
+                    let selected = state.open == Some(convo.channel);
+                    let row = sigil_ui::ConversationRow {
+                        id: &id,
+                        label: &convo.label,
+                        key: key.as_deref(),
+                        preview: convo.preview.as_deref().unwrap_or(""),
+                        at: &convo
+                            .at
+                            .map(|t| sigil_ui::brief(t, now))
+                            .unwrap_or_default(),
+                        unread: convo.unread as u32,
+                        public: convo.public,
+                        group: convo.group,
+                        waiting: convo.waiting,
+                        typing: convo.typing,
+                    };
+                    if sigil_ui::conversation_row(ui, &row, selected).clicked() {
+                        self.send_as(Some(me), Cmd::Show(convo.channel));
+                    }
+                }
+            });
     }
 
+    /// The messages, and the box to write one in.
     fn transcript_ui(
         &mut self,
         me: PubKey,
@@ -345,71 +434,138 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
-        let Some(_channel) = state.open else {
-            ui.colored_label(theme.text_secondary, "Choose a conversation.");
+        let now = self.now();
+
+        if state.open.is_none() {
+            ui.centered_and_justified(|ui| {
+                ui.colored_label(theme.text_secondary, "Pick a conversation.");
+            });
             return;
-        };
+        }
+
         if state.lost > 0 {
-            // Said out loud rather than silently missing: these were held under
-            // a superseded epoch and are gone for good.
+            // An epoch that has been superseded is gone, and saying so is the
+            // difference between somebody waiting for it and somebody knowing
+            // not to. Not the same as `unreadable`, where a key may still come.
             ui.colored_label(
-                theme.warning,
-                format!(
-                    "{} earlier messages were lost with this client's keys.",
-                    state.lost
-                ),
+                theme.destructive,
+                match state.lost {
+                    1 => "1 message here cannot be read: its key is gone.".to_string(),
+                    n => format!("{n} messages here cannot be read: their key is gone."),
+                },
             );
         }
 
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .max_height(360.0)
+        // The composer is laid out first, from the bottom, so the transcript
+        // gets the remaining height rather than pushing it off the screen.
+        egui::Panel::bottom("chat_composer")
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme.surface_primary)
+                    .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_SM as i8)),
+            )
+            .show(ui, |ui| self.composer_ui(me, ui, theme));
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                for line in &state.lines {
-                    if line.redacted {
-                        // A deleted message is still shown, as a gap. The
-                        // tombstone is the record.
-                        ui.colored_label(theme.text_muted, "(deleted)");
-                        continue;
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        let who = if line.mine {
-                            "you"
-                        } else {
-                            &line.who.to_string()[..8]
-                        };
-                        ui.colored_label(
-                            if line.mine {
-                                theme.accent
-                            } else {
-                                theme.text_secondary
-                            },
-                            format!("{who}:"),
-                        );
-                        ui.label(&line.text);
-                        if line.edited {
-                            // Presenting an edit as the original hides that the
-                            // text changed after it was read.
-                            ui.colored_label(theme.text_muted, "(edited)");
-                        }
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        self.messages_ui(state, ui, theme, now);
                     });
-                }
             });
+    }
+
+    /// The messages themselves, with day separators, grouping and the divider.
+    fn messages_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme, now: u64) {
+        if state.lines.is_empty() {
+            ui.add_space(tokens::SPACING_XL);
+            ui.vertical_centered(|ui| {
+                ui.colored_label(theme.text_secondary, "Nothing here yet.");
+            });
+            return;
+        }
+
+        let mut previous_day: Option<String> = None;
+        let mut previous_author: Option<PubKey> = None;
+        let mut previous_at: u64 = 0;
+
+        for line in &state.lines {
+            // A separator on each new day, and the year on anything from
+            // another one -- a bare date is a trap on old history.
+            let day = sigil_ui::day_of(line.at);
+            if day != previous_day {
+                sigil_ui::day_separator(ui, &sigil_ui::day_label(line.at, now));
+                previous_day = day;
+                // A new day always starts a new group, however soon after.
+                previous_author = None;
+            }
+
+            // The unread divider is **frozen** where it was on opening.
+            // Reading advances the read mark, so one that tracked it would
+            // vanish exactly when somebody wanted to see where they had got to.
+            if state.divider == Some(line.seq) {
+                sigil_ui::unread_divider(ui, state.unread_on_open);
+                previous_author = None;
+            }
+
+            // Grouped when the same person said it recently. Five minutes,
+            // because a reply an hour later is a new thought and should carry
+            // its own time and name.
+            let grouped = previous_author == Some(line.who)
+                && line.at.saturating_sub(previous_at) < 300
+                && state.divider != Some(line.seq);
+
+            let key = line.who.to_string();
+            let bubble = sigil_ui::Bubble {
+                key: &key,
+                name: line.name.as_deref(),
+                text: &line.text,
+                at: &sigil_ui::clock(line.at),
+                mine: line.mine,
+                grouped,
+                edited: line.edited,
+                redacted: line.redacted,
+                reply_to: None,
+                reactions: &[],
+                receipt: None,
+            };
+            let _ = sigil_ui::bubble(ui, &bubble);
+
+            previous_author = Some(line.who);
+            previous_at = line.at;
+        }
 
         if state.typing {
+            ui.add_space(tokens::SPACING_SM);
             ui.colored_label(theme.text_muted, "typing…");
         }
-        ui.add_space(tokens::SPACING_SM);
+    }
+
+    /// The box a message is written in.
+    ///
+    /// The button is laid out **first and from the right**, and the field then
+    /// takes what is left. Doing it the other way round -- a right-aligned
+    /// button before the field -- consumed the whole row, and the field was
+    /// allocated the nothing that remained: a composer with no box to write in,
+    /// which is what the first snapshot of this showed.
+    fn composer_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let _ = theme;
         ui.horizontal(|ui| {
+            let button = tokens::BUTTON_LG + tokens::SPACING_MD;
+            let width = (ui.available_width() - button).max(80.0);
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().composing)
-                    .hint_text("message")
-                    .desired_width(420.0),
+                    .hint_text("Write a message")
+                    .desired_width(width),
             );
+            let send = ui.button("Send").clicked();
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (entered || ui.button("Send").clicked())
-                && !self.pane(me).composing.trim().is_empty()
-            {
+            if (entered || send) && !self.pane(me).composing.trim().is_empty() {
+                // Taken, not cleared: if the send fails the text has to come
+                // back, and the session is what knows whether it did.
                 let text = std::mem::take(&mut self.pane(me).composing);
                 self.send_as(Some(me), Cmd::Send(text));
                 field.request_focus();

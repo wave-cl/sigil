@@ -53,6 +53,12 @@ const TICK_MS: u64 = 700;
 pub struct Line {
     pub seq: u64,
     pub who: PubKey,
+    /// Their display name, if a profile has been seen for them.
+    ///
+    /// Self-declared and attested by nobody, so it is drawn as ordinary text
+    /// with the key always reachable beside it (SIP-21). `None` falls back to
+    /// the key, which is never wrong.
+    pub name: Option<String>,
     /// Ours, so it can be drawn on the other side.
     pub mine: bool,
     pub at: u64,
@@ -72,6 +78,18 @@ pub struct Summary {
     pub peer: Option<PubKey>,
     pub label: String,
     pub unread: usize,
+    /// The last thing said, for the list. `None` when nothing has been.
+    pub preview: Option<String>,
+    /// When that was, for the list's time column.
+    pub at: Option<u64>,
+    /// Anybody may find and join it, and **nothing in it is encrypted** —
+    /// everyone who may join would hold any key it used, so encrypting would
+    /// look end-to-end and not be. A reader has to see this before they type.
+    pub public: bool,
+    /// More than two people.
+    pub group: bool,
+    /// Somebody in it is typing.
+    pub typing: bool,
     /// They have published no prekeys, so nothing can be sealed to them yet.
     /// A conversation waiting to start, **not** a failure to open one — the
     /// difference is what somebody sees on the screen.
@@ -95,6 +113,14 @@ pub struct ChatState {
     /// Entries held under a superseded epoch, gone for good. Said out loud
     /// rather than silently missing.
     pub lost: usize,
+    /// The first message that was unread when this conversation was opened.
+    ///
+    /// **Frozen on entry.** Reading advances the read mark, so a divider that
+    /// tracked it would disappear exactly when somebody wanted to see where
+    /// they had got to.
+    pub divider: Option<u64>,
+    /// How many there were, for the divider's label. Frozen with it.
+    pub unread_on_open: usize,
 }
 
 /// [`Link`] without a dependency on the chat crate, and `Default`.
@@ -140,6 +166,8 @@ pub enum Cmd {
     AddContact(PubKey, String),
     /// Redial now, whatever the backoff had planned.
     Reconnect,
+    /// Put the open conversation away. What "back" means in a single pane.
+    Close,
 }
 
 pub struct ChatHandle {
@@ -338,9 +366,27 @@ async fn apply(
             state.send_modify(|s| {
                 s.open = Some(channel);
                 s.lines.clear();
+                // The divider is taken **here**, on entry, and then left
+                // alone. Reading advances the read mark, so one recomputed
+                // each refresh would disappear the moment somebody looked at
+                // the thing it was marking.
+                let unread = s
+                    .conversations
+                    .iter()
+                    .find(|c| c.channel == channel)
+                    .map(|c| c.unread)
+                    .unwrap_or(0);
+                s.unread_on_open = unread;
+                s.divider = None;
             });
             timelines.entry(channel).or_default();
         }
+        Cmd::Close => state.send_modify(|s| {
+            s.open = None;
+            s.lines.clear();
+            s.divider = None;
+            s.unread_on_open = 0;
+        }),
         Cmd::Send(text) => {
             let open = state.borrow().open;
             let Some(channel) = open else { return };
@@ -388,6 +434,15 @@ async fn refresh(
                 },
                 unread: 0,
                 waiting: false,
+                // Filled once the conversation model comes off `Chat::mine()`
+                // rather than the contact list. Left honest rather than
+                // invented: a list showing a preview it made up is worse than
+                // one showing none.
+                preview: None,
+                at: None,
+                public: false,
+                group: false,
+                typing: false,
             });
         }
     }
@@ -408,6 +463,9 @@ async fn refresh(
                 .map(|m| Line {
                     seq: m.seq,
                     who: m.account,
+                    // Names arrive with the profile work; until then the key,
+                    // which is never wrong and never an assertion.
+                    name: None,
                     mine: Some(m.account) == me,
                     at: m.posted,
                     text: m.post.body_text().unwrap_or_default().to_string(),

@@ -8,6 +8,7 @@ description = "Shared sigil widgets: identicons, roster rows, level meters."
 [dependencies]
 egui = { workspace = true }
 egui_extras = { workspace = true }
+jiff = "0.2"
 sigil = { path = "../sigil" }
 
 [dev-dependencies]
