@@ -166,6 +166,10 @@ struct Pane {
     exchange: String,
     /// The message whose file is being forwarded.
     forwarding: Option<u64>,
+    /// The picture being looked at full size: a message and which of its
+    /// files. Kept per identity like everything else here, so switching away
+    /// and back does not leave somebody else's picture over the screen.
+    viewing: Option<(u64, usize)>,
     /// The key being invited to the open channel.
     inviting: String,
     /// The SIP-38 name being claimed.
@@ -197,6 +201,7 @@ impl Default for Pane {
             searching: String::new(),
             exchange: String::new(),
             forwarding: None,
+            viewing: None,
             inviting: String::new(),
             naming: String::new(),
             channel_name: String::new(),
@@ -568,6 +573,7 @@ impl App for ChatApp {
         // dialog opened and then collapsed behind was one nobody could get out
         // of, and it also has several early returns under it.
         self.dialogs_ui(ctx, at, &state, ui, &theme);
+        self.picture_ui(at, &state, ui, &theme);
 
         // Two panes when there is room, one when there is not -- decided at
         // **runtime** from the width actually available, never from the
@@ -1056,6 +1062,79 @@ impl ChatApp {
                 }
             });
         });
+    }
+
+    /// One picture, as large as the window will take.
+    ///
+    /// The transcript draws a thumbnail — a picture the width of a bubble is
+    /// the right size for reading past and the wrong size for looking at. This
+    /// is what clicking one gets: the same bytes, bounded only by the window,
+    /// and three ways out because a thing covering everything must be easy to
+    /// dismiss.
+    fn picture_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some((seq, index)) = self.pane(at).viewing else {
+            return;
+        };
+        // Gone from under it — the message was deleted, or the conversation
+        // changed — is not an error, it is nothing to show.
+        let Some(file) = state
+            .lines
+            .iter()
+            .find(|l| l.seq == seq)
+            .and_then(|l| l.attachments.get(index))
+        else {
+            self.pane(at).viewing = None;
+            return;
+        };
+        let Some(bytes) = file.bytes.clone() else {
+            self.pane(at).viewing = None;
+            return;
+        };
+
+        let egui_ctx = ui.ctx().clone();
+        // The window, so a big picture fills it and a small one does not
+        // grow. `available_rect` is the whole surface here: this draws over
+        // everything by construction.
+        let screen = ui.ctx().viewport_rect().size();
+        let response = egui::Modal::new(egui::Id::new(("picture", seq, index)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme.surface_primary)
+                    .corner_radius(tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8)),
+            )
+            .show(&egui_ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    // The same URI the transcript uses, so the decoded texture
+                    // is the one already in hand rather than a second copy of
+                    // the same picture under another name.
+                    ui.add(
+                        egui::Image::from_bytes(format!("bytes://{}", file.id), bytes)
+                            .max_size(screen * 0.86)
+                            .corner_radius(tokens::RADIUS_MD),
+                    );
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new(&file.described).small(),
+                        );
+                        if ui.button("Save…").clicked()
+                            && let Some(to) = rfd::FileDialog::new().save_file()
+                        {
+                            self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
+                        }
+                        if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
+                            self.pane(at).viewing = None;
+                        }
+                    });
+                });
+            });
+        // The backdrop and Escape, which `should_close` covers, and the
+        // control above. Three ways out of something that covers the window.
+        if response.should_close() {
+            self.pane(at).viewing = None;
+        }
     }
 
     /// The short forms, over the top of everything.
@@ -1958,6 +2037,9 @@ impl ChatApp {
             }
             if did.forward {
                 self.pane(at).forwarding = Some(seq);
+            }
+            if let Some(index) = did.open {
+                self.pane(at).viewing = Some((seq, index));
             }
             if let Some(index) = did.save {
                 // The dialog is native and blocking, which is fine here: it is

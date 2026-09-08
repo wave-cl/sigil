@@ -928,6 +928,84 @@ fn an_added_exchange_can_be_removed_again() {
     );
 }
 
+/// A message's controls sit beside it, on the side it has room on.
+///
+/// Under the bubble they pushed everything below them down as the pointer
+/// moved along the transcript, so reading with the mouse anywhere near it made
+/// the whole conversation twitch.
+#[test]
+fn the_controls_are_beside_the_message_and_on_its_free_side() {
+    let mut h = harness(true);
+    h.run();
+    // One of theirs, which sits on the left: the controls belong to its right.
+    let bubble = h.get_by_label_contains("the second one, then").rect();
+    h.get_by_label_contains("the second one, then").hover();
+    h.step();
+    h.step();
+    let reply = h.get_by_label("Reply").rect();
+    assert!(
+        reply.left() >= bubble.right(),
+        "somebody else's message keeps its controls on the right: \
+         {reply:?} against {bubble:?}"
+    );
+    // And beside it, not under it: the two share vertical space. Overlap
+    // rather than containment, because the controls are aligned to the top of
+    // the bubble and this measures one line of its text.
+    assert!(
+        reply.bottom() > bubble.top() && reply.top() < bubble.bottom(),
+        "the controls are below the message: {reply:?} against {bubble:?}"
+    );
+}
+
+/// One's own messages sit on the other side.
+///
+/// The layout note in `message.rs` records three shapes that left them on the
+/// left and looked *almost* right, which is why they survived several passes —
+/// and there was no test, so the fourth rewrite of that layout had nothing
+/// watching it either.
+#[test]
+fn ones_own_messages_sit_on_the_other_side() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].mine = true;
+    state.lines[n - 1].text = "sent by me".into();
+    state.lines[n - 2].mine = false;
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let mine = h.get_by_label_contains("sent by me").rect();
+    let theirs = h.get_by_label_contains("the second one, then").rect();
+    assert!(
+        mine.left() > theirs.right(),
+        "one's own message is on the same side as everybody else's: \
+         {mine:?} against {theirs:?}"
+    );
+}
+
+/// And their controls are on the other side too.
+#[test]
+fn ones_own_message_keeps_its_controls_on_the_left() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].mine = true;
+    state.lines[n - 1].text = "sent by me".into();
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let bubble = h.get_by_label_contains("sent by me").rect();
+    h.get_by_label_contains("sent by me").hover();
+    h.step();
+    h.step();
+    let reply = h.get_by_label("Reply").rect();
+    assert!(
+        reply.right() <= bubble.left(),
+        "one's own message keeps its controls on the right, where the bubble is: \
+         {reply:?} against {bubble:?}"
+    );
+}
+
 /// A ring shows the caller's key in full, and does not dress it as proven.
 ///
 /// Carried over from the voice app, which used to own ringing. The rule did

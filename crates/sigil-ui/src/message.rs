@@ -192,6 +192,8 @@ pub struct BubbleAction {
     pub copy_key: bool,
     /// Save the file at this index.
     pub save: Option<usize>,
+    /// Look at the file at this index, full size.
+    pub open: Option<usize>,
     /// Forward the file it carries somewhere else.
     pub forward: bool,
 }
@@ -376,16 +378,31 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
         tokens::SPACING_XS
     });
 
-    let limit = (ui.available_width() * 0.72).max(160.0);
+    // Room for the controls beside the bubble, always — so a message does not
+    // move sideways when the pointer arrives.
+    let aside = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 3.0;
+    let limit = ((ui.available_width() - aside) * 0.72).max(160.0);
     if b.mine {
         // Measured, not filled. A frame in a top-down layout takes the width
         // it is given, so capping at the limit made every message the same
         // width as the longest one it was allowed to be — a wall of identical
         // blocks rather than a conversation.
         let width = wanted(ui, b).clamp(120.0, limit);
-        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            ui.set_max_width(width);
-            body(ui, b, &theme, &mut action);
+        // **Right to left**: the bubble is placed first and lands against the
+        // right edge, and the controls go to its left. The previous shape was
+        // `top_down(Align::Max)` with the frame as a direct child, which
+        // right-aligns one thing and has nowhere to put a second.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            let bubble = ui
+                .scope_builder(
+                    egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Max)),
+                    |ui| {
+                        ui.set_max_width(width);
+                        body(ui, b, &theme, &mut action)
+                    },
+                )
+                .inner;
+            controls(ui, b, bubble, &mut action);
         });
     } else {
         ui.horizontal(|ui| {
@@ -400,14 +417,95 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
             } else {
                 crate::identicon(ui, b.key, size);
             }
-            ui.vertical(|ui| {
-                ui.set_max_width(limit);
-                body(ui, b, &theme, &mut action);
-            });
+            let width = wanted(ui, b).clamp(120.0, limit);
+            let bubble = ui
+                .scope_builder(
+                    egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        ui.set_max_width(width);
+                        body(ui, b, &theme, &mut action)
+                    },
+                )
+                .inner;
+            controls(ui, b, bubble, &mut action);
         });
     }
 
     action
+}
+
+/// Reply, react, and the rest — **beside** the message rather than under it.
+///
+/// # Why beside
+///
+/// Under the bubble they pushed everything below them down as the pointer
+/// moved along a conversation, so reading with the mouse anywhere near the
+/// transcript made it twitch. Beside, they sit in the space that is already
+/// empty: to the right of somebody else's message and to the left of one's
+/// own, which is also the side each has room on.
+///
+/// Shown while the pointer is over the message, so a transcript at rest is a
+/// transcript and not a field of buttons. `reach` covers the bubble **and the
+/// controls** — a region stopping at the bubble's edge made them impossible to
+/// press, because moving towards one left the region and the row stopped being
+/// drawn before the click landed.
+fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut BubbleAction) {
+    let aside = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 3.0;
+    let reach = bubble
+        .expand2(egui::vec2(0.0, tokens::SPACING_XS))
+        .translate(egui::vec2(if b.mine { -aside } else { aside } / 2.0, 0.0))
+        .expand2(egui::vec2(aside / 2.0, 0.0));
+    if !ui.rect_contains_pointer(reach) || b.redacted {
+        return;
+    }
+    if crate::icon_button(ui, crate::Icon::Reply).clicked() {
+        action.reply = true;
+    }
+
+    // Painted openers, not glyph labels. `menu_button` takes text, and the two
+    // obvious characters for these — a face and an ellipsis — are exactly the
+    // sort this font set has already turned into boxes twice. `Popup::menu`
+    // takes any response, so the button can be a shape we drew ourselves.
+    let react = crate::icon_button(ui, crate::Icon::React);
+    egui::Popup::menu(&react).show(|ui| {
+        ui.horizontal(|ui| {
+            for emoji in REACTIONS {
+                if ui.button(*emoji).clicked() {
+                    action.react = Some((*emoji).to_string());
+                    ui.close();
+                }
+            }
+        });
+    });
+
+    let more = crate::icon_button(ui, crate::Icon::More);
+    egui::Popup::menu(&more).show(|ui| {
+        if b.mine && ui.button("Edit").clicked() {
+            action.edit = true;
+            ui.close();
+        }
+        if ui.button("Delete").clicked() {
+            action.redact = true;
+            ui.close();
+        }
+        if ui.button("Copy key").clicked() {
+            action.copy_key = true;
+            ui.close();
+        }
+        if !b.attachments.is_empty() {
+            // Saving lives here rather than on the picture: it is the one
+            // action nobody takes often, and it had the loudest place on the
+            // bubble.
+            if ui.button("Save file").clicked() {
+                action.save = Some(0);
+                ui.close();
+            }
+            if ui.button("Forward file").clicked() {
+                action.forward = true;
+                ui.close();
+            }
+        }
+    });
 }
 
 /// How wide this bubble would like to be, before any cap.
@@ -416,9 +514,6 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
 /// margins. Anything with a picture in it asks for everything, because an
 /// image is sized by the space it is given rather than by its text.
 fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
-    if !b.attachments.is_empty() {
-        return f32::INFINITY;
-    }
     let measure = |text: &str, style: egui::TextStyle| {
         let font = style.resolve(ui.style());
         ui.ctx()
@@ -444,15 +539,37 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
         (false, false, None) => measure(&short(b.key), egui::TextStyle::Body),
         _ => 0.0,
     };
+    // The rule down its left and the gap after it are part of the line.
+    // Left out, the bubble was measured too narrow for what it then drew, and
+    // a `horizontal` does not wrap — so the frame grew past the width it had
+    // been given and ran off the edge of the pane.
     let reply = b
         .reply_to
-        .map(|(who, stub)| measure(&format!("{who}: {stub}"), egui::TextStyle::Small))
+        .map(|(who, stub)| {
+            measure(&format!("{who}: {stub}"), egui::TextStyle::Small)
+                + tokens::STROKE_THICK
+                + tokens::SPACING_XXS
+                + ui.spacing().item_spacing.x * 2.0
+        })
         .unwrap_or(0.0);
-    body.max(meta).max(author).max(reply) + PAD_X * 2.0
+    // A picture asks for the size it will be drawn at, not for everything.
+    // `INFINITY` made every message carrying a file as wide as the pane
+    // allowed, including one whose whole content is `[image, 28 KiB]`.
+    let files = if b.attachments.is_empty() {
+        0.0
+    } else {
+        crate::attachment::PICTURE
+    };
+    body.max(meta).max(author).max(reply).max(files) + PAD_X * 2.0
 }
 
 /// The bubble itself: the frame, what is in it, and the reactions under it.
-fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut BubbleAction) {
+fn body(
+    ui: &mut egui::Ui,
+    b: &Bubble<'_>,
+    theme: &ColorTheme,
+    action: &mut BubbleAction,
+) -> egui::Rect {
     let fill = if b.mine {
         theme.accent_muted
     } else {
@@ -482,8 +599,12 @@ fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut Bubb
             // rather than a caption with a picture attached.
             if !b.redacted {
                 for (i, a) in b.attachments.iter().enumerate() {
-                    if crate::attachment(ui, a).save {
+                    let did = crate::attachment(ui, a);
+                    if did.save {
                         action.save = Some(i);
+                    }
+                    if did.open {
+                        action.open = Some(i);
                     }
                 }
             }
@@ -544,72 +665,7 @@ fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut Bubb
         });
     }
 
-    // **The controls, on the message.** These lived only in a right-click
-    // menu, which is a control nobody finds: replying and reacting are the two
-    // most common things anybody does to a message, and both were hidden
-    // behind a gesture with nothing on screen suggesting it.
-    //
-    // Shown while the pointer is over the message, so a transcript at rest is
-    // a transcript and not a field of buttons.
-    // `Frame::show`'s response senses nothing, so `hovered()` on it is always
-    // false. The pointer has to be asked about the rect directly, and the
-    // reactions row below the bubble counts as part of the message.
-    // The bubble, **and the row of controls under it**.
-    //
-    // A region that stopped at the bubble's edge made the controls impossible
-    // to press: they are drawn below it, so moving the pointer towards one
-    // left the region, the row stopped being drawn, and the click landed on
-    // nothing. Visible and unusable, which is worse than absent.
-    let mut reach = inner
-        .response
-        .rect
-        .expand2(egui::vec2(0.0, tokens::SPACING_SM));
-    reach.max.y += tokens::BUTTON_MD;
-    let over = ui.rect_contains_pointer(reach);
-    if over && !b.redacted {
-        ui.horizontal(|ui| {
-            if crate::icon_button(ui, crate::Icon::Reply).clicked() {
-                action.reply = true;
-            }
-
-            // Painted openers, not glyph labels. `menu_button` takes text, and
-            // the two obvious characters for these — a face and an ellipsis —
-            // are exactly the sort this font set has already turned into boxes
-            // twice. `Popup::menu` takes any response, so the button can be a
-            // shape we drew ourselves.
-            let react = crate::icon_button(ui, crate::Icon::React);
-            egui::Popup::menu(&react).show(|ui| {
-                ui.horizontal(|ui| {
-                    for emoji in REACTIONS {
-                        if ui.button(*emoji).clicked() {
-                            action.react = Some((*emoji).to_string());
-                            ui.close();
-                        }
-                    }
-                });
-            });
-
-            let more = crate::icon_button(ui, crate::Icon::More);
-            egui::Popup::menu(&more).show(|ui| {
-                if b.mine && ui.button("Edit").clicked() {
-                    action.edit = true;
-                    ui.close();
-                }
-                if ui.button("Delete").clicked() {
-                    action.redact = true;
-                    ui.close();
-                }
-                if ui.button("Copy key").clicked() {
-                    action.copy_key = true;
-                    ui.close();
-                }
-                if !b.attachments.is_empty() && ui.button("Forward file").clicked() {
-                    action.forward = true;
-                    ui.close();
-                }
-            });
-        });
-    }
+    inner.response.rect
 }
 
 /// Text that is quieter than the body but still legible on `over`.
@@ -672,9 +728,18 @@ fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, theme: &ColorTheme) {
         ui.painter()
             .rect_filled(rect, tokens::RADIUS_SM, theme.accent);
         ui.add_space(tokens::SPACING_XXS);
-        ui.colored_label(
-            theme.text_muted,
-            egui::RichText::new(format!("{who}: {stub}")).small(),
+        // **Truncated, not extended.** A `horizontal` layout does not wrap, so
+        // a label long enough grows the frame around it — past the width the
+        // bubble was given, and off the side of the pane. `stub` already cuts
+        // this to 48 characters; 48 characters is still wider than a narrow
+        // bubble.
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("{who}: {stub}"))
+                    .small()
+                    .color(theme.text_muted),
+            )
+            .truncate(),
         );
     });
     ui.add_space(tokens::SPACING_XS);
@@ -796,6 +861,61 @@ mod tests {
     #[test]
     fn a_preview_is_flattened_so_it_cannot_grow_a_row() {
         assert_eq!(preview("two\nlines\there", 48), "two lines here");
+    }
+
+    fn plain<'a>(text: &'a str, files: &'a [crate::Attachment<'a>]) -> Bubble<'a> {
+        Bubble {
+            key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+            name: None,
+            title: None,
+            text,
+            at: "12:00",
+            mine: false,
+            grouped: true,
+            edited: false,
+            redacted: false,
+            reply_to: None,
+            reactions: &[],
+            receipt: None,
+            attachments: files,
+            standing: None,
+            alarming: false,
+        }
+    }
+
+    /// A message carrying a file asks for the size a picture is drawn at.
+    ///
+    /// It used to ask for `INFINITY`, so **every** message with a file was as
+    /// wide as the pane allowed — including one whose entire content is a row
+    /// reading `[notes.txt, 2.1 kB]`, which then ran off the edge of a narrow
+    /// window. Measured here rather than through a rendered transcript,
+    /// because what a label reports is the width of its own text whatever the
+    /// bubble around it does.
+    #[test]
+    fn a_file_asks_for_a_picture_and_not_for_the_whole_pane() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let file = crate::Attachment {
+                kind: 0x04,
+                described: "[notes.txt, 2.1 kB]",
+                preview: &[],
+                bytes: None,
+                id: "abc123",
+            };
+            let asked = wanted(ui, &plain("", std::slice::from_ref(&file)));
+            assert!(asked.is_finite(), "a file asks for infinite width: {asked}");
+            assert!(
+                asked <= crate::attachment::PICTURE + PAD_X * 2.0,
+                "a file asks for {asked}, wider than a picture is drawn"
+            );
+            // And the text still wins when there is more of it than that.
+            let long = "x".repeat(400);
+            assert!(
+                wanted(ui, &plain(&long, std::slice::from_ref(&file))) > asked,
+                "a long message with a file is measured by the file"
+            );
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

@@ -36,10 +36,20 @@ pub struct Attachment<'a> {
     pub id: &'a str,
 }
 
+/// How large a picture is drawn in a transcript.
+///
+/// **The bubble is measured against this**, so the two must agree: a message
+/// carrying a file used to ask for infinite width, which made every one of
+/// them as wide as the pane allowed — including one whose entire content is a
+/// row reading `[image, 28 KiB]`.
+pub const PICTURE: f32 = 320.0;
+
 /// What the reader did to a file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentAction {
     pub save: bool,
+    /// Look at it full size.
+    pub open: bool,
 }
 
 /// Draw one.
@@ -64,11 +74,21 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
             // real thing: egui caches by URI, so reusing one name for both
             // would leave the thumbnail on screen after the image arrived.
             let uri = format!("bytes://{}{}", a.id, if whole { "" } else { "-preview" });
+            let side = if whole { PICTURE } else { 96.0 };
             let image = egui::Image::from_bytes(uri, bytes.to_vec())
-                .max_height(if whole { 320.0 } else { 96.0 })
+                // Both, not only the height. A wide picture given an unbounded
+                // width takes the whole pane and pushes the bubble off it.
+                .max_size(egui::vec2(side, side))
                 .corner_radius(tokens::RADIUS_MD)
-                .show_loading_spinner(false);
+                .show_loading_spinner(false)
+                .sense(egui::Sense::click());
             let response = ui.add(image);
+            // The thumbnail in the transcript is a thumbnail. Clicking it is
+            // how anybody expects to see the picture itself.
+            if response.clicked() {
+                action.open = true;
+            }
+            let response = response.on_hover_text("Click to see it full size");
             if !whole {
                 // A thumbnail is not the picture, and saying so stops somebody
                 // reading a blurry 96-pixel image as the whole of what was
@@ -79,17 +99,20 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
                 );
             }
             response.context_menu(|ui| {
+                if ui.button("See it full size").clicked() {
+                    action.open = true;
+                    ui.close();
+                }
                 if ui.button("Save as…").clicked() {
                     action.save = true;
                     ui.close();
                 }
             });
-            ui.horizontal(|ui| {
-                ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
-                if ui.small_button("Save").clicked() {
-                    action.save = true;
-                }
-            });
+            // What it is, quietly, and no button. Saving is on the message's
+            // own controls beside it, where every other thing done to a
+            // message is — a Save button on the picture put the one action
+            // nobody takes often in the loudest place on the bubble.
+            ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
             return action;
         }
     }
@@ -116,6 +139,8 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
                         _ => "file",
                     },
                 );
+                // A file that cannot be drawn keeps its button: there is
+                // nothing else to do with it, and nothing on screen to click.
                 ui.label(a.described);
                 if ui.small_button("Save").clicked() {
                     action.save = true;

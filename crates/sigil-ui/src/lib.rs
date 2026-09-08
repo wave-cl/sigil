@@ -20,6 +20,22 @@ pub use dot::dot;
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.
 pub use identicon::{avatar, identicon, identicon_of};
 
+/// Teach egui how to decode an image.
+///
+/// # Why nothing drew
+///
+/// `egui::Image::from_bytes` does not decode anything itself — it hands the
+/// bytes to a registered loader, and with none registered it draws a broken
+/// picture. Nothing called this, so **every image attachment came out as a red
+/// triangle**, which reads as "this file is damaged" and was nothing of the
+/// sort. `egui_extras` is already a dependency with `all_loaders`; it was
+/// simply never switched on.
+///
+/// Call it once per `Context`, beside `theme::install`. Idempotent.
+pub fn install_loaders(ctx: &egui::Context) {
+    egui_extras::install_image_loaders(ctx);
+}
+
 /// sigil's own mark: a disc in the accent.
 ///
 /// # Why a disc and not a picture

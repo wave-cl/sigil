@@ -108,6 +108,9 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::install(&cc.egui_ctx, theme::light(), theme::dark());
+            // Without this every image attachment is a broken-picture icon:
+            // `egui::Image` decodes nothing on its own. See `install_loaders`.
+            sigil_ui::install_loaders(&cc.egui_ctx);
 
             // Built here, and only here: the tray must be created on the main
             // thread — the macOS menu bar and Linux's GTK context both insist —
