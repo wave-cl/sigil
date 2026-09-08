@@ -653,17 +653,26 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
 /// bundles and came out as `□`. It is also the better shape — a rule down the
 /// left is what every messenger uses, and it does not have to be understood.
 fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, theme: &ColorTheme) {
+    // Room of its own, on all four sides. The bubble's padding came down and
+    // this went with it: the quote ended up jammed against the name above and
+    // the words below, reading as a first line of the message rather than as
+    // something being quoted.
+    ui.add_space(tokens::SPACING_XS);
     ui.horizontal(|ui| {
-        let h = ui.text_style_height(&egui::TextStyle::Small);
+        // Taller than its text, so the rule reads as a rule. At exactly the
+        // line height it is a dash the length of one word.
+        let h = ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS;
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(tokens::STROKE_THICK, h), egui::Sense::hover());
         ui.painter()
             .rect_filled(rect, tokens::RADIUS_SM, theme.accent);
+        ui.add_space(tokens::SPACING_XXS);
         ui.colored_label(
             theme.text_muted,
             egui::RichText::new(format!("{who}: {stub}")).small(),
         );
     });
+    ui.add_space(tokens::SPACING_XS);
 }
 
 /// One emoji and how many people sent it. Ours is outlined.
