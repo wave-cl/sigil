@@ -24,11 +24,13 @@
 //!   but the interface should not let somebody discover that after a disk
 //!   failure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sqex_chat::client::{Chat, Link};
 use sqex_chat::store::{self, Store};
+use sqex_proto::channel::{Role, Visibility};
+use sqex_proto::events::Event;
 use sqex_proto::timeline::Timeline;
 use sqnr_core::{PubKey, SoftwareSigner};
 use tokio::sync::{mpsc, watch};
@@ -110,9 +112,8 @@ pub struct ChatState {
     pub lines: Vec<Line>,
     /// Somebody is typing in the open conversation (SIP-19's only signal).
     pub typing: bool,
-    /// Entries held under a superseded epoch, gone for good. Said out loud
-    /// rather than silently missing.
-    pub lost: usize,
+    /// What is wrong with the open conversation, if anything.
+    pub trouble_with: Trouble,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -121,6 +122,43 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// What is wrong with a conversation, as against what is in it.
+///
+/// **These are not interchangeable and a client must not collapse them.** Each
+/// says something different about what to do, and the two that look alike are
+/// the two that matter most:
+///
+/// - `unreadable` is an entry whose key **may still arrive**. Wait.
+/// - `lost` is an entry under a superseded epoch. It is **gone**, and telling
+///   somebody to wait for it wastes their time forever.
+/// - `gap` is history that fell outside the retention window. It was never
+///   ours to have.
+/// - `forked` is SIP-31 evidence that the exchange signed two histories for one
+///   position. It **must** be surfaced, and must never be shown as a `gap` —
+///   one is ordinary and the other is misconduct.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Trouble {
+    /// Entries held and not opened. A key for them may still come.
+    pub unreadable: usize,
+    /// Entries under an epoch we will never hold a key for. Gone.
+    pub lost: usize,
+    /// We were away longer than the retention window; there is history that
+    /// can never be filled in. Shown as a gap, never as the whole conversation.
+    pub gap: bool,
+    /// The channel was destroyed and recreated under the same identifier, so
+    /// what came before is unrelated to what follows (SIP-16).
+    pub restarted: bool,
+    /// The epoch in force, when we hold no key for it: SIP-17's *stranded*
+    /// member, who can fetch every entry and open none of them.
+    pub no_key: Option<u32>,
+}
+
+impl Trouble {
+    pub fn is_clear(&self) -> bool {
+        *self == Trouble::default()
+    }
 }
 
 /// [`Link`] without a dependency on the chat crate, and `Default`.
@@ -309,7 +347,7 @@ async fn run(
     state.send_modify(|s| s.me = Some(me));
     (wake)();
 
-    let mut timelines: HashMap<[u8; 32], Timeline> = HashMap::new();
+    let mut desk = Desk::default();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
 
     loop {
@@ -318,7 +356,7 @@ async fn run(
             // the network, which is the discipline `sqex-chat`'s own loop keeps
             // by handling keys before anything else.
             Some(cmd) = cmds.recv() => {
-                apply(&mut chat, cmd, &state, &mut timelines).await;
+                apply(&mut chat, cmd, &state, &mut desk).await;
                 (wake)();
             }
             _ = tick.tick() => {
@@ -326,22 +364,493 @@ async fn run(
                 if chat.link() == Link::Up && !chat.subscribed() {
                     let _ = chat.subscribe().await;
                 }
-                // The events say only *what changed*; the fetch below is what
-                // reads it. Draining them here keeps the queue from growing.
-                let _ = chat.take_events();
-                refresh(&mut chat, &state, &mut timelines).await;
+                // **SIP-30's events say which channels moved**, and that is
+                // what decides where to look. This used to drain and discard
+                // them and poll only whatever was on screen, so a message
+                // arriving in any other conversation was invisible until
+                // somebody happened to open it -- the unread count could not
+                // have worked, and did not.
+                for event in chat.take_events() {
+                    desk.note(event, me);
+                }
+                desk.age();
+                if desk.restructure {
+                    // **Cleared only on success.** Clearing it first meant a
+                    // rebuild that failed -- which is what every rebuild does
+                    // before the connection is up -- was not tried again until
+                    // the backstop came round half a minute later. For that
+                    // half minute the conversation list was empty and nothing
+                    // said why.
+                    match sync_channels(&mut chat, &mut desk).await {
+                        Ok(()) => {
+                            desk.restructure = false;
+                            desk.since_sync = 0;
+                        }
+                        Err(e) => state.send_modify(|s| s.trouble = Some(e)),
+                    }
+                }
+                refresh(&mut chat, &state, &mut desk, me).await;
                 (wake)();
             }
         }
     }
 }
 
-async fn apply(
-    chat: &mut Chat,
-    cmd: Cmd,
-    state: &watch::Sender<ChatState>,
-    timelines: &mut HashMap<[u8; 32], Timeline>,
-) {
+/// One conversation, as this client knows it.
+struct Known {
+    /// The other party, for a direct message. `None` for a group or a public
+    /// channel.
+    peer: Option<PubKey>,
+    /// Anybody may find and join it, and nothing in it is encrypted.
+    public: bool,
+    /// More than two people.
+    group: bool,
+    label: String,
+    /// Who may redact and rename. From the exchange, remembered so that a
+    /// client starting offline folds its own history correctly.
+    admins: Vec<PubKey>,
+    timeline: Timeline,
+    /// How many messages we had last time, so a new one can be counted unread
+    /// without diffing two timelines.
+    seen: usize,
+    /// The newest thing said here. What the list sorts on.
+    last_at: u64,
+    unread: usize,
+    /// They have published no prekeys, so nothing can be sealed to them yet.
+    waiting: bool,
+    typing: bool,
+    trouble: Trouble,
+}
+
+impl Known {
+    fn summary(&self, channel: [u8; 32], me: &PubKey) -> Summary {
+        Summary {
+            channel,
+            peer: self.peer,
+            label: self.label.clone(),
+            unread: self.unread,
+            waiting: self.waiting,
+            preview: self.preview(me),
+            at: (self.last_at > 0).then_some(self.last_at),
+            public: self.public,
+            group: self.group,
+            typing: self.typing,
+        }
+    }
+
+    /// The newest thing said here, whoever said it.
+    ///
+    /// A redaction shows as the gap it is rather than being skipped, or the
+    /// list would claim the conversation ended at an older message.
+    fn preview(&self, me: &PubKey) -> Option<String> {
+        let m = self.timeline.messages().last()?;
+        let said = if m.redacted {
+            "message deleted".to_string()
+        } else {
+            m.post
+                .body_text()
+                .map(str::to_string)
+                .unwrap_or_else(|| "a file".to_string())
+        };
+        // In a group half of what the line is worth is *who*: the row already
+        // names the channel, so "lol" on its own says nothing about whether it
+        // is worth opening. A direct message needs no prefix -- the row is
+        // the person.
+        if self.peer.is_some() {
+            return Some(said);
+        }
+        let who = if m.account == *me {
+            "you".to_string()
+        } else {
+            let key = m.account.to_string();
+            key.chars().take(8).collect()
+        };
+        Some(format!("{who}: {said}"))
+    }
+}
+
+/// The session's own view of the world, kept between ticks.
+struct Desk {
+    channels: HashMap<[u8; 32], Known>,
+    /// Which conversation is on screen. Held here as well as in the published
+    /// state so the task can read it without borrowing the watch channel.
+    open: Option<[u8; 32]>,
+    /// Channels an event says have changed. Only these are fetched.
+    dirty: HashSet<[u8; 32]>,
+    /// The conversation list itself needs rebuilding from the exchange.
+    restructure: bool,
+    /// Ticks since the list was last rebuilt.
+    ///
+    /// A backstop, not the mechanism. Events are what make this responsive,
+    /// but a subscription can drop and reconnect with a gap in it, and a
+    /// conversation list that is only ever event-driven would then be wrong
+    /// until something else happened to change it -- which, for somebody who
+    /// has been added to a channel and told about it nowhere else, is never.
+    since_sync: u32,
+}
+
+impl Default for Desk {
+    fn default() -> Self {
+        Desk {
+            channels: HashMap::new(),
+            open: None,
+            dirty: HashSet::new(),
+            // The first tick has nothing yet, so it rebuilds.
+            restructure: true,
+            since_sync: 0,
+        }
+    }
+}
+
+/// How long the conversation list can be wrong before the backstop fixes it.
+///
+/// Exposed so a test can say what it is pointed at. A test that waits *longer*
+/// than this proves only that the backstop works — it passes whether or not
+/// SIP-30's events are being acted on at all, which is how the stranger test
+/// passed at 28.9 seconds while the event path was broken.
+pub const BACKSTOP: std::time::Duration =
+    std::time::Duration::from_millis(TICK_MS * Desk::RESYNC_TICKS as u64);
+
+impl Desk {
+    /// How often the list is rebuilt regardless of events. See `since_sync`.
+    const RESYNC_TICKS: u32 = 40;
+
+    fn note(&mut self, event: Event, me: PubKey) {
+        match event {
+            Event::Channel { channel, .. } | Event::Signal { channel } => {
+                self.dirty.insert(channel);
+            }
+            // Somebody's read mark moved. Ours moving is not news; theirs is,
+            // once receipts are drawn.
+            Event::Cursor { channel } => {
+                self.dirty.insert(channel);
+            }
+            Event::Membership {
+                channel, account, ..
+            } => {
+                self.dirty.insert(channel);
+                // **A channel we have never heard of is a new conversation**,
+                // whoever the event names. This is how one somebody else
+                // started arrives, and getting the condition wrong costs
+                // exactly that: `create` publishes the event with `account`
+                // set to the *creator*, so the person being invited receives
+                // one naming somebody else. Keying only on `account == me`
+                // meant a stranger's first message did not appear until the
+                // periodic rebuild came round half a minute later -- which
+                // looked like it worked, because eventually it did.
+                if account == me || !self.channels.contains_key(&channel) {
+                    self.restructure = true;
+                }
+            }
+            // We fell behind and events were dropped. Nothing local can be
+            // trusted to be current, so read everything again.
+            Event::Resync => {
+                self.restructure = true;
+                self.dirty.extend(self.channels.keys().copied());
+            }
+            Event::Profile { .. }
+            | Event::Admission
+            | Event::Heartbeat
+            | Event::Ringing { .. }
+            | Event::CrossCall { .. }
+            | Event::Unknown(_) => {}
+        }
+    }
+
+    fn age(&mut self) {
+        self.since_sync = self.since_sync.saturating_add(1);
+        if self.since_sync >= Self::RESYNC_TICKS {
+            self.restructure = true;
+        }
+    }
+}
+
+/// Reconcile what the exchange says we are in with what we hold.
+///
+/// Groups come from here and only from here: a group's identifier is random
+/// rather than derived, so there is nothing to compute and nothing to guess.
+/// Direct messages are matched against the contact list so a conversation keeps
+/// the name its contact was given -- and a direct message from **somebody not
+/// in it** still appears, which is the whole reason this cannot be built from
+/// the contact list alone.
+async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
+    let contacts = chat.store().contacts().map_err(|e| e.to_string())?;
+    let known = chat.store().channels().map_err(|e| e.to_string())?;
+    let mine = chat.mine().await.map_err(|e| e.to_string())?;
+    let me = chat.me;
+
+    let mut present: HashSet<[u8; 32]> = HashSet::new();
+
+    for m in mine {
+        present.insert(m.channel);
+        let peer = contacts
+            .iter()
+            .find(|c| chat.dm_with(&c.account) == m.channel)
+            .map(|c| (c.account, c.label.clone()));
+        let remembered = known.iter().find(|k| k.0 == m.channel);
+        let public = m.visibility == Visibility::Public;
+
+        // The exchange is authoritative about who administers a channel; the
+        // store is what makes that survive being offline.
+        let (admins, given_name, members) = match chat.info(&m.channel).await {
+            Ok(info) => (
+                info.members
+                    .iter()
+                    .filter(|mem| mem.role == Role::Admin)
+                    .map(|mem| mem.account)
+                    .collect::<Vec<_>>(),
+                info.name,
+                info.members
+                    .iter()
+                    .map(|mem| mem.account)
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => (
+                remembered.map(|k| k.3.clone()).unwrap_or_default(),
+                String::new(),
+                Vec::new(),
+            ),
+        };
+
+        // A direct message with somebody who is not a contact: the identifier
+        // derives from the two accounts, so proving it is one means finding the
+        // other member and checking the derivation.
+        let peer = peer.or_else(|| {
+            let other = members.iter().find(|a| **a != me)?;
+            (chat.dm_with(other) == m.channel).then(|| (*other, other.to_string()))
+        });
+
+        let label = match &peer {
+            Some((account, l)) if !l.is_empty() => {
+                if l == &account.to_string() {
+                    // An unnamed contact's label is only its key repeated.
+                    account.to_string()
+                } else {
+                    l.clone()
+                }
+            }
+            Some((account, _)) => account.to_string(),
+            // A public channel's name is held by the exchange in the clear --
+            // that is what the directory searches -- so it is known before a
+            // single entry is read. A group's is a sealed entry and is not, so
+            // until the log is read it goes by its identifier.
+            None if public && !given_name.is_empty() => given_name,
+            None => remembered
+                .map(|k| k.2.clone())
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| format!("group {}", hex8(&m.channel))),
+        };
+
+        let group = peer.is_none();
+        let _ = chat.store().put_channel(&m.channel, group, &label, &admins);
+
+        let entry = desk.channels.entry(m.channel).or_insert_with(|| {
+            // Folded from the store, so history is on screen before the
+            // exchange has answered anything -- and stays there when it never
+            // does. The local copy is the only one that can be read anyway:
+            // opening an epoch key spends the prekey it was sealed against.
+            let timeline = chat.history(&m.channel, &admins).unwrap_or_default();
+            let last_at = timeline.messages().last().map(|m| m.posted).unwrap_or(0);
+            let seen = timeline.messages().count();
+            Known {
+                peer: None,
+                public,
+                group,
+                label: String::new(),
+                admins: Vec::new(),
+                timeline,
+                seen,
+                last_at,
+                unread: 0,
+                waiting: false,
+                typing: false,
+                trouble: Trouble::default(),
+            }
+        });
+        entry.peer = peer.map(|(a, _)| a);
+        entry.public = public;
+        entry.group = group;
+        entry.label = label;
+        entry.admins = admins;
+        if entry.last_at == 0 {
+            entry.last_at = m.joined;
+        }
+    }
+
+    // A contact we have never exchanged anything with is not a membership yet,
+    // so it will not come back from `mine` -- but somebody who added them
+    // expects a row they can write into.
+    for c in &contacts {
+        let channel = chat.dm_with(&c.account);
+        present.insert(channel);
+        desk.channels.entry(channel).or_insert_with(|| Known {
+            peer: Some(c.account),
+            public: false,
+            group: false,
+            label: if c.label.is_empty() {
+                c.account.to_string()
+            } else {
+                c.label.clone()
+            },
+            admins: vec![me, c.account],
+            timeline: Timeline::default(),
+            seen: 0,
+            unread: 0,
+            // Nothing has happened here yet, so it sorts below anything that
+            // has rather than claiming a time it does not have.
+            last_at: 0,
+            waiting: false,
+            typing: false,
+            trouble: Trouble::default(),
+        });
+    }
+
+    // Left, removed, or closed. Dropped from the list rather than left on it
+    // as a conversation nothing can be sent to.
+    desk.channels.retain(|c, _| present.contains(c));
+    desk.dirty.retain(|c| present.contains(c));
+    Ok(())
+}
+
+/// Fetch what has changed and publish the result.
+async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk, me: PubKey) {
+    // The open conversation is always fetched: it is the one somebody is
+    // looking at, and a signal there (typing) has no event of its own until it
+    // is delivered.
+    let mut to_poll: Vec<[u8; 32]> = desk.dirty.drain().collect();
+    if let Some(open) = desk.open
+        && !to_poll.contains(&open)
+    {
+        to_poll.push(open);
+    }
+
+    for channel in to_poll {
+        let Some(known) = desk.channels.get_mut(&channel) else {
+            continue;
+        };
+        let mut timeline = std::mem::take(&mut known.timeline);
+        let polled = chat.poll(&channel, &mut timeline, 0).await;
+        let Some(known) = desk.channels.get_mut(&channel) else {
+            continue;
+        };
+        match polled {
+            Ok(conversation) => {
+                known.timeline = conversation.timeline;
+                known.typing = conversation.typing;
+                known.waiting = false;
+                known.trouble = Trouble {
+                    unreadable: conversation.unreadable.len(),
+                    gap: conversation.gap,
+                    restarted: conversation.restarted,
+                    no_key: conversation.no_key,
+                    lost: conversation.lost,
+                };
+                if !conversation.admins.is_empty() {
+                    known.admins = conversation.admins;
+                }
+                let after = known.timeline.messages().count();
+                // Counted against what we had rather than against a read mark,
+                // so a message arriving in a conversation nobody is looking at
+                // is counted once, when it arrives.
+                if after > known.seen && desk.open != Some(channel) {
+                    known.unread += after - known.seen;
+                }
+                known.seen = after;
+                if let Some(newest) = known.timeline.messages().last().map(|m| m.posted) {
+                    known.last_at = known.last_at.max(newest);
+                }
+                // A group's name lives in a sealed entry, so it is only known
+                // once the log has been read -- and it changes when an admin
+                // renames it.
+                let named = known.timeline.name.clone();
+                if known.peer.is_none() && !named.is_empty() && named != known.label {
+                    known.label = named.clone();
+                    let _ = chat.store().set_label(&channel, &named);
+                }
+            }
+            Err(_) => {
+                known.timeline = timeline;
+            }
+        }
+    }
+
+    // Reading it is what clears it, and advancing the exchange's mark is what
+    // makes "where was I" survive closing the client.
+    if let Some(open) = desk.open
+        && let Some(known) = desk.channels.get_mut(&open)
+    {
+        known.unread = 0;
+        if let Some(last) = known.timeline.messages().last().map(|m| m.seq) {
+            let _ = chat.mark_read(&open, last).await;
+        }
+    }
+
+    publish(chat, state, desk, me);
+}
+
+/// Build what the interface draws from what the task holds.
+fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) {
+    // Most recent first, the way every chat client orders a conversation list.
+    // `mine()` hands them back in join order, which says nothing about where
+    // anything is happening.
+    //
+    // Selection is by channel and not by position, so reordering under
+    // somebody's cursor moves the row and not the reader.
+    let mut summaries: Vec<Summary> = desk
+        .channels
+        .iter()
+        .map(|(c, k)| k.summary(*c, &me))
+        .collect();
+    summaries.sort_by(|a, b| {
+        b.at.unwrap_or(0)
+            .cmp(&a.at.unwrap_or(0))
+            // A stable tie-break, or two conversations with the same time would
+            // swap places on every redraw.
+            .then_with(|| a.channel.cmp(&b.channel))
+    });
+
+    let open = desk
+        .open
+        .and_then(|c| desk.channels.get(&c).map(|k| (c, k)));
+    let lines = open
+        .map(|(_, k)| {
+            k.timeline
+                .messages()
+                .map(|m| Line {
+                    seq: m.seq,
+                    who: m.account,
+                    // Names arrive with the profile work; until then the key,
+                    // which is never wrong and never an assertion.
+                    name: None,
+                    mine: m.account == me,
+                    at: m.posted,
+                    text: m.post.body_text().unwrap_or_default().to_string(),
+                    redacted: m.redacted,
+                    edited: m.edited.is_some(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
+    let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
+    let link = LinkState::from(chat.link());
+
+    state.send_modify(|s| {
+        s.link = link;
+        s.conversations = summaries;
+        s.lines = lines;
+        s.typing = typing;
+        s.trouble_with = trouble;
+    });
+}
+
+/// The first eight hex characters of an identifier, for a channel with no name.
+fn hex8(id: &[u8; 32]) -> String {
+    id.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk: &mut Desk) {
     match cmd {
         Cmd::OpenDm(peer) => match chat.open_dm(&peer).await {
             Ok(channel) => {
@@ -351,50 +860,50 @@ async fn apply(
                 // device with no prekeys. That is a conversation waiting to
                 // start, not a failure to open one.
                 let waiting = chat.ensure_epoch(&channel).await.is_err();
-                state.send_modify(|s| {
-                    s.open = Some(channel);
-                    s.lines.clear();
-                    if let Some(c) = s.conversations.iter_mut().find(|c| c.channel == channel) {
-                        c.waiting = waiting;
-                    }
+                // A brand new conversation is not in the list until the next
+                // rebuild, so it is put there now rather than opening onto
+                // nothing.
+                desk.restructure = true;
+                desk.channels.entry(channel).or_insert_with(|| Known {
+                    peer: Some(peer),
+                    public: false,
+                    group: false,
+                    label: peer.to_string(),
+                    admins: vec![chat.me, peer],
+                    timeline: Timeline::default(),
+                    seen: 0,
+                    last_at: 0,
+                    unread: 0,
+                    waiting,
+                    typing: false,
+                    trouble: Trouble::default(),
                 });
-                timelines.entry(channel).or_default();
+                if let Some(k) = desk.channels.get_mut(&channel) {
+                    k.waiting = waiting;
+                }
+                open(desk, state, channel);
             }
             Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
         },
-        Cmd::Show(channel) => {
+        Cmd::Show(channel) => open(desk, state, channel),
+        Cmd::Close => {
+            desk.open = None;
             state.send_modify(|s| {
-                s.open = Some(channel);
+                s.open = None;
                 s.lines.clear();
-                // The divider is taken **here**, on entry, and then left
-                // alone. Reading advances the read mark, so one recomputed
-                // each refresh would disappear the moment somebody looked at
-                // the thing it was marking.
-                let unread = s
-                    .conversations
-                    .iter()
-                    .find(|c| c.channel == channel)
-                    .map(|c| c.unread)
-                    .unwrap_or(0);
-                s.unread_on_open = unread;
                 s.divider = None;
+                s.unread_on_open = 0;
             });
-            timelines.entry(channel).or_default();
         }
-        Cmd::Close => state.send_modify(|s| {
-            s.open = None;
-            s.lines.clear();
-            s.divider = None;
-            s.unread_on_open = 0;
-        }),
         Cmd::Send(text) => {
-            let open = state.borrow().open;
-            let Some(channel) = open else { return };
+            let Some(channel) = desk.open else { return };
             if let Err(e) = chat.send(&channel, &text).await {
                 // The text is not thrown away here; the interface keeps it in
                 // the composer, because retyping a message the program lost is
                 // the worst thing a chat client can do to somebody.
                 state.send_modify(|s| s.trouble = Some(e.to_string()));
+            } else {
+                desk.dirty.insert(channel);
             }
         }
         Cmd::AddContact(who, label) => {
@@ -406,87 +915,36 @@ async fn apply(
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let _ = chat.store().add_contact(&who, &label, now);
+            desk.restructure = true;
         }
         Cmd::Reconnect => chat.reconnect_now(),
     }
 }
 
-/// Refetch what is on screen and rebuild the conversation list.
-async fn refresh(
-    chat: &mut Chat,
-    state: &watch::Sender<ChatState>,
-    timelines: &mut HashMap<[u8; 32], Timeline>,
-) {
-    let me = state.borrow().me;
-    let open = state.borrow().open;
-
-    let mut summaries = Vec::new();
-    if let Ok(contacts) = chat.store().contacts() {
-        for contact in contacts {
-            let channel = chat.dm_with(&contact.account);
-            summaries.push(Summary {
-                channel,
-                peer: Some(contact.account),
-                label: if contact.label.is_empty() {
-                    contact.account.to_string()
-                } else {
-                    contact.label.clone()
-                },
-                unread: 0,
-                waiting: false,
-                // Filled once the conversation model comes off `Chat::mine()`
-                // rather than the contact list. Left honest rather than
-                // invented: a list showing a preview it made up is worse than
-                // one showing none.
-                preview: None,
-                at: None,
-                public: false,
-                group: false,
-                typing: false,
-            });
-        }
-    }
-
-    let mut lines = Vec::new();
-    let mut typing = false;
-    let mut lost = 0;
-    if let Some(channel) = open {
-        let timeline = timelines.entry(channel).or_default();
-        // `wait_secs: 0` -- a long poll here would hold the tick open and make
-        // every command wait behind it.
-        if let Ok(conversation) = chat.poll(&channel, timeline, 0).await {
-            typing = conversation.typing;
-            lost = conversation.lost;
-            lines = conversation
-                .timeline
-                .messages()
-                .map(|m| Line {
-                    seq: m.seq,
-                    who: m.account,
-                    // Names arrive with the profile work; until then the key,
-                    // which is never wrong and never an assertion.
-                    name: None,
-                    mine: Some(m.account) == me,
-                    at: m.posted,
-                    text: m.post.body_text().unwrap_or_default().to_string(),
-                    redacted: m.redacted,
-                    edited: m.edited.is_some(),
-                })
-                .collect();
-            // Reading advances the read mark, which is what makes "where was I"
-            // survive closing the client.
-            if let Some(last) = lines.last().map(|l| l.seq) {
-                let _ = chat.mark_read(&channel, last).await;
-            }
-        }
-    }
-
-    let link = LinkState::from(chat.link());
+/// Put a conversation on screen, taking the unread divider as it goes.
+fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
+    desk.open = Some(channel);
+    desk.dirty.insert(channel);
+    // The divider is taken **here**, on entry, and then left alone. Reading
+    // advances the read mark, so one recomputed each refresh would disappear
+    // the moment somebody looked at the thing it was marking.
+    let known = desk.channels.get(&channel);
+    let unread = known.map(|k| k.unread).unwrap_or(0);
+    let divider = (unread > 0)
+        .then(|| {
+            known.and_then(|k| {
+                let messages: Vec<u64> = k.timeline.messages().map(|m| m.seq).collect();
+                messages
+                    .len()
+                    .checked_sub(unread)
+                    .and_then(|i| messages.get(i).copied())
+            })
+        })
+        .flatten();
     state.send_modify(|s| {
-        s.link = link;
-        s.conversations = summaries;
-        s.lines = lines;
-        s.typing = typing;
-        s.lost = lost;
+        s.open = Some(channel);
+        s.lines.clear();
+        s.unread_on_open = unread;
+        s.divider = divider;
     });
 }

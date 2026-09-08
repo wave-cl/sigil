@@ -2,7 +2,7 @@
 
 pub mod session;
 
-pub use session::{ChatHandle, ChatState, Closing, Cmd, Line, LinkState, Summary};
+pub use session::{ChatHandle, ChatState, Closing, Cmd, Line, LinkState, Summary, Trouble};
 
 use std::collections::HashMap;
 
@@ -443,18 +443,7 @@ impl ChatApp {
             return;
         }
 
-        if state.lost > 0 {
-            // An epoch that has been superseded is gone, and saying so is the
-            // difference between somebody waiting for it and somebody knowing
-            // not to. Not the same as `unreadable`, where a key may still come.
-            ui.colored_label(
-                theme.destructive,
-                match state.lost {
-                    1 => "1 message here cannot be read: its key is gone.".to_string(),
-                    n => format!("{n} messages here cannot be read: their key is gone."),
-                },
-            );
-        }
+        self.trouble_ui(&state.trouble_with, ui, theme);
 
         // The composer is laid out first, from the bottom, so the transcript
         // gets the remaining height rather than pushing it off the screen.
@@ -476,6 +465,70 @@ impl ChatApp {
                         self.messages_ui(state, ui, theme, now);
                     });
             });
+    }
+
+    /// What is wrong with this conversation, said in words.
+    ///
+    /// Each of these is a **different thing to do**, so none of them may be
+    /// collapsed into the others. The pair most easily confused is the pair
+    /// that matters most: an unreadable entry is one whose key may still
+    /// arrive, so waiting is right; a lost one is under a superseded epoch and
+    /// is gone, so waiting is forever.
+    fn trouble_ui(&self, trouble: &Trouble, ui: &mut egui::Ui, theme: &ColorTheme) {
+        if trouble.is_clear() {
+            return;
+        }
+        let mut say = |colour: egui::Color32, text: String| {
+            ui.colored_label(colour, text);
+        };
+        if let Some(epoch) = trouble.no_key {
+            // SIP-17's stranded member: every entry fetches and none of them
+            // open. Without this the conversation simply reads as empty, which
+            // is indistinguishable from nobody having written.
+            say(
+                theme.destructive,
+                format!(
+                    "You hold no key for this conversation (epoch {epoch}). \
+                     An admin has to hand you one before anything here can be read."
+                ),
+            );
+        }
+        if trouble.unreadable > 0 {
+            say(
+                theme.warning,
+                match trouble.unreadable {
+                    1 => "1 message here has not been opened yet — its key may still arrive."
+                        .to_string(),
+                    n => format!(
+                        "{n} messages here have not been opened yet — their key may still arrive."
+                    ),
+                },
+            );
+        }
+        if trouble.lost > 0 {
+            say(
+                theme.destructive,
+                match trouble.lost {
+                    1 => "1 message here can never be read: its key is gone.".to_string(),
+                    n => format!("{n} messages here can never be read: their key is gone."),
+                },
+            );
+        }
+        if trouble.gap {
+            say(
+                theme.text_secondary,
+                "Older messages have passed this channel's retention window and are gone."
+                    .to_string(),
+            );
+        }
+        if trouble.restarted {
+            say(
+                theme.warning,
+                "This conversation was destroyed and started again under the same name. \
+                 Nothing above is related to what follows."
+                    .to_string(),
+            );
+        }
     }
 
     /// The messages themselves, with day separators, grouping and the divider.

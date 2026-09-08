@@ -189,3 +189,124 @@ async fn the_link_state_has_words_for_every_case() {
     assert_eq!(LinkState::Retrying.word(), "reconnecting…");
     assert_eq!(LinkState::Gone.word(), "offline");
 }
+
+/// A message from somebody who is not already a contact must appear.
+///
+/// # What this is really testing
+///
+/// The conversation list used to be built from `store().contacts()` — a purely
+/// local note-to-self about who exists. A stranger is by definition not in it,
+/// so their conversation had no row, and a message in it was invisible: not
+/// late, not an error, simply absent, with nothing on screen suggesting
+/// anything had happened.
+///
+/// The fix is that the list comes from `Chat::mine()`, which is the exchange's
+/// answer to "what am I in" and **the only way to learn about a channel nobody
+/// told us about**. Bob never adds Alice here, deliberately: adding her is
+/// exactly the step that used to be required and must not be.
+#[tokio::test]
+async fn a_message_from_a_stranger_appears_without_adding_them_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(3);
+    let (b_signer, b_id) = signer(4);
+
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    // Bob opens nothing and adds nobody. He publishes prekeys by existing,
+    // which is all SIP-23 needs for Alice to be able to seal to him.
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(|| alice.state().open.is_some(), 15).await,
+        "Alice should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+    alice.send(Cmd::Send("out of the blue".into()));
+
+    // Bob's list has to grow a row for a person he has never heard of, and it
+    // has to happen because SIP-30 said so rather than because the periodic
+    // rebuild came round. Those are different mechanisms and only one of them
+    // is fast enough to be a chat client, so the wait is pinned well inside
+    // the backstop -- and asserted against it, so that lowering the backstop
+    // cannot quietly turn this back into a test of the backstop.
+    const WAIT: u64 = 10;
+    assert!(
+        std::time::Duration::from_secs(WAIT) * 2 < sigil_chat::session::BACKSTOP,
+        "this test no longer proves the event path: it waits {WAIT}s against a          backstop of {:?}",
+        sigil_chat::session::BACKSTOP
+    );
+    let listed = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id))
+        },
+        WAIT,
+    )
+    .await;
+    assert!(
+        listed,
+        "a conversation with a stranger must appear in the list: {:?}",
+        bob.state().conversations
+    );
+
+    // And it has to be counted, or the badge that brings somebody back to the
+    // window is permanently zero — which it was.
+    let counted = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id) && c.unread > 0)
+        },
+        25,
+    )
+    .await;
+    assert!(
+        counted,
+        "and be counted unread while it is not on screen: {:?}",
+        bob.state().conversations
+    );
+
+    // Opening it is what clears the count.
+    let channel = bob
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.peer == Some(a_id))
+        .map(|c| c.channel)
+        .unwrap();
+    bob.send(Cmd::Show(channel));
+    let read = until(
+        || {
+            let s = bob.state();
+            s.open == Some(channel)
+                && s.lines.iter().any(|l| l.text == "out of the blue")
+                && s.conversations
+                    .iter()
+                    .all(|c| c.peer != Some(a_id) || c.unread == 0)
+        },
+        25,
+    )
+    .await;
+    assert!(read, "opening it shows it and clears it: {:?}", bob.state());
+
+    alice.stop();
+    bob.stop();
+}

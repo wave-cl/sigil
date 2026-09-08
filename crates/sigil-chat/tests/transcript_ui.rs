@@ -111,7 +111,7 @@ fn a_conversation() -> ChatState {
             },
         ],
         typing: false,
-        lost: 0,
+        trouble_with: Default::default(),
         divider: Some(3),
         unread_on_open: 2,
     }
