@@ -91,6 +91,8 @@ pub struct Line {
     pub reply_to: Option<(String, String)>,
     /// How far one of ours is known to have got. `None` on anybody else's.
     pub receipt: Option<Receipt>,
+    /// Files this message carries.
+    pub attachments: Vec<Attached>,
 }
 
 /// How far a message is known to have got.
@@ -190,6 +192,31 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// A file carried by a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    /// Image, video, voice note, or file. **Taken from the kind, never from
+    /// the mime type**, which is the sender's claim and nothing more: SIP-18
+    /// says a receiver must not dispatch on it beyond choosing how to display,
+    /// must never execute a blob, and must never hand one to a handler chosen
+    /// by that string.
+    pub kind: u8,
+    /// What it is, in words: `[image 1920x1080, 2.1 MB]`.
+    pub described: String,
+    pub size: u64,
+    /// The thumbnail the sender put in, if any. Drawn while the blob is
+    /// fetched, and the only thing shown at all until it is.
+    pub preview: Vec<u8>,
+    /// The whole file, once it has been fetched and opened.
+    ///
+    /// Held here rather than fetched by the view: a view runs sixty times a
+    /// second and must never be where a download starts.
+    pub bytes: Option<Vec<u8>>,
+    /// A name for the blob, stable across passes, so the interface can key a
+    /// texture on it.
+    pub id: String,
 }
 
 /// A call, as the interface needs it.
@@ -471,6 +498,18 @@ pub enum Cmd {
         seq: u64,
         seconds: u32,
     },
+
+    // ---- files (SIP-18) -------------------------------------------------
+    /// Seal a file, upload it, and post a message carrying the reference.
+    SendFile(std::path::PathBuf),
+    /// Fetch a file and write it out.
+    SaveFile {
+        seq: u64,
+        index: usize,
+        to: std::path::PathBuf,
+    },
+    /// Set the open channel's picture, or clear it.
+    SetChannelAvatar(Option<std::path::PathBuf>),
 }
 
 pub struct ChatHandle {
@@ -655,6 +694,7 @@ async fn run(
                     }
                 }
                 learn_names(&mut chat, &mut desk).await;
+                fetch_files(&mut chat, &mut desk).await;
                 refresh(&mut chat, &state, &mut desk, me).await;
                 (wake)();
             }
@@ -760,6 +800,17 @@ struct Desk {
     /// only place the fact lives. It drives what is on screen and must never
     /// be allowed to contradict the log.
     answered: HashSet<([u8; 32], u64)>,
+    /// Files fetched and opened, by blob.
+    ///
+    /// Images in the conversation on screen are fetched **here**, on the
+    /// session, and never by a view: a view runs sixty times a second and is
+    /// the last place a download should start. Bounded by kind and by size —
+    /// a hundred-megabyte video is not something to pull because somebody
+    /// scrolled past it.
+    files: HashMap<[u8; 32], Vec<u8>>,
+    /// Blobs we tried and could not get, so a broken one is not retried on
+    /// every pass for as long as the conversation is open.
+    unfetchable: HashSet<[u8; 32]>,
     /// Ticks since the list was last rebuilt.
     ///
     /// A backstop, not the mechanism. Events are what make this responsive,
@@ -778,6 +829,8 @@ impl Default for Desk {
             dirty: HashSet::new(),
             restale: HashSet::new(),
             answered: HashSet::new(),
+            files: HashMap::new(),
+            unfetchable: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
             since_sync: 0,
@@ -1135,6 +1188,71 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
     publish(chat, state, desk, me);
 }
 
+/// The longest edge of a thumbnail, in pixels.
+///
+/// It rides inside the message, which is capped, so this has to stay small
+/// enough that a photograph does not push the post over the limit on its own.
+const THUMBNAIL_EDGE: u32 = 96;
+
+/// A small picture of an image file, to carry inside the message.
+///
+/// `None` for anything that will not decode. A missing thumbnail is ordinary —
+/// SIP-18 makes the field optional and every reader has to cope with an empty
+/// one — so a file that cannot be previewed is still sent.
+fn thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
+    let image = image::ImageReader::open(path).ok()?.decode().ok()?;
+    let small = image.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
+    let mut out = std::io::Cursor::new(Vec::new());
+    // PNG rather than the source format: a thumbnail of a JPEG is small enough
+    // that the difference does not matter, and one encoder is one thing that
+    // can go wrong.
+    small.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
+/// The largest file fetched without being asked for.
+///
+/// An image is worth pulling so a conversation reads as a conversation; a
+/// video is not, and neither is a large photograph on a metered connection.
+/// Everything above this waits to be asked for, which is what the Save control
+/// is.
+const AUTO_FETCH_MAX: u64 = 4 * 1024 * 1024;
+
+/// Fetch the images in the conversation on screen.
+///
+/// Bounded three ways — kind, size, and one attempt per blob — because this
+/// runs on a tick. `download` verifies the blob's name against the ciphertext
+/// **before decrypting**, so what arrives is what was named or nothing.
+async fn fetch_files(chat: &mut Chat, desk: &mut Desk) {
+    let Some(open) = desk.open else { return };
+    let Some(known) = desk.channels.get(&open) else {
+        return;
+    };
+    let wanted: Vec<sqex_proto::blob::Attachment> = known
+        .timeline
+        .messages()
+        .flat_map(|m| m.post.attachments())
+        .filter(|a| a.effective_kind() == sqex_proto::blob::KIND_IMAGE)
+        .filter(|a| a.size <= AUTO_FETCH_MAX)
+        .filter(|a| !desk.files.contains_key(&a.blob) && !desk.unfetchable.contains(&a.blob))
+        .cloned()
+        .collect();
+
+    for a in wanted {
+        match chat.download(&a).await {
+            Ok(bytes) => {
+                desk.files.insert(a.blob, bytes);
+            }
+            // Remembered as a failure rather than retried every tick. A blob
+            // that has passed its retention window is gone, and asking again
+            // four times a second will not bring it back.
+            Err(_) => {
+                desk.unfetchable.insert(a.blob);
+            }
+        }
+    }
+}
+
 /// Learn what everybody on screen is called.
 ///
 /// Two fetches with different meanings, and they must not be merged:
@@ -1292,6 +1410,21 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     // Only ever on our own. On somebody else's it would be a
                     // claim about our own reading, shown back to us.
                     receipt: (m.account == me).then(|| receipt_for(k, m.seq, &me)),
+                    attachments: m
+                        .post
+                        .attachments()
+                        .map(|a| Attached {
+                            // From the kind, never the mime: that is the
+                            // sender's claim, and SIP-18 forbids dispatching
+                            // on it beyond choosing how to display.
+                            kind: a.effective_kind(),
+                            described: sqex_chat::attach::describe(a),
+                            size: a.size,
+                            preview: a.preview.clone(),
+                            bytes: desk.files.get(&a.blob).cloned(),
+                            id: bs58::encode(a.blob).into_string(),
+                        })
+                        .collect(),
                 })
                 .collect()
         })
@@ -1567,6 +1700,101 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::Typing(on) => {
             let Some(channel) = desk.open else { return };
             chat.typing(&channel, on).await;
+        }
+
+        Cmd::SendFile(path) => {
+            let Some(channel) = desk.open else { return };
+            // **Asked, never assumed.** SIP-18 says a client discovers the
+            // chunk size from the exchange, and a client that guessed 256 KiB
+            // against one on the uniform 64 KiB cap fails its first Put with
+            // nothing explaining why.
+            let limits = match chat.blob_limits().await {
+                Ok(l) => l,
+                Err(e) => return trouble(state, e),
+            };
+            let prepared = match chat.prepare_file(&path, limits.chunk as usize) {
+                Ok(p) => p,
+                Err(e) => return trouble(state, e),
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            note(state, format!("Sending {name}…"));
+            let mut attachment = match chat.upload(&channel, &prepared).await {
+                Ok(a) => a,
+                Err(e) => return trouble(state, e),
+            };
+            // The field SIP-18 has always had and the terminal client always
+            // left empty: "rendering one means decoding the image, and a
+            // terminal client has nothing to show it on. The field exists for
+            // a client that does." This is that client.
+            //
+            // It travels **inside the sealed message**, so it is no more
+            // visible to the exchange than the picture is — and it is what a
+            // reader sees before the blob has been fetched, or instead of it
+            // when the blob is too big to fetch unasked.
+            if attachment.effective_kind() == sqex_proto::blob::KIND_IMAGE {
+                attachment.preview = thumbnail(&path).unwrap_or_default();
+            }
+            let post = sqex_proto::message::Post {
+                parts: vec![sqex_proto::message::Part::Attachment(attachment)],
+                ..Default::default()
+            };
+            match chat.send_post(&channel, post).await {
+                Ok(_) => {
+                    desk.dirty.insert(channel);
+                    note(state, format!("Sent {name}."));
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::SaveFile { seq, index, to } => {
+            let Some(channel) = desk.open else { return };
+            let Some(attachment) = desk
+                .channels
+                .get(&channel)
+                .and_then(|k| k.timeline.messages().find(|m| m.seq == seq))
+                .and_then(|m| m.post.attachments().nth(index).cloned())
+            else {
+                return trouble(state, "that file is no longer in the conversation");
+            };
+            match chat.download(&attachment).await {
+                Ok(bytes) => match std::fs::write(&to, &bytes) {
+                    Ok(()) => note(state, format!("Saved to {}", to.display())),
+                    Err(e) => trouble(state, format!("could not write {}: {e}", to.display())),
+                },
+                // A missing chunk is reported as retention rather than as a
+                // failure, because that is usually what it is.
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::SetChannelAvatar(path) => {
+            let Some(channel) = desk.open else { return };
+            let attachment = match path {
+                None => None,
+                Some(path) => {
+                    let limits = match chat.blob_limits().await {
+                        Ok(l) => l,
+                        Err(e) => return trouble(state, e),
+                    };
+                    let prepared = match chat.prepare_file(&path, limits.chunk as usize) {
+                        Ok(p) => p,
+                        Err(e) => return trouble(state, e),
+                    };
+                    match chat.upload(&channel, &prepared).await {
+                        Ok(a) => Some(a),
+                        Err(e) => return trouble(state, e),
+                    }
+                }
+            };
+            match chat.set_avatar(&channel, attachment).await {
+                Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
         }
 
         Cmd::Call => {

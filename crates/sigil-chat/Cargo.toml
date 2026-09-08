@@ -8,6 +8,8 @@ description = "Messaging as a sigil App."
 [dependencies]
 egui = { workspace = true }
 bs58 = { workspace = true }
+image = { workspace = true }
+rfd = { workspace = true }
 sigil = { path = "../sigil" }
 sigil-ui = { path = "../sigil-ui" }
 sqex-chat = { workspace = true }

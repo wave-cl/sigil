@@ -166,6 +166,8 @@ pub struct Bubble<'a> {
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: &'a [(String, usize, bool)],
     pub receipt: Option<Receipt>,
+    /// Files it carries.
+    pub attachments: &'a [crate::Attachment<'a>],
 }
 
 /// What the reader did to a message.
@@ -178,6 +180,8 @@ pub struct BubbleAction {
     pub redact: bool,
     /// Copy the author's key.
     pub copy_key: bool,
+    /// Save the file at this index.
+    pub save: Option<usize>,
 }
 
 impl BubbleAction {
@@ -310,6 +314,15 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                 if let Some((who, stub)) = b.reply_to {
                     reply_stub(ui, who, stub, &theme);
                 }
+                // Before the text: a message is usually a picture *with* a
+                // caption rather than a caption with a picture attached.
+                if !b.redacted {
+                    for (i, a) in b.attachments.iter().enumerate() {
+                        if crate::attachment(ui, a).save {
+                            action.save = Some(i);
+                        }
+                    }
+                }
                 if b.redacted {
                     // The tombstone. Deleting the row instead would destroy the
                     // one thing a redaction is for: the record that something
@@ -319,7 +332,7 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                             .italics()
                             .color(theme.text_muted),
                     );
-                } else {
+                } else if !b.text.is_empty() {
                     ui.add(egui::Label::new(b.text).wrap().selectable(true));
                 }
                 // Our own bubble is filled with the accent, and `text_muted`

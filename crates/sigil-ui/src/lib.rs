@@ -3,6 +3,7 @@
 //! Deliberately knows nothing of the protocol: everything here takes plain
 //! data, so this does not become a second place the wire format is understood.
 
+pub mod attachment;
 pub mod clock;
 pub mod conversation_row;
 pub mod dot;
@@ -10,6 +11,7 @@ pub mod identicon;
 pub mod message;
 pub mod roster;
 
+pub use attachment::{Attachment, AttachmentAction, attachment};
 pub use clock::{brief, clock, day_label, day_of, stamp};
 pub use conversation_row::{ConversationRow, conversation_row};
 pub use dot::dot;

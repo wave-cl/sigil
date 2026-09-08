@@ -3,8 +3,8 @@
 pub mod session;
 
 pub use session::{
-    ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Receipt, Ring,
-    Summary, Trouble,
+    Attached, ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Receipt,
+    Ring, Summary, Trouble,
 };
 
 use std::collections::HashMap;
@@ -890,6 +890,17 @@ impl ChatApp {
 
             let key = line.who.to_string();
             let title = state.people.get(&line.who).and_then(|p| p.title.as_deref());
+            let files: Vec<sigil_ui::Attachment<'_>> = line
+                .attachments
+                .iter()
+                .map(|a| sigil_ui::Attachment {
+                    kind: a.kind,
+                    described: &a.described,
+                    preview: &a.preview,
+                    bytes: a.bytes.as_deref(),
+                    id: &a.id,
+                })
+                .collect();
             let bubble = sigil_ui::Bubble {
                 key: &key,
                 name: line.name.as_deref(),
@@ -910,6 +921,7 @@ impl ChatApp {
                     Receipt::Delivered => sigil_ui::Receipt::Delivered,
                     Receipt::Read => sigil_ui::Receipt::Read,
                 }),
+                attachments: &files,
             };
             let did = sigil_ui::bubble(ui, &bubble);
             if !did.is_none() {
@@ -943,6 +955,14 @@ impl ChatApp {
             }
             if did.copy_key {
                 ui.ctx().copy_text(who.to_string());
+            }
+            if let Some(index) = did.save {
+                // The dialog is native and blocking, which is fine here: it is
+                // a direct answer to a click, and the session goes on running
+                // on its own task regardless.
+                if let Some(to) = rfd::FileDialog::new().save_file() {
+                    self.send_as(Some(me), Cmd::SaveFile { seq, index, to });
+                }
             }
         }
     }
@@ -1015,6 +1035,14 @@ impl ChatApp {
             let send = ui
                 .button(if editing.is_some() { "Save" } else { "Send" })
                 .clicked();
+            if ui
+                .button("Attach")
+                .on_hover_text("Send a file. It is sealed before it leaves this machine.")
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new().pick_file()
+            {
+                self.send_as(Some(me), Cmd::SendFile(path));
+            }
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (entered || send) && !self.pane(me).composing.trim().is_empty() {
                 // Taken, not cleared: if the send fails the text has to come

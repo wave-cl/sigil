@@ -700,3 +700,98 @@ async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
     alice.stop();
     bob.stop();
 }
+
+/// A file sent through a real exchange, and read back on the other side.
+///
+/// The blob is sealed with a key of its own before it leaves, and its name is
+/// the SHA-256 of the **ciphertext** — so the exchange verifies a name for
+/// bytes it cannot read, and `download` checks that name before decrypting
+/// anything. What arrives is what was named, or nothing.
+#[tokio::test]
+async fn a_file_is_sent_and_arrives_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(13);
+    let (b_signer, b_id) = signer(14);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+
+    // Deliberately not an image: this is about the blob path, and a file that
+    // needs no decoder cannot fail for a decoder's reasons.
+    let payload: Vec<u8> = (0..5000u32).map(|n| (n % 251) as u8).collect();
+    let path = dir.path().join("notes.bin");
+    std::fs::write(&path, &payload).unwrap();
+    alice.send(Cmd::SendFile(path));
+
+    let arrived = until(
+        || bob.state().lines.iter().any(|l| !l.attachments.is_empty()),
+        25,
+    )
+    .await;
+    assert!(
+        arrived,
+        "the file should reach the other side: {:?}",
+        bob.state().lines
+    );
+
+    let line = bob
+        .state()
+        .lines
+        .into_iter()
+        .find(|l| !l.attachments.is_empty())
+        .unwrap();
+    let file = &line.attachments[0];
+    assert_eq!(file.size, payload.len() as u64, "the size is carried");
+    assert!(
+        file.described.contains("kB") || file.described.contains("B"),
+        "and it is described in words a reader can use: {}",
+        file.described
+    );
+
+    // And the bytes themselves come back exactly, through the same path the
+    // Save control uses.
+    let out = dir.path().join("out.bin");
+    bob.send(Cmd::SaveFile {
+        seq: line.seq,
+        index: 0,
+        to: out.clone(),
+    });
+    let written = until(|| out.exists(), 25).await;
+    assert!(
+        written,
+        "saving it writes it out: {:?}",
+        bob.state().trouble
+    );
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        payload,
+        "and what comes back is byte for byte what was sent"
+    );
+
+    alice.stop();
+    bob.stop();
+}

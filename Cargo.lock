@@ -5754,6 +5754,8 @@ dependencies = [
  "egui",
  "egui_kittest",
  "hex",
+ "image",
+ "rfd",
  "sigil",
  "sigil-net",
  "sigil-ui",

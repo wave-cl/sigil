@@ -10,7 +10,7 @@ use egui_kittest::kittest::NodeT;
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
-use sigil_chat::{ChatApp, ChatState, Line, LinkState, Member, Person, Receipt, Summary};
+use sigil_chat::{Attached, ChatApp, ChatState, Line, LinkState, Member, Person, Receipt, Summary};
 use sqnr_core::PubKey;
 
 /// 2026-09-08 12:00:00 UTC. Pinned, because a day separator says "Today" and
@@ -81,6 +81,7 @@ fn a_conversation() -> ChatState {
                 reactions: Vec::new(),
                 reply_to: None,
                 receipt: None,
+                attachments: Vec::new(),
             },
             Line {
                 seq: 2,
@@ -94,6 +95,7 @@ fn a_conversation() -> ChatState {
                 reactions: vec![("\u{1f44d}".to_string(), 2, true)],
                 reply_to: None,
                 receipt: Some(Receipt::Read),
+                attachments: Vec::new(),
             },
             Line {
                 seq: 3,
@@ -107,6 +109,17 @@ fn a_conversation() -> ChatState {
                 reactions: Vec::new(),
                 reply_to: None,
                 receipt: None,
+                attachments: vec![Attached {
+                    // Not an image, so it draws as a named row rather than as
+                    // a picture — and no bytes, because nothing has been
+                    // fetched.
+                    kind: 0x04,
+                    described: "[notes.txt, 2.1 kB]".into(),
+                    size: 2100,
+                    preview: Vec::new(),
+                    bytes: None,
+                    id: "abc123".into(),
+                }],
             },
             Line {
                 seq: 4,
@@ -120,6 +133,7 @@ fn a_conversation() -> ChatState {
                 reactions: Vec::new(),
                 reply_to: Some(("me".into(), "mine, on the other side".into())),
                 receipt: None,
+                attachments: Vec::new(),
             },
             Line {
                 seq: 5,
@@ -133,6 +147,7 @@ fn a_conversation() -> ChatState {
                 reactions: Vec::new(),
                 reply_to: None,
                 receipt: None,
+                attachments: Vec::new(),
             },
         ],
         typing: false,
