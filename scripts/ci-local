@@ -114,7 +114,12 @@ def main() -> int:
             print(f"\n== {job}: {step_name}\n$ {cmd}")
             if listing:
                 continue
-            result = subprocess.run(cmd, shell=True, cwd=REPO)
+            # bash, explicitly. `shell=True` uses /bin/sh, and GitHub runs
+            # `run:` steps under bash -- so a step using a bash-ism passes on
+            # the runner and fails here. The fmt step's `< <(...)` process
+            # substitution did exactly that, which is precisely the drift this
+            # script exists to stop.
+            result = subprocess.run(["bash", "-c", cmd], cwd=REPO)
             if result.returncode != 0:
                 print(f"\nfailed: {job} / {step_name}", file=sys.stderr)
                 return result.returncode
