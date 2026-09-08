@@ -541,7 +541,11 @@ impl App for ChatApp {
                 if self.columns_open {
                     egui::Panel::left("chat_list")
                         .resizable(false)
-                        .exact_size(column_width.min(360.0))
+                        // Narrower than a third of a wide window. A list of
+                        // names and one line of preview needs about this much,
+                        // and everything past it is width taken from the
+                        // conversation, which is what somebody is reading.
+                        .exact_size(column_width.min(280.0))
                         .frame(egui::Frame::NONE.inner_margin(egui::Margin {
                             right: tokens::SPACING_LG as i8,
                             ..Default::default()
@@ -612,8 +616,7 @@ impl ChatApp {
             // Only when there is nothing to bring back does this appear, so
             // the bar is not carrying a control that does nothing.
             if !self.columns_open
-                && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Show the conversations")
-                    .clicked()
+                && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Show the chats").clicked()
             {
                 self.columns_open = true;
             }
@@ -1131,16 +1134,12 @@ impl ChatApp {
                     // control that brings it back is in the conversation's own
                     // bar, because a control inside the thing it hides is a
                     // control nobody can reach once they have used it.
-                    if sigil_ui::icon_button_named(
-                        ui,
-                        sigil_ui::Icon::Menu,
-                        "Hide the conversations",
-                    )
-                    .clicked()
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Hide the chats")
+                        .clicked()
                     {
                         self.columns_open = false;
                     }
-                    ui.heading("Conversations");
+                    ui.heading("Chats");
                 });
             });
         });
@@ -1302,7 +1301,7 @@ impl ChatApp {
                 } else {
                     ui.colored_label(theme.text_secondary, "Nothing open.");
                     ui.add_space(tokens::SPACING_SM);
-                    if ui.button("Show conversations").clicked() {
+                    if ui.button("Show chats").clicked() {
                         self.columns_open = true;
                     }
                 }

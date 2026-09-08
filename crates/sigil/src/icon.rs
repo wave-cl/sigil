@@ -89,7 +89,7 @@ impl Icon {
             Icon::Plus => "New",
             Icon::Compose => "New conversation",
             Icon::Chevron => "More choices",
-            Icon::Menu => "Conversations",
+            Icon::Menu => "Chats",
             Icon::Search => "Search",
             Icon::Attach => "Attach a file",
             Icon::Send => "Send",

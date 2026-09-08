@@ -378,6 +378,12 @@ impl Shell {
 
     /// The app rail: one icon per app, with its unread badge.
     ///
+    /// **No account switcher.** It was pinned to the bottom of this, which
+    /// meant identities were chosen in one place and everything else about
+    /// them — the key, the exchanges, the profile — read in another. They are
+    /// all behind the identity block in the top right now, which is also where
+    /// the name being switched away from is shown.
+    ///
     /// Icons, because a rail is narrow by definition and a column of words is
     /// a column of labels. Each still **says its name** — to the accessibility
     /// tree and on hover — since an icon alone is a convention somebody has to
@@ -417,50 +423,6 @@ impl Shell {
                 ui.add_space(tokens::SPACING_XS);
             }
         });
-        // Pinned to the bottom, the way an account switcher is everywhere
-        // else. Only when there is a choice to make: a switcher over one
-        // account is a control that cannot do anything.
-        if self.accounts.len() > 1 {
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                self.switcher(ui);
-            });
-        }
-    }
-
-    /// Which identity is on screen, and how to look at another.
-    ///
-    /// Every account here is **live** whether or not it is the one selected —
-    /// see [`sigil::accounts`]. Selecting one changes what is drawn and stops
-    /// nothing, so nothing here needs a warning about what will be lost.
-    fn switcher(&mut self, ui: &mut egui::Ui) {
-        let theme = ColorTheme::current(ui.ctx());
-        let active = self.accounts.active_index();
-        for i in (0..self.accounts.len()).rev() {
-            let label = self.accounts.label(i);
-            let open = self.accounts.get(i).is_some_and(|a| a.is_unlocked());
-            let selected = i == active;
-            // A sealed account reads differently from an open one, because
-            // selecting it gets a passphrase field rather than a conversation.
-            let text = if open {
-                egui::RichText::new(label)
-            } else {
-                egui::RichText::new(format!("{label} (locked)")).color(theme.text_muted)
-            };
-            let response = ui.selectable_label(selected, text);
-            // The full key on hover. A name -- even an abbreviated key -- is an
-            // assertion; the key is the thing that identifies somebody (SIP-21),
-            // so it stays reachable from wherever the short form is shown.
-            if let Some(account) = self.accounts.get(i)
-                && let Some(unlocked) = account.unlocked()
-            {
-                response.clone().on_hover_text(unlocked.me().to_string());
-            }
-            if response.clicked() && !selected {
-                self.accounts.switch_to(i);
-            }
-        }
-        ui.add_space(tokens::SPACING_XS);
-        ui.separator();
     }
 
     /// The active app, drawn through the history entry that names it — so an

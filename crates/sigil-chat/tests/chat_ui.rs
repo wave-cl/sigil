@@ -65,7 +65,7 @@ fn fields(h: &Harness<'static>) -> usize {
 /// It starts away: the conversation is what somebody opened sigil to read, and
 /// the list of the others is a thing they ask for.
 fn open_column(h: &mut Harness<'static>) {
-    h.get_by_label("Show the conversations").click();
+    h.get_by_label("Show the chats").click();
     h.run();
 }
 
@@ -218,13 +218,13 @@ fn nothing_open_offers_the_list_rather_than_naming_it() {
         "told to pick from a list that is not there: {said}"
     );
     assert!(
-        said.contains("Show conversations"),
+        said.contains("Show chats"),
         "and offered no way to one: {said}"
     );
-    h.get_by_label("Show conversations").click();
+    h.get_by_label("Show chats").click();
     h.run();
     assert!(
-        text_of(&h).contains("Conversations"),
+        text_of(&h).contains("Chats"),
         "the offer did nothing: {}",
         text_of(&h)
     );

@@ -304,60 +304,22 @@ fn desktop_pane_dark() {
     h.snapshot("desktop_pane_dark");
 }
 
-/// The switcher appears only when there is a choice, and every account in it
-/// is live whether or not it is the one being shown.
+/// Identities are not chosen here.
+///
+/// The switcher was pinned to the bottom of the rail, so identities were
+/// chosen in one place and everything else about them read in another. It
+/// lives behind the identity block in the top right now, and
+/// `every_identity_is_offered_and_one_is_not_a_choice` in `sigil-chat` is
+/// where that property is asserted.
 #[test]
-fn the_rail_offers_a_switcher_once_there_is_more_than_one_identity() {
-    fn labels(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
-        let n = node.accesskit_node();
-        if let Some(l) = n.label() {
-            out.push(l.to_string());
-        }
-        if let Some(v) = n.value() {
-            out.push(v.to_string());
-        }
-        for child in node.children() {
-            labels(child, out);
-        }
-    }
-
-    fn rail_labels(accounts: sigil::accounts::Accounts) -> String {
-        let apps: Vec<Box<dyn App>> = vec![Box::new(Stub {
-            title: "Calls",
-            unread: 0,
-        })];
-        let mut shell = sigil_shell::Shell::new(apps, None).with_accounts(accounts);
-        let mut h = Harness::builder()
-            .with_size(egui::vec2(900.0, 600.0))
-            .build_ui(move |ui| {
-                let ctx = ui.ctx().clone();
-                theme::install(&ctx, theme::light(), theme::dark());
-                ctx.set_theme(egui::Theme::Dark);
-                shell.ui(ui);
-            });
-        h.run();
-        let mut found = Vec::new();
-        labels(h.root(), &mut found);
-        found.join(" | ")
-    }
-
-    // Fixed seeds: the key is drawn, and a generated one renders differently
-    // on every run, which is a snapshot that can never pass twice.
+fn the_rail_does_not_offer_identities() {
     let one = sigil::Account::unlocked_for_test([1u8; 32]);
-    let two = sigil::Account::unlocked_for_test([2u8; 32]);
-    let first = one.unlocked().unwrap().me().to_string();
-
-    let alone = rail_labels(sigil::accounts::Accounts::of(vec![
-        sigil::Account::unlocked_for_test([1u8; 32]),
-    ]));
+    let key = one.unlocked().unwrap().me().to_string();
+    let mut h = with_account(true, one);
+    h.run();
     assert!(
-        !alone.contains(&first[..10]),
-        "one account is not a choice, so there is nothing to switch between: {alone}"
-    );
-
-    let several = rail_labels(sigil::accounts::Accounts::of(vec![one, two]));
-    assert!(
-        several.contains(&first[..10]),
-        "each held identity is offered: {several}"
+        !said(&h).contains(&key[..10]),
+        "the rail is offering identities: {}",
+        said(&h)
     );
 }

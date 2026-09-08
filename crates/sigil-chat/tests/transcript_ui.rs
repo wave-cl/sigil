@@ -247,6 +247,29 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
 }
 
 /// A harness whose identity is connected to more than one exchange.
+/// A harness holding more than one identity.
+fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(accounts);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        })
+}
+
 fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
@@ -312,7 +335,7 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
 /// It starts away: the conversation is what somebody opened sigil to read, and
 /// the list of the others is a thing they ask for.
 fn open_column(h: &mut Harness<'static>) {
-    h.get_by_label("Show the conversations").click();
+    h.get_by_label("Show the chats").click();
     h.run();
 }
 
@@ -648,9 +671,9 @@ fn the_conversation_column_can_be_put_away_and_found_again() {
     let mut h = harness(true);
     h.run();
     open_column(&mut h);
-    assert!(text_of(&h).contains("Conversations"), "{}", text_of(&h));
+    assert!(text_of(&h).contains("Chats"), "{}", text_of(&h));
 
-    h.get_by_label("Hide the conversations").click();
+    h.get_by_label("Hide the chats").click();
     h.run();
     let said = text_of(&h);
     assert!(
@@ -658,11 +681,11 @@ fn the_conversation_column_can_be_put_away_and_found_again() {
         "the column is still there: {said}"
     );
     assert!(
-        said.contains("Show the conversations"),
+        said.contains("Show the chats"),
         "and there is no way back to it: {said}"
     );
 
-    h.get_by_label("Show the conversations").click();
+    h.get_by_label("Show the chats").click();
     h.run();
     assert!(
         text_of(&h).contains("release check"),
@@ -814,6 +837,41 @@ fn a_name_never_appears_without_its_key_reachable() {
     assert!(
         said.contains(&key),
         "your own key is shown in full, not abbreviated away: {said}"
+    );
+}
+
+/// Every identity this host holds is offered, and one is not a choice.
+///
+/// **Moved here from the shell's rail.** Identities used to be chosen at the
+/// bottom of the rail, which meant switching happened in one place and
+/// everything else about an identity — its key, its exchanges, its profile —
+/// was read in another. They are all behind the same block now.
+#[test]
+fn every_identity_is_offered_and_one_is_not_a_choice() {
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let two = Account::unlocked_for_test([2u8; 32]);
+    let first = one.unlocked().unwrap().me().to_string();
+
+    let mut h = harness_with_accounts(
+        a_conversation(),
+        vec![Account::unlocked_for_test([1u8; 32])],
+    );
+    h.run();
+    open_identity(&mut h);
+    assert!(
+        !text_of(&h).contains("Identities"),
+        "one account is not a choice, so there is nothing to switch between: {}",
+        text_of(&h)
+    );
+
+    let mut h = harness_with_accounts(a_conversation(), vec![one, two]);
+    h.run();
+    open_identity(&mut h);
+    let said = text_of(&h);
+    assert!(said.contains("Identities"), "{said}");
+    assert!(
+        said.contains(&first[..10]),
+        "each held identity is offered: {said}"
     );
 }
 
