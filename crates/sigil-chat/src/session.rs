@@ -62,6 +62,23 @@ const RING_SECS: u16 = 45;
 /// never waits behind it.
 const TICK_MS: u64 = 700;
 
+/// How many messages a conversation opens on, and how many more each time
+/// somebody asks for earlier ones.
+///
+/// # Why the transcript is paged at all
+///
+/// Opening a channel built a [`Line`] for **every message it had ever
+/// carried** — its text, its stub, its reactions, its attachments — and did it
+/// again on every poll, and the interface then cloned the whole vector twice
+/// per frame. On a small conversation that is free. On a public channel a few
+/// thousand messages deep it is seconds of work to show a screenful, repeated
+/// forever, and it was the first thing anybody noticed about a busy room.
+///
+/// Nothing is dropped: the store still holds every entry and the fold still
+/// folds all of them, so search, replies and receipts are unchanged. This is
+/// only how much of it gets turned into something drawable at once.
+pub const PAGE: usize = 50;
+
 /// One message, as the interface should draw it.
 ///
 /// Plain data on purpose: the widgets take this rather than
@@ -251,6 +268,11 @@ pub struct ChatState {
     /// What happened to the conversation, in the same sequence space as
     /// `lines` so the two interleave.
     pub events: Vec<Happened>,
+    /// How many messages there are before the first one in `lines`.
+    ///
+    /// Zero means the transcript is whole. Anything else is what the reader
+    /// gets offered when they reach the top; see [`PAGE`].
+    pub earlier: usize,
     /// Somebody is typing in the open conversation (SIP-19's only signal).
     pub typing: bool,
     /// What is wrong with the open conversation, if anything.
@@ -541,6 +563,12 @@ pub enum Cmd {
     OpenDm(PubKey),
     /// Show an existing conversation.
     Show([u8; 32]),
+    /// Build another [`PAGE`] of the open conversation's history.
+    ///
+    /// Asked for by the transcript when somebody reaches the top of it. The
+    /// entries are already held; this is only how many of them get turned into
+    /// something drawable.
+    Earlier,
     /// Post to whatever is open.
     Send(String),
     /// Remember somebody, so they appear in the list before they write.
@@ -952,6 +980,13 @@ struct Known {
     /// How many messages we had last time, so a new one can be counted unread
     /// without diffing two timelines.
     seen: usize,
+    /// How many of this channel's messages the interface has asked for.
+    ///
+    /// Grows by [`PAGE`] each time somebody reaches the top and asks for
+    /// earlier ones, and is reset when the conversation is opened afresh: a
+    /// channel somebody scrolled a long way back into last week should not
+    /// cost that again today.
+    wanted: usize,
     /// The newest thing said here. What the list sorts on.
     last_at: u64,
     unread: usize,
@@ -1251,6 +1286,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 marks: Vec::new(),
                 timeline,
                 seen,
+                wanted: PAGE,
                 last_at,
                 unread: 0,
                 waiting: false,
@@ -1291,6 +1327,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             marks: Vec::new(),
             timeline: Timeline::default(),
             seen: 0,
+            wanted: PAGE,
             unread: 0,
             // Nothing has happened here yet, so it sorts below anything that
             // has rather than claiming a time it does not have.
@@ -1651,9 +1688,24 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     )
                 })
                 .collect();
+            // The **last** `wanted` of them, which is where a conversation is
+            // read from. Everything before that stays in the fold and in the
+            // store; this only bounds how much is turned into something
+            // drawable at once. See [`PAGE`].
+            let total = k.timeline.messages().count();
+            let window = total.saturating_sub(k.wanted);
+
+            // A stub of what each message says, so a reply can name it. Only
+            // for what a reply in the window actually points at, and looked up
+            // in the fold rather than built for every message that ever
+            // existed -- which is precisely the work the window exists to
+            // avoid doing.
             let stubs: HashMap<u64, (PubKey, String)> = k
                 .timeline
                 .messages()
+                .skip(window)
+                .filter_map(|m| m.post.reply_to())
+                .filter_map(|target| k.timeline.get(target))
                 .map(|m| {
                     let said = if m.redacted {
                         "deleted".to_string()
@@ -1665,6 +1717,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                 .collect();
             k.timeline
                 .messages()
+                .skip(window)
                 .map(|m| Line {
                     seq: m.seq,
                     who: m.account,
@@ -1717,6 +1770,11 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    // How many are behind the window, so the reader can be offered them.
+    let earlier = open
+        .map(|(_, k)| k.timeline.messages().count().saturating_sub(k.wanted))
+        .unwrap_or(0);
+
     // What happened *to* the channel, from the exchange's own signed entries.
     let events: Vec<Happened> = open
         .map(|(_, k)| {
@@ -1746,8 +1804,27 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                 EVENT_RENAMED,
             ];
             let dm = k.peer.is_some();
+            // From the same point as the messages. An event above the first
+            // message drawn would sit at the top of the transcript describing
+            // something that happened before anything on screen.
+            // Only while there is something behind the window. With the whole
+            // conversation on screen this cut every event that came *before*
+            // the first message -- which is all of them in a new channel,
+            // where the exchange writes the creation and the invitations
+            // before anybody has said a word.
+            let behind = k.timeline.messages().count().saturating_sub(k.wanted);
+            let first = if behind == 0 {
+                0
+            } else {
+                k.timeline
+                    .messages()
+                    .nth(behind)
+                    .map(|m| m.seq)
+                    .unwrap_or(0)
+            };
             k.timeline
                 .events()
+                .filter(|h| h.seq >= first)
                 .filter(|h| !(dm && plumbing.contains(&h.what.event)))
                 .map(|h| {
                     let (actor, subject) = (h.what.actor, h.what.subject);
@@ -1928,6 +2005,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         s.conversations = summaries;
         s.lines = lines;
         s.events = events;
+        s.earlier = earlier;
         s.typing = typing;
         s.trouble_with = trouble;
         s.people = people;
@@ -2013,6 +2091,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     marks: Vec::new(),
                     timeline: Timeline::default(),
                     seen: 0,
+                    wanted: PAGE,
                     last_at: 0,
                     unread: 0,
                     waiting,
@@ -2027,6 +2106,14 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
         },
         Cmd::Show(channel) => open(desk, state, channel),
+        Cmd::Earlier => {
+            if let Some(channel) = desk.open
+                && let Some(known) = desk.channels.get_mut(&channel)
+            {
+                known.wanted += PAGE;
+                desk.dirty.insert(channel);
+            }
+        }
         Cmd::Close => {
             desk.open = None;
             state.send_modify(|s| {
@@ -2651,6 +2738,13 @@ fn close(desk: &mut Desk, state: &watch::Sender<ChatState>) {
 fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
     desk.open = Some(channel);
     desk.dirty.insert(channel);
+    // Back to one page. A channel somebody scrolled a long way into last week
+    // should not cost that again today -- and **at least the unread run**,
+    // because the divider marks where they stopped and a divider above the
+    // first message drawn is a mark pointing off the top of the screen.
+    if let Some(known) = desk.channels.get_mut(&channel) {
+        known.wanted = PAGE.max(known.unread + 1);
+    }
     // The divider is taken **here**, on entry, and then left alone. Reading
     // advances the read mark, so one recomputed each refresh would disappear
     // the moment somebody looked at the thing it was marking.

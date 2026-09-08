@@ -486,43 +486,6 @@ impl App for ChatApp {
         let at = &at;
         let state = self.state_of(Some(at));
 
-        // One row, laid out from the right: who you are, and beside it whether
-        // the link is up. Both are facts about *this session* rather than
-        // about any conversation, so they share a corner.
-        ui.horizontal(|ui| {
-            let colour = match state.link {
-                LinkState::Up => theme.link_up,
-                LinkState::Retrying => theme.link_retrying,
-                LinkState::Gone => theme.link_gone,
-            };
-            let up = state.link == LinkState::Up;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.me_ui(ctx, at, &state, ui, &theme);
-                ui.add_space(tokens::SPACING_SM);
-                // **The word appears when it is worth reading.** A link that
-                // is up is the ordinary case and a green dot says it. A link
-                // that is not is the case where nothing arriving looks exactly
-                // like nobody writing, and no colour can tell somebody that --
-                // so that one keeps its word, and its way back.
-                //
-                // Either way the word is on the dot's hover and in the
-                // accessibility tree, where a colour reaches nobody at all.
-                if !up {
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Refresh, "Reconnect")
-                        .clicked()
-                    {
-                        self.send_as(Some(at), Cmd::Reconnect);
-                    }
-                    ui.colored_label(colour, state.link.word());
-                }
-                sigil_ui::dot(ui, up, colour, colour, state.link.word());
-            });
-        });
-        if let Some(trouble) = &state.trouble {
-            ui.colored_label(theme.destructive, trouble);
-        }
-        ui.separator();
-
         // Two panes when there is room, one when there is not -- decided at
         // **runtime** from the width actually available, never from the
         // platform. Narrowing a desktop window has to collapse the layout
@@ -537,11 +500,19 @@ impl App for ChatApp {
                 // conversation with a way back. Not both squeezed together --
                 // two unusable columns are worse than one usable one.
                 match state.open {
-                    None => self.list_ui(ctx, at, &state, ui, &theme),
+                    None => {
+                        // One pane and nothing open: the bar has nowhere else
+                        // to be, and the list is the whole window.
+                        self.session_bar_ui(ctx, at, &state, ui, &theme);
+                        self.list_ui(ctx, at, &state, ui, &theme);
+                    }
                     Some(_) => {
-                        if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
-                            self.send_as(Some(at), Cmd::Close);
-                        }
+                        ui.horizontal(|ui| {
+                            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                                self.send_as(Some(at), Cmd::Close);
+                            }
+                        });
+                        self.session_bar_ui(ctx, at, &state, ui, &theme);
                         self.transcript_ui(ctx, at, &state, ui, &theme);
                     }
                 }
@@ -564,7 +535,10 @@ impl App for ChatApp {
                         right: tokens::SPACING_XS as i8,
                         ..Default::default()
                     }))
-                    .show(ui, |ui| self.transcript_ui(ctx, at, &state, ui, &theme));
+                    .show(ui, |ui| {
+                        self.session_bar_ui(ctx, at, &state, ui, &theme);
+                        self.transcript_ui(ctx, at, &state, ui, &theme);
+                    });
             }
         }
         AppResponse::default()
@@ -594,6 +568,59 @@ impl App for ChatApp {
 }
 
 impl ChatApp {
+    /// The one row about this session: whether the link is up, and who you are.
+    ///
+    /// **Over the conversation and not over the whole window.** It used to
+    /// span both, which cost the conversation column its top and made the list
+    /// start under a bar that has nothing to do with it. The column is the
+    /// full height of the application now, the way every client with a sidebar
+    /// draws one, and this belongs to the pane it sits over.
+    fn session_bar_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        // One row, laid out from the right: who you are, and beside it whether
+        // the link is up. Both are facts about *this session* rather than
+        // about any conversation, so they share a corner.
+        ui.horizontal(|ui| {
+            let colour = match state.link {
+                LinkState::Up => theme.link_up,
+                LinkState::Retrying => theme.link_retrying,
+                LinkState::Gone => theme.link_gone,
+            };
+            let up = state.link == LinkState::Up;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.me_ui(ctx, at, state, ui, theme);
+                ui.add_space(tokens::SPACING_SM);
+                // **The word appears when it is worth reading.** A link that
+                // is up is the ordinary case and a green dot says it. A link
+                // that is not is the case where nothing arriving looks exactly
+                // like nobody writing, and no colour can tell somebody that --
+                // so that one keeps its word, and its way back.
+                //
+                // Either way the word is on the dot's hover and in the
+                // accessibility tree, where a colour reaches nobody at all.
+                if !up {
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Refresh, "Reconnect")
+                        .clicked()
+                    {
+                        self.send_as(Some(at), Cmd::Reconnect);
+                    }
+                    ui.colored_label(colour, state.link.word());
+                }
+                sigil_ui::dot(ui, up, colour, colour, state.link.word());
+            });
+        });
+        if let Some(trouble) = &state.trouble {
+            ui.colored_label(theme.destructive, trouble);
+        }
+        ui.separator();
+    }
+
     /// Who you are, at the top right, with everything about you behind it.
     ///
     /// # Why it is a block and not a pane
@@ -1080,18 +1107,17 @@ impl ChatApp {
         });
         ui.add_space(tokens::SPACING_XS);
 
-        // Searching what is here. **A visible label, not only a hint**: a hint
-        // disappears the moment somebody types and never reaches the
-        // accessibility tree at all.
-        let label_width = 58.0;
         ui.horizontal(|ui| {
             let control = tokens::BUTTON_MD + ui.spacing().item_spacing.x * 2.0;
-            ui.add_sized([label_width, tokens::BUTTON_MD], egui::Label::new("Search"));
             let width = ui.available_width() - control;
+            // No label beside it. A search box is the one control everybody
+            // recognises without being told, and the word is still on the
+            // magnifier next to it -- which is a button, so it reaches the
+            // accessibility tree where a placeholder would not.
             let field = sigil_ui::field(
                 ui,
                 &mut self.panes.entry(at.clone()).or_default().searching,
-                "search what you have here",
+                "Search conversations",
                 width,
             );
             if field.changed() {
@@ -1106,21 +1132,10 @@ impl ChatApp {
                     self.pane(at).searching.clear();
                     self.send_as(Some(at), Cmd::Search(String::new()));
                 }
-            } else {
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(tokens::BUTTON_MD, tokens::BUTTON_MD),
-                    egui::Sense::hover(),
-                );
-                let inner = egui::Rect::from_center_size(
-                    rect.center(),
-                    egui::vec2(tokens::ICON_MD, tokens::ICON_MD),
-                );
-                sigil_ui::icon::draw(
-                    ui.painter(),
-                    inner,
-                    sigil_ui::Icon::Search,
-                    theme.text_muted,
-                );
+            } else if sigil_ui::icon_button(ui, sigil_ui::Icon::Search).clicked() {
+                // Focuses the box rather than doing nothing: it is beside a
+                // field and the obvious thing to press first.
+                field.request_focus();
             }
         });
 
@@ -1479,6 +1494,31 @@ impl ChatApp {
         // loop: acting there would need `&mut self` while `state` is borrowed
         // from it, and a frame-local queue is the shape the rest of the host
         // uses anyway.
+        // The way back into the rest of the conversation.
+        //
+        // A conversation opens on its last page rather than on all of it --
+        // see `session::PAGE`. So the top of the transcript is a door and not
+        // the beginning, and it says which: a reader who cannot tell the two
+        // apart believes a channel started where their screen does.
+        if state.earlier > 0 {
+            ui.add_space(tokens::SPACING_SM);
+            ui.vertical_centered(|ui| {
+                let more = ui.button(match state.earlier {
+                    1 => "1 earlier message".to_string(),
+                    n => format!("{n} earlier messages"),
+                });
+                // Asked for by reaching the top as well as by pressing it.
+                // Scrolling is how anybody actually gets there, and a control
+                // that only answers a click makes somebody hunt for a button
+                // they have already scrolled past.
+                let reached = ui.clip_rect().contains(more.rect.center());
+                if more.clicked() || reached {
+                    self.send_as(Some(at), Cmd::Earlier);
+                }
+            });
+            ui.add_space(tokens::SPACING_SM);
+        }
+
         let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
         let mut previous_day: Option<String> = None;
         let mut previous_author: Option<PubKey> = None;

@@ -35,13 +35,19 @@ pub use identicon::{avatar, identicon, identicon_of};
 /// label stays outside it and stays visible, because a hint never reaches the
 /// accessibility tree at all.
 pub fn field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32) -> egui::Response {
+    // The vertical padding is **measured against the line**, not a token. A
+    // fixed 8px in a 40px box leaves the text sitting a few pixels above
+    // centre — not enough to name, enough to look wrong in every field at
+    // once.
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let above = ((sigil::tokens::FIELD_MD - line) / 2.0).max(0.0);
     ui.add_sized(
         [width, sigil::tokens::FIELD_MD],
         egui::TextEdit::singleline(buf)
             .hint_text(hint)
             .margin(egui::Margin::symmetric(
                 sigil::tokens::SPACING_MD as i8,
-                sigil::tokens::SPACING_SM as i8,
+                above as i8,
             )),
     )
 }

@@ -211,6 +211,9 @@ fn a_conversation() -> ChatState {
             subject: PubKey::new([4u8; 32]),
             caveat: None,
         }],
+        // The whole conversation, so the paging control is out of the way of
+        // everything else here. `a_paged_conversation` is what covers it.
+        earlier: 0,
     }
 }
 
@@ -580,6 +583,49 @@ fn a_direct_message_does_not_count_its_two_people() {
         labels(&h).iter().any(|l| l == "7"),
         "a group stops saying how many are in it: {:?}",
         labels(&h)
+    );
+}
+
+/// The top of the transcript is a door, and says so.
+///
+/// A conversation opens on its last page rather than on all of it, so the
+/// first message drawn is not the beginning. A reader who cannot tell those
+/// apart believes the channel started where their screen does.
+#[test]
+fn a_conversation_opened_on_its_last_page_says_there_is_more() {
+    let mut state = a_conversation();
+    state.earlier = 12;
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("12 earlier messages"),
+        "nothing says the conversation goes further back: {said}"
+    );
+    // And it is a control, not a note.
+    h.get_by_label("12 earlier messages").click();
+    h.run();
+}
+
+/// One is one.
+#[test]
+fn one_earlier_message_is_not_one_earlier_messages() {
+    let mut state = a_conversation();
+    state.earlier = 1;
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(text_of(&h).contains("1 earlier message"), "{}", text_of(&h));
+}
+
+/// A whole conversation offers nothing, because there is nothing to offer.
+#[test]
+fn a_whole_conversation_has_no_door_at_the_top_of_it() {
+    let mut h = harness(true);
+    h.run();
+    assert!(
+        !text_of(&h).contains("earlier message"),
+        "a control that cannot do anything: {}",
+        text_of(&h)
     );
 }
 

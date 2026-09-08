@@ -483,6 +483,103 @@ async fn a_group_is_created_invited_to_and_read() {
     bob.stop();
 }
 
+/// A busy conversation opens on its last page, not on all of it.
+///
+/// Opening a channel used to build a drawable line for **every message it had
+/// ever carried**, again on every poll, and the interface then cloned the
+/// whole vector twice a frame. On a public channel a few thousand deep that is
+/// seconds of work to show a screenful, and it was the first thing anybody
+/// noticed about a busy room.
+///
+/// Nothing is dropped: the fold still folds all of it and the store still
+/// holds it, which is what `earlier` counts and what asking for more reaches.
+#[tokio::test]
+async fn a_long_conversation_opens_on_a_page_and_reaches_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(21);
+    let (b_signer, b_id) = signer(22);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::OpenDm(b_id));
+    bob.send(Cmd::OpenDm(a_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+
+    // One more than a page, so the window is doing something and the number
+    // behind it is exactly known.
+    let sent = sigil_chat::session::PAGE + 10;
+    for i in 0..sent {
+        alice.send(Cmd::Send(format!("message {i}")));
+    }
+    let all_there = until(
+        || alice.state().lines.len() + alice.state().earlier >= sent,
+        60,
+    )
+    .await;
+    assert!(
+        all_there,
+        "the exchange should have taken all of them: {} shown, {} behind",
+        alice.state().lines.len(),
+        alice.state().earlier
+    );
+
+    let s = alice.state();
+    assert!(
+        s.lines.len() <= sigil_chat::session::PAGE,
+        "a conversation opens on a page, not on all of it: {} lines",
+        s.lines.len()
+    );
+    assert!(
+        s.earlier > 0,
+        "and says how many are behind it: {:?}",
+        s.earlier
+    );
+    // The newest are the ones on screen. A page taken off the *front* would
+    // open a busy channel on its oldest messages, which is nobody's idea of
+    // opening a conversation.
+    assert!(
+        s.lines
+            .last()
+            .is_some_and(|l| l.text == format!("message {}", sent - 1)),
+        "the page is the end of the conversation: {:?}",
+        s.lines.last().map(|l| l.text.clone())
+    );
+
+    // And the rest is reachable.
+    let behind = s.earlier;
+    alice.send(Cmd::Earlier);
+    let reached = until(|| alice.state().earlier < behind, 20).await;
+    assert!(
+        reached,
+        "asking for earlier messages produced none: still {} behind",
+        alice.state().earlier
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
 /// A public channel is findable by somebody who was never told about it.
 ///
 /// The directory is the **only** channel route open to anybody, because every
