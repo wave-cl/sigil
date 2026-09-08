@@ -202,6 +202,16 @@ impl BubbleAction {
     }
 }
 
+/// The bubble's own padding.
+///
+/// **Named, because two places have to agree about it.** `wanted` measures a
+/// message to decide how wide its bubble should be and adds this on; `body`
+/// draws it. A width computed from one padding and drawn with another is a
+/// bubble that wraps a line it had room for, and the two were separate
+/// numbers that happened to match.
+const PAD_X: f32 = tokens::SPACING_SM;
+const PAD_Y: f32 = tokens::SPACING_XS;
+
 /// The emoji offered by the picker.
 ///
 /// A short list, like the terminal client's, and for the same reason: it is
@@ -353,10 +363,12 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
     let theme = ColorTheme::current(ui.ctx());
     let mut action = BubbleAction::default();
 
+    // A run from one person is one block of speech, so the gap inside it is
+    // barely a gap; the gap between two people is what separates them.
     ui.add_space(if b.grouped {
-        tokens::SPACING_XS
+        tokens::SPACING_XXS
     } else {
-        tokens::SPACING_SM
+        tokens::SPACING_XS
     });
 
     let limit = (ui.available_width() * 0.72).max(160.0);
@@ -431,7 +443,7 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
         .reply_to
         .map(|(who, stub)| measure(&format!("{who}: {stub}"), egui::TextStyle::Small))
         .unwrap_or(0.0);
-    body.max(meta).max(author).max(reply) + tokens::SPACING_MD * 2.0
+    body.max(meta).max(author).max(reply) + PAD_X * 2.0
 }
 
 /// The bubble itself: the frame, what is in it, and the reactions under it.
@@ -443,11 +455,11 @@ fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut Bubb
     };
     let frame = egui::Frame::NONE
         .fill(fill)
-        .corner_radius(tokens::RADIUS_LG)
-        .inner_margin(egui::Margin::symmetric(
-            tokens::SPACING_MD as i8,
-            tokens::SPACING_SM as i8,
-        ));
+        // Properly round, and tight around the words. A 12px radius on a
+        // two-line bubble reads as a box with the corners taken off; this is
+        // the shape a message has.
+        .corner_radius(tokens::RADIUS_PILL)
+        .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
     let inner = frame.show(ui, |ui| {
         // **Inside the bubble, always left to right.** The right-alignment
         // that puts one's own message on the right is a property of where the

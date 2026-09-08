@@ -7,6 +7,11 @@
 //! hundred.
 
 /// Spacing, on a 4px base.
+///
+/// `XXS` is the half-step, and exists for the one place 4px is too much: the
+/// gap between two messages the same person sent a moment apart, which should
+/// read as one block of speech rather than as a list.
+pub const SPACING_XXS: f32 = 2.0;
 pub const SPACING_XS: f32 = 4.0;
 pub const SPACING_SM: f32 = 8.0;
 pub const SPACING_MD: f32 = 12.0;
