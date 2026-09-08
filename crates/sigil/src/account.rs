@@ -126,6 +126,23 @@ impl Account {
         }
     }
 
+    /// The account's public key, whether or not it is open.
+    ///
+    /// A sealed identity still names its key in the clear — sqnr writes it
+    /// beside the encrypted seed, and `read_public` reads it without the
+    /// passphrase. That is what lets somebody be shown *which* identity they
+    /// are about to open, by the same mark it will carry once it is open.
+    ///
+    /// `None` for an identity whose file is missing or unreadable, which is a
+    /// state with no key to show rather than a key that failed to load.
+    pub fn public(&self) -> Option<PubKey> {
+        match self {
+            Account::Unlocked(open) => Some(open.me()),
+            Account::Locked { path, .. } => sqnr::identity::read_public(path).ok(),
+            Account::Missing { .. } | Account::Broken { .. } => None,
+        }
+    }
+
     fn unlocked_from(signer: SoftwareSigner, path: PathBuf) -> Account {
         Account::Unlocked(Unlocked {
             seed: signer.seed(),
@@ -263,6 +280,39 @@ mod tests {
             account.describe()
         );
         assert!(!account.is_unlocked());
+    }
+
+    /// A sealed identity still says which identity it is.
+    ///
+    /// sqnr writes the public key beside the encrypted seed, so a client can
+    /// show *which* account it is about to open — by the same mark it will
+    /// carry once open — without asking for anything first. Without this, the
+    /// only honest thing to draw for a locked account is a blank.
+    #[test]
+    fn a_sealed_identity_still_names_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_identity(dir.path(), Some("open sesame"));
+
+        let sealed = Account::discover(Some(path.clone()));
+        assert!(matches!(sealed, Account::Locked { .. }));
+        let named = sealed.public().expect("a sealed identity names its key");
+
+        // The same key the passphrase eventually produces, or the mark shown
+        // before unlocking would be a different account's.
+        let mut open = Account::discover(Some(path));
+        assert!(open.unlock("open sesame"));
+        assert_eq!(named, open.public().expect("an open one names it too"));
+        assert_eq!(named, open.unlocked().expect("open").me());
+    }
+
+    /// There is no key to name when there is no file.
+    #[test]
+    fn a_missing_identity_names_no_key() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Account::discover(Some(dir.path().join("nothing-here"))).public(),
+            None
+        );
     }
 
     #[test]

@@ -61,6 +61,14 @@ fn harness(dark: bool) -> Harness<'static> {
 }
 
 /// The shell as somebody meets it: nothing open yet.
+///
+/// The path points at nothing, so there is no key to read and the screen
+/// falls back to sigil's own disc. That is deliberate for the **snapshot**:
+/// `sqnr::identity::generate` mints a random key, so a real sealed identity
+/// draws a different mark on every run and no snapshot of one could pass
+/// twice. The identicon a real identity gets is covered by
+/// `the_opening_screen_shows_the_chosen_identitys_own_mark`, which writes one
+/// and reads its key back rather than comparing pixels.
 fn sealed(dark: bool) -> Harness<'static> {
     with_account(
         dark,
@@ -149,6 +157,39 @@ fn a_sealed_identity_gets_the_opening_screen_and_no_rail() {
     );
     // The apps are not offered while there is nobody to be them.
     assert!(!said.contains("Chat (3)"), "the rail is up too: {said}");
+}
+
+/// The mark on the opening screen is the identity's own.
+///
+/// The same identicon it will carry in the corner once it is open, so the
+/// thing about to be unlocked is recognisable before it is — and the key is on
+/// it, because a mark is a hint for the eye and never an identity (SIP-21).
+#[test]
+fn the_opening_screen_shows_the_chosen_identitys_own_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity");
+    // Written by sqnr's own `generate`, so this tests the file format sqnr
+    // actually writes rather than a guess at it.
+    sqnr::identity::generate(&path, Some("open sesame")).expect("an identity");
+    let key = sqnr::identity::read_public(&path)
+        .expect("its key")
+        .to_string();
+
+    let mut h = with_account(
+        true,
+        sigil::Account::Locked {
+            path,
+            trouble: None,
+        },
+    );
+    h.run();
+    assert!(
+        said(&h).contains(&key),
+        "the screen does not say which identity it is about to open: {}",
+        said(&h)
+    );
+    // And the list above it names a *file*, which is something somebody typed.
+    assert!(said(&h).contains("identity (the default)"), "{}", said(&h));
 }
 
 /// You can type your passphrase the moment the window opens.

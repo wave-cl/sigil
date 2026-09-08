@@ -58,6 +58,14 @@ struct Welcome {
     /// its own small cruelty.
     passphrase: String,
     trouble: Option<String>,
+    /// The chosen identity's key, and which file it came from.
+    ///
+    /// Cached because reading it is a file read, and this screen redraws
+    /// whenever the caret blinks. Refreshed when the choice changes, which is
+    /// the only thing that can change the answer.
+    /// Held as base58 rather than as a key, which is what draws it -- and
+    /// saves this crate a dependency on the key type for one field.
+    mark: Option<(std::path::PathBuf, String)>,
     /// Whether the box has been given the keyboard once.
     ///
     /// Once, not every pass: asking for focus on every frame takes it back
@@ -300,10 +308,44 @@ impl Shell {
                 egui::vec2(CARD_WIDTH, 0.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    // The application's own mark, over the middle of the card
-                    // -- the same disc as the icon in the dock and the tray.
-                    ui.vertical_centered(|ui| {
-                        sigil_ui::mark(ui, tokens::AVATAR_XL);
+                    // **The identity's own mark**, over the middle of the
+                    // card: the same identicon it will carry in the corner
+                    // once it is open, so the thing about to be unlocked is
+                    // recognisable before it is. A sealed identity still names
+                    // its key in the clear, which is what makes this possible
+                    // without the passphrase.
+                    //
+                    // sigil's own disc stands in when there is no key to show
+                    // — a missing or unreadable file, where a generated mark
+                    // would be a picture of nothing.
+                    if self.welcome.mark.as_ref().is_none_or(|(p, _)| *p != chosen) {
+                        self.welcome.mark = self
+                            .accounts
+                            .active()
+                            .public()
+                            .map(|key| (chosen.clone(), key.to_string()));
+                    }
+                    let key = self.welcome.mark.as_ref().map(|(_, k)| k.clone());
+                    ui.vertical_centered(|ui| match &key {
+                        Some(key) => {
+                            sigil_ui::identicon(ui, key, tokens::AVATAR_XL)
+                                .on_hover_text(key.clone());
+                            ui.add_space(tokens::SPACING_SM);
+                            // **The key, not only the file name.** The list
+                            // above names files, and a file name is something
+                            // somebody typed; the key is the identity. A mark
+                            // is a hint for the eye and two of them can
+                            // collide, so this is what actually says which
+                            // account is about to be opened.
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(key).monospace().small())
+                                    .wrap()
+                                    .selectable(true),
+                            );
+                        }
+                        None => {
+                            sigil_ui::mark(ui, tokens::AVATAR_XL);
+                        }
                     });
                     ui.add_space(tokens::SPACING_LG);
                     ui.heading("Open an identity");
@@ -338,6 +380,7 @@ impl Shell {
                                     // passphrase, so the box is where the
                                     // keyboard should be again.
                                     self.welcome.focused = false;
+                                    self.welcome.mark = None;
                                 }
                             }
                             if found.is_empty() {

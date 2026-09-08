@@ -27,6 +27,10 @@ path = "src/lib.rs"
 [dev-dependencies]
 egui_kittest = { workspace = true }
 sqnr-core = { workspace = true }
+# A real sealed identity for the opening screen's test, written by sqnr's own
+# `generate`. Hand-rolling the file format would test a guess at it.
+sqnr = { workspace = true }
+tempfile = "3"
 
 [[bin]]
 name = "sigil"
