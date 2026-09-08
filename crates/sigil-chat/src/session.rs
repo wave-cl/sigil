@@ -739,13 +739,10 @@ async fn run(
         Some(p) => p,
         None => store::store_path(&me).map_err(|e| e.to_string())?,
     };
-    // Held for the life of the session. See the module note: two interactive
-    // clients would disagree about the next message counter, and reusing one
-    // costs the confidentiality of two messages.
-    let _lock = store::lock(&path)
-        .map_err(|e| format!("another client is already using this account's store: {e}"))?;
-    let store = Store::open(&seed, Some(&path)).map_err(|e| e.to_string())?;
-
+    // Resolved before the lock, because the lock is per account **and
+    // exchange**: what it protects is the SIP-17 counter, and the store keeps
+    // one of those per pair. One lock per account would refuse a second
+    // exchange over a conflict that does not exist.
     let endpoint = match &dial {
         Dial::At(e) => *e,
         Dial::Discover(layers) => {
@@ -753,6 +750,13 @@ async fn run(
             sqex_voice::engine::resolve(&layers[..], &mut silent).await?
         }
     };
+    // Held for the life of the session. Two interactive clients on one account
+    // at one exchange would disagree about the next message counter, and
+    // reusing one costs the confidentiality of two messages.
+    let _lock = store::lock(&path, &endpoint.server).map_err(|e| {
+        format!("another client is already using this account at this exchange: {e}")
+    })?;
+    let store = Store::open(&seed, Some(&path)).map_err(|e| e.to_string())?;
     let client =
         sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
     let mut chat = Chat::new(client, seed, me, endpoint.server, store);
