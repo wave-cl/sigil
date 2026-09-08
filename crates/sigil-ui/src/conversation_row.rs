@@ -61,8 +61,16 @@ pub fn conversation_row(
         ));
 
     let inner = frame.show(ui, |ui| {
-        ui.set_min_height(height);
         ui.horizontal(|ui| {
+            // **On the row, not on what is around it.** A minimum height set
+            // on the frame's own `ui` is satisfied by empty space underneath,
+            // so the row's contents kept their own height and sat above the
+            // middle of it -- the mark by a few pixels in every row at once,
+            // which reads as a list that is slightly falling over.
+            //
+            // Set here, the horizontal layout is that tall and its `Center`
+            // alignment has the whole row to centre in.
+            ui.set_min_height(height);
             crate::identicon(ui, row.id, tokens::AVATAR_MD);
             ui.add_space(tokens::SPACING_SM);
             ui.vertical(|ui| {

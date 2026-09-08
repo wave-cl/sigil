@@ -755,6 +755,20 @@ fn transcript_dark() {
     h.snapshot("transcript_dark");
 }
 
+/// The conversation list, which nothing else renders.
+///
+/// It is behind a modal in `chat_dialog_dark` and away by default everywhere
+/// else, so the rows themselves — the marks, the marker on a channel, the
+/// unread pill — had no picture anybody could look at.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn list_dark() {
+    let mut h = harness(true);
+    h.run();
+    open_column(&mut h);
+    h.snapshot("list_dark");
+}
+
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn transcript_light() {

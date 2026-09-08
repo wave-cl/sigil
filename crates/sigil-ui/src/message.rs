@@ -204,13 +204,18 @@ impl BubbleAction {
 
 /// The bubble's own padding.
 ///
+/// Generous. It was cut to 8×4 and that was too tight — the words touched the
+/// shape holding them. These are the token steps nearest a request for "about
+/// ten more pixels"; they stay on the 4px grid, which everything else in the
+/// interface is measured against.
+///
 /// **Named, because two places have to agree about it.** `wanted` measures a
 /// message to decide how wide its bubble should be and adds this on; `body`
 /// draws it. A width computed from one padding and drawn with another is a
 /// bubble that wraps a line it had room for, and the two were separate
 /// numbers that happened to match.
-const PAD_X: f32 = tokens::SPACING_SM;
-const PAD_Y: f32 = tokens::SPACING_XS;
+const PAD_X: f32 = tokens::SPACING_LG;
+const PAD_Y: f32 = tokens::SPACING_MD;
 
 /// The emoji offered by the picker.
 ///
