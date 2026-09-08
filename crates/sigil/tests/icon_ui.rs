@@ -17,6 +17,7 @@ const ALL: &[Icon] = &[
     Icon::Plus,
     Icon::Compose,
     Icon::Chevron,
+    Icon::Menu,
     Icon::Search,
     Icon::Attach,
     Icon::Send,

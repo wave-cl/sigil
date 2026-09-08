@@ -161,6 +161,16 @@ pub struct ChatApp {
     /// Which exchange is being shown, for each identity. Absent means the
     /// default one.
     showing: HashMap<PubKey, String>,
+    /// Whether the conversation column is on screen. **Closed to begin with.**
+    ///
+    /// One preference for the whole app rather than one per identity: it is
+    /// about how much room the transcript gets, which is a fact about the
+    /// window and not about who you are being in it.
+    ///
+    /// The control that opens it lives in the conversation's own bar and is
+    /// drawn whenever the column is away, so starting closed hides the list
+    /// and never the way to it.
+    columns_open: bool,
     config: Config,
     /// Where the stores live, when it is not `~/.sqex/chat`.
     ///
@@ -209,6 +219,9 @@ impl ChatApp {
             closing: Vec::new(),
             panes: HashMap::new(),
             showing: HashMap::new(),
+            // Closed. The conversation is what somebody opened sigil to read,
+            // and a list of the others beside it is a thing they ask for.
+            columns_open: false,
             config: Config::load(),
             store_root: None,
             now: None,
@@ -486,6 +499,13 @@ impl App for ChatApp {
         let at = &at;
         let state = self.state_of(Some(at));
 
+        // Before anything else, and **outside every branch below**. It hung
+        // off the conversation list, which is not drawn at all when the column
+        // is hidden or when a narrow window is showing a conversation -- so a
+        // dialog opened and then collapsed behind was one nobody could get out
+        // of, and it also has several early returns under it.
+        self.dialogs_ui(ctx, at, &state, ui, &theme);
+
         // Two panes when there is room, one when there is not -- decided at
         // **runtime** from the width actually available, never from the
         // platform. Narrowing a desktop window has to collapse the layout
@@ -518,14 +538,16 @@ impl App for ChatApp {
                 }
             }
             sigil::Layout::Shared { column_width } | sigil::Layout::Scrolling { column_width } => {
-                egui::Panel::left("chat_list")
-                    .resizable(false)
-                    .exact_size(column_width.min(360.0))
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin {
-                        right: tokens::SPACING_LG as i8,
-                        ..Default::default()
-                    }))
-                    .show(ui, |ui| self.list_ui(ctx, at, &state, ui, &theme));
+                if self.columns_open {
+                    egui::Panel::left("chat_list")
+                        .resizable(false)
+                        .exact_size(column_width.min(360.0))
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                            right: tokens::SPACING_LG as i8,
+                            ..Default::default()
+                        }))
+                        .show(ui, |ui| self.list_ui(ctx, at, &state, ui, &theme));
+                }
                 // The conversation gets a margin of its own. Without one the
                 // messages start hard against the divider and the composer
                 // runs off the right edge -- both of which this had.
@@ -587,6 +609,14 @@ impl ChatApp {
         // the link is up. Both are facts about *this session* rather than
         // about any conversation, so they share a corner.
         ui.horizontal(|ui| {
+            // Only when there is nothing to bring back does this appear, so
+            // the bar is not carrying a control that does nothing.
+            if !self.columns_open
+                && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Show the conversations")
+                    .clicked()
+            {
+                self.columns_open = true;
+            }
             let colour = match state.link {
                 LinkState::Up => theme.link_up,
                 LinkState::Retrying => theme.link_retrying,
@@ -1079,10 +1109,6 @@ impl ChatApp {
         theme: &ColorTheme,
     ) {
         let now = self.now();
-        // Before anything else, and unconditionally: the list has several
-        // early returns under it, and a dialog that only draws on some of
-        // them is one somebody cannot get out of.
-        self.dialogs_ui(ctx, at, state, ui, theme);
         // The heading carries the two things you do *to* the list, rather
         // than each having a row of its own below it. Both are icons: a word
         // in a heading row reads as part of the heading, not as a control.
@@ -1101,6 +1127,19 @@ impl ChatApp {
                     ctx.navigator.push_here(Route::Directory);
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // Beside the heading, and it puts the column away. The
+                    // control that brings it back is in the conversation's own
+                    // bar, because a control inside the thing it hides is a
+                    // control nobody can reach once they have used it.
+                    if sigil_ui::icon_button_named(
+                        ui,
+                        sigil_ui::Icon::Menu,
+                        "Hide the conversations",
+                    )
+                    .clicked()
+                    {
+                        self.columns_open = false;
+                    }
                     ui.heading("Conversations");
                 });
             });
@@ -1253,8 +1292,20 @@ impl ChatApp {
         let now = self.now();
 
         if state.open.is_none() {
-            ui.centered_and_justified(|ui| {
-                ui.colored_label(theme.text_secondary, "Pick a conversation.");
+            // "Pick a conversation" beside a column that is not on screen is
+            // an instruction to use something nobody can see. The list starts
+            // away, so the empty pane offers it rather than assuming it.
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.35);
+                if self.columns_open {
+                    ui.colored_label(theme.text_secondary, "Pick a conversation.");
+                } else {
+                    ui.colored_label(theme.text_secondary, "Nothing open.");
+                    ui.add_space(tokens::SPACING_SM);
+                    if ui.button("Show conversations").clicked() {
+                        self.columns_open = true;
+                    }
+                }
             });
             return;
         }
@@ -1273,6 +1324,12 @@ impl ChatApp {
             // number, so the count is a fact about the kind of conversation
             // and not about this one.
             let dm = open.is_some_and(|c| c.peer.is_some());
+            // **No calling a public channel.** Anybody may join one, so the
+            // ring would go to a membership nobody chose and the room secret
+            // — a bearer capability, SIP-36 — would be handed to whoever
+            // turned up next. There is nothing to fix about that at the point
+            // somebody presses it, so the control is not there.
+            let public = open.is_some_and(|c| c.public);
 
             // **The controls are laid out first, from the right.** Given the
             // name first, a long one takes the row and the controls wrap onto
@@ -1298,7 +1355,8 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::Blocked);
                     ctx.navigator.push_here(Route::Members);
                 }
-                if !self.calls.contains_key(&me)
+                if !public
+                    && !self.calls.contains_key(&me)
                     && !state.ringing.iter().any(|r| r.mine)
                     && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked()
                 {

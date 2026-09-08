@@ -21,7 +21,11 @@ use sigil::{ColorTheme, NavStack, tokens};
 /// Wide enough that an app name and its unread count sit on one line. Icons
 /// will make this narrower; until there are icons, a wrapped label reads worse
 /// than a wide rail.
-const RAIL_WIDTH: f32 = 104.0;
+/// Wide enough for one icon and its hit target, and no wider.
+///
+/// It was 104px, which was right for a column of words and is most of an inch
+/// of nothing beside a column of 34px icons.
+const RAIL_WIDTH: f32 = 52.0;
 
 /// The opening screen's card. Wide enough for a passphrase somebody actually
 /// chose, and narrow enough to read as one thing to do.
@@ -249,7 +253,10 @@ impl Shell {
                 .frame(
                     egui::Frame::NONE
                         .fill(theme.surface_secondary)
-                        .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8)),
+                        .inner_margin(egui::Margin::symmetric(
+                            tokens::SPACING_XS as i8,
+                            tokens::SPACING_SM as i8,
+                        )),
                 )
                 .show(ui, |ui| self.rail(ui));
         }

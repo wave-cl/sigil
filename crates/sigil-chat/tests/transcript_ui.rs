@@ -307,6 +307,15 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
         })
 }
 
+/// Show the conversation list.
+///
+/// It starts away: the conversation is what somebody opened sigil to read, and
+/// the list of the others is a thing they ask for.
+fn open_column(h: &mut Harness<'static>) {
+    h.get_by_label("Show the conversations").click();
+    h.run();
+}
+
 /// Open the identity block's menu.
 ///
 /// Your key, your exchanges and the other identities you hold moved here from
@@ -629,6 +638,99 @@ fn a_whole_conversation_has_no_door_at_the_top_of_it() {
     );
 }
 
+/// The conversation column can be put away, and brought back.
+///
+/// **The control that brings it back is not inside it.** A toggle that hides
+/// the thing it lives in is a toggle nobody can reach the second time, so it
+/// moves to the conversation's own bar while the column is away.
+#[test]
+fn the_conversation_column_can_be_put_away_and_found_again() {
+    let mut h = harness(true);
+    h.run();
+    open_column(&mut h);
+    assert!(text_of(&h).contains("Conversations"), "{}", text_of(&h));
+
+    h.get_by_label("Hide the conversations").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("release check"),
+        "the column is still there: {said}"
+    );
+    assert!(
+        said.contains("Show the conversations"),
+        "and there is no way back to it: {said}"
+    );
+
+    h.get_by_label("Show the conversations").click();
+    h.run();
+    assert!(
+        text_of(&h).contains("release check"),
+        "it did not come back: {}",
+        text_of(&h)
+    );
+}
+
+/// A dialog outlives the column it was opened from.
+///
+/// The dialogs hung off the conversation list, and the list is not drawn at
+/// all once the window is narrow enough to show one pane at a time. So
+/// narrowing the window with a dialog up left it *open in the state and absent
+/// from the screen* — and it came back the next time the column did, over
+/// whatever was there by then.
+///
+/// Narrowing is the way in, because the modal's own backdrop blocks the
+/// column's hide control: while a dialog is up that click dismisses it, which
+/// is what a modal is for.
+#[test]
+fn a_dialog_outlives_the_column_it_was_opened_from() {
+    let mut h = harness(true);
+    h.run();
+    open_column(&mut h);
+    h.get_by_label("New conversation").click();
+    h.run();
+    assert!(text_of(&h).contains("Write to"), "{}", text_of(&h));
+
+    // Narrow enough for one pane. `sigil::layout` decides this at runtime from
+    // the width actually available, so this is the real path and not a flag.
+    h.set_size(egui::vec2(420.0, 620.0));
+    h.run();
+    assert!(
+        text_of(&h).contains("Write to"),
+        "the dialog went with the column: {}",
+        text_of(&h)
+    );
+}
+
+/// Nobody calls a public channel.
+///
+/// Anybody may join one, so the ring would go to a membership nobody chose,
+/// and the room secret is a bearer capability (SIP-36) — whoever turns up next
+/// holds it. There is nothing to fix at the point somebody presses it, so the
+/// control is not there to press.
+#[test]
+fn a_public_channel_offers_no_way_to_call_it() {
+    let mut state = a_conversation();
+    // The public one, which the fixture's second row is.
+    state.open = Some([8u8; 32]);
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(
+        !text_of(&h).contains("Call"),
+        "a public channel offers a call: {}",
+        text_of(&h)
+    );
+
+    // And a private one still does, or this would pass by drawing no header.
+    let mut h = harness(true);
+    h.run();
+    assert!(
+        text_of(&h).contains("Call"),
+        "and a conversation with people in it lost its call: {}",
+        text_of(&h)
+    );
+}
+
 #[test]
 fn a_public_channel_is_marked_in_the_list() {
     // Anybody may join it and nothing in it is encrypted. That is the whole
@@ -636,6 +738,7 @@ fn a_public_channel_is_marked_in_the_list() {
     // somebody types into one.
     let mut h = harness(true);
     h.run();
+    open_column(&mut h);
     let said = text_of(&h);
     assert!(said.contains("release check"), "{said}");
     assert!(

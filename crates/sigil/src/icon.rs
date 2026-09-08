@@ -51,6 +51,8 @@ pub enum Icon {
     Compose,
     /// There is a menu under this.
     Chevron,
+    /// Show or hide the column beside this.
+    Menu,
     /// Search.
     Search,
     /// Send a file.
@@ -87,6 +89,7 @@ impl Icon {
             Icon::Plus => "New",
             Icon::Compose => "New conversation",
             Icon::Chevron => "More choices",
+            Icon::Menu => "Conversations",
             Icon::Search => "Search",
             Icon::Attach => "Attach a file",
             Icon::Send => "Send",
@@ -206,6 +209,15 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             // the arrows: this is punctuation next to something else, not a
             // control somebody hunts for.
             path(vec![p(0.28, 0.40), p(0.5, 0.62), p(0.72, 0.40)]);
+        }
+        Icon::Menu => {
+            // Three lines. The one icon in this set that is genuinely a
+            // convention rather than a picture of anything -- which is why it
+            // gets a word like all the others, and why the word names the
+            // thing it shows rather than saying "menu".
+            for y in [0.30f32, 0.5, 0.70] {
+                line(p(0.22, y), p(0.78, y));
+            }
         }
         Icon::Search => {
             painter.circle_stroke(p(0.44, 0.44), s * 0.24, stroke);
@@ -447,6 +459,7 @@ mod tests {
             Icon::Plus,
             Icon::Compose,
             Icon::Chevron,
+            Icon::Menu,
             Icon::Search,
             Icon::Attach,
             Icon::Send,
