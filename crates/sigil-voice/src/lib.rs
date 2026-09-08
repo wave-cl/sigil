@@ -209,6 +209,10 @@ impl App for VoiceApp {
     fn title(&self) -> &str {
         "Calls"
     }
+
+    fn icon(&self) -> sigil::Icon {
+        sigil::Icon::Call
+    }
 }
 
 impl VoiceApp {

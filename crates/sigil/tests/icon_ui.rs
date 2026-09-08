@@ -5,8 +5,8 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::NodeT;
+use sigil::Icon;
 use sigil::theme;
-use sigil_ui::Icon;
 
 const ALL: &[Icon] = &[
     Icon::Call,
@@ -16,6 +16,7 @@ const ALL: &[Icon] = &[
     Icon::Device,
     Icon::Plus,
     Icon::Compose,
+    Icon::Chevron,
     Icon::Search,
     Icon::Attach,
     Icon::Send,
@@ -52,7 +53,7 @@ fn harness(dark: bool) -> Harness<'static> {
                     // a shape that only works big is obvious.
                     ui.horizontal_wrapped(|ui| {
                         for icon in ALL {
-                            sigil_ui::icon_button(ui, *icon);
+                            sigil::icon_button(ui, *icon);
                         }
                     });
                     ui.add_space(sigil::tokens::SPACING_LG);
@@ -60,7 +61,7 @@ fn harness(dark: bool) -> Harness<'static> {
                         for icon in ALL {
                             let (rect, _) = ui
                                 .allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
-                            sigil_ui::icon::draw(ui.painter(), rect, *icon, t.text_primary);
+                            sigil::icon::draw(ui.painter(), rect, *icon, t.text_primary);
                         }
                     });
                 });

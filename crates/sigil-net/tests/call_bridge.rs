@@ -107,6 +107,66 @@ async fn a_call_on_a_task_reports_its_progress_and_its_end() {
     );
 }
 
+/// Hanging up ends the call **on screen**, not only on the wire.
+///
+/// `hang_up` aborts the task, which drops it at whatever it was awaiting — so
+/// the epilogue that reports the ending never ran, and the snapshot went on
+/// saying `Live` for ever. The interface picks its view off that phase, so
+/// pressing Leave stopped the call and left its screen up with no way back to
+/// anything.
+#[tokio::test]
+async fn hanging_up_reports_the_ending_the_aborted_task_never_will() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(7);
+    let (b_signer, b_id) = signer(8);
+    // Long enough that neither side ends on its own inside this test: what is
+    // being measured is the hang-up, and a call that finished by itself would
+    // report `Ended` whatever `hang_up` did.
+    let a_wav = dir.path().join("a.wav");
+    let b_wav = dir.path().join("b.wav");
+    let mut a = spawn_call(endpoint, a_signer, b_id, 20, tone_to(&a_wav, 600), || {});
+    let b = spawn_call(endpoint, b_signer, a_id, 20, tone_to(&b_wav, 600), || {});
+
+    let live = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let s = a.state();
+            if s.phase == Phase::Live || s.phase == Phase::Ended {
+                return s;
+            }
+            a.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the call should reach a decision within twenty seconds");
+    // Without this the test would pass over a call that had already ended.
+    assert_eq!(live.phase, Phase::Live, "trouble: {:?}", live.trouble);
+
+    a.hang_up();
+    let after = a.state();
+    assert_eq!(
+        after.phase,
+        Phase::Ended,
+        "hanging up left the call screen up: {after:?}"
+    );
+    assert!(
+        after.trouble.is_none(),
+        "hanging up is a decision, not a fault: {:?}",
+        after.trouble
+    );
+    assert!(
+        after.present.is_empty(),
+        "and leaves nobody on screen who could still hear you"
+    );
+
+    b.hang_up();
+}
+
 /// A call nobody answers must end by itself and say why, rather than sitting on
 /// screen looking like it is still connecting.
 #[tokio::test]

@@ -537,10 +537,17 @@ fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut Bubb
     // `Frame::show`'s response senses nothing, so `hovered()` on it is always
     // false. The pointer has to be asked about the rect directly, and the
     // reactions row below the bubble counts as part of the message.
-    let reach = inner
+    // The bubble, **and the row of controls under it**.
+    //
+    // A region that stopped at the bubble's edge made the controls impossible
+    // to press: they are drawn below it, so moving the pointer towards one
+    // left the region, the row stopped being drawn, and the click landed on
+    // nothing. Visible and unusable, which is worse than absent.
+    let mut reach = inner
         .response
         .rect
         .expand2(egui::vec2(0.0, tokens::SPACING_SM));
+    reach.max.y += tokens::BUTTON_MD;
     let over = ui.rect_contains_pointer(reach);
     if over && !b.redacted {
         ui.horizontal(|ui| {
@@ -679,14 +686,91 @@ pub fn reaction_chip(ui: &mut egui::Ui, emoji: &str, count: usize, ours: bool) -
 /// The first characters of a key, for where the whole one will not fit.
 ///
 /// Only ever beside something that leads back to the full key.
-pub fn short(key: &str) -> String {
-    let n = key.len().min(8);
-    format!("{}…", &key[..n])
+///
+/// # Characters, not bytes
+///
+/// This cut `&key[..8]` and **panicked** on any string whose eighth byte falls
+/// inside a character — an em dash, an accent, an emoji, which is to say most
+/// messages anybody writes. A key is base58 and would never have found it; two
+/// callers passed message text, and searching your conversations or replying
+/// to a message with a dash in it took the whole application down.
+///
+/// A public function that slices a `&str` by byte index is a crash waiting for
+/// somebody to type a character.
+pub fn short(text: &str) -> String {
+    let cut: String = text.chars().take(8).collect();
+    // Elided only when something was actually cut. Appending `…` to a string
+    // that is already whole says there is more, and there is not.
+    if cut.chars().count() == text.chars().count() {
+        cut
+    } else {
+        format!("{cut}…")
+    }
+}
+
+/// A line of somebody's message, for a preview.
+///
+/// Whitespace flattened and control characters removed, because a preview goes
+/// on one row and a message with a newline in it would otherwise take the row
+/// height of whatever it contains. Cut on a **character** boundary; see
+/// [`short`] for what a byte index costs here.
+pub fn preview(text: &str, chars: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > chars {
+        let cut: String = flat.chars().take(chars.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        flat
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The crash: `&s[..8]` landing inside a character.
+    ///
+    /// An em dash is three bytes, so "hello — world" has its eighth byte in
+    /// the middle of one. This took the application down when somebody
+    /// searched their conversations, or replied to such a message.
+    #[test]
+    fn shortening_cuts_characters_and_not_bytes() {
+        for text in [
+            "hello — world",
+            "café au lait, and then some more of it",
+            "👍🎉🧡😂🤔👀👍🎉🧡",
+            "日本語のメッセージです",
+        ] {
+            let out = short(text);
+            assert!(
+                out.chars().count() <= 9,
+                "{text:?} shortened to {out:?}, which is longer than it should be"
+            );
+            assert!(
+                text.starts_with(out.trim_end_matches('…')),
+                "{out:?} is not the start of {text:?}"
+            );
+            let _ = preview(text, 48);
+        }
+    }
+
+    /// Nothing was cut, so nothing says there is more.
+    #[test]
+    fn a_short_string_is_not_given_an_ellipsis_it_did_not_earn() {
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(preview("abc", 48), "abc");
+        assert!(short("abcdefghij").ends_with('…'));
+    }
+
+    /// A preview goes on one row, whatever is in the message.
+    #[test]
+    fn a_preview_is_flattened_so_it_cannot_grow_a_row() {
+        assert_eq!(preview("two\nlines\there", 48), "two lines here");
+    }
 
     #[test]
     fn every_receipt_has_a_word_for_what_it_means() {
@@ -748,8 +832,12 @@ mod tests {
     }
 
     #[test]
-    fn short_never_panics_on_a_key_shorter_than_the_window() {
-        assert_eq!(short(""), "…");
-        assert_eq!(short("ab"), "ab…");
+    fn short_never_panics_on_a_string_shorter_than_the_window() {
+        // The ellipsis went with the byte slicing: it was appended whether or
+        // not anything had been cut, so a two-character string claimed to have
+        // more after it. What this test is actually for -- that a string
+        // shorter than the window does not panic -- is unchanged.
+        assert_eq!(short(""), "");
+        assert_eq!(short("ab"), "ab");
     }
 }

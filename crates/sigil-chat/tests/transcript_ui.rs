@@ -304,6 +304,16 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
         })
 }
 
+/// Open the identity block's menu.
+///
+/// Your key, your exchanges and the other identities you hold moved here from
+/// the head of the conversation column. **One gesture away is still
+/// reachable**; replaced by a name would not be.
+fn open_identity(h: &mut Harness<'static>) {
+    h.get_by_label("Your identity").click();
+    h.run();
+}
+
 fn text_of(h: &Harness<'static>) -> String {
     fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
         let n = node.accesskit_node();
@@ -320,6 +330,33 @@ fn text_of(h: &Harness<'static>) -> String {
     let mut found = Vec::new();
     walk(h.root(), &mut found);
     found.join(" | ")
+}
+
+/// Every label on screen, whole.
+///
+/// `text_of` joins them, which is right for "is this sentence anywhere" and
+/// wrong for "is there a control saying exactly `2`" -- a substring search for
+/// a bare number matches a timestamp, an unread pill and half the keys.
+fn labels(h: &Harness<'static>) -> Vec<String> {
+    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
+        let n = node.accesskit_node();
+        // Both, and as separate entries. A plain `Label` carries its text as
+        // the node's *value* and has no label at all, so collecting only
+        // labels finds no ordinary text on the screen -- and an assertion that
+        // some text is absent then passes over an empty list.
+        if let Some(l) = n.label() {
+            out.push(l.to_string());
+        }
+        if let Some(v) = n.value() {
+            out.push(v.to_string());
+        }
+        for c in node.children() {
+            walk(c, out);
+        }
+    }
+    let mut found = Vec::new();
+    walk(h.root(), &mut found);
+    found
 }
 
 #[test]
@@ -462,8 +499,10 @@ fn a_fork_is_surfaced_and_says_it_is_not_an_ordinary_gap() {
 
     // And the words are different things, not one word twice.
     h.get_by_label("forked").hover();
-    h.run();
-    h.run();
+    // `step`, not `run`: hovering a message also brings up its controls, and
+    // `run` waits for the frame to settle -- which an animation never does.
+    h.step();
+    h.step();
     let means = text_of(&h);
     assert!(
         means.contains("evidence"),
@@ -480,8 +519,8 @@ fn a_fork_is_surfaced_and_says_it_is_not_an_ordinary_gap() {
     );
     h.run();
     h.get_by_label("gap").hover();
-    h.run();
-    h.run();
+    h.step();
+    h.step();
     let means = text_of(&h);
     assert!(
         means.contains("not evidence"),
@@ -500,6 +539,47 @@ fn something_forged_is_counted_and_said_rather_than_dropped() {
     assert!(
         said.contains("2 entries") && said.contains("not signed"),
         "a forged entry disappears without a word: {said}"
+    );
+}
+
+/// A direct message has two people in it and cannot have any other number.
+///
+/// So the count beside the members control says nothing about *this*
+/// conversation, only about what kind it is -- and it sits in the header of
+/// every one-to-one conversation being read as though it might change.
+#[test]
+fn a_direct_message_does_not_count_its_two_people() {
+    // The unread pill on the list row also says "2", and it is not what this
+    // is about. Cleared, so a pass cannot come from the wrong widget -- and so
+    // a failure names the header.
+    let mut dm = a_conversation();
+    for c in &mut dm.conversations {
+        c.unread = 0;
+    }
+    assert_eq!(dm.members.len(), 2, "the fixture has two people in it");
+    let mut h = harness_with(dm.clone(), true);
+    h.run();
+    assert!(
+        !labels(&h).iter().any(|l| l == "2"),
+        "a direct message counts its two people: {:?}",
+        labels(&h)
+    );
+
+    // And a group, which is the case the count is for, still has it.
+    let mut group = dm;
+    group.open = Some([8u8; 32]);
+    group.members = (0..7)
+        .map(|i| Member {
+            account: PubKey::new([100 + i; 32]),
+            admin: i == 0,
+        })
+        .collect();
+    let mut h = harness_with(group, true);
+    h.run();
+    assert!(
+        labels(&h).iter().any(|l| l == "7"),
+        "a group stops saying how many are in it: {:?}",
+        labels(&h)
     );
 }
 
@@ -564,7 +644,9 @@ fn a_name_never_appears_without_its_key_reachable() {
     // assertion (SIP-21) and the key is the only identity.
     let said = text_of(&h);
     assert!(said.contains("Ada"));
-    // Our own key is on screen in full, in the pane about us.
+    // Our own key in full, one gesture from the name it sits under.
+    open_identity(&mut h);
+    let said = text_of(&h);
     let key = me().to_string();
     assert!(
         said.contains(&key),
@@ -681,6 +763,7 @@ fn a_revoked_device_says_it_has_been_revoked() {
 fn the_exchange_this_list_belongs_to_is_shown_in_full() {
     let mut h = harness(true);
     h.run();
+    open_identity(&mut h);
     let key = PubKey::new([3u8; 32]).to_string();
     assert!(
         text_of(&h).contains(&key),
@@ -694,6 +777,7 @@ fn the_exchange_this_list_belongs_to_is_shown_in_full() {
 fn a_single_exchange_offers_no_switcher() {
     let mut h = harness_at_exchanges(a_conversation(), &[]);
     h.run();
+    open_identity(&mut h);
     let said = text_of(&h);
     assert!(!said.contains("indra.org"), "{said}");
     // But adding one is always offered.
@@ -705,11 +789,35 @@ fn a_single_exchange_offers_no_switcher() {
 fn a_second_exchange_appears_as_somewhere_to_switch_to() {
     let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
     h.run();
+    open_identity(&mut h);
     let said = text_of(&h);
     assert!(
         said.contains("indra.org"),
         "the added exchange is offered: {said}"
     );
+}
+
+/// Replying to a message with a dash in it must not take the application down.
+///
+/// `short` cut `&text[..8]` and panicked whenever the eighth **byte** fell
+/// inside a character. An em dash is three bytes, so "one — and" put one
+/// there. It killed the reply bar and the search results, which is to say two
+/// of the most ordinary things anybody does.
+#[test]
+fn a_message_that_is_not_ascii_can_be_replied_to() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "one — and then a café, 日本語, 👍".into();
+    let mut h = harness_with(state, true);
+    h.run();
+    h.get_by_label_contains("one — and").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    // The panic was here, drawing the "Replying to" bar.
+    h.run();
+    assert!(text_of(&h).contains("Replying to"), "{}", text_of(&h));
 }
 
 /// Replying and reacting are on the message, not behind a right-click.

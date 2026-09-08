@@ -13,6 +13,15 @@
 //! and buys an interface that cannot render as boxes on somebody else's
 //! machine, in a font they have and we did not test.
 //!
+//! # Why this lives in the host crate and not the widget crate
+//!
+//! Because the [`App`](crate::App) trait names one: the shell's rail is icons,
+//! and an app has to be able to say which is its own. `sigil-ui` depends on
+//! this crate, so the enum could not live there without the dependency running
+//! backwards. It is a design token in the same sense a spacing is — a fixed
+//! vocabulary the whole application draws from — and `sigil-ui` re-exports the
+//! whole of it, so every existing `sigil_ui::Icon` still resolves.
+//!
 //! # Every icon says a word
 //!
 //! An icon is a convention somebody has to already know, and no assistive
@@ -21,7 +30,7 @@
 //! word as a tooltip. **A control that is only a picture is a control some
 //! people cannot use.**
 
-use sigil::{ColorTheme, tokens};
+use crate::{ColorTheme, tokens};
 
 /// What an icon depicts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +49,8 @@ pub enum Icon {
     Plus,
     /// Start a new conversation.
     Compose,
+    /// There is a menu under this.
+    Chevron,
     /// Search.
     Search,
     /// Send a file.
@@ -75,6 +86,7 @@ impl Icon {
             Icon::Device => "Devices",
             Icon::Plus => "New",
             Icon::Compose => "New conversation",
+            Icon::Chevron => "More choices",
             Icon::Search => "Search",
             Icon::Attach => "Attach a file",
             Icon::Send => "Send",
@@ -108,21 +120,31 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
 
     match icon {
         Icon::Call | Icon::HangUp => {
-            // A handset: two ends and a bar between them.
-            let pts = vec![
-                p(0.24, 0.28),
-                p(0.30, 0.22),
-                p(0.44, 0.34),
-                p(0.38, 0.42),
-                p(0.58, 0.62),
-                p(0.66, 0.56),
-                p(0.78, 0.70),
-                p(0.72, 0.76),
-            ];
-            path(pts);
+            // The handset everybody already knows: an arc bowing away from the
+            // diagonal, with a fat end at each end of it.
+            //
+            // The first version was a zigzag polyline meant to read as a
+            // handset seen at an angle. It read as a squiggle. This is the
+            // silhouette people recognise without being told, which is the
+            // whole job of an icon nobody has been taught.
+            let c = p(0.80, 0.26);
+            let r = s * 0.54;
+            let at = |a: f32| c + egui::vec2(a.cos() * r, a.sin() * r);
+            let (from, to) = (std::f32::consts::PI * 0.53, std::f32::consts::PI * 0.99);
+            let arc: Vec<egui::Pos2> = (0..=24)
+                .map(|step| at(from + (to - from) * step as f32 / 24.0))
+                .collect();
+            // Heavier than the rest of the set: this is a body and not a line,
+            // and drawn at the ordinary weight it reads as a stray stroke.
+            let body = egui::Stroke::new((s * 0.17).max(2.0), colour);
+            painter.add(egui::Shape::line(arc, body));
+            // The earpiece and the mouthpiece, which are what make it a
+            // handset rather than a bracket.
+            painter.circle_filled(at(from), s * 0.13, colour);
+            painter.circle_filled(at(to), s * 0.13, colour);
             if icon == Icon::HangUp {
                 // Struck through, so refusing is not the same shape as taking.
-                line(p(0.20, 0.80), p(0.80, 0.20));
+                line(p(0.16, 0.84), p(0.84, 0.16));
             }
         }
         Icon::Settings => {
@@ -178,6 +200,12 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             ));
             line(p(0.5, 0.28), p(0.5, 0.58));
             line(p(0.35, 0.43), p(0.65, 0.43));
+        }
+        Icon::Chevron => {
+            // Pointing down, because what it opens comes down. Thinner than
+            // the arrows: this is punctuation next to something else, not a
+            // control somebody hunts for.
+            path(vec![p(0.28, 0.40), p(0.5, 0.62), p(0.72, 0.40)]);
         }
         Icon::Search => {
             painter.circle_stroke(p(0.44, 0.44), s * 0.24, stroke);
@@ -336,25 +364,56 @@ pub fn icon_button_tinted(
     icon_button_as(ui, icon, icon.word(), tint)
 }
 
+/// The same, and it can be the one that is currently chosen.
+///
+/// For a rail or a tab strip: **selected is drawn as well as said**. A colour
+/// alone would leave somebody who cannot see it unable to tell which of the
+/// apps they are looking at, so the state reaches the accessibility tree too.
+pub fn icon_button_as_named(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    word: &str,
+    tint: Option<egui::Color32>,
+    selected: bool,
+) -> egui::Response {
+    icon_button_inner(ui, icon, word, tint, selected)
+}
+
 fn icon_button_as(
     ui: &mut egui::Ui,
     icon: Icon,
     word: &str,
     tint: Option<egui::Color32>,
 ) -> egui::Response {
+    icon_button_inner(ui, icon, word, tint, false)
+}
+
+fn icon_button_inner(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    word: &str,
+    tint: Option<egui::Color32>,
+    selected: bool,
+) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
     let size = egui::vec2(tokens::BUTTON_MD, tokens::BUTTON_MD);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), word));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, word)
+    });
     if ui.is_rect_visible(rect) {
         // A hit target the size of a finger, with the mark drawn smaller
         // inside it. A 16px icon with a 16px target is a control people miss.
-        if response.hovered() {
+        // Selected reads as a filled ground; hovered as a lighter one. Both
+        // are the same shape, so the eye follows one thing and not two.
+        if selected {
+            ui.painter()
+                .rect_filled(rect, tokens::RADIUS_MD, theme.accent_muted);
+        } else if response.hovered() {
             ui.painter()
                 .rect_filled(rect, tokens::RADIUS_MD, theme.interactive_hover);
         }
-        let colour = tint.unwrap_or(if response.hovered() {
+        let colour = tint.unwrap_or(if selected || response.hovered() {
             theme.text_primary
         } else {
             theme.text_secondary
@@ -387,6 +446,7 @@ mod tests {
             Icon::Device,
             Icon::Plus,
             Icon::Compose,
+            Icon::Chevron,
             Icon::Search,
             Icon::Attach,
             Icon::Send,

@@ -15,7 +15,13 @@ use sigil::tokens;
 /// **And it carries a word.** A screen reader announcing "black circle" helps
 /// nobody, and every caller here has something specific to say — "speaking",
 /// "connected" — that is more useful than the shape.
-pub fn dot(ui: &mut egui::Ui, filled: bool, on: egui::Color32, off: egui::Color32, label: &str) {
+pub fn dot(
+    ui: &mut egui::Ui,
+    filled: bool,
+    on: egui::Color32,
+    off: egui::Color32,
+    label: &str,
+) -> egui::Response {
     let size = egui::vec2(tokens::SPACING_MD, tokens::SPACING_MD);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let radius = tokens::SPACING_XS + 1.0;
@@ -30,4 +36,7 @@ pub fn dot(ui: &mut egui::Ui, filled: bool, on: egui::Color32, off: egui::Color3
     }
     let said = label.to_string();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said));
+    // Returned so a caller can hang the word off it. A dot that says nothing
+    // anywhere is a colour, and a colour is not a message.
+    response.on_hover_text(said)
 }

@@ -134,8 +134,12 @@ fn main() -> eframe::Result<()> {
                 );
             }
 
+            // No Calls tab. A call is placed from inside the conversation
+            // with the person you are calling, rings there, and carries its
+            // audio there -- so a separate app for it was a second place to
+            // look for something that had already happened somewhere else.
+            // `sigil-voice` still holds the engine and the call views.
             let apps: Vec<Box<dyn App>> = vec![
-                Box::new(sigil_voice::VoiceApp::new()),
                 Box::new(sigil_chat::ChatApp::new()),
                 Box::new(sigil_admin::AdminApp::new()),
                 Box::new(sigil_shell::PlatformApp::new(

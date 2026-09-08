@@ -5735,6 +5735,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "egui",
+ "egui_kittest",
  "hex",
  "serde",
  "serde_json",

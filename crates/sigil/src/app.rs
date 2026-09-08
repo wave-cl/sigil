@@ -18,6 +18,8 @@
 use std::any::Any;
 use std::rc::Rc;
 
+use crate::Icon;
+
 use crate::account::Account;
 use crate::accounts::Accounts;
 use crate::navigator::Navigator;
@@ -211,6 +213,19 @@ pub trait App {
 
     /// A short name for the tab strip.
     fn title(&self) -> &str;
+
+    /// The mark for it on the shell's rail.
+    ///
+    /// The rail is icons — a word there is a label on a column of labels, and
+    /// the whole point of a rail is that it is narrow. [`title`](App::title) is
+    /// still what the icon *says*: every one of these carries its app's name to
+    /// the accessibility tree and to a tooltip, because an icon on its own is a
+    /// convention somebody has to already know.
+    ///
+    /// Defaulted, so a new app draws something rather than nothing.
+    fn icon(&self) -> Icon {
+        Icon::Public
+    }
 }
 
 #[cfg(test)]

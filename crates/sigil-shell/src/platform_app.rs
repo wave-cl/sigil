@@ -143,4 +143,8 @@ impl App for PlatformApp {
     fn title(&self) -> &str {
         "Desktop"
     }
+
+    fn icon(&self) -> sigil::Icon {
+        sigil::Icon::Device
+    }
 }

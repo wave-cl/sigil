@@ -157,6 +157,16 @@ pub struct CallHandle {
     state: watch::Receiver<CallState>,
     events: mpsc::UnboundedReceiver<Event>,
     task: JoinHandle<Result<(), String>>,
+    /// The same sender the task holds, so that **hanging up can report the
+    /// ending itself**.
+    ///
+    /// The task reports one when its work finishes, and aborting drops the
+    /// task at whatever it was awaiting — so the epilogue never runs and the
+    /// snapshot keeps saying `Live` for ever. Which is precisely what
+    /// happened: pressing Leave ended the call and left its screen up, with no
+    /// way back.
+    ending: watch::Sender<CallState>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl CallHandle {
@@ -183,6 +193,18 @@ impl CallHandle {
     /// documented there.
     pub fn hang_up(&self) {
         self.task.abort();
+        // Said here rather than left to the task, which will not run again.
+        self.ending.send_modify(|s| {
+            s.phase = Phase::Ended;
+            // Nobody can hear you once you have gone, so a roster left on
+            // screen would be a list of people who cannot.
+            s.present.clear();
+            s.connecting = 0;
+            // Not `trouble`: hanging up is a decision, and reporting it as
+            // something that went wrong would put an error on screen for
+            // having done what was asked.
+        });
+        (self.wake)();
     }
 
     /// Wait for the call to finish on its own.
@@ -259,6 +281,8 @@ pub fn spawn_call(
 
     let ending = state_tx.clone();
     let ending_wake = wake.clone();
+    let hanging_up = state_tx.clone();
+    let hanging_up_wake = wake.clone();
     let task = tokio::spawn(async move {
         let mut bridge = Bridge {
             state: state_tx,
@@ -305,6 +329,8 @@ pub fn spawn_call(
         state: state_rx,
         events: events_rx,
         task,
+        ending: hanging_up,
+        wake: hanging_up_wake,
     }
 }
 
@@ -336,6 +362,8 @@ pub fn spawn_room(
 
     let ending = state_tx.clone();
     let ending_wake = wake.clone();
+    let hanging_up = state_tx.clone();
+    let hanging_up_wake = wake.clone();
     let task = tokio::spawn(async move {
         let mut bridge = Bridge {
             state: state_tx,
@@ -370,5 +398,7 @@ pub fn spawn_room(
         state: state_rx,
         events: events_rx,
         task,
+        ending: hanging_up,
+        wake: hanging_up_wake,
     }
 }

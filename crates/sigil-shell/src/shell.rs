@@ -216,24 +216,43 @@ impl Shell {
         self.apply_nav();
     }
 
-    /// The app rail: one entry per app, with its unread badge.
+    /// The app rail: one icon per app, with its unread badge.
+    ///
+    /// Icons, because a rail is narrow by definition and a column of words is
+    /// a column of labels. Each still **says its name** — to the accessibility
+    /// tree and on hover — since an icon alone is a convention somebody has to
+    /// already know.
     fn rail(&mut self, ui: &mut egui::Ui) {
         let active = self.active();
-        ui.vertical_centered_justified(|ui| {
+        ui.vertical_centered(|ui| {
             for i in 0..self.apps.len() {
                 let title = self.apps[i].title().to_string();
                 let badge = self.apps[i].tab_notifications();
-                // The count goes in the label rather than a painted dot: a dot
-                // says "something", a number says how much, and the
-                // accessibility tree can read one of them out.
-                let label = if badge.is_empty() {
-                    title
+                let selected = i == active;
+                let theme = ColorTheme::current(ui.ctx());
+                // The count stays a **number**, beside the icon rather than
+                // inside it: a dot says "something" and a number says how
+                // much, and only one of them can be read out.
+                let said = if badge.is_empty() {
+                    title.clone()
                 } else {
                     format!("{title} ({})", badge.count)
                 };
-                let selected = i == active;
-                if ui.selectable_label(selected, label).clicked() && !selected {
+                let response = sigil::icon::icon_button_as_named(
+                    ui,
+                    self.apps[i].icon(),
+                    &said,
+                    selected.then_some(theme.accent),
+                    selected,
+                );
+                if response.clicked() && !selected {
                     self.navigator.switch_to(AppId(i));
+                }
+                if !badge.is_empty() {
+                    ui.colored_label(
+                        theme.accent,
+                        egui::RichText::new(badge.count.to_string()).small(),
+                    );
                 }
                 ui.add_space(tokens::SPACING_XS);
             }

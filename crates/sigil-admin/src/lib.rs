@@ -147,6 +147,10 @@ impl App for AdminApp {
         "Exchange"
     }
 
+    fn icon(&self) -> sigil::Icon {
+        sigil::Icon::Settings
+    }
+
     fn render(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
         let Some(me) = Self::showing(ctx) else {
