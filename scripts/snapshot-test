@@ -86,7 +86,12 @@ cargo test --workspace --no-fail-fast -- --ignored
 if [[ -n "$update" ]]; then
     echo
     echo "verifying the updated snapshots are stable…"
-    UPDATE_SNAPSHOTS= cargo test --workspace --no-fail-fast -- --ignored
+    # `env -u`, not `UPDATE_SNAPSHOTS=`. Setting it empty leaves it *set*, and
+    # egui_kittest 0.36 refuses an empty value outright -- so this whole verify
+    # step failed with "Unsupported value for UPDATE_SNAPSHOTS" rather than
+    # verifying anything. The check installed to catch unstable snapshots was
+    # itself broken, which is the failure it exists to prevent.
+    env -u UPDATE_SNAPSHOTS cargo test --workspace --no-fail-fast -- --ignored
     echo
     echo "stable. If that had failed, the snapshot depends on something that"
     echo "changes between runs -- a generated key, the machine's capabilities --"
