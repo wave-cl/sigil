@@ -582,6 +582,13 @@ pub enum Cmd {
         name: String,
         title: String,
     },
+    /// Claim a SIP-38 name at this exchange.
+    ///
+    /// Not the same thing as [`Cmd::SetProfile`] and easily confused with it.
+    /// A profile name is what somebody says about themselves and nobody
+    /// attests; a SIP-38 name is bound at the exchange, resolves to exactly
+    /// one account, and is what makes `name@domain` work.
+    ClaimName(String),
 
     // ---- making conversations ------------------------------------------
     /// A private group. Its name is a sealed entry, not the exchange's.
@@ -2161,6 +2168,47 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     false
                 }
             };
+        }
+        Cmd::ClaimName(name) => {
+            // The exchange's own outcome, in words. A refusal here is an
+            // answer and not a fault: whether self-claim is offered at all is
+            // the operator's policy, and "somebody else has it" and "not
+            // here, ask an administrator" want opposite things from whoever
+            // asked.
+            match chat.claim_name(&name).await {
+                Ok(outcome) => {
+                    let said = match outcome {
+                        sqex_proto::name::CLAIM_GRANTED => {
+                            // Read back rather than assumed: the handle shown
+                            // everywhere else comes from the exchange, and a
+                            // client that wrote its own would be showing a
+                            // name nobody else can see.
+                            desk.restale.insert(chat.me);
+                            format!("{name} is yours here.")
+                        }
+                        sqex_proto::name::CLAIM_TAKEN => {
+                            format!("{name} is already somebody else's.")
+                        }
+                        sqex_proto::name::CLAIM_CLOSED => {
+                            "This exchange assigns names itself. Ask its operator.".to_string()
+                        }
+                        sqex_proto::name::CLAIM_AT_CAPACITY => {
+                            "You hold as many names here as this exchange allows.".to_string()
+                        }
+                        sqex_proto::name::CLAIM_RATE_LIMITED => {
+                            "Too many claims just now. Try again shortly.".to_string()
+                        }
+                        sqex_proto::name::CLAIM_FULL => {
+                            "This exchange is not taking any more names.".to_string()
+                        }
+                        other => format!(
+                            "The exchange answered {other}, which this                                           version does not know."
+                        ),
+                    };
+                    state.send_modify(|s| s.note = Some(said));
+                }
+                Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
+            }
         }
         Cmd::Reconnect => chat.reconnect_now(),
 

@@ -34,6 +34,13 @@ pub enum Route {
     Devices,
 }
 
+/// What the identity block says when the exchange knows no name for you.
+///
+/// One word, because it goes under your own name in a corner and the sentence
+/// it replaced — "no name at this exchange" — wrapped onto a second line and
+/// pushed the block down rather than out.
+const UNREGISTERED: &str = "unregistered";
+
 /// A short form, shown over everything as a dialog.
 ///
 /// # Why the column holds no forms
@@ -57,6 +64,8 @@ enum Dialog {
     Profile,
     /// Connect this identity to another exchange.
     Exchange,
+    /// Claim a SIP-38 name here.
+    Name,
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -108,6 +117,8 @@ struct Pane {
     forwarding: Option<u64>,
     /// The key being invited to the open channel.
     inviting: String,
+    /// The SIP-38 name being claimed.
+    naming: String,
     /// The channel settings fields.
     channel_name: String,
     channel_topic: String,
@@ -136,6 +147,7 @@ impl Default for Pane {
             exchange: String::new(),
             forwarding: None,
             inviting: String::new(),
+            naming: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
             // The protocol's own default, not zero: a retention field starting
@@ -692,7 +704,15 @@ impl ChatApp {
         // left the picture stranded 200px from its own name, so the width is
         // measured instead.
         let label = state.mine.label(&me);
-        let second = state.mine.handle.clone().unwrap_or_default();
+        // Whatever the second line will actually say, so the block is wide
+        // enough for it. Measured against an empty string when there is no
+        // handle, "unregistered" wrapped onto a third line and the block grew
+        // downwards instead of leftwards.
+        let second = state
+            .mine
+            .handle
+            .clone()
+            .unwrap_or_else(|| UNREGISTERED.to_string());
         let measure = |text: &str, style: egui::TextStyle| {
             ui.ctx()
                 .fonts_mut(|f| {
@@ -728,10 +748,23 @@ impl ChatApp {
                         );
                     }
                     None => {
-                        ui.colored_label(
-                            theme.text_muted,
-                            egui::RichText::new("no name at this exchange").small(),
-                        );
+                        // A control, not a note. "You have no name here" is
+                        // only useful beside the way to get one, and the way
+                        // to get one is a claim at this exchange.
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(UNREGISTERED)
+                                        .small()
+                                        .color(theme.text_muted),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Claim a name at this exchange")
+                            .clicked()
+                        {
+                            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Name);
+                        }
                     }
                 }
             },
@@ -921,6 +954,7 @@ impl ChatApp {
                     Dialog::Compose => self.compose_dialog(at, ui, theme),
                     Dialog::Profile => self.profile_dialog(at, ui, theme),
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
+                    Dialog::Name => self.name_dialog(at, state, ui, theme),
                 }
             });
         if response.should_close() {
@@ -1051,6 +1085,57 @@ impl ChatApp {
                 self.pane(at).dialog = None;
             }
         });
+    }
+
+    /// Claim a SIP-38 name at this exchange.
+    ///
+    /// # Why this is not the profile
+    ///
+    /// A profile name is what somebody says about themselves and **nobody
+    /// attests it** (SIP-21). A SIP-38 name is bound at the exchange, resolves
+    /// to exactly one account, and is what lets anybody write to you as
+    /// `name@domain`. They are two different things that both get called a
+    /// name, so they get two dialogs and each says which it is.
+    fn name_dialog(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.heading("Claim a name");
+        ui.add_space(tokens::SPACING_SM);
+        ui.label("Name");
+        let width = ui.available_width();
+        let field = sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().naming,
+            "the name you want, without the domain",
+            width,
+        );
+        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Bound at this exchange, so it means nothing at another one. Whether \
+                 anybody may take a free name is the operator's policy.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        ui.horizontal(|ui| {
+            if ui.button("Claim").clicked() || entered {
+                let name = self.pane(at).naming.trim().to_string();
+                if !name.is_empty() {
+                    self.pane(at).naming.clear();
+                    self.pane(at).dialog = None;
+                    self.send_as(Some(at), Cmd::ClaimName(name));
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                let pane = self.pane(at);
+                pane.naming.clear();
+                pane.dialog = None;
+            }
+        });
+        // The exchange's answer, where the question was asked.
+        if let Some(note) = &state.note {
+            ui.colored_label(theme.text_secondary, note);
+        }
     }
 
     /// Connect this identity to another exchange.

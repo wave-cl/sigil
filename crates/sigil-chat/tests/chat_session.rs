@@ -15,12 +15,23 @@ use sqexd::config::FileConfig;
 use sqnr_core::{PubKey, SoftwareSigner};
 
 async fn server_in(dir: &Path) -> (SocketAddr, [u8; 32], tokio::task::JoinHandle<()>) {
+    server_with(dir, "off").await
+}
+
+/// The same, with a SIP-38 registration policy of the caller's choosing.
+///
+/// `off` is the default and does not carry the route at all, which is right
+/// for every other test here and useless for the one about claiming a name.
+async fn server_with(
+    dir: &Path,
+    names: &str,
+) -> (SocketAddr, [u8; 32], tokio::task::JoinHandle<()>) {
     let key_path = dir.join("host_key");
     let (server_sk, _) = squic::generate_keypair();
     std::fs::write(&key_path, hex::encode(server_sk.to_bytes())).unwrap();
     let config_toml = format!(
         "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
-         welcome_channel = \"\"\n",
+         welcome_channel = \"\"\nname_registration = \"{names}\"\n",
         key_path.to_string_lossy(),
         dir.join("sqex.state").to_string_lossy(),
     );
@@ -982,6 +993,67 @@ async fn a_file_is_sent_and_arrives_intact() {
         std::fs::read(&out).unwrap(),
         payload,
         "and what comes back is byte for byte what was sent"
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
+/// Claiming a SIP-38 name from the client, and being told what came back.
+///
+/// **A refusal is an answer.** Whether anybody may take a free name is the
+/// operator's policy, and "somebody else has it" and "this exchange assigns
+/// them itself" want opposite things from whoever asked — so each comes back
+/// in its own words rather than as one failure.
+#[tokio::test]
+async fn a_name_is_claimed_and_a_taken_one_is_said_in_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_with(dir.path(), "open").await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(31);
+    let (b_signer, b_id) = signer(32);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::ClaimName("ada".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .note
+                .is_some_and(|n| n.contains("ada is yours here")),
+            20
+        )
+        .await,
+        "the claim was not granted, or not said: {:?}",
+        alice.state().note
+    );
+
+    bob.send(Cmd::ClaimName("ada".into()));
+    assert!(
+        until(
+            || bob
+                .state()
+                .note
+                .is_some_and(|n| n.contains("already somebody else")),
+            20
+        )
+        .await,
+        "a taken name reads as a failure rather than as taken: {:?} / {:?}",
+        bob.state().note,
+        bob.state().trouble
     );
 
     alice.stop();

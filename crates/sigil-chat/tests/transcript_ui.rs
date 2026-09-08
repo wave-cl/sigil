@@ -875,6 +875,35 @@ fn every_identity_is_offered_and_one_is_not_a_choice() {
     );
 }
 
+/// Having no name here is a control, not a note.
+///
+/// "You have no name at this exchange" is only useful beside the way to get
+/// one. It is one word now, too: the sentence it replaced wrapped onto a
+/// second line in a corner block and pushed it down rather than out.
+#[test]
+fn having_no_name_offers_the_way_to_claim_one() {
+    let mut state = a_conversation();
+    state.mine.handle = None;
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(
+        text_of(&h).contains("unregistered"),
+        "nothing says the exchange knows no name here: {}",
+        text_of(&h)
+    );
+
+    h.get_by_label("unregistered").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Claim a name"), "{said}");
+    // And it says which kind of name it is. A profile name is what somebody
+    // says about themselves; this one is bound at the exchange.
+    assert!(
+        said.contains("Bound at this exchange"),
+        "the two things called a name are not told apart: {said}"
+    );
+}
+
 /// A ring shows the caller's key in full, and does not dress it as proven.
 ///
 /// Carried over from the voice app, which used to own ringing. The rule did
