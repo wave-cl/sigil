@@ -227,7 +227,7 @@ async fn resolve_once(dial: &Dial) -> Result<Endpoint, String> {
         Dial::At(e) => Ok(*e),
         Dial::Discover(layers) => {
             let mut silent = Silent;
-            engine::resolve(layers, &mut silent as &mut dyn Report).await
+            engine::resolve(&layers[..], &mut silent as &mut dyn Report).await
         }
     }
 }

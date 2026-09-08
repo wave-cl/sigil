@@ -132,6 +132,12 @@ impl Report for Bridge {
             | Event::BadFrame { .. }
             | Event::Reflected(_)
             | Event::CallerGone { .. }
+            // SIP-39's cross-exchange decline: the callee's exchange tells the
+            // caller rather than leaving them to time out. sigil does not take
+            // that path yet -- it rings over the SIP-5 mailbox and declines by
+            // simply not answering -- so this only ever arrives as something to
+            // say, not as a state to hold.
+            | Event::Declined { .. }
             | Event::Device(_) => {}
         });
         // A closed receiver means the interface has gone; the call carries on
@@ -258,7 +264,7 @@ pub fn spawn_call(
         let result = async {
             let endpoint = match dial {
                 Dial::At(e) => e,
-                Dial::Discover(layers) => engine::resolve(&layers, &mut bridge).await?,
+                Dial::Discover(layers) => engine::resolve(&layers[..], &mut bridge).await?,
             };
             let mut client = engine::dial(endpoint, &signer, peer, &mut bridge).await?;
             // Ring before waiting, so the other end has a reason to answer.
@@ -335,7 +341,7 @@ pub fn spawn_room(
         let result = async {
             let endpoint = match dial {
                 Dial::At(e) => e,
-                Dial::Discover(layers) => engine::resolve(&layers, &mut bridge).await?,
+                Dial::Discover(layers) => engine::resolve(&layers[..], &mut bridge).await?,
             };
             let client = engine::connect(endpoint, &signer, &mut bridge).await?;
             engine::room_call(client, &signer, room, opts, &mut bridge).await

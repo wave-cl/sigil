@@ -237,7 +237,7 @@ async fn run(
         Dial::At(e) => *e,
         Dial::Discover(layers) => {
             let mut silent = sqex_voice::engine::Silent;
-            sqex_voice::engine::resolve(layers, &mut silent).await?
+            sqex_voice::engine::resolve(&layers[..], &mut silent).await?
         }
     };
     let client =
