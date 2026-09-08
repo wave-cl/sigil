@@ -2,7 +2,9 @@
 
 pub mod session;
 
-pub use session::{ChatHandle, ChatState, Closing, Cmd, Line, LinkState, Person, Summary, Trouble};
+pub use session::{
+    ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Summary, Trouble,
+};
 
 use std::collections::HashMap;
 
@@ -13,9 +15,20 @@ use sqnr::config::Config;
 use sqnr_core::PubKey;
 
 /// Where you are inside the chat app.
+///
+/// These go into the shell's global history as `Rc<dyn Any>` tokens, so back
+/// and forward cross app boundaries: leaving the directory can take you to the
+/// call you were on before, which is what a single history is for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
+    /// The list and whatever is open in it.
     Conversations,
+    /// The public directory: search, and join what it turns up.
+    Directory,
+    /// Who is in the open conversation, and what may be done about them.
+    Members,
+    /// The open conversation's name, topic and retention.
+    Settings,
 }
 
 /// What is being typed, per identity.
@@ -24,7 +37,6 @@ pub enum Route {
 /// still be in the box after switching to another: the next Return would send
 /// it as somebody else, which is a mistake the interface would have made on
 /// your behalf and not mentioned.
-#[derive(Default)]
 struct Pane {
     /// Kept out of the session so that a failed send leaves it on screen:
     /// retyping a message the program lost is the worst thing a chat client can
@@ -35,10 +47,42 @@ struct Pane {
     add_trouble: Option<String>,
     /// The profile editor is open.
     editing_profile: bool,
+    /// The directory search box.
+    query: String,
+    /// The key being invited to the open channel.
+    inviting: String,
+    /// The channel settings fields.
+    channel_name: String,
+    channel_topic: String,
+    retention_days: u32,
+    /// Destroying a channel is asked twice, because it cannot be undone.
+    confirming_destroy: bool,
     /// What is being typed into it. Held separately from the published
     /// profile so cancelling really cancels.
     name: String,
     title: String,
+}
+
+impl Default for Pane {
+    fn default() -> Self {
+        Pane {
+            composing: String::new(),
+            adding: String::new(),
+            add_trouble: None,
+            editing_profile: false,
+            query: String::new(),
+            inviting: String::new(),
+            channel_name: String::new(),
+            channel_topic: String::new(),
+            // The protocol's own default, not zero: a retention field starting
+            // outside its own range offers to set something the exchange will
+            // refuse, and the refusal would read as sigil's fault.
+            retention_days: 30,
+            confirming_destroy: false,
+            name: String::new(),
+            title: String::new(),
+        }
+    }
 }
 
 pub struct ChatApp {
@@ -241,7 +285,47 @@ impl ChatApp {
     }
 }
 
+impl ChatApp {
+    /// The route a token names, or the list when it names none of ours.
+    ///
+    /// A token from another app -- or the `()` of a plain tab switch -- is not
+    /// an error and must never panic: the shell cannot tell them apart and
+    /// hands over whatever it is holding.
+    fn route(token: &std::rc::Rc<dyn std::any::Any>) -> Route {
+        token
+            .downcast_ref::<Route>()
+            .cloned()
+            .unwrap_or(Route::Conversations)
+    }
+}
+
 impl App for ChatApp {
+    fn render_nav(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        ui: &mut egui::Ui,
+        token: &std::rc::Rc<dyn std::any::Any>,
+    ) -> AppResponse {
+        match Self::route(token) {
+            Route::Conversations => self.render(ctx, ui),
+            Route::Directory => self.directory_view(ctx, ui),
+            Route::Members => self.members_view(ctx, ui),
+            Route::Settings => self.settings_view(ctx, ui),
+        }
+    }
+
+    fn nav_title(&self, token: &std::rc::Rc<dyn std::any::Any>) -> Option<String> {
+        Some(
+            match Self::route(token) {
+                Route::Conversations => return None,
+                Route::Directory => "Public channels",
+                Route::Members => "Members",
+                Route::Settings => "Channel settings",
+            }
+            .to_string(),
+        )
+    }
+
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
     }
@@ -312,12 +396,12 @@ impl App for ChatApp {
                 // conversation with a way back. Not both squeezed together --
                 // two unusable columns are worse than one usable one.
                 match state.open {
-                    None => self.list_ui(me, &state, ui, &theme),
+                    None => self.list_ui(ctx, me, &state, ui, &theme),
                     Some(_) => {
                         if ui.button("← Conversations").clicked() {
                             self.send_as(Some(me), Cmd::Close);
                         }
-                        self.transcript_ui(me, &state, ui, &theme);
+                        self.transcript_ui(ctx, me, &state, ui, &theme);
                     }
                 }
             }
@@ -329,10 +413,10 @@ impl App for ChatApp {
                         right: tokens::SPACING_MD as i8,
                         ..Default::default()
                     }))
-                    .show(ui, |ui| self.list_ui(me, &state, ui, &theme));
+                    .show(ui, |ui| self.list_ui(ctx, me, &state, ui, &theme));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ui, |ui| self.transcript_ui(me, &state, ui, &theme));
+                    .show(ui, |ui| self.transcript_ui(ctx, me, &state, ui, &theme));
             }
         }
         AppResponse::default()
@@ -432,10 +516,46 @@ impl ChatApp {
     }
 
     /// The conversation list.
-    fn list_ui(&mut self, me: PubKey, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn list_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        me: PubKey,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         let now = self.now();
         self.me_ui(me, state, ui, theme);
-        ui.heading("Conversations");
+        ui.horizontal(|ui| {
+            ui.heading("Conversations");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("New", |ui| {
+                    if ui.button("Group").clicked() {
+                        // A group's name is a sealed entry, so it is named
+                        // after it exists rather than before.
+                        self.send_as(Some(me), Cmd::NewGroup("New group".into()));
+                        ui.close();
+                    }
+                    if ui
+                        .button("Public channel")
+                        .on_hover_text(
+                            "Anybody may find and join it, and nothing said in it is \
+                             encrypted.",
+                        )
+                        .clicked()
+                    {
+                        self.send_as(
+                            Some(me),
+                            Cmd::NewPublic {
+                                name: "New channel".into(),
+                                topic: String::new(),
+                            },
+                        );
+                        ui.close();
+                    }
+                });
+            });
+        });
         ui.add_space(tokens::SPACING_XS);
 
         ui.horizontal(|ui| {
@@ -463,6 +583,9 @@ impl ChatApp {
         }
         if let Some(t) = self.panes.get(&me).and_then(|p| p.add_trouble.as_ref()) {
             ui.colored_label(theme.destructive, t);
+        }
+        if ui.button("Find a public channel").clicked() {
+            ctx.navigator.push_here(Route::Directory);
         }
 
         ui.add_space(tokens::SPACING_SM);
@@ -507,6 +630,7 @@ impl ChatApp {
     /// The messages, and the box to write one in.
     fn transcript_ui(
         &mut self,
+        ctx: &mut AppContext<'_>,
         me: PubKey,
         state: &ChatState,
         ui: &mut egui::Ui,
@@ -521,6 +645,39 @@ impl ChatApp {
             return;
         }
 
+        // The header: what this conversation is, and the way into everything
+        // that can be done about it.
+        ui.horizontal(|ui| {
+            let label = state
+                .conversations
+                .iter()
+                .find(|c| Some(c.channel) == state.open)
+                .map(|c| c.label.clone())
+                .unwrap_or_default();
+            ui.heading(label);
+            if !state.topic.is_empty() {
+                ui.colored_label(theme.text_secondary, &state.topic);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Settings").clicked() {
+                    ctx.navigator.push_here(Route::Settings);
+                }
+                let members = state.members.len();
+                let label = match members {
+                    0 => "Members".to_string(),
+                    n => format!("Members ({n})"),
+                };
+                if ui.button(label).clicked() {
+                    ctx.navigator.push_here(Route::Members);
+                }
+            });
+        });
+        // A note is about something just done and a trouble is about a state.
+        // Kept apart because the state is rebuilt every refresh, and merged
+        // they would put every confirmation on screen for less than a tick.
+        if let Some(note) = &state.note {
+            ui.colored_label(theme.success, note);
+        }
         self.trouble_ui(&state.trouble_with, ui, theme);
 
         // The composer is laid out first, from the bottom, so the transcript
@@ -704,5 +861,374 @@ impl ChatApp {
                 field.request_focus();
             }
         });
+    }
+}
+
+impl ChatApp {
+    /// The public directory: search it, and join what it turns up.
+    ///
+    /// This is the only way into a public channel and the only channel route
+    /// open to anybody — every other one names an identifier, and an identifier
+    /// is not an authorisation. A private channel is not merely un-joinable, it
+    /// is unmentionable, so nothing here can be made to admit one exists.
+    fn directory_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(me) = Self::showing(ctx) else {
+            return AppResponse::default();
+        };
+        let state = self.state_of(Some(me));
+
+        ui.horizontal(|ui| {
+            if ui.button("← Back").clicked() {
+                ctx.navigator.back();
+            }
+            ui.heading("Public channels");
+        });
+        ui.colored_label(
+            theme.text_secondary,
+            "Anybody may join these, and nothing said in one is encrypted — everyone \
+             who may join would hold any key it used.",
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        ui.horizontal(|ui| {
+            let pane = self.panes.entry(me).or_default();
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut pane.query)
+                    .hint_text("search, or leave empty for everything"),
+            );
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if entered || ui.button("Search").clicked() {
+                let query = self.pane(me).query.clone();
+                self.send_as(Some(me), Cmd::Find(query));
+            }
+        });
+        ui.add_space(tokens::SPACING_SM);
+
+        if state.found.is_empty() {
+            // "Nothing matched" and "nobody has searched" are different facts
+            // and the pane says which.
+            ui.colored_label(
+                theme.text_secondary,
+                if state.searched {
+                    "Nothing matched."
+                } else {
+                    "Search to see what this exchange is carrying."
+                },
+            );
+            return AppResponse::default();
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for found in &state.found {
+                    let already = state
+                        .conversations
+                        .iter()
+                        .any(|c| c.channel == found.channel);
+                    ui.horizontal(|ui| {
+                        let id = bs58::encode(found.channel).into_string();
+                        sigil_ui::identicon(ui, &id, tokens::AVATAR_MD);
+                        ui.add_space(tokens::SPACING_SM);
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&found.name).strong());
+                            if !found.topic.is_empty() {
+                                ui.colored_label(
+                                    theme.text_secondary,
+                                    egui::RichText::new(&found.topic).small(),
+                                );
+                            }
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(match found.members {
+                                    1 => "1 member".to_string(),
+                                    n => format!("{n} members"),
+                                })
+                                .small(),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if already {
+                                ui.colored_label(theme.text_muted, "joined");
+                            } else if ui.button("Join").clicked() {
+                                // Reading a public channel *is* joining it:
+                                // fetching requires membership, so there is no
+                                // way to look without becoming a member.
+                                self.send_as(
+                                    Some(me),
+                                    Cmd::Join {
+                                        channel: found.channel,
+                                        instance: found.instance,
+                                    },
+                                );
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
+            });
+        AppResponse::default()
+    }
+
+    /// Who is in the open conversation.
+    fn members_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(me) = Self::showing(ctx) else {
+            return AppResponse::default();
+        };
+        let state = self.state_of(Some(me));
+
+        ui.horizontal(|ui| {
+            if ui.button("← Back").clicked() {
+                ctx.navigator.back();
+            }
+            ui.heading("Members");
+        });
+
+        if state.i_am_admin {
+            ui.add_space(tokens::SPACING_SM);
+            ui.horizontal(|ui| {
+                ui.label("Invite");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().inviting)
+                        .hint_text("their key or name@domain")
+                        .desired_width(240.0),
+                );
+                if ui.button("Add").clicked() {
+                    let typed = self.pane(me).inviting.trim().to_string();
+                    match typed.parse::<PubKey>() {
+                        Ok(who) => {
+                            self.pane(me).inviting.clear();
+                            self.send_as(Some(me), Cmd::Invite(who));
+                        }
+                        Err(e) => {
+                            self.pane(me).add_trouble = Some(format!("that is not a key: {e}"))
+                        }
+                    }
+                }
+            });
+            // Inviting grants the history, and that is a decision rather than
+            // a side effect: sealing the current epoch is what hands it over,
+            // and rotating instead would deny it.
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(
+                    "Somebody invited is given the key in force, so they can read what is \
+                     already here.",
+                )
+                .small(),
+            );
+        }
+
+        ui.add_space(tokens::SPACING_SM);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for member in &state.members {
+                    let key = member.account.to_string();
+                    let person = state
+                        .people
+                        .get(&member.account)
+                        .cloned()
+                        .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        sigil_ui::identicon(ui, &key, tokens::AVATAR_SM);
+                        ui.add_space(tokens::SPACING_SM);
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(person.label(&member.account));
+                                if member.admin {
+                                    // The exchange attests this one, so it may
+                                    // be drawn as a role. A SIP-21 title may
+                                    // not, which is why it is not here.
+                                    ui.colored_label(theme.accent, "admin");
+                                }
+                                if member.account == me {
+                                    ui.colored_label(theme.text_muted, "you");
+                                }
+                            });
+                            // In full. This is the only thing that identifies
+                            // them; everything above it is a claim.
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&key).monospace().small())
+                                    .selectable(true),
+                            );
+                        });
+                        if state.i_am_admin && member.account != me {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button("Remove")
+                                        .on_hover_text(
+                                            "Removes them and mints a new key, so what \
+                                             follows is not theirs. What they already \
+                                             hold, they keep.",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.send_as(Some(me), Cmd::Kick(member.account));
+                                    }
+                                    let (label, admin) = if member.admin {
+                                        ("Demote", false)
+                                    } else {
+                                        ("Make admin", true)
+                                    };
+                                    if ui.button(label).clicked() {
+                                        self.send_as(
+                                            Some(me),
+                                            Cmd::Grant {
+                                                who: member.account,
+                                                admin,
+                                            },
+                                        );
+                                    }
+                                },
+                            );
+                        }
+                    });
+                    ui.separator();
+                }
+            });
+        AppResponse::default()
+    }
+
+    /// The open conversation's name, topic, retention, and how to end it.
+    fn settings_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(me) = Self::showing(ctx) else {
+            return AppResponse::default();
+        };
+        let state = self.state_of(Some(me));
+
+        ui.horizontal(|ui| {
+            if ui.button("← Back").clicked() {
+                ctx.navigator.back();
+            }
+            ui.heading("Channel settings");
+        });
+
+        if !state.i_am_admin {
+            ui.colored_label(
+                theme.text_secondary,
+                "Only an admin can change these. You can still leave.",
+            );
+        }
+
+        ui.add_space(tokens::SPACING_SM);
+        ui.add_enabled_ui(state.i_am_admin, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().channel_name)
+                        .desired_width(240.0),
+                );
+                if ui.button("Set").clicked() {
+                    let name = self.pane(me).channel_name.clone();
+                    self.send_as(Some(me), Cmd::SetName(name));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Topic");
+                ui.add(
+                    egui::TextEdit::singleline(
+                        &mut self.panes.entry(me).or_default().channel_topic,
+                    )
+                    .desired_width(240.0),
+                );
+                if ui.button("Set").clicked() {
+                    let topic = self.pane(me).channel_topic.clone();
+                    self.send_as(Some(me), Cmd::SetTopic(topic));
+                }
+            });
+
+            ui.add_space(tokens::SPACING_SM);
+            ui.horizontal(|ui| {
+                ui.label("Keep messages for");
+                ui.add(
+                    egui::DragValue::new(&mut self.panes.entry(me).or_default().retention_days)
+                        .range(1..=365)
+                        .suffix(" days"),
+                );
+                if ui.button("Set").clicked() {
+                    let days = self.pane(me).retention_days;
+                    self.send_as(
+                        Some(me),
+                        Cmd::SetRetention {
+                            secs: days * 24 * 60 * 60,
+                            max_entries: 0,
+                        },
+                    );
+                }
+            });
+            // Narrowing a window deletes, at once. It is not a policy that
+            // takes effect later, and somebody shortening it should know that
+            // before they press the button rather than after.
+            ui.colored_label(
+                theme.warning,
+                egui::RichText::new(
+                    "Shortening this deletes anything already outside the window, \
+                     immediately and for everybody.",
+                )
+                .small(),
+            );
+
+            ui.add_space(tokens::SPACING_SM);
+            if ui
+                .button("Mint a new key")
+                .on_hover_text(
+                    "Everybody present is given a new key. Anybody who has left keeps \
+                     what they already had.",
+                )
+                .clicked()
+            {
+                self.send_as(Some(me), Cmd::Rotate);
+            }
+        });
+
+        ui.add_space(tokens::SPACING_LG);
+        ui.separator();
+        ui.add_space(tokens::SPACING_SM);
+
+        // Leaving and destroying are not the same control and must not look
+        // like one. One takes you out; the other ends it for everybody.
+        if ui
+            .button("Leave")
+            .on_hover_text("You stop receiving this conversation. Nobody else loses it.")
+            .clicked()
+        {
+            self.send_as(Some(me), Cmd::Leave);
+            ctx.navigator.back();
+        }
+
+        ui.add_space(tokens::SPACING_SM);
+        let pane = self.panes.entry(me).or_default();
+        if !pane.confirming_destroy {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("Destroy this channel").color(theme.destructive),
+                ))
+                .clicked()
+            {
+                pane.confirming_destroy = true;
+            }
+        } else {
+            ui.colored_label(
+                theme.destructive,
+                "This ends the conversation for everybody in it and cannot be undone.",
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Yes, destroy it").clicked() {
+                    self.panes.entry(me).or_default().confirming_destroy = false;
+                    self.send_as(Some(me), Cmd::Destroy);
+                    ctx.navigator.back();
+                }
+                if ui.button("Cancel").clicked() {
+                    self.panes.entry(me).or_default().confirming_destroy = false;
+                }
+            });
+        }
+        AppResponse::default()
     }
 }

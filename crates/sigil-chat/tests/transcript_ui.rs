@@ -10,7 +10,7 @@ use egui_kittest::kittest::NodeT;
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
-use sigil_chat::{ChatApp, ChatState, Line, LinkState, Person, Summary};
+use sigil_chat::{ChatApp, ChatState, Line, LinkState, Member, Person, Summary};
 use sqnr_core::PubKey;
 
 /// 2026-09-08 12:00:00 UTC. Pinned, because a day separator says "Today" and
@@ -139,6 +139,21 @@ fn a_conversation() -> ChatState {
             title: None,
             handle: Some("me@squic.org".into()),
         },
+        found: Vec::new(),
+        searched: false,
+        note: None,
+        members: vec![
+            Member {
+                account: me(),
+                admin: true,
+            },
+            Member {
+                account: them(),
+                admin: false,
+            },
+        ],
+        i_am_admin: true,
+        topic: String::new(),
         divider: Some(3),
         unread_on_open: 2,
     }

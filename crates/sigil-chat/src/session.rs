@@ -122,6 +122,23 @@ pub struct ChatState {
     pub people: HashMap<PubKey, Person>,
     /// Our own profile, for the pane that edits it.
     pub mine: Person,
+    /// What the directory last turned up.
+    pub found: Vec<Found>,
+    /// A search has been run, so an empty `found` means "nothing matched"
+    /// rather than "nobody has looked".
+    pub searched: bool,
+    /// A confirmation of something just done.
+    ///
+    /// **Separate from `trouble`**, which is about the state of the
+    /// conversation and is rebuilt by every refresh. Merged, every
+    /// confirmation would be on screen for less than a tick.
+    pub note: Option<String>,
+    /// Who is in the open conversation.
+    pub members: Vec<Member>,
+    /// Whether we may rename, invite, remove and rotate here.
+    pub i_am_admin: bool,
+    /// The open conversation's topic, when it has one.
+    pub topic: String,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -130,6 +147,29 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// A public channel the directory turned up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub channel: [u8; 32],
+    /// Which incarnation the directory is showing. Carried because a joiner
+    /// has to sign against it and cannot ask `Info`, which requires the
+    /// membership they are trying to acquire.
+    pub instance: [u8; 32],
+    pub name: String,
+    pub topic: String,
+    pub members: u16,
+}
+
+/// Who is in a conversation, and what they may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub account: PubKey,
+    /// May redact, rename, invite and mint a new epoch. **Attested by the
+    /// exchange**, unlike a SIP-21 title, which is why it may be shown as a
+    /// role and a title may not.
+    pub admin: bool,
 }
 
 /// How somebody can be named.
@@ -254,7 +294,62 @@ pub enum Cmd {
     /// Put the open conversation away. What "back" means in a single pane.
     Close,
     /// Publish a display name and title (SIP-21). Empty clears them.
-    SetProfile { name: String, title: String },
+    SetProfile {
+        name: String,
+        title: String,
+    },
+
+    // ---- making conversations ------------------------------------------
+    /// A private group. Its name is a sealed entry, not the exchange's.
+    NewGroup(String),
+    /// A public channel. Anybody may find and join it, and **nothing in it is
+    /// encrypted** — everyone who may join would hold any key it used.
+    NewPublic {
+        name: String,
+        topic: String,
+    },
+    /// Search the public directory. Empty lists everything (SIP-16).
+    Find(String),
+    /// Join a public channel found in the directory.
+    ///
+    /// The incarnation comes from the directory row and has to: SIP-31 binds
+    /// it into the signature, and `Info` — the other place it appears —
+    /// requires the membership this call is asking for.
+    Join {
+        channel: [u8; 32],
+        instance: [u8; 32],
+    },
+
+    // ---- running one ---------------------------------------------------
+    /// Add somebody, and seal them the **current** epoch key, which grants them
+    /// the history. Rotating instead would deny it — a different decision, and
+    /// not one to make on somebody's behalf without saying so.
+    Invite(PubKey),
+    /// Remove somebody. **This rotates**: a removed member keeps every key they
+    /// were ever given, so without a new epoch they could go on reading from
+    /// the exchange's own copy.
+    Kick(PubKey),
+    /// Make somebody an admin, or stop them being one.
+    Grant {
+        who: PubKey,
+        admin: bool,
+    },
+    /// Mint a new epoch for everybody present.
+    Rotate,
+    /// Leave. For a direct message this removes only us — leaving a
+    /// conversation must not delete the other person's copy.
+    Leave,
+    /// **Destroy the channel for everybody.** Not the same as `Close`, which
+    /// only puts it away on this screen.
+    Destroy,
+    SetName(String),
+    SetTopic(String),
+    /// Retention window and an optional entry cap. **Narrowing is a deletion**,
+    /// applied at once, not a policy that takes effect later.
+    SetRetention {
+        secs: u32,
+        max_entries: u32,
+    },
 }
 
 pub struct ChatHandle {
@@ -459,6 +554,8 @@ struct Known {
     /// Who may redact and rename. From the exchange, remembered so that a
     /// client starting offline folds its own history correctly.
     admins: Vec<PubKey>,
+    /// Everybody in it, with the role the **exchange** attests.
+    members: Vec<Member>,
     timeline: Timeline,
     /// How many messages we had last time, so a new one can be counted unread
     /// without diffing two timelines.
@@ -650,7 +747,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
 
         // The exchange is authoritative about who administers a channel; the
         // store is what makes that survive being offline.
-        let (admins, given_name, members) = match chat.info(&m.channel).await {
+        let (admins, given_name, roster) = match chat.info(&m.channel).await {
             Ok(info) => (
                 info.members
                     .iter()
@@ -660,7 +757,12 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 info.name,
                 info.members
                     .iter()
-                    .map(|mem| mem.account)
+                    .map(|mem| Member {
+                        account: mem.account,
+                        // Attested by the exchange. This is the one role that
+                        // may be drawn as a role; a SIP-21 title may not.
+                        admin: mem.role == Role::Admin,
+                    })
                     .collect::<Vec<_>>(),
             ),
             Err(_) => (
@@ -669,6 +771,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 Vec::new(),
             ),
         };
+        let members: Vec<PubKey> = roster.iter().map(|m| m.account).collect();
 
         // A direct message with somebody who is not a contact: the identifier
         // derives from the two accounts, so proving it is one means finding the
@@ -716,6 +819,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 group,
                 label: String::new(),
                 admins: Vec::new(),
+                members: Vec::new(),
                 timeline,
                 seen,
                 last_at,
@@ -730,6 +834,9 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
         entry.group = group;
         entry.label = label;
         entry.admins = admins;
+        if !roster.is_empty() {
+            entry.members = roster;
+        }
         if entry.last_at == 0 {
             entry.last_at = m.joined;
         }
@@ -751,6 +858,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 c.label.clone()
             },
             admins: vec![me, c.account],
+            members: Vec::new(),
             timeline: Timeline::default(),
             seen: 0,
             unread: 0,
@@ -978,6 +1086,13 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
 
     let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
     let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
+    let members = open.map(|(_, k)| k.members.clone()).unwrap_or_default();
+    // What the **exchange** attests, not what anybody says about themselves.
+    // This is the one place a role may be drawn as a role.
+    let i_am_admin = members.iter().any(|m| m.account == me && m.admin);
+    let topic = open
+        .map(|(_, k)| k.timeline.topic.clone())
+        .unwrap_or_default();
     let link = LinkState::from(chat.link());
 
     state.send_modify(|s| {
@@ -988,6 +1103,9 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         s.trouble_with = trouble;
         s.people = people;
         s.mine = mine;
+        s.members = members;
+        s.i_am_admin = i_am_admin;
+        s.topic = topic;
     });
 }
 
@@ -1016,6 +1134,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     group: false,
                     label: peer.to_string(),
                     admins: vec![chat.me, peer],
+                    members: Vec::new(),
                     timeline: Timeline::default(),
                     seen: 0,
                     last_at: 0,
@@ -1081,7 +1200,196 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             };
         }
         Cmd::Reconnect => chat.reconnect_now(),
+
+        Cmd::NewGroup(name) => match chat.create_group(&name, &[]).await {
+            Ok(channel) => {
+                desk.restructure = true;
+                open(desk, state, channel);
+                note(state, format!("Created {name}. Invite somebody to it."));
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::NewPublic { name, topic } => match chat.create_public(&name, &topic).await {
+            Ok(channel) => {
+                desk.restructure = true;
+                open(desk, state, channel);
+                note(
+                    state,
+                    format!(
+                        "Created {name}. Anybody may find and join it, and nothing in it is encrypted."
+                    ),
+                );
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::Find(query) => match chat.find(&query, 0).await {
+            Ok(listing) => {
+                let found = listing
+                    .channels
+                    .into_iter()
+                    .map(|c| Found {
+                        channel: c.channel,
+                        instance: c.instance,
+                        name: c.name,
+                        topic: c.topic,
+                        members: c.members,
+                    })
+                    .collect();
+                state.send_modify(|s| {
+                    s.found = found;
+                    s.searched = true;
+                });
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::Join { channel, instance } => match chat.join(&channel, instance).await {
+            Ok(()) => {
+                desk.restructure = true;
+                open(desk, state, channel);
+            }
+            Err(e) => trouble(state, e),
+        },
+
+        Cmd::Invite(who) => {
+            let Some(channel) = desk.open else { return };
+            match chat.invite(&channel, &who).await {
+                Ok(()) => {
+                    desk.dirty.insert(channel);
+                    // SIP-17: a device with no prekeys cannot be sealed to, and
+                    // one holding no envelope fetches every entry and opens
+                    // none -- which is indistinguishable from not reading. So
+                    // it is said here rather than left to be discovered.
+                    match chat.stranded(&channel).await {
+                        Ok(absent) if !absent.devices.is_empty() => note(
+                            state,
+                            format!(
+                                "Invited. {} of their devices still hold no key for this \
+                                 conversation and cannot read it yet.",
+                                absent.devices.len()
+                            ),
+                        ),
+                        _ => note(state, "Invited.".into()),
+                    }
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Kick(who) => {
+            let Some(channel) = desk.open else { return };
+            match chat.remove(&channel, &who).await {
+                Ok(()) => {
+                    desk.dirty.insert(channel);
+                    note(
+                        state,
+                        "Removed, and the key rotated: what follows is not theirs.".into(),
+                    );
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Grant { who, admin } => {
+            let Some(channel) = desk.open else { return };
+            let role = if admin { Role::Admin } else { Role::Member };
+            match chat.grant(&channel, &who, role).await {
+                Ok(()) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+        Cmd::Rotate => {
+            let Some(channel) = desk.open else { return };
+            match chat.rotate(&channel).await {
+                Ok(epoch) => note(state, format!("New key minted (epoch {epoch}).")),
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Leave => {
+            let Some(channel) = desk.open else { return };
+            match chat.leave(&channel).await {
+                Ok(()) => {
+                    desk.channels.remove(&channel);
+                    desk.restructure = true;
+                    close(desk, state);
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Destroy => {
+            let Some(channel) = desk.open else { return };
+            match chat.close(&channel).await {
+                Ok(()) => {
+                    // Forgotten locally only after the exchange has confirmed
+                    // it: dropping our copy first would leave somebody with no
+                    // conversation and no channel either, if the call failed.
+                    let _ = chat.store().forget_channel(&channel);
+                    desk.channels.remove(&channel);
+                    desk.restructure = true;
+                    close(desk, state);
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::SetName(name) => {
+            let Some(channel) = desk.open else { return };
+            match chat.set_name(&channel, &name).await {
+                Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+        Cmd::SetTopic(topic) => {
+            let Some(channel) = desk.open else { return };
+            match chat.set_topic(&channel, &topic).await {
+                Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+        Cmd::SetRetention { secs, max_entries } => {
+            let Some(channel) = desk.open else { return };
+            match chat.set_retention(&channel, secs, max_entries).await {
+                Ok(()) => {
+                    desk.dirty.insert(channel);
+                    note(
+                        state,
+                        "Retention set. Anything already outside the window is gone.".into(),
+                    );
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
     }
+}
+
+/// A confirmation of something that was just done.
+///
+/// **Separate from `trouble`, and deliberately.** A note is about an action and
+/// a trouble is about a state, and the state is rebuilt by every refresh — so
+/// keeping the two in one field puts every confirmation on screen for less than
+/// a tick, which is to say it is never read.
+fn note(state: &watch::Sender<ChatState>, said: String) {
+    state.send_modify(|s| s.note = Some(said));
+}
+
+fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {
+    state.send_modify(|s| s.trouble = Some(e.to_string()));
+}
+
+/// Put the open conversation away, without touching it at the exchange.
+fn close(desk: &mut Desk, state: &watch::Sender<ChatState>) {
+    desk.open = None;
+    state.send_modify(|s| {
+        s.open = None;
+        s.lines.clear();
+        s.divider = None;
+        s.unread_on_open = 0;
+    });
 }
 
 /// Put a conversation on screen, taking the unread divider as it goes.

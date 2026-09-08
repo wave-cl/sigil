@@ -310,3 +310,260 @@ async fn a_message_from_a_stranger_appears_without_adding_them_first() {
     alice.stop();
     bob.stop();
 }
+
+/// A private group: created, invited to, and read by the person invited.
+///
+/// A group's identifier is **random rather than derived**, so there is nothing
+/// to compute and nothing to guess — the only way the invitee learns it exists
+/// is `Chat::mine()`, reached because SIP-30 said a membership changed. This
+/// is the same path as the stranger test and a different shape of it: there,
+/// the channel was derivable and we chose not to rely on that; here it is not
+/// derivable at all.
+#[tokio::test]
+async fn a_group_is_created_invited_to_and_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(5);
+    let (b_signer, b_id) = signer(6);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::NewGroup("release check".into()));
+    let made = until(
+        || {
+            alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.group && !c.public)
+        },
+        15,
+    )
+    .await;
+    assert!(
+        made,
+        "the group should appear in its creator's list: {:?}",
+        alice.state().conversations
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.group && !c.public)
+        .map(|c| c.channel)
+        .unwrap();
+
+    // Alice is its admin, which is what lets her invite. The exchange attests
+    // this, unlike anything in a profile.
+    assert!(
+        until(
+            || alice.state().open == Some(channel) && alice.state().i_am_admin,
+            15
+        )
+        .await,
+        "its creator administers it: {:?}",
+        alice.state().members
+    );
+
+    alice.send(Cmd::Invite(b_id));
+    let joined = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel)
+        },
+        15,
+    )
+    .await;
+    assert!(
+        joined,
+        "the invitee learns of a group they could not have guessed: {:?}",
+        bob.state().conversations
+    );
+
+    // And can read what is said in it. Inviting seals them the epoch in force,
+    // which is what grants the history rather than only the future.
+    alice.send(Cmd::Send("in the group".into()));
+    bob.send(Cmd::Show(channel));
+    let read = until(
+        || bob.state().lines.iter().any(|l| l.text == "in the group"),
+        20,
+    )
+    .await;
+    assert!(read, "and can read it: {:?}", bob.state().lines);
+
+    alice.stop();
+    bob.stop();
+}
+
+/// A public channel is findable by somebody who was never told about it.
+///
+/// The directory is the **only** channel route open to anybody, because every
+/// other one names an identifier and an identifier is not an authorisation.
+#[tokio::test]
+async fn a_public_channel_is_found_in_the_directory_and_joined() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(7);
+    let (b_signer, b_id) = signer(8);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::NewPublic {
+        name: "the square".into(),
+        topic: "anybody at all".into(),
+    });
+    assert!(
+        until(|| alice.state().conversations.iter().any(|c| c.public), 15).await,
+        "the public channel should appear for its creator: {:?}",
+        alice.state().conversations
+    );
+
+    // Bob has never heard of it and holds no identifier for it.
+    bob.send(Cmd::Find("square".into()));
+    let listed = until(
+        || bob.state().found.iter().any(|f| f.name == "the square"),
+        15,
+    )
+    .await;
+    assert!(
+        listed,
+        "the directory is how somebody finds a room nobody told them about: {:?}",
+        bob.state().found
+    );
+
+    let found = bob
+        .state()
+        .found
+        .into_iter()
+        .find(|f| f.name == "the square")
+        .unwrap();
+    // The incarnation comes from the directory row and has to: SIP-31 binds it
+    // into the signature, and `Info` requires the membership being acquired.
+    bob.send(Cmd::Join {
+        channel: found.channel,
+        instance: found.instance,
+    });
+    let joined = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == found.channel && c.public)
+        },
+        15,
+    )
+    .await;
+    assert!(
+        joined,
+        "and joining it is what lets it be read: {:?}",
+        bob.state().conversations
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
+/// A private channel is not merely un-joinable, it is unmentionable.
+///
+/// Answering "not public" would reopen, on the join route, exactly the
+/// existence oracle every read path closes. So a stranger searching the
+/// directory must not find a group at all — not as a refusal, not as a row
+/// they cannot use.
+#[tokio::test]
+async fn a_private_group_never_appears_in_the_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(9);
+    let (b_signer, b_id) = signer(10);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::NewGroup("private business".into()));
+    // A public one beside it, so this test can tell "the directory does not
+    // carry private channels" from "the search returned nothing at all".
+    // Without it the assertion below passes when the search is simply broken,
+    // which is the shape a security test fails in silently.
+    alice.send(Cmd::NewPublic {
+        name: "open house".into(),
+        topic: String::new(),
+    });
+    assert!(
+        until(
+            || {
+                let c = alice.state().conversations;
+                c.iter().any(|c| c.group && !c.public) && c.iter().any(|c| c.public)
+            },
+            15
+        )
+        .await,
+        "both exist: {:?}",
+        alice.state().conversations
+    );
+
+    // An empty query lists everything the directory carries (SIP-16).
+    bob.send(Cmd::Find(String::new()));
+    assert!(
+        until(
+            || bob.state().found.iter().any(|f| f.name == "open house"),
+            15
+        )
+        .await,
+        "the search works at all -- without this the assertion below is vacuous: {:?}",
+        bob.state().found
+    );
+    // Given a moment in case it were to arrive late, which would be worse than
+    // never: a leak that is merely slow is still a leak.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !bob.state()
+            .found
+            .iter()
+            .any(|f| f.name == "private business"),
+        "a private group must not be in the public directory: {:?}",
+        bob.state().found
+    );
+
+    alice.stop();
+    bob.stop();
+}
