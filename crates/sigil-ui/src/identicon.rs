@@ -84,8 +84,9 @@ pub fn identicon_of(ui: &mut egui::Ui, id: &[u8], size: f32) -> egui::Response {
     let (back, fore) = colours(id);
     let h = fnv(id);
     let painter = ui.painter();
-    let radius = (size * 0.3).min(tokens::RADIUS_MD);
-    painter.rect_filled(rect, radius, back);
+    let centre = rect.center();
+    let radius = size / 2.0;
+    painter.circle_filled(centre, radius, back);
 
     // Mirrored about the centre column, which is what makes these read as a
     // face or a glyph rather than as noise. Only the left half plus the middle
@@ -103,9 +104,18 @@ pub fn identicon_of(ui: &mut egui::Ui, id: &[u8], size: f32) -> egui::Response {
                     rect.min + egui::vec2(c as f32 * cell, row as f32 * cell),
                     egui::vec2(cell, cell),
                 );
-                // Clipped to the rounded outline so the pattern does not spill
-                // past the corners.
-                painter.with_clip_rect(rect).rect_filled(at, 0.0, fore);
+                // **The circle, clipped to the cell** -- not the cell, which
+                // would spill past the outline at the corners.
+                //
+                // The union of (circle ∩ cell) over the cells that are set is
+                // exactly (circle ∩ pattern), so the mark keeps a true
+                // circular edge using nothing but rectangular clipping, which
+                // is all egui offers. Drawing the cells and masking afterwards
+                // would need the colour of whatever is behind, and these sit
+                // on four different surfaces.
+                painter
+                    .with_clip_rect(at.intersect(rect))
+                    .circle_filled(centre, radius, fore);
             }
         }
     }
@@ -133,9 +143,11 @@ pub fn avatar(
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
             if ui.is_rect_visible(rect) {
-                let radius = (size * 0.3).min(tokens::RADIUS_MD);
+                // The same shape as the mark it stands in for, or a picture
+                // and a generated mark would be two different things in one
+                // column.
                 egui::Image::new(texture)
-                    .corner_radius(radius)
+                    .corner_radius(size / 2.0)
                     .paint_at(ui, rect);
             }
             response
@@ -149,12 +161,10 @@ pub fn avatar(
 
 /// A ring drawn round an avatar, for presence or speaking.
 pub fn ring(ui: &egui::Ui, around: egui::Rect, colour: egui::Color32) {
-    let radius = (around.width() * 0.3).min(tokens::RADIUS_MD);
-    ui.painter().rect_stroke(
-        around.expand(tokens::STROKE_THICK),
-        radius,
+    ui.painter().circle_stroke(
+        around.center(),
+        around.width() / 2.0 + tokens::STROKE_THICK,
         egui::Stroke::new(tokens::STROKE_THICK, colour),
-        egui::StrokeKind::Outside,
     );
 }
 
@@ -179,6 +189,48 @@ mod tests {
                 "{id} got two colours too close to tell apart: {a:?} vs {b:?}"
             );
         }
+    }
+
+    /// Everything the mark paints in its own colours is a circle.
+    ///
+    /// # Why this is not left to the snapshot
+    ///
+    /// "It is round" is exactly the sort of thing a picture shows and nobody
+    /// checks: the snapshots are looked at when something else changed, and a
+    /// mark quietly back to a rounded square would pass a threshold that
+    /// forgives a few hundred pixels. This reads the shapes egui was actually
+    /// given, so a `rect_filled` in the identicon's own colours fails here and
+    /// names itself.
+    #[test]
+    fn the_mark_is_drawn_as_circles_and_never_as_squares() {
+        let id = b"a-key";
+        let (back, fore) = colours(id);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            identicon_of(ui, id, 40.0);
+        });
+        // epaint panics on a dropped `TexturesDelta`, which is its way of
+        // saying a real backend must upload the font atlas. There is no
+        // backend here and nothing to upload it to.
+        output.textures_delta.clear();
+
+        let mut circles = 0;
+        let mut rects = 0;
+        for clipped in &output.shapes {
+            match &clipped.shape {
+                egui::Shape::Circle(c) if c.fill == back || c.fill == fore => circles += 1,
+                egui::Shape::Rect(r) if r.fill == back || r.fill == fore => rects += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(rects, 0, "the mark paints {rects} rectangles of its own");
+        // The ground and at least one cell of the pattern. A hash that set no
+        // bits at all would make this vacuous, so the count is checked rather
+        // than merely being non-zero.
+        assert!(
+            circles > 1,
+            "the mark painted {circles} circles, so there is no pattern in it"
+        );
     }
 
     #[test]
