@@ -168,6 +168,16 @@ pub struct Bubble<'a> {
     pub receipt: Option<Receipt>,
     /// Files it carries.
     pub attachments: &'a [crate::Attachment<'a>],
+    /// What SIP-31 concluded about the entry, in a word, with the long form
+    /// for a hover. `None` when there is nothing to say — which is almost
+    /// always, and is why this is not a badge every message wears.
+    ///
+    /// **A fork is not a gap.** A gap is ordinary and a fork is evidence, and
+    /// the two must not be drawn alike: a client that coloured every gap as
+    /// tampering would cry wolf on every channel with a retention window.
+    pub standing: Option<(&'a str, &'a str)>,
+    /// Whether that word is the one that is evidence.
+    pub alarming: bool,
 }
 
 /// What the reader did to a message.
@@ -409,6 +419,9 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
     if b.edited {
         meta += measure("edited", egui::TextStyle::Small) + tokens::SPACING_SM;
     }
+    if let Some((word, _)) = b.standing {
+        meta += measure(word, egui::TextStyle::Small) + tokens::SPACING_SM;
+    }
     let author = match (b.grouped, b.mine, b.name) {
         (false, false, Some(name)) => measure(name, egui::TextStyle::Body),
         (false, false, None) => measure(&short(b.key), egui::TextStyle::Body),
@@ -482,6 +495,14 @@ fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut Bubb
                 ui.colored_label(quiet, egui::RichText::new(b.at).small());
                 if b.edited {
                     ui.colored_label(quiet, egui::RichText::new("edited").small());
+                }
+                // SIP-31 **requires** a fork be surfaced, so this is a word in
+                // the message and not a line in a diagnostics pane somebody
+                // would have to go and look at.
+                if let Some((word, means)) = b.standing {
+                    let colour = if b.alarming { theme.destructive } else { quiet };
+                    ui.colored_label(colour, egui::RichText::new(word).small())
+                        .on_hover_text(means);
                 }
                 if let Some(r) = b.receipt {
                     let colour = match r {

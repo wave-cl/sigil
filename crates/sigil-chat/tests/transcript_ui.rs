@@ -85,6 +85,7 @@ fn a_conversation() -> ChatState {
                 reply_to: None,
                 receipt: None,
                 attachments: Vec::new(),
+                standing: Default::default(),
             },
             Line {
                 seq: 2,
@@ -99,6 +100,7 @@ fn a_conversation() -> ChatState {
                 reply_to: None,
                 receipt: Some(Receipt::Read),
                 attachments: Vec::new(),
+                standing: Default::default(),
             },
             Line {
                 seq: 3,
@@ -123,6 +125,7 @@ fn a_conversation() -> ChatState {
                     bytes: None,
                     id: "abc123".into(),
                 }],
+                standing: Default::default(),
             },
             Line {
                 seq: 4,
@@ -137,6 +140,7 @@ fn a_conversation() -> ChatState {
                 reply_to: Some(("me".into(), "mine, on the other side".into())),
                 receipt: None,
                 attachments: Vec::new(),
+                standing: Default::default(),
             },
             Line {
                 seq: 5,
@@ -151,6 +155,7 @@ fn a_conversation() -> ChatState {
                 reply_to: None,
                 receipt: None,
                 attachments: Vec::new(),
+                standing: Default::default(),
             },
         ],
         typing: false,
@@ -427,6 +432,74 @@ fn an_event_keeps_the_keys_it_names_within_reach() {
     assert!(
         said.contains(&them().to_string()),
         "and neither is who did it: {said}"
+    );
+}
+
+/// SIP-31 **requires** a fork be surfaced, and a fork is not a gap.
+///
+/// A gap is ordinary — pruning, a retention window, and joining a channel
+/// without its history all make one. A fork is two entries signed by one
+/// device at one chain position, which cannot happen without that device
+/// signing twice or somebody replaying. Drawn alike, the client would cry wolf
+/// on every channel that keeps anything for a fixed time, and the cry that
+/// matters would be lost in it.
+#[test]
+fn a_fork_is_surfaced_and_says_it_is_not_an_ordinary_gap() {
+    // On messages that are actually **on screen**: the transcript is
+    // bottom-aligned and scrolled, and a widget scrolled out of view is still
+    // in the accessibility tree but cannot be pointed at -- so hovering one
+    // silently does nothing and the tooltip half of this test would be a
+    // check of nothing.
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 2].standing = sigil_chat::Standing::Fork;
+    state.lines[n - 1].standing = sigil_chat::Standing::Gap;
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("forked"), "a fork is not named: {said}");
+    assert!(said.contains("gap"), "and neither is a gap: {said}");
+
+    // And the words are different things, not one word twice.
+    h.get_by_label("forked").hover();
+    h.run();
+    h.run();
+    let means = text_of(&h);
+    assert!(
+        means.contains("evidence"),
+        "a fork does not say what it is: {means}"
+    );
+    let mut h = harness_with(
+        {
+            let mut s = a_conversation();
+            let n = s.lines.len();
+            s.lines[n - 1].standing = sigil_chat::Standing::Gap;
+            s
+        },
+        true,
+    );
+    h.run();
+    h.get_by_label("gap").hover();
+    h.run();
+    h.run();
+    let means = text_of(&h);
+    assert!(
+        means.contains("not evidence"),
+        "an ordinary gap reads as misconduct: {means}"
+    );
+}
+
+/// An entry nobody signed for is not a message, and is not silence either.
+#[test]
+fn something_forged_is_counted_and_said_rather_than_dropped() {
+    let mut state = a_conversation();
+    state.trouble_with.forged = 2;
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("2 entries") && said.contains("not signed"),
+        "a forged entry disappears without a word: {said}"
     );
 }
 

@@ -4,7 +4,7 @@ pub mod session;
 
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Found, Happened, Hit, Line, LinkState, Linked,
-    Member, Person, Receipt, Ring, Summary, Trouble,
+    Member, Person, Receipt, Ring, Standing, Summary, Trouble,
 };
 
 use std::collections::HashMap;
@@ -1320,6 +1320,25 @@ impl ChatApp {
                     .to_string(),
             );
         }
+        if trouble.forged > 0 {
+            // Never shown as messages — the whole point is that nobody
+            // vouched for them — but said, because something arrived claiming
+            // to be from somebody here and the signature did not hold. A
+            // client that silently dropped them would leave the only party
+            // who could notice unable to.
+            say(
+                theme.destructive,
+                match trouble.forged {
+                    1 => "1 entry claimed to be from somebody here and was not signed by \
+                          them. It is not shown."
+                        .to_string(),
+                    n => format!(
+                        "{n} entries claimed to be from somebody here and were not signed \
+                         by them. They are not shown."
+                    ),
+                },
+            );
+        }
     }
 
     /// One membership or metadata change, centred in the transcript.
@@ -1439,6 +1458,8 @@ impl ChatApp {
                     Receipt::Read => sigil_ui::Receipt::Read,
                 }),
                 attachments: &files,
+                standing: line.standing.word().zip(line.standing.means()),
+                alarming: line.standing == session::Standing::Fork,
             };
             let did = sigil_ui::bubble(ui, &bubble);
             if !did.is_none() {

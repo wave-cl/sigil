@@ -39,7 +39,7 @@ use sqex_proto::message::{
     CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, CALL_FAILED, CALL_MISSED, MEDIA_AUDIO,
     RING_ACCEPTED, RING_DECLINED, RING_ENDED, RING_RINGING,
 };
-use sqex_proto::timeline::Timeline;
+use sqex_proto::timeline::{Timeline, Verdict};
 use sqnr_core::{PubKey, SoftwareSigner};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -97,6 +97,9 @@ pub struct Line {
     pub receipt: Option<Receipt>,
     /// Files this message carries.
     pub attachments: Vec<Attached>,
+    /// What SIP-31 concluded about it. SIP-31 **requires** a fork be
+    /// surfaced, and a message with nothing wrong says nothing.
+    pub standing: Standing,
 }
 
 /// Something that happened *to* the conversation rather than in it.
@@ -120,6 +123,67 @@ pub struct Happened {
     /// Anything a reader would otherwise have to know. `None` for the events
     /// that mean exactly what they say.
     pub caveat: Option<&'static str>,
+}
+
+/// What SIP-31 verification concluded about one message.
+///
+/// # Why three of these and not a warning triangle
+///
+/// SIP-31 requires a fork be surfaced, and it is the **only** one of these
+/// that is evidence: two entries by one device at one chain position cannot
+/// happen without that device signing twice or somebody replaying. A gap is
+/// ordinary — pruning, a retention window, and joining a channel without its
+/// history all produce one — so a client that drew the two alike would cry
+/// wolf on every channel that keeps anything for a fixed time, and the cry
+/// that matters would be lost in it.
+///
+/// *Unattributed* is a third thing again: the signature verifies and nobody
+/// can say whose key it is, because no SIP-20 credential could be obtained to
+/// bind the signing device to the account the entry names. A mapping somebody
+/// asserts and evidence somebody can check are different things.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Standing {
+    /// Signed by the device it names, following that device's chain.
+    #[default]
+    Sound,
+    /// A gap in the chain. Ordinary, and reported rather than hidden.
+    Gap,
+    /// Two entries at one chain position. Evidence.
+    Fork,
+    /// It was signed, and whose key signed it is unknown.
+    Unattributed,
+}
+
+impl Standing {
+    /// What to say about it, or nothing when there is nothing to say.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Standing::Sound => None,
+            Standing::Gap => Some("gap"),
+            Standing::Fork => Some("forked"),
+            Standing::Unattributed => Some("unattributed"),
+        }
+    }
+
+    /// The long form: what it means, and whether to be alarmed.
+    pub fn means(self) -> Option<&'static str> {
+        match self {
+            Standing::Sound => None,
+            Standing::Gap => Some(
+                "The chain skips here. Ordinary — messages expire, and joining a channel \
+                 does not bring its history. It is not evidence of anything.",
+            ),
+            Standing::Fork => Some(
+                "Two messages signed at the same position in one device's chain. This \
+                 cannot happen without that device signing twice or somebody replaying, \
+                 and it is the one thing here that is evidence.",
+            ),
+            Standing::Unattributed => Some(
+                "The signature is good and nothing proves whose key it is: no credential \
+                 could be got binding the signing device to the account named.",
+            ),
+        }
+    }
 }
 
 /// How far a message is known to have got.
@@ -426,6 +490,12 @@ pub struct Trouble {
     /// The epoch in force, when we hold no key for it: SIP-17's *stranded*
     /// member, who can fetch every entry and open none of them.
     pub no_key: Option<u32>,
+    /// Entries whose signature did not verify.
+    ///
+    /// **Never shown as messages** — the whole point is that nobody vouched
+    /// for them — but counted and said, because something arrived claiming to
+    /// be from somebody in this conversation and was not.
+    pub forged: usize,
 }
 
 impl Trouble {
@@ -1281,6 +1351,7 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
                     restarted: conversation.restarted,
                     no_key: conversation.no_key,
                     lost: conversation.lost,
+                    forged: known.timeline.forged().len(),
                 };
                 if !conversation.admins.is_empty() {
                     known.admins = conversation.admins;
@@ -1559,6 +1630,27 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
             // A stub of what each message says, so a reply can name it. Built
             // once rather than searched per reply: a conversation full of
             // replies would otherwise be quadratic in its own length.
+            // `broken` is a list rather than a field on the message: the
+            // fold keeps it separate so that a client which ignores it still
+            // shows the message, which is right for a gap and would be wrong
+            // for a fork. Turned into a lookup once, not searched per line.
+            let standing: HashMap<u64, Standing> = k
+                .timeline
+                .broken()
+                .iter()
+                .map(|(seq, verdict)| {
+                    (
+                        *seq,
+                        match verdict {
+                            Verdict::Fork => Standing::Fork,
+                            Verdict::Unattributed => Standing::Unattributed,
+                            // `Gap` is what is left; `Valid` never reaches
+                            // this list and `Forged` never becomes a message.
+                            _ => Standing::Gap,
+                        },
+                    )
+                })
+                .collect();
             let stubs: HashMap<u64, (PubKey, String)> = k
                 .timeline
                 .messages()
@@ -1614,6 +1706,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                             id: bs58::encode(a.blob).into_string(),
                         })
                         .collect(),
+                    standing: standing.get(&m.seq).copied().unwrap_or_default(),
                 })
                 .collect()
         })
