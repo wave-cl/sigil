@@ -169,15 +169,20 @@ fn a_conversation() -> ChatState {
         ],
         i_am_admin: true,
         topic: String::new(),
+        ringing: Vec::new(),
         divider: Some(3),
         unread_on_open: 2,
     }
 }
 
 fn harness(dark: bool) -> Harness<'static> {
+    harness_with(a_conversation(), dark)
+}
+
+fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
-    app.show_state_for_test(a_conversation());
+    app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))
@@ -335,4 +340,60 @@ fn a_name_never_appears_without_its_key_reachable() {
         said.contains(&key),
         "your own key is shown in full, not abbreviated away: {said}"
     );
+}
+
+/// A ring shows the caller's key in full, and does not dress it as proven.
+///
+/// Carried over from the voice app, which used to own ringing. The rule did
+/// not change with the mechanism: a name is an assertion (SIP-21), and this is
+/// the one screen where acting on the wrong one puts somebody in a call with a
+/// stranger who chose a confusable name. The key stays on the ring.
+#[test]
+fn a_ring_shows_the_callers_key_in_full() {
+    let mut state = a_conversation();
+    state.ringing = vec![sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: them(),
+        mine: false,
+        secret: [3u8; 32],
+        answered: false,
+        label: "Ada".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("is calling"), "{said}");
+    assert!(
+        said.contains(&them().to_string()),
+        "the caller's key is on the ring, in full: {said}"
+    );
+    assert!(
+        said.contains("Answer") && said.contains("Decline"),
+        "{said}"
+    );
+}
+
+/// A call we placed is not a ring, and is not offered an Answer button.
+#[test]
+fn our_own_call_is_shown_as_ringing_out_not_as_an_incoming_ring() {
+    let mut state = a_conversation();
+    state.ringing = vec![sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: me(),
+        mine: true,
+        secret: [3u8; 32],
+        answered: false,
+        label: "Ada".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Ringing"), "{said}");
+    assert!(
+        !said.contains("Answer"),
+        "answering a call you are placing is nonsense: {said}"
+    );
+    assert!(said.contains("Cancel"), "{said}");
 }

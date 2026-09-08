@@ -31,12 +31,24 @@ use sqex_chat::client::{Chat, Link};
 use sqex_chat::store::{self, Store};
 use sqex_proto::channel::{Role, Visibility};
 use sqex_proto::events::Event;
+use sqex_proto::message::{
+    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, MEDIA_AUDIO, RING_ACCEPTED, RING_DECLINED,
+    RING_ENDED, RING_RINGING,
+};
 use sqex_proto::timeline::Timeline;
 use sqnr_core::{PubKey, SoftwareSigner};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use sigil_net::Dial;
+
+/// How long a call rings before a reader derives that it was missed.
+///
+/// The same 45 seconds the terminal client uses, so the two agree about when a
+/// call stopped ringing. This is not only how long a phone rings: with no
+/// `CallEnd` entry, **every** reader derives `CALL_MISSED` from it, so two
+/// clients disagreeing here would disagree about what happened.
+const RING_SECS: u16 = 45;
 
 /// How often the client is driven.
 ///
@@ -165,6 +177,11 @@ pub struct ChatState {
     pub i_am_admin: bool,
     /// The open conversation's topic, when it has one.
     pub topic: String,
+    /// Calls ringing right now, in **any** conversation.
+    ///
+    /// Not only the one on screen: a call is the thing that most needs to
+    /// reach somebody who is looking elsewhere.
+    pub ringing: Vec<Ring>,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -173,6 +190,33 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+/// A call, as the interface needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ring {
+    pub channel: [u8; 32],
+    /// The `seq` of the invitation. Everything about a call is keyed on it.
+    pub seq: u64,
+    /// Who rang.
+    pub from: PubKey,
+    /// Ours, so it is drawn as calling rather than as ringing.
+    pub mine: bool,
+    /// The SIP-13 room secret carried by the invitation. **This is the whole
+    /// of what joining needs**, which is also why the invitation is a bearer
+    /// capability: anybody who can read the entry can join the call.
+    pub secret: [u8; 32],
+    /// Somebody has said they are taking it.
+    ///
+    /// **A second notion of what a call is doing, deliberately.** The log is
+    /// the only authority on what *happened* — SIP-36 forbids deriving that
+    /// from a signal — but it structurally cannot say what is *happening*,
+    /// because answering posts no entry at all. Without somewhere to put this,
+    /// a client shows an answered call as still ringing, then derives
+    /// **missed** of a call two people are talking on.
+    pub answered: bool,
+    /// What the conversation this rang in is called.
+    pub label: String,
 }
 
 /// A public channel the directory turned up.
@@ -404,6 +448,29 @@ pub enum Cmd {
     /// Say we are typing, or have stopped. Best effort, ephemeral and
     /// forgeable, like every signal.
     Typing(bool),
+
+    // ---- calls (SIP-36) -------------------------------------------------
+    /// Ring everybody in the open conversation.
+    Call,
+    /// Take a call. Signals that we have, so the caller stops seeing "ringing"
+    /// — answering posts **no entry**, so a caller watching only the log would
+    /// go on ringing and then derive *missed* of a call being spoken on.
+    Answer {
+        channel: [u8; 32],
+        seq: u64,
+    },
+    /// Refuse one. Signals it *and* writes the durable record, because a
+    /// signal is not an account of what happened.
+    Decline {
+        channel: [u8; 32],
+        seq: u64,
+    },
+    /// End one that is up, or cancel one that never connected.
+    Hangup {
+        channel: [u8; 32],
+        seq: u64,
+        seconds: u32,
+    },
 }
 
 pub struct ChatHandle {
@@ -687,6 +754,12 @@ struct Desk {
     restructure: bool,
     /// Accounts whose profile an event says has moved on.
     restale: HashSet<PubKey>,
+    /// Calls somebody has said they are taking, by (channel, invitation).
+    ///
+    /// Ephemeral and never written: answering posts no entry, so this is the
+    /// only place the fact lives. It drives what is on screen and must never
+    /// be allowed to contradict the log.
+    answered: HashSet<([u8; 32], u64)>,
     /// Ticks since the list was last rebuilt.
     ///
     /// A backstop, not the mechanism. Events are what make this responsive,
@@ -704,6 +777,7 @@ impl Default for Desk {
             open: None,
             dirty: HashSet::new(),
             restale: HashSet::new(),
+            answered: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
             since_sync: 0,
@@ -763,11 +837,27 @@ impl Desk {
             Event::Profile { account } => {
                 self.restale.insert(account);
             }
-            Event::Admission
-            | Event::Heartbeat
-            | Event::Ringing { .. }
-            | Event::CrossCall { .. }
-            | Event::Unknown(_) => {}
+            // SIP-36: a call is ringing. The event names the channel and the
+            // invitation and carries nothing else, so the entry is fetched to
+            // learn the rest — which is the point of it being an event rather
+            // than a message.
+            //
+            // **Redundant with `Channel`, on purpose.** An invitation is also
+            // an ordinary entry, so posting one emits both kinds, and the test
+            // for this passes with either arm removed and fails only with both
+            // — which is how it was measured rather than assumed. Keeping this
+            // arm is what lets a client tell a phone ringing from somebody
+            // typing without fetching to find out, and it is the kind that
+            // carries SIP-21's blocking rules.
+            //
+            // It is also what the mailbox ring listener was a stopgap for.
+            // That was written when no such kind existed, swept the mailbox
+            // every two seconds, and cost about a thousand requests a day
+            // finding nothing. It is gone.
+            Event::Ringing { channel, .. } => {
+                self.dirty.insert(channel);
+            }
+            Event::Admission | Event::Heartbeat | Event::CrossCall { .. } | Event::Unknown(_) => {}
         }
     }
 
@@ -951,6 +1041,10 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
         to_poll.push(open);
     }
 
+    // Collected rather than written straight into `desk`, which is borrowed
+    // mutably for the channel being polled.
+    let mut accepted: Vec<([u8; 32], u64)> = Vec::new();
+
     for channel in to_poll {
         let Some(known) = desk.channels.get_mut(&channel) else {
             continue;
@@ -964,6 +1058,13 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
             Ok(conversation) => {
                 known.timeline = conversation.timeline;
                 known.typing = conversation.typing;
+                // Somebody said they are taking a call. The only way to learn
+                // it: answering posts no entry, so without this the caller
+                // goes on showing "ringing" and then derives *missed* of a
+                // call that is up and being spoken on.
+                if let Some(seq) = conversation.accepted {
+                    accepted.push((channel, seq));
+                }
                 known.waiting = false;
                 known.trouble = Trouble {
                     unreadable: conversation.unreadable.len(),
@@ -1000,6 +1101,8 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
             }
         }
     }
+
+    desk.answered.extend(accepted);
 
     // Reading it is what clears it, and advancing the exchange's mark is what
     // makes "where was I" survive closing the client.
@@ -1194,6 +1297,37 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         })
         .unwrap_or_default();
 
+    // Calls ringing anywhere, not only in the conversation on screen.
+    //
+    // Derived from the **log** and not from a signal: SIP-36 is explicit that
+    // a durable outcome must not come from one, and `CallRecord::outcome`
+    // derives `CALL_MISSED` once the ring window passes — so a call whose
+    // caller crashed stops ringing on its own rather than for ever. The one
+    // thing taken from a signal is `answered`, because answering writes no
+    // entry and the log therefore cannot say it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut ringing: Vec<Ring> = Vec::new();
+    for (channel, known) in &desk.channels {
+        for call in known.timeline.calls() {
+            if call.outcome(now).is_some() {
+                continue;
+            }
+            ringing.push(Ring {
+                channel: *channel,
+                seq: call.seq,
+                from: call.account,
+                mine: call.account == me,
+                secret: call.secret,
+                answered: desk.answered.contains(&(*channel, call.seq)),
+                label: known.label.clone(),
+            });
+        }
+    }
+    ringing.sort_by_key(|r| r.seq);
+
     let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
     let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
     let members = open.map(|(_, k)| k.members.clone()).unwrap_or_default();
@@ -1216,6 +1350,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         s.members = members;
         s.i_am_admin = i_am_admin;
         s.topic = topic;
+        s.ringing = ringing;
     });
 }
 
@@ -1432,6 +1567,57 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::Typing(on) => {
             let Some(channel) = desk.open else { return };
             chat.typing(&channel, on).await;
+        }
+
+        Cmd::Call => {
+            let Some(channel) = desk.open else { return };
+            match chat.call(&channel, MEDIA_AUDIO, RING_SECS).await {
+                Ok((posted, _secret)) => {
+                    // The signal says it is ringing *now*; the entry is what
+                    // says it happened. Both, because neither does the other's
+                    // job.
+                    chat.ring_state(&channel, posted.seq, RING_RINGING).await;
+                    desk.dirty.insert(channel);
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Answer { channel, seq } => {
+            // Signalled, not written: SIP-36 is right that a durable outcome
+            // must not be derived from a signal, and taking a call is not an
+            // outcome. The entry comes when it ends.
+            chat.ring_state(&channel, seq, RING_ACCEPTED).await;
+            desk.answered.insert((channel, seq));
+            desk.dirty.insert(channel);
+        }
+        Cmd::Decline { channel, seq } => {
+            chat.ring_state(&channel, seq, RING_DECLINED).await;
+            // And the durable record, which the signal is not. A caller who
+            // was not listening at that instant still learns it was refused.
+            if let Err(e) = chat.end_call(&channel, seq, CALL_DECLINED, 0).await {
+                trouble(state, e);
+            }
+            desk.dirty.insert(channel);
+        }
+        Cmd::Hangup {
+            channel,
+            seq,
+            seconds,
+        } => {
+            chat.ring_state(&channel, seq, RING_ENDED).await;
+            // Answered if anybody got as far as speaking, cancelled if the
+            // caller gave up first. They are different facts about the call
+            // and the log is where the difference survives.
+            let outcome = if desk.answered.contains(&(channel, seq)) {
+                CALL_ANSWERED
+            } else {
+                CALL_CANCELLED
+            };
+            if let Err(e) = chat.end_call(&channel, seq, outcome, seconds).await {
+                trouble(state, e);
+            }
+            desk.answered.remove(&(channel, seq));
+            desk.dirty.insert(channel);
         }
 
         Cmd::NewGroup(name) => match chat.create_group(&name, &[]).await {

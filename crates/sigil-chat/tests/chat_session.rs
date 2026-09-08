@@ -567,3 +567,136 @@ async fn a_private_group_never_appears_in_the_directory() {
     alice.stop();
     bob.stop();
 }
+
+/// A call rings in the conversation, and refusing it is recorded.
+///
+/// # What replaced what
+///
+/// sigil used to ring over the SIP-5 mailbox, polled every two seconds,
+/// because when that was written SIP-30 had **no event kind for a call**. It
+/// has one now, and this is the ring arriving on the stream chat already holds
+/// open, with no polling and no second mechanism. The mailbox listener is
+/// gone, so there is exactly one way a call can ring and no way to ring twice.
+///
+/// Measured rather than assumed: this passes with `Event::Ringing` ignored and
+/// with `Event::Channel` ignored, and fails only when **both** are — an
+/// invitation is also an ordinary entry, so two kinds announce it and either
+/// one is enough.
+///
+/// The wait is pinned well inside `BACKSTOP` for the same reason the stranger
+/// test is: a ring that only arrived when the periodic rebuild came round
+/// would be a ring nobody answered.
+#[tokio::test]
+async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(11);
+    let (b_signer, b_id) = signer(12);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    // A conversation to ring in. SIP-36 rings *in a channel*, which is the one
+    // thing the mailbox did not need — and the reason retiring it is safe is
+    // that both parties here are chat clients and so have published prekeys.
+    //
+    // **Bob opens nothing.** That is the whole point: the open conversation is
+    // polled every tick whatever happens, so a test where the callee is
+    // already looking at the conversation proves only that polling works. It
+    // passed with every event handler disabled, which is how I found out.
+    // Ringing has to reach somebody who is looking somewhere else.
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(|| alice.state().open.is_some(), 15).await,
+        "the caller should have the conversation open"
+    );
+    assert!(
+        until(
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id)),
+            15
+        )
+        .await,
+        "and the callee should know the conversation exists: {:?}",
+        bob.state().conversations
+    );
+    assert_eq!(bob.state().open, None, "while having nothing open");
+
+    const WAIT: u64 = 10;
+    assert!(
+        std::time::Duration::from_secs(WAIT) * 2 < sigil_chat::session::BACKSTOP,
+        "this test no longer proves the event path"
+    );
+
+    alice.send(Cmd::Call);
+    let rang = until(
+        || {
+            bob.state()
+                .ringing
+                .iter()
+                .any(|r| r.from == a_id && !r.mine)
+        },
+        WAIT,
+    )
+    .await;
+    assert!(
+        rang,
+        "the call should ring for the person called: {:?}",
+        bob.state().ringing
+    );
+
+    let ring = bob
+        .state()
+        .ringing
+        .into_iter()
+        .find(|r| r.from == a_id)
+        .unwrap();
+    // The invitation carries the room secret, and that is the whole of what
+    // joining the audio needs — which is also why it is a bearer capability.
+    assert_ne!(ring.secret, [0u8; 32], "the invitation carries a room");
+
+    // Alice sees her own as outgoing rather than as something to answer.
+    assert!(
+        until(|| alice.state().ringing.iter().any(|r| r.mine), WAIT).await,
+        "the caller sees it as their own: {:?}",
+        alice.state().ringing
+    );
+
+    bob.send(Cmd::Decline {
+        channel: ring.channel,
+        seq: ring.seq,
+    });
+
+    // A refusal is a durable entry, not only a signal: a caller who was not
+    // listening at that instant still learns the call was refused. Once it is
+    // written the call has an outcome, so it stops ringing for both.
+    let settled = until(
+        || alice.state().ringing.is_empty() && bob.state().ringing.is_empty(),
+        WAIT,
+    )
+    .await;
+    assert!(
+        settled,
+        "a declined call stops ringing for both sides: alice={:?} bob={:?}",
+        alice.state().ringing,
+        bob.state().ringing
+    );
+
+    alice.stop();
+    bob.stop();
+}

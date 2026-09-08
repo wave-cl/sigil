@@ -3,8 +3,8 @@
 pub mod session;
 
 pub use session::{
-    ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Receipt, Summary,
-    Trouble,
+    ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Receipt, Ring,
+    Summary, Trouble,
 };
 
 use std::collections::HashMap;
@@ -118,6 +118,26 @@ pub struct ChatApp {
     now: Option<u64>,
     /// A state to draw instead of a session's. See `show_state_for_test`.
     fixed: Option<ChatState>,
+    /// The call this identity is carrying audio for, and which invitation it
+    /// belongs to.
+    ///
+    /// Signalling lives in the session (it is chat traffic); the audio is a
+    /// SIP-13 room on its own connection, which is `sigil-net`'s job. This is
+    /// the join between them, and nothing else needs to know both halves.
+    calls: HashMap<PubKey, Live>,
+    /// Calls already announced, so a ring is said out loud once and not on
+    /// every pass for as long as it rings.
+    announced: std::collections::HashSet<([u8; 32], u64)>,
+}
+
+/// A call this client is actually carrying audio for.
+struct Live {
+    channel: [u8; 32],
+    /// The invitation's `seq`. Everything about a call is keyed on it.
+    seq: u64,
+    handle: sigil_net::CallHandle,
+    /// When we joined, for the duration written into the closing entry.
+    since: std::time::Instant,
 }
 
 impl Default for ChatApp {
@@ -136,6 +156,8 @@ impl ChatApp {
             store_root: None,
             now: None,
             fixed: None,
+            calls: HashMap::new(),
+            announced: std::collections::HashSet::new(),
         }
     }
 
@@ -339,6 +361,7 @@ impl App for ChatApp {
 
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
+        self.announce_rings(ctx);
     }
 
     fn accounts_changed(&mut self, _ctx: &mut AppContext<'_>) {
@@ -673,6 +696,42 @@ impl ChatApp {
                 if ui.button("Settings").clicked() {
                     ctx.navigator.push_here(Route::Settings);
                 }
+                // Calling from inside the conversation, with audio. The
+                // terminal client does the whole SIP-36 exchange and then
+                // prints a room secret for somebody to paste into another
+                // program, because it has nothing to play sound on.
+                if !self.calls.contains_key(&me)
+                    && !state.ringing.iter().any(|r| r.mine)
+                    && ui.button("Call").clicked()
+                {
+                    self.send_as(Some(me), Cmd::Call);
+                }
+            });
+        });
+        if self.ringing_ui(ctx, me, state, ui, theme) {
+            ui.add_space(tokens::SPACING_SM);
+        }
+        self.in_call_ui(me, ui, theme);
+        // A call we placed that nobody has taken yet.
+        if let Some(ring) = state.ringing.iter().find(|r| r.mine) {
+            let (channel, seq) = (ring.channel, ring.seq);
+            ui.horizontal(|ui| {
+                ui.colored_label(theme.text_secondary, "Ringing…");
+                if ui.button("Cancel").clicked() {
+                    let seconds = self.leave_call(me).map(|(_, _, s)| s).unwrap_or(0);
+                    self.send_as(
+                        Some(me),
+                        Cmd::Hangup {
+                            channel,
+                            seq,
+                            seconds,
+                        },
+                    );
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let members = state.members.len();
                 let label = match members {
                     0 => "Members".to_string(),
@@ -1343,5 +1402,221 @@ impl ChatApp {
             });
         }
         AppResponse::default()
+    }
+}
+
+impl ChatApp {
+    /// Join the SIP-13 room a call invitation carries.
+    ///
+    /// **The invitation is a bearer capability**: the secret is the whole of
+    /// what joining needs, so anybody who can read the entry can join. That is
+    /// SIP-36's design and the reason a call entry wants a short expiry.
+    fn join_call(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        me: PubKey,
+        ring: &Ring,
+        egui_ctx: &egui::Context,
+    ) {
+        if self.calls.contains_key(&me) {
+            return;
+        }
+        // The signer is minted here rather than kept: a seed held in a second
+        // place is a second place to leak it from, and expanding one costs
+        // nothing worth caring about.
+        let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
+            return;
+        };
+        let path = unlocked.path().to_path_buf();
+        let signer = unlocked.signer();
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+        if !discovery::any_configured(&layers) {
+            return;
+        }
+        let wake = egui_ctx.clone();
+        let handle = sigil_net::spawn_room(
+            layers,
+            signer,
+            sigil_net::RoomId::new(ring.secret),
+            Default::default(),
+            move || wake.request_repaint(),
+        );
+        self.calls.insert(
+            me,
+            Live {
+                channel: ring.channel,
+                seq: ring.seq,
+                handle,
+                since: std::time::Instant::now(),
+            },
+        );
+    }
+
+    /// Stop carrying audio, and say how long it lasted.
+    fn leave_call(&mut self, me: PubKey) -> Option<([u8; 32], u64, u32)> {
+        let live = self.calls.remove(&me)?;
+        let seconds = live.since.elapsed().as_secs().min(u32::MAX as u64) as u32;
+        live.handle.hang_up();
+        Some((live.channel, live.seq, seconds))
+    }
+}
+
+impl ChatApp {
+    /// Say out loud that a call is ringing.
+    ///
+    /// From `update`, not `render`: a call has to reach somebody who is
+    /// looking at another tab or at nothing at all, which is most of the time
+    /// and is the entire reason the desktop integration exists. Wiring this
+    /// into `render` is a mistake already made once here — the ring was drawn
+    /// and never announced, and no test caught it, because a missing notifier
+    /// produces silence and silence is what a working one looks like from
+    /// inside a test.
+    fn announce_rings(&mut self, ctx: &mut AppContext<'_>) {
+        let mut fresh: Vec<(PubKey, u64, String)> = Vec::new();
+        for (me, session) in &self.sessions {
+            for ring in session.state().ringing {
+                if ring.mine || self.announced.contains(&(ring.channel, ring.seq)) {
+                    continue;
+                }
+                fresh.push((ring.from, ring.seq, ring.label.clone()));
+                self.announced.insert((ring.channel, ring.seq));
+                let _ = me;
+            }
+        }
+        for (from, _, label) in fresh {
+            ctx.notify.post(
+                "Incoming call",
+                &format!(
+                    "{label} — from {}",
+                    sigil_ui::message::short(&from.to_string())
+                ),
+            );
+        }
+    }
+
+    /// A call ringing, and the two things to do about it.
+    fn ringing_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        me: PubKey,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) -> bool {
+        // Ours is not a ring, it is a call being placed. Drawn differently,
+        // because "answer" on a call you are making is nonsense.
+        let Some(ring) = state.ringing.iter().find(|r| !r.mine && !r.answered) else {
+            return false;
+        };
+        let key = ring.from.to_string();
+        egui::Frame::NONE
+            .fill(theme.surface_elevated)
+            .corner_radius(tokens::RADIUS_LG)
+            .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.vertical(|ui| {
+                        let named = state
+                            .people
+                            .get(&ring.from)
+                            .map(|p| p.label(&ring.from))
+                            .unwrap_or_else(|| key.clone());
+                        ui.label(egui::RichText::new(format!("{named} is calling")).strong());
+                        ui.colored_label(
+                            theme.text_secondary,
+                            egui::RichText::new(&ring.label).small(),
+                        );
+                        // The key in full, on the ring, always. A name is an
+                        // assertion and this is the one screen where acting on
+                        // the wrong one puts somebody in a call with a stranger
+                        // who chose a confusable name.
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&key).monospace().small())
+                                .selectable(true),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("Decline").color(theme.destructive),
+                            ))
+                            .clicked()
+                        {
+                            self.send_as(
+                                Some(me),
+                                Cmd::Decline {
+                                    channel: ring.channel,
+                                    seq: ring.seq,
+                                },
+                            );
+                        }
+                        if ui.button("Answer").clicked() {
+                            let ring = ring.clone();
+                            self.send_as(
+                                Some(me),
+                                Cmd::Answer {
+                                    channel: ring.channel,
+                                    seq: ring.seq,
+                                },
+                            );
+                            self.join_call(ctx, me, &ring, ui.ctx());
+                        }
+                    });
+                });
+            });
+        true
+    }
+
+    /// The bar shown while audio is actually flowing.
+    fn in_call_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some(live) = self.calls.get(&me) else {
+            return;
+        };
+        let call = live.handle.state();
+        let seconds = live.since.elapsed().as_secs();
+        egui::Frame::NONE
+            .fill(theme.surface_elevated)
+            .corner_radius(tokens::RADIUS_LG)
+            .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let up = matches!(call.phase, sigil_net::Phase::Live);
+                    sigil_ui::dot(
+                        ui,
+                        up,
+                        theme.success,
+                        theme.warning,
+                        if up { "connected" } else { "connecting" },
+                    );
+                    ui.colored_label(
+                        if up { theme.success } else { theme.warning },
+                        if up { "In a call" } else { "Connecting…" },
+                    );
+                    ui.colored_label(
+                        theme.text_muted,
+                        format!("{:02}:{:02}", seconds / 60, seconds % 60),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("Hang up").color(theme.destructive),
+                            ))
+                            .clicked()
+                            && let Some((channel, seq, seconds)) = self.leave_call(me)
+                        {
+                            self.send_as(
+                                Some(me),
+                                Cmd::Hangup {
+                                    channel,
+                                    seq,
+                                    seconds,
+                                },
+                            );
+                        }
+                    });
+                });
+            });
     }
 }
