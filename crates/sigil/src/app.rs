@@ -19,6 +19,7 @@ use std::any::Any;
 use std::rc::Rc;
 
 use crate::account::Account;
+use crate::accounts::Accounts;
 use crate::navigator::Navigator;
 
 /// A badge on an app's tab, its tray entry, and the dock icon.
@@ -73,10 +74,14 @@ pub struct AppContext<'a> {
     /// Queue navigation here. Apps never touch the real stack; the shell
     /// drains this after render. See [`crate::navigator`].
     pub navigator: &'a mut Navigator,
-    /// The identity sigil acts as. Shared, because voice and chat are the same
-    /// person: two apps unlocking the same file separately would ask for the
-    /// passphrase twice and disagree about who you are.
-    pub account: &'a mut Account,
+    /// Every identity sigil is holding, and which is on screen. Shared,
+    /// because voice and chat are the same person: two apps unlocking the same
+    /// file separately would ask for the passphrase twice and disagree about
+    /// who you are.
+    ///
+    /// **An app draws the active one and keeps sessions for all of them** —
+    /// see [`crate::accounts`].
+    pub accounts: &'a mut Accounts,
     /// True while the main window is hidden — closed to the tray. An app
     /// should keep working and stop doing anything only a viewer would want,
     /// like animating.
@@ -87,6 +92,30 @@ pub struct AppContext<'a> {
     /// on must not rely on it: notifications can be off at the desktop level
     /// with nothing here able to tell.
     pub notify: &'a dyn Notify,
+}
+
+impl AppContext<'_> {
+    /// The account being shown. What a view draws.
+    pub fn account(&self) -> &Account {
+        self.accounts.active()
+    }
+
+    /// The account being shown, to change.
+    pub fn account_mut(&mut self) -> &mut Account {
+        self.accounts.active_mut()
+    }
+
+    /// Try a passphrase on the account being shown.
+    ///
+    /// Goes through the roster rather than the account so that opening one
+    /// **bumps the generation** — unlocking is the moment an identity becomes
+    /// usable, and an app that reconciled only on add would never start its
+    /// session. Calling `account_mut().unlock(..)` would open it and tell
+    /// nobody, which works right up until a second identity exists.
+    pub fn unlock_active(&mut self, passphrase: &str) -> bool {
+        let i = self.accounts.active_index();
+        self.accounts.unlock(i, passphrase)
+    }
 }
 
 /// Telling somebody something when they are not looking at sigil.
@@ -157,6 +186,24 @@ pub trait App {
     /// nothing with one you do not recognise.
     fn dispose(&mut self, _ctx: &mut AppContext<'_>, _token: &Rc<dyn Any>) {}
 
+    /// The set of identities changed: reconcile.
+    ///
+    /// Called when [`Accounts::generation`](crate::Accounts::generation) moves
+    /// — an account added, removed, unlocked, closed, or a different one put on
+    /// screen. An app holding anything per identity must bring it into line
+    /// here: start what is newly unlocked, **stop what is no longer held**.
+    ///
+    /// This exists because the failure without it is silent. Both apps used to
+    /// guard startup with `if self.session.is_some() { return }` and then never
+    /// look again, so switching identity left the previous key's session
+    /// running — connected, succeeding, and the wrong person. Nothing errors,
+    /// no test fails, and the only symptom is messages going out as somebody
+    /// else.
+    ///
+    /// Reconcile idempotently: this is a *"something moved"* signal, not a
+    /// diff, and it may be called when nothing an app cares about has changed.
+    fn accounts_changed(&mut self, _ctx: &mut AppContext<'_>) {}
+
     /// What to badge this app's tab with. Also feeds the tray and dock.
     fn tab_notifications(&self) -> TabNotifications {
         TabNotifications::default()
@@ -201,12 +248,12 @@ mod tests {
         let mut drew = false;
         let output = ctx.run_ui(Default::default(), |ui| {
             let mut nav = Navigator::default();
-            let mut account = Account::Missing {
+            let mut accounts = Accounts::of(vec![Account::Missing {
                 path: "nowhere".into(),
-            };
+            }]);
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
-                account: &mut account,
+                accounts: &mut accounts,
                 hidden: false,
                 notify: &Silent,
             };

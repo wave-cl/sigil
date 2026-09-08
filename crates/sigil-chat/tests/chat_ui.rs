@@ -10,7 +10,7 @@ use sigil_chat::ChatApp;
 
 fn harness(account: Account) -> Harness<'static> {
     let mut app = ChatApp::new();
-    let mut account = account;
+    let mut accounts = sigil::accounts::Accounts::of(vec![account]);
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))
         .build_ui(move |ui| {
@@ -28,7 +28,7 @@ fn harness(account: Account) -> Harness<'static> {
                     let mut nav = Navigator::default();
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
-                        account: &mut account,
+                        accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
                     };

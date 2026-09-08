@@ -148,6 +148,27 @@ pub struct ChatHandle {
     task: JoinHandle<()>,
 }
 
+/// A session that has been told to stop but may not have finished stopping.
+///
+/// **The store's `flock` is released when the task's future is dropped, not
+/// when `abort` is called.** So an identity that was just closed cannot be
+/// reopened straight away: the new session would ask for a lock the old one
+/// still holds and be refused with `StoreError::InUse`, which reads as
+/// "another client is already using this account" and names sigil itself.
+///
+/// Holding one of these and waiting for [`Closing::is_finished`] is how a
+/// switch waits without blocking the interface to do it.
+pub struct Closing {
+    task: JoinHandle<()>,
+}
+
+impl Closing {
+    /// Whether the task is really gone, and the store lock with it.
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
+
 impl ChatHandle {
     pub fn state(&self) -> ChatState {
         self.state.borrow().clone()
@@ -161,6 +182,16 @@ impl ChatHandle {
 
     pub fn stop(&self) {
         self.task.abort();
+    }
+
+    /// Stop, and hand back something that says when the store lock is free.
+    ///
+    /// Prefer this to [`stop`](Self::stop) anywhere the account might be
+    /// reopened — see [`Closing`].
+    #[must_use = "the store lock is held until the closing task finishes"]
+    pub fn close(self) -> Closing {
+        self.task.abort();
+        Closing { task: self.task }
     }
 
     pub async fn changed(&mut self) -> Result<(), String> {

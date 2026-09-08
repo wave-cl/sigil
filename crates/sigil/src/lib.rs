@@ -11,6 +11,7 @@
 //! do, and the shell knows about neither.
 
 pub mod account;
+pub mod accounts;
 pub mod app;
 pub mod deck;
 pub mod nav;
@@ -19,6 +20,7 @@ pub mod theme;
 pub mod tokens;
 
 pub use account::{Account, Unlocked};
+pub use accounts::Accounts;
 pub use app::{App, AppAction, AppContext, AppResponse, Notify, Silent, TabNotifications};
 pub use deck::{Layout, layout};
 pub use nav::{Discarded, NavStack};

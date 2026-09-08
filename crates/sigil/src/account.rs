@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use sqnr_core::{PubKey, Signer, SoftwareSigner};
+use zeroize::Zeroize;
 
 /// Where the identity has got to.
 #[derive(Debug)]
@@ -62,6 +63,19 @@ impl std::fmt::Debug for Unlocked {
             .field("me", &self.me)
             .field("path", &self.path)
             .finish_non_exhaustive()
+    }
+}
+
+/// The seed is wiped when an account is closed or replaced.
+///
+/// Switching identities is the reason this exists: sigil now holds several
+/// accounts at once, and one being put away must not leave its seed sitting in
+/// a freed allocation for the rest of the process. `Drop` rather than a method
+/// so that every path out — switch, forget, quit, panic — gets it, including
+/// the ones nobody remembered to write.
+impl Drop for Unlocked {
+    fn drop(&mut self) {
+        self.seed.zeroize();
     }
 }
 
@@ -160,6 +174,23 @@ impl Account {
                 false
             }
         }
+    }
+
+    /// Close this account, wiping the seed and returning it to whatever state
+    /// its file is in now.
+    ///
+    /// The counterpart `unlock` never had. Without it an account, once open,
+    /// stayed open for the life of the process — fine when there was exactly
+    /// one, wrong the moment somebody can switch away from it or sign out.
+    ///
+    /// Re-reads the file rather than assuming `Locked`: an identity can be
+    /// deleted or replaced while sigil is running, and reporting it as sealed
+    /// when it is gone sends somebody looking for a passphrase that will never
+    /// work.
+    pub fn lock(&mut self) {
+        let path = self.path().to_path_buf();
+        // The old `Unlocked` drops here, and its `Drop` wipes the seed.
+        *self = Account::discover(Some(path));
     }
 
     pub fn is_unlocked(&self) -> bool {

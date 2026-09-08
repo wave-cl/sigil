@@ -39,15 +39,36 @@ use crate::call::Dial;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Incoming {
     pub from: PubKey,
+    /// Which of our identities was called.
+    ///
+    /// sigil holds several at once, and a ring belongs to exactly one of them:
+    /// answering opens a session, and opening it as the wrong identity reaches
+    /// the caller as somebody they did not ring. Zero when it is not known —
+    /// only rings a test injected by hand.
+    pub to: PubKey,
     /// When the exchange received it.
     pub at: u64,
 }
 
-impl From<Ring> for Incoming {
-    fn from(r: Ring) -> Self {
+impl Incoming {
+    /// Tag a ring with the identity that received it.
+    ///
+    /// Not a `From` impl: which identity was called is not in the ring, it is
+    /// in the listener that collected it, so it has to be supplied here.
+    pub fn received(r: Ring, to: PubKey) -> Incoming {
         Incoming {
             from: r.from,
+            to,
             at: r.at,
+        }
+    }
+
+    /// A ring with no identity attached, for tests that inject one directly.
+    pub fn from_unknown(from: PubKey, at: u64) -> Incoming {
+        Incoming {
+            from,
+            to: PubKey::new([0u8; 32]),
+            at,
         }
     }
 }
@@ -159,6 +180,9 @@ async fn run(
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let seed = signer.seed();
+    // Which identity this listener is for. Every ring it hands over is tagged
+    // with it, so answering opens the session as the person who was called.
+    let me = PubKey::new(sqnr_core::Signer::public(&signer));
 
     // Resolved once. A listener that re-resolved every sweep would do a DNSSEC
     // lookup every two seconds for as long as the program is open.
@@ -203,7 +227,7 @@ async fn run(
                 Ok(found) => {
                     if !found.is_empty() {
                         for r in found {
-                            let _ = rings.send(r.into());
+                            let _ = rings.send(Incoming::received(r, me));
                         }
                         (wake)();
                     }

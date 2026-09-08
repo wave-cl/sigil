@@ -42,7 +42,18 @@ fn harness(dark: bool) -> Harness<'static> {
     ];
     // No platform: this is headless, with no tray and no notification
     // daemon, and it should not pretend to have either.
-    let mut shell = sigil_shell::Shell::new(apps, None);
+    //
+    // And a fixed roster, not the remembered one: `Shell::new` re-opens
+    // whatever this machine was last holding, so a snapshot taken without this
+    // draws however many accounts the person running it happens to have. That
+    // is the "snapshot the layout, not the machine" lesson again, and it would
+    // have shown up as CI disagreeing with every developer.
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: "nowhere".into(),
+            },
+        ]));
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -126,12 +137,13 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(egui::Theme::Dark);
             let mut nav = sigil::navigator::Navigator::default();
-            let mut account = sigil::account::Account::Missing {
-                path: "nowhere".into(),
-            };
+            let mut accounts =
+                sigil::accounts::Accounts::of(vec![sigil::account::Account::Missing {
+                    path: "nowhere".into(),
+                }]);
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
-                account: &mut account,
+                accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
             };
@@ -221,12 +233,13 @@ fn platform_harness() -> Harness<'static> {
                 )
                 .show(ui, |ui| {
                     let mut nav = sigil::navigator::Navigator::default();
-                    let mut account = sigil::account::Account::Missing {
-                        path: "nowhere".into(),
-                    };
+                    let mut accounts =
+                        sigil::accounts::Accounts::of(vec![sigil::account::Account::Missing {
+                            path: "nowhere".into(),
+                        }]);
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
-                        account: &mut account,
+                        accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
                     };
@@ -241,4 +254,62 @@ fn desktop_pane_dark() {
     let mut h = platform_harness();
     h.run();
     h.snapshot("desktop_pane_dark");
+}
+
+/// The switcher appears only when there is a choice, and every account in it
+/// is live whether or not it is the one being shown.
+#[test]
+fn the_rail_offers_a_switcher_once_there_is_more_than_one_identity() {
+    fn labels(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
+        let n = node.accesskit_node();
+        if let Some(l) = n.label() {
+            out.push(l.to_string());
+        }
+        if let Some(v) = n.value() {
+            out.push(v.to_string());
+        }
+        for child in node.children() {
+            labels(child, out);
+        }
+    }
+
+    fn rail_labels(accounts: sigil::accounts::Accounts) -> String {
+        let apps: Vec<Box<dyn App>> = vec![Box::new(Stub {
+            title: "Calls",
+            unread: 0,
+        })];
+        let mut shell = sigil_shell::Shell::new(apps, None).with_accounts(accounts);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                theme::install(&ctx, theme::light(), theme::dark());
+                ctx.set_theme(egui::Theme::Dark);
+                shell.ui(ui);
+            });
+        h.run();
+        let mut found = Vec::new();
+        labels(h.root(), &mut found);
+        found.join(" | ")
+    }
+
+    // Fixed seeds: the key is drawn, and a generated one renders differently
+    // on every run, which is a snapshot that can never pass twice.
+    let one = sigil::Account::unlocked_for_test([1u8; 32]);
+    let two = sigil::Account::unlocked_for_test([2u8; 32]);
+    let first = one.unlocked().unwrap().me().to_string();
+
+    let alone = rail_labels(sigil::accounts::Accounts::of(vec![
+        sigil::Account::unlocked_for_test([1u8; 32]),
+    ]));
+    assert!(
+        !alone.contains(&first[..10]),
+        "one account is not a choice, so there is nothing to switch between: {alone}"
+    );
+
+    let several = rail_labels(sigil::accounts::Accounts::of(vec![one, two]));
+    assert!(
+        several.contains(&first[..10]),
+        "each held identity is offered: {several}"
+    );
 }

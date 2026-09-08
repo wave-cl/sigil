@@ -15,7 +15,7 @@ use sigil_voice::VoiceApp;
 /// Drive the app with a given account, as the shell would.
 fn harness(account: Account, dark: bool) -> Harness<'static> {
     let mut app = VoiceApp::new();
-    let mut account = account;
+    let mut accounts = sigil::accounts::Accounts::of(vec![account]);
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -40,7 +40,7 @@ fn harness(account: Account, dark: bool) -> Harness<'static> {
                     let mut nav = Navigator::default();
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
-                        account: &mut account,
+                        accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
                     };
@@ -230,7 +230,7 @@ fn minting_a_room_produces_a_usable_secret() {
 fn ringing_harness(account: Account, from: sqnr_core::PubKey) -> Harness<'static> {
     let mut app = VoiceApp::new();
     app.ring_for_test(from);
-    let mut account = account;
+    let mut accounts = sigil::accounts::Accounts::of(vec![account]);
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -248,7 +248,7 @@ fn ringing_harness(account: Account, from: sqnr_core::PubKey) -> Harness<'static
                     let mut nav = Navigator::default();
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
-                        account: &mut account,
+                        accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
                     };
@@ -337,7 +337,7 @@ async fn the_listener_starts_by_itself_once_the_identity_is_open() {
     use sigil::app::App;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut account = unlocked_account(dir.path());
+    let mut accounts = sigil::accounts::Accounts::of(vec![unlocked_account(dir.path())]);
     let ctx = egui::Context::default();
 
     let mut app = VoiceApp::new();
@@ -350,7 +350,7 @@ async fn the_listener_starts_by_itself_once_the_identity_is_open() {
     let mut nav = Navigator::default();
     let mut app_ctx = AppContext {
         navigator: &mut nav,
-        account: &mut account,
+        accounts: &mut accounts,
         hidden: false,
         notify: &sigil::Silent,
     };
@@ -370,7 +370,7 @@ async fn nothing_listens_while_the_identity_is_sealed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("identity");
     sqnr::identity::generate(&path, Some("open sesame")).unwrap();
-    let mut account = Account::discover(Some(path));
+    let mut accounts = sigil::accounts::Accounts::of(vec![Account::discover(Some(path))]);
     let ctx = egui::Context::default();
 
     let mut app = VoiceApp::new();
@@ -378,7 +378,7 @@ async fn nothing_listens_while_the_identity_is_sealed() {
     let mut nav = Navigator::default();
     let mut app_ctx = AppContext {
         navigator: &mut nav,
-        account: &mut account,
+        accounts: &mut accounts,
         hidden: false,
         notify: &sigil::Silent,
     };
@@ -406,7 +406,7 @@ async fn an_arriving_ring_is_announced() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let mut account = unlocked_account(dir.path());
+    let mut accounts = sigil::accounts::Accounts::of(vec![unlocked_account(dir.path())]);
     let ctx = egui::Context::default();
     let heard = Heard::default();
     let caller = a_key();
@@ -418,7 +418,7 @@ async fn an_arriving_ring_is_announced() {
     let mut nav = Navigator::default();
     let mut app_ctx = AppContext {
         navigator: &mut nav,
-        account: &mut account,
+        accounts: &mut accounts,
         hidden: true,
         notify: &heard,
     };

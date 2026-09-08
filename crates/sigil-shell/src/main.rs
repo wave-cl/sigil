@@ -141,9 +141,39 @@ fn main() -> eframe::Result<()> {
                     sigil_platform::Platform::new(),
                 )),
             ];
-            Ok(Box::new(Sigil {
-                shell: Shell::new(apps, Some(platform)),
-            }))
+            let shell = Shell::new(apps, Some(platform));
+
+            // Which identities were re-opened, and what state each is in.
+            //
+            // The roster used to be one identity read from a fixed path; it is
+            // now runtime state restored from a file, and state that came from
+            // a file with nothing announcing it leaves nobody able to say what
+            // the program thinks it is holding. "Sigil is not ringing" and
+            // "sigil is not holding that account at all" look identical from
+            // outside and want completely different fixes.
+            let accounts = shell.accounts();
+            tracing::info!(
+                "holding {} identit{}",
+                accounts.len(),
+                if accounts.len() == 1 { "y" } else { "ies" }
+            );
+            for (i, account) in accounts.iter().enumerate() {
+                let shown = if i == accounts.active_index() {
+                    " (shown)"
+                } else {
+                    ""
+                };
+                match account.unlocked() {
+                    Some(u) => tracing::info!("  {}{shown} — open", u.me()),
+                    None => tracing::info!(
+                        "  {}{shown} — {}",
+                        account.path().display(),
+                        account.describe()
+                    ),
+                }
+            }
+
+            Ok(Box::new(Sigil { shell }))
         }),
     )
 }

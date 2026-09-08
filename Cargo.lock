@@ -5742,6 +5742,7 @@ dependencies = [
  "sqnr-core",
  "tempfile",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
