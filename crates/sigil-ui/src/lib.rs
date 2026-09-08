@@ -20,6 +20,32 @@ pub use dot::dot;
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.
 pub use identicon::{avatar, identicon, identicon_of};
 
+/// sigil's own mark: a disc in the accent.
+///
+/// # Why a disc and not a picture
+///
+/// It is what the application icon and the tray icon are —
+/// `packaging/icon.py` draws exactly this, from the same colour, and says why
+/// there is no icon file in the repository: a checked-in blob is one more
+/// thing to drift from the mark it is supposed to match, and one nobody can
+/// diff. Drawing it here from the theme keeps the third copy from being a
+/// fourth number.
+///
+/// It follows the theme, so it is the brighter accent on a dark ground and
+/// the deeper one on a light ground — the same mark, legible on both, rather
+/// than one fixed colour that is wrong on one of them.
+pub fn mark(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    let theme = sigil::ColorTheme::current(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        // The same inset the icon uses, so the disc does not sit flush to its
+        // own bounds and read as larger than everything beside it.
+        ui.painter()
+            .circle_filled(rect.center(), size * 0.43, theme.accent);
+    }
+    response
+}
+
 /// A text field, at the size a text field should be.
 ///
 /// # Why this exists rather than a `TextEdit` at each call site

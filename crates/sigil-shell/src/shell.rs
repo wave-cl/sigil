@@ -292,11 +292,20 @@ impl Shell {
         let chosen = self.accounts.active().path().to_path_buf();
 
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.22);
+            // Enough to sit off the top edge, and no more: the card grew a
+            // mark and an eighty-pixel disc pushed the Unlock button off the
+            // bottom of a short window.
+            ui.add_space(ui.available_height() * 0.10);
             ui.allocate_ui_with_layout(
                 egui::vec2(CARD_WIDTH, 0.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    // The application's own mark, over the middle of the card
+                    // -- the same disc as the icon in the dock and the tray.
+                    ui.vertical_centered(|ui| {
+                        sigil_ui::mark(ui, tokens::AVATAR_XL);
+                    });
+                    ui.add_space(tokens::SPACING_LG);
                     ui.heading("Open an identity");
                     ui.colored_label(
                         theme.text_secondary,
