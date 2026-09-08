@@ -18,6 +18,7 @@ sigil-net = { path = "../sigil-net" }
 sigil-platform = { path = "../sigil-platform" }
 sigil-voice = { path = "../sigil-voice" }
 sigil-chat = { path = "../sigil-chat" }
+sigil-admin = { path = "../sigil-admin" }
 
 [lib]
 name = "sigil_shell"

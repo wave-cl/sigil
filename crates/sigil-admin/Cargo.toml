@@ -1,0 +1,24 @@
+[package]
+name = "sigil-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Running an exchange: the SIP-10 administrative surface, signed."
+
+[dependencies]
+egui = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+bs58 = { workspace = true }
+serde_json = { workspace = true }
+sigil = { path = "../sigil" }
+sigil-ui = { path = "../sigil-ui" }
+sigil-net = { path = "../sigil-net" }
+sqex-proto = { workspace = true }
+sqex-voice = { workspace = true }
+sqnr = { workspace = true }
+sqnr-core = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+tempfile = "3"

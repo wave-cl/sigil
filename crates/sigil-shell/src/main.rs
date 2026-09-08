@@ -137,6 +137,7 @@ fn main() -> eframe::Result<()> {
             let apps: Vec<Box<dyn App>> = vec![
                 Box::new(sigil_voice::VoiceApp::new()),
                 Box::new(sigil_chat::ChatApp::new()),
+                Box::new(sigil_admin::AdminApp::new()),
                 Box::new(sigil_shell::PlatformApp::new(
                     sigil_platform::Platform::new(),
                 )),

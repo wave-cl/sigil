@@ -27,6 +27,8 @@ enum Reached {
     Chat,
     /// sigil's voice app or `sigil-net` reaches it.
     Voice,
+    /// The operator console reaches it.
+    Admin,
     /// Reached indirectly: a client never calls it by name, but the code paths
     /// above go through it.
     Beneath,
@@ -167,26 +169,19 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         NotYet("retired with the mailbox ring"),
     ),
     // ---- the operator's side ---------------------------------------------
-    (
-        "GET",
-        "/admin/challenge",
-        NotYet("the operator console: SIP-10 admin commands, signed through sqnr"),
-    ),
-    ("POST", "/admin/command", NotYet("the operator console")),
-    (
-        "GET",
-        "/status",
-        NotYet("an exchange's own numbers, for the operator console"),
-    ),
-    (
-        "GET",
-        "/health",
-        NotYet("a probe, for the operator console"),
-    ),
+    // The SIP-10 authority protocol: a nonce, then a batch signed against it.
+    // All seventeen operations go through these two.
+    ("GET", "/admin/challenge", Admin),
+    ("POST", "/admin/command", Admin),
+    ("GET", "/status", Admin),
+    ("GET", "/health", Admin),
     (
         "GET",
         "/exchange/ping",
-        NotYet("the one whitelist-gated route; a reachability check for the console"),
+        NotYet(
+            "the one whitelist-gated route. Reaching it would say whether *this* client \
+             is admitted, which is a different question from whether the exchange is up",
+        ),
     ),
     // ---- other services --------------------------------------------------
     (
@@ -311,7 +306,7 @@ fn the_coverage_is_what_it_says_it_is() {
         .count();
     let reached = COVERAGE
         .iter()
-        .filter(|(_, _, r)| matches!(r, Chat | Voice | Beneath))
+        .filter(|(_, _, r)| matches!(r, Chat | Voice | Admin | Beneath))
         .count();
     let client = total - peer;
 
@@ -327,7 +322,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 51,
+        reached, 55,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );
