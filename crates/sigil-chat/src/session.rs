@@ -70,6 +70,32 @@ pub struct Line {
     /// Presenting an edit as though it were the original hides that the text
     /// changed after it was read.
     pub edited: bool,
+    /// Emoji, how many sent it, and whether we are one of them.
+    pub reactions: Vec<(String, usize, bool)>,
+    /// What this replies to: who said it and a stub of what they said.
+    ///
+    /// The author and the words, not the sequence number — "↳ 57" names a
+    /// number nobody has memorised.
+    pub reply_to: Option<(String, String)>,
+    /// How far one of ours is known to have got. `None` on anybody else's.
+    pub receipt: Option<Receipt>,
+}
+
+/// How far a message is known to have got.
+///
+/// **Under-claiming is the only safe direction.** `Read` means *everybody* in
+/// the conversation is known to have read it, so in a group it waits for the
+/// last of them. An account that opted out of receipts reports no reading at
+/// all — the exchange withholds their reading, not their existence — and must
+/// never be counted as having read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Receipt {
+    /// The exchange has it.
+    Sent,
+    /// Everybody has fetched it.
+    Delivered,
+    /// Everybody has read it.
+    Read,
 }
 
 /// One conversation in the list.
@@ -350,6 +376,34 @@ pub enum Cmd {
         secs: u32,
         max_entries: u32,
     },
+
+    // ---- doing things to a message -------------------------------------
+    /// Add or take back an emoji. Keyed on `(account, target, emoji)` by the
+    /// fold, so sending one twice is a no-op and taking back one that was
+    /// never sent is ordinary — which is what lets this be sent without first
+    /// knowing what we already sent.
+    React {
+        target: u64,
+        emoji: String,
+    },
+    /// A message that names another.
+    Reply {
+        target: u64,
+        text: String,
+    },
+    /// Rewrite one of ours. Enforced at the **reader**: only from the account
+    /// that posted it and only inside the edit window. The client checks too,
+    /// so it can say an edit will be ignored rather than send one that
+    /// silently is.
+    Edit {
+        target: u64,
+        text: String,
+    },
+    /// Remove a message's body. The entry stays, and the gap is the record.
+    Redact(u64),
+    /// Say we are typing, or have stopped. Best effort, ephemeral and
+    /// forgeable, like every signal.
+    Typing(bool),
 }
 
 pub struct ChatHandle {
@@ -556,6 +610,11 @@ struct Known {
     admins: Vec<PubKey>,
     /// Everybody in it, with the role the **exchange** attests.
     members: Vec<Member>,
+    /// Where everybody's cursor is, as of the last time we asked.
+    ///
+    /// Fetched only for the conversation on screen: it is another round trip,
+    /// and nobody is reading a receipt in a channel they are not looking at.
+    marks: Vec<sqex_proto::channel::Mark>,
     timeline: Timeline,
     /// How many messages we had last time, so a new one can be counted unread
     /// without diffing two timelines.
@@ -820,6 +879,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 label: String::new(),
                 admins: Vec::new(),
                 members: Vec::new(),
+                marks: Vec::new(),
                 timeline,
                 seen,
                 last_at,
@@ -859,6 +919,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             },
             admins: vec![me, c.account],
             members: Vec::new(),
+            marks: Vec::new(),
             timeline: Timeline::default(),
             seen: 0,
             unread: 0,
@@ -949,6 +1010,23 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
         if let Some(last) = known.timeline.messages().last().map(|m| m.seq) {
             let _ = chat.mark_read(&open, last).await;
         }
+    }
+
+    // Everybody else's cursor, for the conversation on screen only. Another
+    // round trip, and nobody is reading a receipt in a channel they are not
+    // looking at.
+    //
+    // **Reciprocity is enforced at the exchange**: opting out of receipts
+    // withholds others' reading from you, and never withholds `delivered`,
+    // which the exchange observes whether or not anybody consents to report
+    // it. So a mark of `read: 0` beside a real `delivered` is somebody who
+    // opted out, not somebody who has not read -- and `receipt_for`
+    // under-claims on exactly that.
+    if let Some(open) = desk.open
+        && let Ok(marks) = chat.marks(&open).await
+        && let Some(known) = desk.channels.get_mut(&open)
+    {
+        known.marks = marks;
     }
 
     publish(chat, state, desk, me);
@@ -1066,8 +1144,23 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     let open = desk
         .open
         .and_then(|c| desk.channels.get(&c).map(|k| (c, k)));
-    let lines = open
+    let lines: Vec<Line> = open
         .map(|(_, k)| {
+            // A stub of what each message says, so a reply can name it. Built
+            // once rather than searched per reply: a conversation full of
+            // replies would otherwise be quadratic in its own length.
+            let stubs: HashMap<u64, (PubKey, String)> = k
+                .timeline
+                .messages()
+                .map(|m| {
+                    let said = if m.redacted {
+                        "deleted".to_string()
+                    } else {
+                        stub(m.post.body_text().unwrap_or_default())
+                    };
+                    (m.seq, (m.account, said))
+                })
+                .collect();
             k.timeline
                 .messages()
                 .map(|m| Line {
@@ -1079,6 +1172,23 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     text: m.post.body_text().unwrap_or_default().to_string(),
                     redacted: m.redacted,
                     edited: m.edited.is_some(),
+                    reactions: m
+                        .reactions
+                        .iter()
+                        .map(|(emoji, who)| (emoji.clone(), who.len(), who.contains(&me)))
+                        .collect(),
+                    reply_to: m.post.reply_to().and_then(|target| {
+                        stubs.get(&target).map(|(account, said)| {
+                            let named = people
+                                .get(account)
+                                .and_then(|p| p.name.clone())
+                                .unwrap_or_else(|| short(account));
+                            (named, said.clone())
+                        })
+                    }),
+                    // Only ever on our own. On somebody else's it would be a
+                    // claim about our own reading, shown back to us.
+                    receipt: (m.account == me).then(|| receipt_for(k, m.seq, &me)),
                 })
                 .collect()
         })
@@ -1109,6 +1219,51 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     });
 }
 
+/// How far one of our own messages is known to have got.
+///
+/// **Under-claims deliberately.** `Read` requires that *every* other member is
+/// known to have read it, so one person who has not — or who has opted out of
+/// receipts, and therefore reports no reading at all — holds the whole message
+/// at `Delivered`. Claiming more than is known is the one direction that
+/// cannot be corrected: somebody acts on "they have read it" and nothing ever
+/// says otherwise.
+fn receipt_for(known: &Known, seq: u64, me: &PubKey) -> Receipt {
+    let others: Vec<&sqex_proto::channel::Mark> =
+        known.marks.iter().filter(|m| m.account != *me).collect();
+    if others.is_empty() {
+        // Nobody else to have received it, or we have not asked yet. Either
+        // way we know only that the exchange took it.
+        return Receipt::Sent;
+    }
+    if others.iter().all(|m| m.read >= seq) {
+        Receipt::Read
+    } else if others.iter().all(|m| m.delivered >= seq) {
+        Receipt::Delivered
+    } else {
+        Receipt::Sent
+    }
+}
+
+/// A few words of a message, to name it in a reply.
+fn stub(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 48 {
+        let cut: String = flat.chars().take(47).collect();
+        format!("{cut}…")
+    } else {
+        flat
+    }
+}
+
+/// The first characters of a key, where a whole one will not fit.
+fn short(key: &PubKey) -> String {
+    key.to_string().chars().take(8).collect()
+}
+
 /// The first eight hex characters of an identifier, for a channel with no name.
 fn hex8(id: &[u8; 32]) -> String {
     id.iter().take(4).map(|b| format!("{b:02x}")).collect()
@@ -1135,6 +1290,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     label: peer.to_string(),
                     admins: vec![chat.me, peer],
                     members: Vec::new(),
+                    marks: Vec::new(),
                     timeline: Timeline::default(),
                     seen: 0,
                     last_at: 0,
@@ -1200,6 +1356,83 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             };
         }
         Cmd::Reconnect => chat.reconnect_now(),
+
+        Cmd::React { target, emoji } => {
+            let Some(channel) = desk.open else { return };
+            // Whether this adds or takes back is decided from what we can see:
+            // the fold keys reactions on (account, target, emoji), so asking
+            // for the opposite of what is there is always the right request.
+            let ours = desk
+                .channels
+                .get(&channel)
+                .and_then(|k| k.timeline.messages().find(|m| m.seq == target))
+                .map(|m| {
+                    m.reactions
+                        .get(&emoji)
+                        .is_some_and(|who| who.contains(&chat.me))
+                })
+                .unwrap_or(false);
+            match chat.react(&channel, target, &emoji, !ours).await {
+                Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+        Cmd::Reply { target, text } => {
+            let Some(channel) = desk.open else { return };
+            match chat.reply(&channel, target, &text).await {
+                Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+        Cmd::Edit { target, text } => {
+            let Some(channel) = desk.open else { return };
+            let post = sqex_proto::message::Post {
+                parts: vec![sqex_proto::message::Part::Text(text)],
+                ..Default::default()
+            };
+            match chat.edit(&channel, target, post).await {
+                Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+        Cmd::Redact(target) => {
+            let Some(channel) = desk.open else { return };
+            match chat.redact(&channel, target).await {
+                Ok(redacted) => {
+                    desk.dirty.insert(channel);
+                    // A file the message carried may outlive it: the reference
+                    // is detached, but somebody who already opened it holds the
+                    // bytes and the key. Said rather than implied, because
+                    // "deleted" reads as gone.
+                    if !redacted.left_behind.is_empty() {
+                        note(
+                            state,
+                            format!(
+                                "Deleted. {} file(s) it carried could not be detached and may \
+                                 still be reachable by anybody who already opened them.",
+                                redacted.left_behind.len()
+                            ),
+                        );
+                    } else {
+                        note(state, "Deleted.".into());
+                    }
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Typing(on) => {
+            let Some(channel) = desk.open else { return };
+            chat.typing(&channel, on).await;
+        }
 
         Cmd::NewGroup(name) => match chat.create_group(&name, &[]).await {
             Ok(channel) => {

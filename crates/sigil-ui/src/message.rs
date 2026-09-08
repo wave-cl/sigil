@@ -40,19 +40,96 @@ pub enum Receipt {
 }
 
 impl Receipt {
-    /// The mark, and the word for it.
-    ///
-    /// Both, always. A tick is a convention somebody has to already know, and
-    /// the accessibility tree cannot read a glyph's meaning out of it.
-    pub fn mark(self) -> (&'static str, &'static str) {
+    /// The word for it. Always available, and the only thing the accessibility
+    /// tree can read: a tick is a convention somebody has to already know, and
+    /// no assistive technology can get meaning out of a glyph.
+    pub fn word(self) -> &'static str {
         match self {
-            Receipt::Sending => ("·", "sending"),
-            Receipt::Sent => ("✓", "sent"),
-            Receipt::Delivered => ("✓✓", "delivered"),
-            Receipt::Read => ("✓✓", "read"),
-            Receipt::Failed => ("!", "did not send"),
+            Receipt::Sending => "sending",
+            Receipt::Sent => "sent",
+            Receipt::Delivered => "delivered",
+            Receipt::Read => "read",
+            Receipt::Failed => "did not send",
         }
     }
+
+    /// How many ticks it draws. Two for delivered and read, which are then
+    /// told apart by colour *and* by the word behind them.
+    fn ticks(self) -> usize {
+        match self {
+            Receipt::Delivered | Receipt::Read => 2,
+            _ => 1,
+        }
+    }
+}
+
+/// Draw a receipt.
+///
+/// **Painted, not written.** `✓` and `✓✓` are not in the fonts egui bundles
+/// and came out as `□ □` — the same trap `dot` records, where `●`/`○` rendered
+/// as tofu and no accessibility assertion could see it, because the
+/// accessibility tree carries the *string* and the string was fine. Only a
+/// snapshot catches it, and only if somebody looks at the snapshot.
+///
+/// Sending and failure are not ticks at all, so they keep their own shapes: a
+/// dot for in-flight, and a bar for a message that did not go.
+pub fn receipt(ui: &mut egui::Ui, receipt: Receipt, colour: egui::Color32) -> egui::Response {
+    let h = ui.text_style_height(&egui::TextStyle::Small);
+    let tick = h * 0.5;
+    let width = match receipt {
+        Receipt::Delivered | Receipt::Read => tick * 1.6,
+        _ => tick,
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    // The word, for anything that cannot see the paint.
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, receipt.word()));
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(tokens::STROKE_THIN, colour);
+    match receipt {
+        Receipt::Sending => {
+            painter.circle_filled(rect.center(), tokens::STROKE_THIN, colour);
+        }
+        Receipt::Failed => {
+            let x = rect.center().x;
+            painter.line_segment(
+                [
+                    egui::pos2(x, rect.top() + h * 0.15),
+                    egui::pos2(x, rect.bottom() - h * 0.35),
+                ],
+                stroke,
+            );
+            painter.circle_filled(
+                egui::pos2(x, rect.bottom() - h * 0.15),
+                tokens::STROKE_THIN,
+                colour,
+            );
+        }
+        _ => {
+            for n in 0..receipt.ticks() {
+                let left = rect.left() + n as f32 * tick * 0.6;
+                let mid = rect.center().y;
+                painter.line_segment(
+                    [
+                        egui::pos2(left, mid),
+                        egui::pos2(left + tick * 0.35, mid + tick * 0.45),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(left + tick * 0.35, mid + tick * 0.45),
+                        egui::pos2(left + tick, mid - tick * 0.5),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+    response
 }
 
 /// One message, as the interface needs it.
@@ -260,15 +337,14 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                     if b.edited {
                         ui.colored_label(quiet, egui::RichText::new("edited").small());
                     }
-                    if let Some(receipt) = b.receipt {
-                        let (mark, word) = receipt.mark();
-                        let colour = match receipt {
+                    if let Some(r) = b.receipt {
+                        let colour = match r {
                             Receipt::Failed => theme.destructive,
                             Receipt::Read if !b.mine => theme.accent,
+                            Receipt::Read => theme.success,
                             _ => quiet,
                         };
-                        ui.colored_label(colour, egui::RichText::new(mark).small())
-                            .on_hover_text(word);
+                        receipt(ui, r, colour).on_hover_text(r.word());
                     }
                 });
             });
@@ -349,18 +425,23 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
     }
 }
 
+/// What a message is replying to: a bar, a name, and a few of the words.
+///
+/// **A painted bar rather than an arrow.** `↳` is not in the fonts egui
+/// bundles and came out as `□`. It is also the better shape — a rule down the
+/// left is what every messenger uses, and it does not have to be understood.
 fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, theme: &ColorTheme) {
-    egui::Frame::NONE
-        .inner_margin(egui::Margin {
-            left: tokens::SPACING_SM as i8,
-            ..Default::default()
-        })
-        .show(ui, |ui| {
-            ui.colored_label(
-                theme.text_muted,
-                egui::RichText::new(format!("↳ {who}: {stub}")).small(),
-            );
-        });
+    ui.horizontal(|ui| {
+        let h = ui.text_style_height(&egui::TextStyle::Small);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(tokens::STROKE_THICK, h), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, tokens::RADIUS_SM, theme.accent);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(format!("{who}: {stub}")).small(),
+        );
+    });
 }
 
 /// One emoji and how many people sent it. Ours is outlined.
@@ -405,9 +486,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_receipt_says_a_word_as_well_as_a_mark() {
-        // A tick is a convention; the word is what the accessibility tree can
-        // read out and what somebody who does not know the convention gets.
+    fn every_receipt_has_a_word_for_what_it_means() {
+        // The mark is painted, so it reaches nothing but a pair of eyes. The
+        // word is what the accessibility tree carries and what somebody who
+        // does not already know the convention gets.
         for r in [
             Receipt::Sending,
             Receipt::Sent,
@@ -415,17 +497,44 @@ mod tests {
             Receipt::Read,
             Receipt::Failed,
         ] {
-            let (mark, word) = r.mark();
-            assert!(!mark.is_empty(), "{r:?} has no mark");
-            assert!(word.len() > 2, "{r:?} has no word: {word}");
+            assert!(r.word().len() > 2, "{r:?} has no word: {}", r.word());
         }
     }
 
     #[test]
     fn delivered_and_read_differ_in_more_than_colour() {
-        // They share a mark, so the word is the only thing telling them apart
-        // and it has to.
-        assert_ne!(Receipt::Delivered.mark().1, Receipt::Read.mark().1);
+        // They paint the same two ticks, so the word is the only thing telling
+        // them apart and it has to.
+        assert_eq!(Receipt::Delivered.ticks(), Receipt::Read.ticks());
+        assert_ne!(Receipt::Delivered.word(), Receipt::Read.word());
+    }
+
+    /// Nothing this crate draws may rely on a glyph the bundled fonts lack.
+    ///
+    /// `✓`, `✓✓` and `↳` all rendered as `□`, and nothing caught it: the
+    /// accessibility tree carries the *string*, which was fine, so every text
+    /// assertion passed. Only a snapshot shows it, and only if somebody looks.
+    /// So the rule is that sigil's own chrome is ASCII, and anything symbolic
+    /// is painted -- exactly what `dot` had to do when `●`/`○` came out as
+    /// tofu.
+    #[test]
+    fn the_words_this_crate_draws_are_all_ascii() {
+        let mut said: Vec<&str> = Vec::new();
+        for r in [
+            Receipt::Sending,
+            Receipt::Sent,
+            Receipt::Delivered,
+            Receipt::Read,
+            Receipt::Failed,
+        ] {
+            said.push(r.word());
+        }
+        for word in said {
+            assert!(
+                word.is_ascii(),
+                "{word:?} is not ASCII, so it may render as tofu -- paint it instead"
+            );
+        }
     }
 
     #[test]

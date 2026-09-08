@@ -10,7 +10,7 @@ use egui_kittest::kittest::NodeT;
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
-use sigil_chat::{ChatApp, ChatState, Line, LinkState, Member, Person, Summary};
+use sigil_chat::{ChatApp, ChatState, Line, LinkState, Member, Person, Receipt, Summary};
 use sqnr_core::PubKey;
 
 /// 2026-09-08 12:00:00 UTC. Pinned, because a day separator says "Today" and
@@ -78,6 +78,9 @@ fn a_conversation() -> ChatState {
                 text: "yesterday's message, so there is a separator above today".into(),
                 redacted: false,
                 edited: false,
+                reactions: Vec::new(),
+                reply_to: None,
+                receipt: None,
             },
             Line {
                 seq: 2,
@@ -88,6 +91,9 @@ fn a_conversation() -> ChatState {
                 text: "mine, on the other side".into(),
                 redacted: false,
                 edited: true,
+                reactions: vec![("\u{1f44d}".to_string(), 2, true)],
+                reply_to: None,
+                receipt: Some(Receipt::Read),
             },
             Line {
                 seq: 3,
@@ -98,6 +104,9 @@ fn a_conversation() -> ChatState {
                 text: "one".into(),
                 redacted: false,
                 edited: false,
+                reactions: Vec::new(),
+                reply_to: None,
+                receipt: None,
             },
             Line {
                 seq: 4,
@@ -108,6 +117,9 @@ fn a_conversation() -> ChatState {
                 text: "the second one, then".into(),
                 redacted: false,
                 edited: false,
+                reactions: Vec::new(),
+                reply_to: Some(("me".into(), "mine, on the other side".into())),
+                receipt: None,
             },
             Line {
                 seq: 5,
@@ -118,6 +130,9 @@ fn a_conversation() -> ChatState {
                 text: "gone".into(),
                 redacted: true,
                 edited: false,
+                reactions: Vec::new(),
+                reply_to: None,
+                receipt: None,
             },
         ],
         typing: false,

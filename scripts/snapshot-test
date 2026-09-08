@@ -27,10 +27,20 @@ for arg in "$@"; do
     esac
 done
 
+# Rendered on one machine, verified on another.
+#
+# macOS draws with Metal and CI with lavapipe, and the two do not agree to the
+# last bit on antialiased curves and glyph edges -- a few dozen sub-pixel
+# values, invisible to look at and more than enough to fail an exact compare.
+# That is what `kittest.toml`'s `threshold` is for, and it is set there with
+# the measurements that chose it. Containerising this to match CI's rasterizer
+# was tried and abandoned: the image would have to track CI's distribution as
+# well as its driver, which is a second thing to keep in step for a difference
+# nobody can see.
 if [[ "$(uname -s)" == "Darwin" && -n "$update" ]]; then
-    echo "note: updating snapshots on macOS renders with Metal, which will not" >&2
-    echo "      match CI's software rasterizer. Commit these only if CI agrees," >&2
-    echo "      or run this in a Linux container." >&2
+    echo "note: rendering with Metal; CI uses lavapipe. kittest.toml's threshold" >&2
+    echo "      covers the difference -- but if CI disagrees, look at the diff" >&2
+    echo "      before raising it, because a real change hides in the same place." >&2
 fi
 
 if [[ "$(uname -s)" == "Linux" ]]; then
@@ -62,7 +72,12 @@ if [[ -n "$update" ]]; then
 fi
 
 cd "$repo"
-cargo test --workspace -- --ignored
+# `--no-fail-fast`, because cargo stops at the first failing test binary and
+# every later one then reports nothing. `chat_ui` failing is why `transcript_ui`
+# was never actually rendered on CI for two commits: the job went red for one
+# snapshot while two others were quietly never checked, which is a green tick's
+# failure mode wearing a red hat.
+cargo test --workspace --no-fail-fast -- --ignored
 
 # Updating writes whatever was drawn and calls it correct, so an unstable
 # snapshot -- one whose content varies per run or per machine -- passes the
@@ -71,7 +86,7 @@ cargo test --workspace -- --ignored
 if [[ -n "$update" ]]; then
     echo
     echo "verifying the updated snapshots are stable…"
-    UPDATE_SNAPSHOTS= cargo test --workspace -- --ignored
+    UPDATE_SNAPSHOTS= cargo test --workspace --no-fail-fast -- --ignored
     echo
     echo "stable. If that had failed, the snapshot depends on something that"
     echo "changes between runs -- a generated key, the machine's capabilities --"

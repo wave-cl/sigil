@@ -1,0 +1,27 @@
+# How exactly a snapshot must match.
+#
+# `threshold` is a per-pixel colour tolerance (weighted squared YIQ distance),
+# not a budget for the image: it is applied to each pixel on its own.
+# `max_failed_pixels` stays at the default 0, which is the dial the library
+# says to leave alone — allowing even ten failing pixels is enough to hide a
+# moved separator or a shifted one-pixel border.
+#
+# # Why 2.0 rather than the default 0.6
+#
+# Snapshots are generated on macOS (Metal) and verified on CI (lavapipe). The
+# two disagree slightly on antialiased curves and glyph edges. Measured on
+# `transcript_dark` and `transcript_light`, from a real CI failure:
+#
+#   threshold  0.0    0.1    0.2    0.4   0.6   1.0  1.5  2.0  3.0
+#   failing    4322   3366   2693   420   44    25   3    0    0
+#
+# So the backends differ by a little under 2.0 and nothing beyond it. For
+# comparison, an actual content change — `chat_dark` rendering a different key —
+# failed 3139 pixels at threshold **10.0**. The two are three orders of
+# magnitude apart, which is what makes this safe: everything real is far above
+# where the backends disagree.
+#
+# Raise this only with a diff in front of you and a measurement like the one
+# above. It is the number that decides whether a snapshot suite is an
+# assertion or a decoration.
+threshold = 2.0

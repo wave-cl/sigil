@@ -3,7 +3,8 @@
 pub mod session;
 
 pub use session::{
-    ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Summary, Trouble,
+    ChatHandle, ChatState, Closing, Cmd, Found, Line, LinkState, Member, Person, Receipt, Summary,
+    Trouble,
 };
 
 use std::collections::HashMap;
@@ -47,6 +48,13 @@ struct Pane {
     add_trouble: Option<String>,
     /// The profile editor is open.
     editing_profile: bool,
+    /// The message being replied to, if any.
+    replying: Option<u64>,
+    /// Whether we have told the channel we are typing, so the signal is sent
+    /// on the edges rather than on every keystroke.
+    announced_typing: bool,
+    /// The message being rewritten, if any. What Enter does depends on it.
+    editing: Option<u64>,
     /// The directory search box.
     query: String,
     /// The key being invited to the open channel.
@@ -70,6 +78,9 @@ impl Default for Pane {
             adding: String::new(),
             add_trouble: None,
             editing_profile: false,
+            replying: None,
+            announced_typing: false,
+            editing: None,
             query: String::new(),
             inviting: String::new(),
             channel_name: String::new(),
@@ -688,7 +699,7 @@ impl ChatApp {
                     .fill(theme.surface_primary)
                     .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_SM as i8)),
             )
-            .show(ui, |ui| self.composer_ui(me, ui, theme));
+            .show(ui, |ui| self.composer_ui(me, state, ui, theme));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -697,7 +708,7 @@ impl ChatApp {
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        self.messages_ui(state, ui, theme, now);
+                        self.messages_ui(me, state, ui, theme, now);
                     });
             });
     }
@@ -767,7 +778,14 @@ impl ChatApp {
     }
 
     /// The messages themselves, with day separators, grouping and the divider.
-    fn messages_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme, now: u64) {
+    fn messages_ui(
+        &mut self,
+        me: PubKey,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        now: u64,
+    ) {
         if state.lines.is_empty() {
             ui.add_space(tokens::SPACING_XL);
             ui.vertical_centered(|ui| {
@@ -776,6 +794,11 @@ impl ChatApp {
             return;
         }
 
+        // What was done to a message, collected rather than acted on inside the
+        // loop: acting there would need `&mut self` while `state` is borrowed
+        // from it, and a frame-local queue is the shape the rest of the host
+        // uses anyway.
+        let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
         let mut previous_day: Option<String> = None;
         let mut previous_author: Option<PubKey> = None;
         let mut previous_at: u64 = 0;
@@ -818,11 +841,21 @@ impl ChatApp {
                 grouped,
                 edited: line.edited,
                 redacted: line.redacted,
-                reply_to: None,
-                reactions: &[],
-                receipt: None,
+                reply_to: line
+                    .reply_to
+                    .as_ref()
+                    .map(|(who, said)| (who.as_str(), said.as_str())),
+                reactions: &line.reactions,
+                receipt: line.receipt.map(|r| match r {
+                    Receipt::Sent => sigil_ui::Receipt::Sent,
+                    Receipt::Delivered => sigil_ui::Receipt::Delivered,
+                    Receipt::Read => sigil_ui::Receipt::Read,
+                }),
             };
-            let _ = sigil_ui::bubble(ui, &bubble);
+            let did = sigil_ui::bubble(ui, &bubble);
+            if !did.is_none() {
+                acted = Some((line.seq, line.text.clone(), line.who, did));
+            }
 
             previous_author = Some(line.who);
             previous_at = line.at;
@@ -831,6 +864,27 @@ impl ChatApp {
         if state.typing {
             ui.add_space(tokens::SPACING_SM);
             ui.colored_label(theme.text_muted, "typing…");
+        }
+
+        if let Some((seq, text, who, did)) = acted {
+            if let Some(emoji) = did.react {
+                self.send_as(Some(me), Cmd::React { target: seq, emoji });
+            }
+            if did.reply {
+                self.pane(me).replying = Some(seq);
+            }
+            if did.edit {
+                // The text is loaded into the composer so an edit is a
+                // correction of what is there rather than a retyping of it.
+                self.pane(me).editing = Some(seq);
+                self.pane(me).composing = text;
+            }
+            if did.redact {
+                self.send_as(Some(me), Cmd::Redact(seq));
+            }
+            if did.copy_key {
+                ui.ctx().copy_text(who.to_string());
+            }
         }
     }
 
@@ -841,8 +895,45 @@ impl ChatApp {
     /// button before the field -- consumed the whole row, and the field was
     /// allocated the nothing that remained: a composer with no box to write in,
     /// which is what the first snapshot of this showed.
-    fn composer_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
-        let _ = theme;
+    fn composer_ui(
+        &mut self,
+        me: PubKey,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        // What Enter will do, said above the box. A composer that silently
+        // means three different things depending on invisible state is one
+        // that will eventually send an edit as a new message.
+        let replying = self.pane(me).replying;
+        let editing = self.pane(me).editing;
+        if let Some(target) = editing.or(replying) {
+            let what = if editing.is_some() {
+                "Rewriting"
+            } else {
+                "Replying to"
+            };
+            let said = state
+                .lines
+                .iter()
+                .find(|l| l.seq == target)
+                .map(|l| sigil_ui::message::short(&l.text))
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.colored_label(theme.accent, format!("{what}: {said}"));
+                if ui.button("Cancel").clicked() {
+                    let pane = self.pane(me);
+                    pane.replying = None;
+                    if pane.editing.take().is_some() {
+                        // An abandoned rewrite must not leave the old text in
+                        // the box, where the next Return would post it again
+                        // as a new message.
+                        pane.composing.clear();
+                    }
+                }
+            });
+        }
+
         ui.horizontal(|ui| {
             let button = tokens::BUTTON_LG + tokens::SPACING_MD;
             let width = (ui.available_width() - button).max(80.0);
@@ -851,13 +942,35 @@ impl ChatApp {
                     .hint_text("Write a message")
                     .desired_width(width),
             );
-            let send = ui.button("Send").clicked();
+            // Typing is published from the fact that the text changed, not from
+            // the field having focus: a box somebody is sitting in front of and
+            // not writing in is not typing, and saying otherwise is a claim
+            // about them that they did not make.
+            if field.changed() {
+                let writing = !self.pane(me).composing.is_empty();
+                if self.pane(me).announced_typing != writing {
+                    self.pane(me).announced_typing = writing;
+                    self.send_as(Some(me), Cmd::Typing(writing));
+                }
+            }
+            let send = ui
+                .button(if editing.is_some() { "Save" } else { "Send" })
+                .clicked();
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (entered || send) && !self.pane(me).composing.trim().is_empty() {
                 // Taken, not cleared: if the send fails the text has to come
                 // back, and the session is what knows whether it did.
                 let text = std::mem::take(&mut self.pane(me).composing);
-                self.send_as(Some(me), Cmd::Send(text));
+                let pane = self.pane(me);
+                let (editing, replying) = (pane.editing.take(), pane.replying.take());
+                pane.announced_typing = false;
+                let cmd = match (editing, replying) {
+                    (Some(target), _) => Cmd::Edit { target, text },
+                    (None, Some(target)) => Cmd::Reply { target, text },
+                    (None, None) => Cmd::Send(text),
+                };
+                self.send_as(Some(me), cmd);
+                self.send_as(Some(me), Cmd::Typing(false));
                 field.request_focus();
             }
         });
