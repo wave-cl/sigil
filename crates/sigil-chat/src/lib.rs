@@ -34,6 +34,25 @@ pub enum Route {
     Devices,
 }
 
+/// The words for a ringing call.
+///
+/// A free function over plain data for the same reason as [`duplicate_of`]:
+/// what it decides is worth testing and a live session is the one thing a
+/// test cannot arrange.
+///
+/// `called` is the identity being rung and `held` how many this host is
+/// holding. With one there is nothing to tell apart, and naming it states a
+/// fact nobody was in doubt about — the same rule as the exchange switcher
+/// that is not drawn over a single exchange.
+fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
+    let who = sigil_ui::message::short(&from.to_string());
+    if held > 1 {
+        format!("{label} — from {who}, to {called}")
+    } else {
+        format!("{label} — from {who}")
+    }
+}
+
 /// The added exchange name to drop, when a session lost the store lock to
 /// another session of the **same identity**.
 ///
@@ -2523,25 +2542,29 @@ impl ChatApp {
     /// produces silence and silence is what a working one looks like from
     /// inside a test.
     fn announce_rings(&mut self, ctx: &mut AppContext<'_>) {
-        let mut fresh: Vec<(PubKey, u64, String)> = Vec::new();
-        for (me, session) in &self.sessions {
-            for ring in session.state().ringing {
+        // **Which identity is being called.** Every session is walked, so a
+        // call arriving at one identity reaches somebody looking at another —
+        // and the notification then has to say which, or it names a caller,
+        // a conversation, and no way to tell where either of them is.
+        let held = self.sessions.len();
+        let mut fresh: Vec<String> = Vec::new();
+        for (at, session) in &self.sessions {
+            let state = session.state();
+            for ring in &state.ringing {
                 if ring.mine || self.announced.contains(&(ring.channel, ring.seq)) {
                     continue;
                 }
-                fresh.push((ring.from, ring.seq, ring.label.clone()));
                 self.announced.insert((ring.channel, ring.seq));
-                let _ = me;
+                fresh.push(ring_said(
+                    &ring.from,
+                    &ring.label,
+                    &state.mine.label(&at.0),
+                    held,
+                ));
             }
         }
-        for (from, _, label) in fresh {
-            ctx.notify.post(
-                "Incoming call",
-                &format!(
-                    "{label} — from {}",
-                    sigil_ui::message::short(&from.to_string())
-                ),
-            );
+        for said in fresh {
+            ctx.notify.post("Incoming call", &said);
         }
     }
 
@@ -2885,6 +2908,45 @@ mod duplicate_tests {
         assert_eq!(
             duplicate_of(&added, None, &[((me, String::new()), Some(exchange))]),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    /// With more than one identity, the notification says which was called.
+    ///
+    /// A call reaches somebody who is looking at another identity — that is
+    /// the entire reason it is announced from `update` and not from `render`.
+    /// Naming the caller and the conversation without naming the identity
+    /// leaves them with no way to tell where either of those is.
+    #[test]
+    fn a_ring_names_the_identity_it_arrived_at() {
+        let said = ring_said(&key(2), "Ada", "colin@squic.org", 3);
+        assert!(said.contains("Ada"), "{said}");
+        assert!(said.contains("colin@squic.org"), "{said}");
+        // And the caller's key, abbreviated. A name is an assertion (SIP-21)
+        // and the label above is one; this is not.
+        assert!(
+            said.contains(&sigil_ui::message::short(&key(2).to_string())),
+            "{said}"
+        );
+    }
+
+    /// With one identity there is nothing to tell apart.
+    #[test]
+    fn a_ring_at_the_only_identity_does_not_name_it() {
+        let said = ring_said(&key(2), "Ada", "colin@squic.org", 1);
+        assert!(said.contains("Ada"), "{said}");
+        assert!(
+            !said.contains("colin@squic.org"),
+            "a fact nobody was in doubt about: {said}"
         );
     }
 }
