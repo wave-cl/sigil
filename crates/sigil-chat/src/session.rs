@@ -142,6 +142,13 @@ pub struct Summary {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatState {
     pub me: Option<PubKey>,
+    /// The exchange this session actually reached.
+    ///
+    /// Reported rather than configured: a session is started against a *name*
+    /// — a domain, or nothing at all for the default — and what that resolves
+    /// to is not known until it is dialled. It is the key a receipt verifies
+    /// under, so an interface shows it rather than the name it was asked for.
+    pub exchange: Option<PubKey>,
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
@@ -764,7 +771,10 @@ async fn run(
     chat.dials(endpoint.address, endpoint.server.as_bytes().to_owned());
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
 
-    state.send_modify(|s| s.me = Some(me));
+    state.send_modify(|s| {
+        s.me = Some(me);
+        s.exchange = Some(endpoint.server);
+    });
     (wake)();
 
     let mut desk = Desk::default();

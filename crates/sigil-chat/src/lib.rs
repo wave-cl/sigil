@@ -34,6 +34,19 @@ pub enum Route {
     Devices,
 }
 
+/// One identity at one exchange: what a session, a store lock and a
+/// conversation list all belong to.
+///
+/// The identity is the same key at every exchange and nothing else is — its
+/// conversations, its channel keys and its SIP-17 counters belong to one and
+/// do not move. So this pair, and not the key alone, is what everything here
+/// is keyed on.
+///
+/// The exchange is the **name** somebody gave it, not the key it resolves to:
+/// the key is not known until something dials it, and a session has to exist
+/// before it can find out.
+type At = (PubKey, String);
+
 /// What is being typed, per identity.
 ///
 /// **Keyed by account, not shared.** A draft typed as one identity must not
@@ -63,6 +76,9 @@ struct Pane {
     linking: String,
     /// The message search box.
     searching: String,
+    /// The exchange being added, and whether the field is open.
+    exchange: String,
+    adding_exchange: bool,
     /// The message whose file is being forwarded.
     forwarding: Option<u64>,
     /// The key being invited to the open channel.
@@ -92,6 +108,8 @@ impl Default for Pane {
             query: String::new(),
             linking: String::new(),
             searching: String::new(),
+            exchange: String::new(),
+            adding_exchange: false,
             forwarding: None,
             inviting: String::new(),
             channel_name: String::new(),
@@ -108,14 +126,17 @@ impl Default for Pane {
 }
 
 pub struct ChatApp {
-    /// One live session per unlocked identity — not one for the identity being
-    /// looked at. A message arriving for an account you are not currently
-    /// showing is still a message you want to be told about.
-    sessions: HashMap<PubKey, ChatHandle>,
-    /// Sessions told to stop that still hold their store lock. An account here
+    /// One live session per identity **at each of its exchanges**, and not one
+    /// for whichever is being looked at. A message arriving somewhere you are
+    /// not currently showing is still a message you want to be told about.
+    sessions: HashMap<At, ChatHandle>,
+    /// Sessions told to stop that still hold their store lock. One of these
     /// must not be reopened yet; see [`Closing`].
-    closing: Vec<(PubKey, Closing)>,
-    panes: HashMap<PubKey, Pane>,
+    closing: Vec<(At, Closing)>,
+    panes: HashMap<At, Pane>,
+    /// Which exchange is being shown, for each identity. Absent means the
+    /// default one.
+    showing: HashMap<PubKey, String>,
     config: Config,
     /// Where the stores live, when it is not `~/.sqex/chat`.
     ///
@@ -163,6 +184,7 @@ impl ChatApp {
             sessions: HashMap::new(),
             closing: Vec::new(),
             panes: HashMap::new(),
+            showing: HashMap::new(),
             config: Config::load(),
             store_root: None,
             now: None,
@@ -213,9 +235,21 @@ impl ChatApp {
     /// switch: after changing identity this must no longer contain the old key.
     #[doc(hidden)]
     pub fn running_as_for_test(&self) -> Vec<PubKey> {
-        let mut keys: Vec<PubKey> = self.sessions.keys().copied().collect();
+        let mut keys: Vec<PubKey> = self.sessions.keys().map(|(me, _)| *me).collect();
         keys.sort_by_key(|k| k.to_string());
+        keys.dedup();
         keys
+    }
+
+    /// Which identity-and-exchange pairs have a live session.
+    ///
+    /// The pair, not the key: one identity at two exchanges is two sessions,
+    /// and a test that counted keys would not see the difference.
+    #[doc(hidden)]
+    pub fn running_at_for_test(&self) -> Vec<(PubKey, String)> {
+        let mut all: Vec<(PubKey, String)> = self.sessions.keys().cloned().collect();
+        all.sort_by_key(|(me, at)| (me.to_string(), at.clone()));
+        all
     }
 
     /// The account being shown, if it is open.
@@ -223,11 +257,21 @@ impl ChatApp {
         ctx.account().unlocked().map(|u| u.me())
     }
 
-    fn state_of(&self, me: Option<PubKey>) -> ChatState {
+    /// The identity **and exchange** being shown.
+    ///
+    /// Both, because a conversation list belongs to a pair: the identity is
+    /// the same key at every exchange and its conversations are not.
+    fn showing_at(&self, ctx: &AppContext<'_>) -> Option<At> {
+        let me = Self::showing(ctx)?;
+        let named = self.showing.get(&me).cloned().unwrap_or_default();
+        Some((me, named))
+    }
+
+    fn state_of(&self, at: Option<&At>) -> ChatState {
         if let Some(fixed) = &self.fixed {
             return fixed.clone();
         }
-        me.and_then(|me| self.sessions.get(&me))
+        at.and_then(|at| self.sessions.get(at))
             .map(|s| s.state())
             .unwrap_or_default()
     }
@@ -247,8 +291,8 @@ impl ChatApp {
         self.fixed = Some(state);
     }
 
-    fn pane(&mut self, me: PubKey) -> &mut Pane {
-        self.panes.entry(me).or_default()
+    fn pane(&mut self, at: &At) -> &mut Pane {
+        self.panes.entry(at.clone()).or_default()
     }
 
     /// Bring the live sessions into line with the roster.
@@ -264,33 +308,42 @@ impl ChatApp {
         // A closed session keeps the store lock until its task really ends.
         self.closing.retain(|(_, c)| !c.is_finished());
 
-        let held: Vec<(PubKey, std::path::PathBuf)> = ctx
-            .accounts
-            .unlocked()
-            .map(|(me, u)| (me, u.path().to_path_buf()))
-            .collect();
+        // Every identity at every exchange it is connected to. The pair is
+        // what a session belongs to: the identity is the same key everywhere,
+        // and its conversations are not.
+        let mut held: Vec<(At, std::path::PathBuf)> = Vec::new();
+        for one in ctx.accounts.all() {
+            let Some(unlocked) = one.account().unlocked() else {
+                continue;
+            };
+            for exchange in one.exchanges() {
+                held.push(((unlocked.me(), exchange), unlocked.path().to_path_buf()));
+            }
+        }
 
         // Stop anything no longer held. This is the half that matters: a
         // session left running for a discarded identity keeps connecting,
         // keeps succeeding, and is the wrong person.
-        let live: Vec<PubKey> = self.sessions.keys().copied().collect();
-        for me in live {
-            if !held.iter().any(|(k, _)| *k == me) {
-                if let Some(session) = self.sessions.remove(&me) {
-                    self.closing.push((me, session.close()));
+        let live: Vec<At> = self.sessions.keys().cloned().collect();
+        for at in live {
+            if !held.iter().any(|(k, _)| *k == at) {
+                if let Some(session) = self.sessions.remove(&at) {
+                    self.closing.push((at.clone(), session.close()));
                 }
-                self.panes.remove(&me);
+                self.panes.remove(&at);
             }
         }
 
-        for (me, path) in held {
-            if self.sessions.contains_key(&me) {
+        for (at, path) in held {
+            if self.sessions.contains_key(&at) {
                 continue;
             }
             // Its predecessor has not let go of the store yet.
-            if self.closing.iter().any(|(k, _)| *k == me) {
+            if self.closing.iter().any(|(k, _)| *k == at) {
                 continue;
             }
+            let me = at.0;
+            let named = at.1.clone();
             let Some(unlocked) = ctx
                 .accounts
                 .unlocked()
@@ -299,22 +352,31 @@ impl ChatApp {
             else {
                 continue;
             };
-            let layers =
-                discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+            // An added exchange is named explicitly; the default one is
+            // whatever the identity's own SIP-38 handle and `~/.sqnr/config`
+            // resolve to, which is the answer for almost everybody.
+            let layers = if named.is_empty() {
+                discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path))
+            } else {
+                vec![sigil_net::Layer {
+                    server: Some(named.clone()),
+                    ..Default::default()
+                }]
+            };
             if !discovery::any_configured(&layers) {
                 continue;
             }
-            // One store per account, which is what makes several identities
-            // safe to hold at once: different keys, different files, different
-            // locks. The same identity twice would be refused its lock, and
-            // rightly.
+            // **One store file per identity, shared by its exchanges.** The
+            // store scopes every row by exchange and the lock is per (account,
+            // exchange), so two sessions on one file do not collide -- and a
+            // file each would put one identity's contact list in two places.
             let store_at = self
                 .store_root
                 .as_ref()
                 .map(|root| root.join(format!("{me}.db")));
             let wake = egui_ctx.clone();
             self.sessions.insert(
-                me,
+                at,
                 session::start(layers, unlocked.signer(), store_at, move || {
                     wake.request_repaint()
                 }),
@@ -322,8 +384,8 @@ impl ChatApp {
         }
     }
 
-    fn send_as(&mut self, me: Option<PubKey>, cmd: Cmd) {
-        if let Some(s) = me.and_then(|me| self.sessions.get(&me)) {
+    fn send_as(&mut self, at: Option<&At>, cmd: Cmd) {
+        if let Some(s) = at.and_then(|at| self.sessions.get(at)) {
             s.send(cmd);
         }
     }
@@ -394,10 +456,11 @@ impl App for ChatApp {
             );
             return AppResponse::default();
         }
-        let Some(me) = Self::showing(ctx) else {
+        let Some(at) = self.showing_at(ctx) else {
             return AppResponse::default();
         };
-        let state = self.state_of(Some(me));
+        let at = &at;
+        let state = self.state_of(Some(at));
 
         // The connection light says the *word* as well as the colour. A red dot
         // on its own is not a message, and this one matters more than usual:
@@ -421,7 +484,7 @@ impl App for ChatApp {
             );
             ui.colored_label(colour, state.link.word());
             if state.link != LinkState::Up && ui.button("Reconnect").clicked() {
-                self.send_as(Some(me), Cmd::Reconnect);
+                self.send_as(Some(at), Cmd::Reconnect);
             }
         });
         if let Some(trouble) = &state.trouble {
@@ -443,12 +506,12 @@ impl App for ChatApp {
                 // conversation with a way back. Not both squeezed together --
                 // two unusable columns are worse than one usable one.
                 match state.open {
-                    None => self.list_ui(ctx, me, &state, ui, &theme),
+                    None => self.list_ui(ctx, at, &state, ui, &theme),
                     Some(_) => {
                         if ui.button("← Conversations").clicked() {
-                            self.send_as(Some(me), Cmd::Close);
+                            self.send_as(Some(at), Cmd::Close);
                         }
-                        self.transcript_ui(ctx, me, &state, ui, &theme);
+                        self.transcript_ui(ctx, at, &state, ui, &theme);
                     }
                 }
             }
@@ -460,10 +523,10 @@ impl App for ChatApp {
                         right: tokens::SPACING_MD as i8,
                         ..Default::default()
                     }))
-                    .show(ui, |ui| self.list_ui(ctx, me, &state, ui, &theme));
+                    .show(ui, |ui| self.list_ui(ctx, at, &state, ui, &theme));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ui, |ui| self.transcript_ui(ctx, me, &state, ui, &theme));
+                    .show(ui, |ui| self.transcript_ui(ctx, at, &state, ui, &theme));
             }
         }
         AppResponse::default()
@@ -495,7 +558,15 @@ impl ChatApp {
     /// SIP-21 profile you publish. The profile is **self-declared and attested
     /// by nobody**, which the pane says rather than leaving somebody to infer
     /// it from a field that looks like an account setting.
-    fn me_ui(&mut self, me: PubKey, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn me_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let me = at.0;
         let key = me.to_string();
         ui.horizontal(|ui| {
             sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
@@ -520,7 +591,7 @@ impl ChatApp {
         // to somebody who wants to write to you.
         ui.add(egui::Label::new(egui::RichText::new(&key).monospace().small()).selectable(true));
 
-        let pane = self.panes.entry(me).or_default();
+        let pane = self.panes.entry(at.clone()).or_default();
         if !pane.editing_profile {
             if ui.button("Edit profile").clicked() {
                 pane.editing_profile = true;
@@ -529,11 +600,11 @@ impl ChatApp {
             }
         } else {
             ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().name)
+                egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().name)
                     .hint_text("display name"),
             );
             ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().title)
+                egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().title)
                     .hint_text("title"),
             );
             // Said next to the field rather than in a help page. A title
@@ -548,31 +619,128 @@ impl ChatApp {
             );
             ui.horizontal(|ui| {
                 if ui.button("Publish").clicked() {
-                    let pane = self.panes.entry(me).or_default();
+                    let pane = self.panes.entry(at.clone()).or_default();
                     let (name, title) = (pane.name.clone(), pane.title.clone());
                     pane.editing_profile = false;
-                    self.send_as(Some(me), Cmd::SetProfile { name, title });
+                    self.send_as(Some(at), Cmd::SetProfile { name, title });
                 }
                 if ui.button("Cancel").clicked() {
-                    self.panes.entry(me).or_default().editing_profile = false;
+                    self.panes.entry(at.clone()).or_default().editing_profile = false;
                 }
             });
         }
+        self.exchanges_ui(ctx, at, state, ui, theme);
         ui.add_space(tokens::SPACING_SM);
         ui.separator();
+    }
+
+    /// Which exchange this identity is talking to, and how to add another.
+    ///
+    /// # Why this is not a setting
+    ///
+    /// The identity is the same key at every exchange, and **nothing else
+    /// is**. Conversations, channel keys and SIP-17 counters belong to one
+    /// exchange and do not move — SIP-31 binds the exchange into every entry
+    /// signature so that they cannot. Adding one is therefore much closer to
+    /// adding an account than to changing a preference, and switching between
+    /// them changes the whole conversation list.
+    fn exchanges_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let me = at.0;
+        let named = ctx.accounts.active_held().exchanges();
+        let which = ctx.accounts.active_index();
+
+        // Only when there is a choice. A switcher over one exchange is a
+        // control that cannot do anything.
+        if named.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("At");
+                for name in &named {
+                    let selected = *name == at.1;
+                    let label = if name.is_empty() {
+                        // The default has no name to show; what it resolved to
+                        // is the useful thing, once it is known.
+                        match state.exchange {
+                            Some(key) => sigil_ui::message::short(&key.to_string()),
+                            None => "default".to_string(),
+                        }
+                    } else {
+                        name.clone()
+                    };
+                    if ui.selectable_label(selected, label).clicked() && !selected {
+                        self.showing.insert(me, name.clone());
+                    }
+                }
+            });
+        }
+        // The full key of whatever is being talked to, always reachable. It is
+        // what a receipt verifies under and what a replica must be checked
+        // against, so it is not something to leave to a name.
+        if let Some(key) = state.exchange {
+            ui.add(
+                egui::Label::new(egui::RichText::new(key.to_string()).monospace().small())
+                    .selectable(true),
+            )
+            .on_hover_text("the exchange this conversation list belongs to");
+        }
+
+        let pane = self.panes.entry(at.clone()).or_default();
+        if !pane.adding_exchange {
+            if ui.small_button("Add an exchange").clicked() {
+                pane.adding_exchange = true;
+            }
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().exchange)
+                    .hint_text("a domain, or host:port")
+                    .desired_width(180.0),
+            );
+            if ui.button("Add").clicked() {
+                let named = self.pane(at).exchange.trim().to_string();
+                if ctx.accounts.add_exchange(which, &named) {
+                    let pane = self.pane(at);
+                    pane.exchange.clear();
+                    pane.adding_exchange = false;
+                    // Shown straight away: adding one and staying where you
+                    // were makes it look as though nothing happened.
+                    self.showing.insert(me, named);
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                let pane = self.pane(at);
+                pane.exchange.clear();
+                pane.adding_exchange = false;
+            }
+        });
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Your key is the same there. Your conversations are not — they belong to \
+                 one exchange and cannot be moved.",
+            )
+            .small(),
+        );
     }
 
     /// The conversation list.
     fn list_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
-        me: PubKey,
+        at: &At,
         state: &ChatState,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
         let now = self.now();
-        self.me_ui(me, state, ui, theme);
+        self.me_ui(ctx, at, state, ui, theme);
         ui.horizontal(|ui| {
             ui.heading("Conversations");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -580,7 +748,7 @@ impl ChatApp {
                     if ui.button("Group").clicked() {
                         // A group's name is a sealed entry, so it is named
                         // after it exists rather than before.
-                        self.send_as(Some(me), Cmd::NewGroup("New group".into()));
+                        self.send_as(Some(at), Cmd::NewGroup("New group".into()));
                         ui.close();
                     }
                     if ui
@@ -592,7 +760,7 @@ impl ChatApp {
                         .clicked()
                     {
                         self.send_as(
-                            Some(me),
+                            Some(at),
                             Cmd::NewPublic {
                                 name: "New channel".into(),
                                 topic: String::new(),
@@ -611,35 +779,35 @@ impl ChatApp {
             // tree at all.
             ui.label("Write to");
             ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().adding)
+                egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().adding)
                     .hint_text("their key, or name@domain")
                     .desired_width(ui.available_width() - 50.0),
             );
         });
         if ui.button("Add").clicked() {
-            let typed = self.pane(me).adding.trim().to_string();
+            let typed = self.pane(at).adding.trim().to_string();
             match typed.parse::<PubKey>() {
                 Ok(who) => {
-                    self.pane(me).add_trouble = None;
-                    self.send_as(Some(me), Cmd::AddContact(who, String::new()));
-                    self.send_as(Some(me), Cmd::OpenDm(who));
-                    self.pane(me).adding.clear();
+                    self.pane(at).add_trouble = None;
+                    self.send_as(Some(at), Cmd::AddContact(who, String::new()));
+                    self.send_as(Some(at), Cmd::OpenDm(who));
+                    self.pane(at).adding.clear();
                 }
                 // Not a key, so try it as a SIP-38 name. A name is looked up
                 // at the exchange and resolves to exactly one account, which
                 // is the whole of what makes it usable here.
                 Err(_) if typed.contains('@') => {
-                    self.pane(me).add_trouble = None;
-                    self.send_as(Some(me), Cmd::OpenByName(typed));
-                    self.pane(me).adding.clear();
+                    self.pane(at).add_trouble = None;
+                    self.send_as(Some(at), Cmd::OpenByName(typed));
+                    self.pane(at).adding.clear();
                 }
                 Err(e) => {
-                    self.pane(me).add_trouble =
+                    self.pane(at).add_trouble =
                         Some(format!("not a key, and not a name@domain: {e}"))
                 }
             }
         }
-        if let Some(t) = self.panes.get(&me).and_then(|p| p.add_trouble.as_ref()) {
+        if let Some(t) = self.panes.get(at).and_then(|p| p.add_trouble.as_ref()) {
             ui.colored_label(theme.destructive, t);
         }
         if ui.button("Find a public channel").clicked() {
@@ -648,13 +816,15 @@ impl ChatApp {
         ui.horizontal(|ui| {
             ui.label("Search");
             let field = ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().searching)
-                    .hint_text("your messages")
-                    .desired_width(ui.available_width() - 20.0),
+                egui::TextEdit::singleline(
+                    &mut self.panes.entry(at.clone()).or_default().searching,
+                )
+                .hint_text("your messages")
+                .desired_width(ui.available_width() - 20.0),
             );
             if field.changed() {
-                let query = self.pane(me).searching.clone();
-                self.send_as(Some(me), Cmd::Search(query));
+                let query = self.pane(at).searching.clone();
+                self.send_as(Some(at), Cmd::Search(query));
             }
         });
 
@@ -662,7 +832,7 @@ impl ChatApp {
 
         // A search replaces the list while there is one. The list is still
         // there underneath, and clearing the box brings it back.
-        if !self.pane(me).searching.trim().is_empty() {
+        if !self.pane(at).searching.trim().is_empty() {
             // Said every time, not once in a help page: an empty result here
             // means "not in what this client has opened", which is a different
             // fact from "never said", and only this client can tell them apart.
@@ -701,7 +871,7 @@ impl ChatApp {
                             );
                         });
                         if response.response.interact(egui::Sense::click()).clicked() {
-                            self.send_as(Some(me), Cmd::Show(hit.channel));
+                            self.send_as(Some(at), Cmd::Show(hit.channel));
                         }
                         ui.separator();
                     }
@@ -740,7 +910,7 @@ impl ChatApp {
                         typing: convo.typing,
                     };
                     if sigil_ui::conversation_row(ui, &row, selected).clicked() {
-                        self.send_as(Some(me), Cmd::Show(convo.channel));
+                        self.send_as(Some(at), Cmd::Show(convo.channel));
                     }
                 }
             });
@@ -750,11 +920,12 @@ impl ChatApp {
     fn transcript_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
-        me: PubKey,
+        at: &At,
         state: &ChatState,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
+        let me = at.0;
         let now = self.now();
 
         if state.open.is_none() {
@@ -782,7 +953,7 @@ impl ChatApp {
                     ctx.navigator.push_here(Route::Settings);
                 }
                 if ui.button("Devices").clicked() {
-                    self.send_as(Some(me), Cmd::Devices);
+                    self.send_as(Some(at), Cmd::Devices);
                     ctx.navigator.push_here(Route::Devices);
                 }
                 // Calling from inside the conversation, with audio. The
@@ -793,14 +964,14 @@ impl ChatApp {
                     && !state.ringing.iter().any(|r| r.mine)
                     && ui.button("Call").clicked()
                 {
-                    self.send_as(Some(me), Cmd::Call);
+                    self.send_as(Some(at), Cmd::Call);
                 }
             });
         });
-        if self.ringing_ui(ctx, me, state, ui, theme) {
+        if self.ringing_ui(ctx, at, state, ui, theme) {
             ui.add_space(tokens::SPACING_SM);
         }
-        self.in_call_ui(me, ui, theme);
+        self.in_call_ui(at, ui, theme);
         // A call we placed that nobody has taken yet.
         if let Some(ring) = state.ringing.iter().find(|r| r.mine) {
             let (channel, seq) = (ring.channel, ring.seq);
@@ -809,7 +980,7 @@ impl ChatApp {
                 if ui.button("Cancel").clicked() {
                     let seconds = self.leave_call(me).map(|(_, _, s)| s).unwrap_or(0);
                     self.send_as(
-                        Some(me),
+                        Some(at),
                         Cmd::Hangup {
                             channel,
                             seq,
@@ -829,7 +1000,7 @@ impl ChatApp {
                 if ui.button(label).clicked() {
                     // Asked for here rather than on a tick: the block list is
                     // only ever looked at on this screen.
-                    self.send_as(Some(me), Cmd::Blocked);
+                    self.send_as(Some(at), Cmd::Blocked);
                     ctx.navigator.push_here(Route::Members);
                 }
             });
@@ -850,7 +1021,7 @@ impl ChatApp {
                     .fill(theme.surface_primary)
                     .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_SM as i8)),
             )
-            .show(ui, |ui| self.composer_ui(me, state, ui, theme));
+            .show(ui, |ui| self.composer_ui(at, state, ui, theme));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -859,7 +1030,7 @@ impl ChatApp {
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        self.messages_ui(me, state, ui, theme, now);
+                        self.messages_ui(at, state, ui, theme, now);
                     });
             });
     }
@@ -931,7 +1102,7 @@ impl ChatApp {
     /// The messages themselves, with day separators, grouping and the divider.
     fn messages_ui(
         &mut self,
-        me: PubKey,
+        at: &At,
         state: &ChatState,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
@@ -1031,7 +1202,7 @@ impl ChatApp {
 
         // Where to forward a file to. A list rather than a key field: the
         // destination is always somewhere you are already in.
-        if let Some(seq) = self.pane(me).forwarding {
+        if let Some(seq) = self.pane(at).forwarding {
             ui.add_space(tokens::SPACING_SM);
             egui::Frame::NONE
                 .fill(theme.surface_elevated)
@@ -1055,9 +1226,9 @@ impl ChatApp {
                             continue;
                         }
                         if ui.selectable_label(false, &convo.label).clicked() {
-                            self.pane(me).forwarding = None;
+                            self.pane(at).forwarding = None;
                             self.send_as(
-                                Some(me),
+                                Some(at),
                                 Cmd::Forward {
                                     seq,
                                     index: 0,
@@ -1067,39 +1238,39 @@ impl ChatApp {
                         }
                     }
                     if ui.button("Cancel").clicked() {
-                        self.pane(me).forwarding = None;
+                        self.pane(at).forwarding = None;
                     }
                 });
         }
 
         if let Some((seq, text, who, did)) = acted {
             if let Some(emoji) = did.react {
-                self.send_as(Some(me), Cmd::React { target: seq, emoji });
+                self.send_as(Some(at), Cmd::React { target: seq, emoji });
             }
             if did.reply {
-                self.pane(me).replying = Some(seq);
+                self.pane(at).replying = Some(seq);
             }
             if did.edit {
                 // The text is loaded into the composer so an edit is a
                 // correction of what is there rather than a retyping of it.
-                self.pane(me).editing = Some(seq);
-                self.pane(me).composing = text;
+                self.pane(at).editing = Some(seq);
+                self.pane(at).composing = text;
             }
             if did.redact {
-                self.send_as(Some(me), Cmd::Redact(seq));
+                self.send_as(Some(at), Cmd::Redact(seq));
             }
             if did.copy_key {
                 ui.ctx().copy_text(who.to_string());
             }
             if did.forward {
-                self.pane(me).forwarding = Some(seq);
+                self.pane(at).forwarding = Some(seq);
             }
             if let Some(index) = did.save {
                 // The dialog is native and blocking, which is fine here: it is
                 // a direct answer to a click, and the session goes on running
                 // on its own task regardless.
                 if let Some(to) = rfd::FileDialog::new().save_file() {
-                    self.send_as(Some(me), Cmd::SaveFile { seq, index, to });
+                    self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
                 }
             }
         }
@@ -1112,18 +1283,12 @@ impl ChatApp {
     /// button before the field -- consumed the whole row, and the field was
     /// allocated the nothing that remained: a composer with no box to write in,
     /// which is what the first snapshot of this showed.
-    fn composer_ui(
-        &mut self,
-        me: PubKey,
-        state: &ChatState,
-        ui: &mut egui::Ui,
-        theme: &ColorTheme,
-    ) {
+    fn composer_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         // What Enter will do, said above the box. A composer that silently
         // means three different things depending on invisible state is one
         // that will eventually send an edit as a new message.
-        let replying = self.pane(me).replying;
-        let editing = self.pane(me).editing;
+        let replying = self.pane(at).replying;
+        let editing = self.pane(at).editing;
         if let Some(target) = editing.or(replying) {
             let what = if editing.is_some() {
                 "Rewriting"
@@ -1139,7 +1304,7 @@ impl ChatApp {
             ui.horizontal(|ui| {
                 ui.colored_label(theme.accent, format!("{what}: {said}"));
                 if ui.button("Cancel").clicked() {
-                    let pane = self.pane(me);
+                    let pane = self.pane(at);
                     pane.replying = None;
                     if pane.editing.take().is_some() {
                         // An abandoned rewrite must not leave the old text in
@@ -1155,19 +1320,21 @@ impl ChatApp {
             let button = tokens::BUTTON_LG + tokens::SPACING_MD;
             let width = (ui.available_width() - button).max(80.0);
             let field = ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().composing)
-                    .hint_text("Write a message")
-                    .desired_width(width),
+                egui::TextEdit::singleline(
+                    &mut self.panes.entry(at.clone()).or_default().composing,
+                )
+                .hint_text("Write a message")
+                .desired_width(width),
             );
             // Typing is published from the fact that the text changed, not from
             // the field having focus: a box somebody is sitting in front of and
             // not writing in is not typing, and saying otherwise is a claim
             // about them that they did not make.
             if field.changed() {
-                let writing = !self.pane(me).composing.is_empty();
-                if self.pane(me).announced_typing != writing {
-                    self.pane(me).announced_typing = writing;
-                    self.send_as(Some(me), Cmd::Typing(writing));
+                let writing = !self.pane(at).composing.is_empty();
+                if self.pane(at).announced_typing != writing {
+                    self.pane(at).announced_typing = writing;
+                    self.send_as(Some(at), Cmd::Typing(writing));
                 }
             }
             let send = ui
@@ -1179,14 +1346,14 @@ impl ChatApp {
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new().pick_file()
             {
-                self.send_as(Some(me), Cmd::SendFile(path));
+                self.send_as(Some(at), Cmd::SendFile(path));
             }
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (entered || send) && !self.pane(me).composing.trim().is_empty() {
+            if (entered || send) && !self.pane(at).composing.trim().is_empty() {
                 // Taken, not cleared: if the send fails the text has to come
                 // back, and the session is what knows whether it did.
-                let text = std::mem::take(&mut self.pane(me).composing);
-                let pane = self.pane(me);
+                let text = std::mem::take(&mut self.pane(at).composing);
+                let pane = self.pane(at);
                 let (editing, replying) = (pane.editing.take(), pane.replying.take());
                 pane.announced_typing = false;
                 let cmd = match (editing, replying) {
@@ -1194,8 +1361,8 @@ impl ChatApp {
                     (None, Some(target)) => Cmd::Reply { target, text },
                     (None, None) => Cmd::Send(text),
                 };
-                self.send_as(Some(me), cmd);
-                self.send_as(Some(me), Cmd::Typing(false));
+                self.send_as(Some(at), cmd);
+                self.send_as(Some(at), Cmd::Typing(false));
                 field.request_focus();
             }
         });
@@ -1211,10 +1378,11 @@ impl ChatApp {
     /// is unmentionable, so nothing here can be made to admit one exists.
     fn directory_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
-        let Some(me) = Self::showing(ctx) else {
+        let Some(at) = self.showing_at(ctx) else {
             return AppResponse::default();
         };
-        let state = self.state_of(Some(me));
+        let at = &at;
+        let state = self.state_of(Some(at));
 
         ui.horizontal(|ui| {
             if ui.button("← Back").clicked() {
@@ -1230,15 +1398,15 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_SM);
 
         ui.horizontal(|ui| {
-            let pane = self.panes.entry(me).or_default();
+            let pane = self.panes.entry(at.clone()).or_default();
             let field = ui.add(
                 egui::TextEdit::singleline(&mut pane.query)
                     .hint_text("search, or leave empty for everything"),
             );
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if entered || ui.button("Search").clicked() {
-                let query = self.pane(me).query.clone();
-                self.send_as(Some(me), Cmd::Find(query));
+                let query = self.pane(at).query.clone();
+                self.send_as(Some(at), Cmd::Find(query));
             }
         });
         ui.add_space(tokens::SPACING_SM);
@@ -1294,7 +1462,7 @@ impl ChatApp {
                                 // fetching requires membership, so there is no
                                 // way to look without becoming a member.
                                 self.send_as(
-                                    Some(me),
+                                    Some(at),
                                     Cmd::Join {
                                         channel: found.channel,
                                         instance: found.instance,
@@ -1312,10 +1480,12 @@ impl ChatApp {
     /// Who is in the open conversation.
     fn members_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
-        let Some(me) = Self::showing(ctx) else {
+        let Some(at) = self.showing_at(ctx) else {
             return AppResponse::default();
         };
-        let state = self.state_of(Some(me));
+        let at = &at;
+        let me = at.0;
+        let state = self.state_of(Some(at));
 
         ui.horizontal(|ui| {
             if ui.button("← Back").clicked() {
@@ -1329,19 +1499,21 @@ impl ChatApp {
             ui.horizontal(|ui| {
                 ui.label("Invite");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().inviting)
-                        .hint_text("their key or name@domain")
-                        .desired_width(240.0),
+                    egui::TextEdit::singleline(
+                        &mut self.panes.entry(at.clone()).or_default().inviting,
+                    )
+                    .hint_text("their key or name@domain")
+                    .desired_width(240.0),
                 );
                 if ui.button("Add").clicked() {
-                    let typed = self.pane(me).inviting.trim().to_string();
+                    let typed = self.pane(at).inviting.trim().to_string();
                     match typed.parse::<PubKey>() {
                         Ok(who) => {
-                            self.pane(me).inviting.clear();
-                            self.send_as(Some(me), Cmd::Invite(who));
+                            self.pane(at).inviting.clear();
+                            self.send_as(Some(at), Cmd::Invite(who));
                         }
                         Err(e) => {
-                            self.pane(me).add_trouble = Some(format!("that is not a key: {e}"))
+                            self.pane(at).add_trouble = Some(format!("that is not a key: {e}"))
                         }
                     }
                 }
@@ -1406,7 +1578,7 @@ impl ChatApp {
                                         )
                                         .clicked()
                                     {
-                                        self.send_as(Some(me), Cmd::Kick(member.account));
+                                        self.send_as(Some(at), Cmd::Kick(member.account));
                                     }
                                     let (label, admin) = if member.admin {
                                         ("Demote", false)
@@ -1415,7 +1587,7 @@ impl ChatApp {
                                     };
                                     if ui.button(label).clicked() {
                                         self.send_as(
-                                            Some(me),
+                                            Some(at),
                                             Cmd::Grant {
                                                 who: member.account,
                                                 admin,
@@ -1439,7 +1611,7 @@ impl ChatApp {
                                         .clicked()
                                     {
                                         self.send_as(
-                                            Some(me),
+                                            Some(at),
                                             Cmd::SetBlocked {
                                                 who: member.account,
                                                 blocked: !blocked,
@@ -1459,10 +1631,11 @@ impl ChatApp {
     /// The open conversation's name, topic, retention, and how to end it.
     fn settings_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
-        let Some(me) = Self::showing(ctx) else {
+        let Some(at) = self.showing_at(ctx) else {
             return AppResponse::default();
         };
-        let state = self.state_of(Some(me));
+        let at = &at;
+        let state = self.state_of(Some(at));
 
         ui.horizontal(|ui| {
             if ui.button("← Back").clicked() {
@@ -1483,25 +1656,27 @@ impl ChatApp {
             ui.horizontal(|ui| {
                 ui.label("Name");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().channel_name)
-                        .desired_width(240.0),
+                    egui::TextEdit::singleline(
+                        &mut self.panes.entry(at.clone()).or_default().channel_name,
+                    )
+                    .desired_width(240.0),
                 );
                 if ui.button("Set").clicked() {
-                    let name = self.pane(me).channel_name.clone();
-                    self.send_as(Some(me), Cmd::SetName(name));
+                    let name = self.pane(at).channel_name.clone();
+                    self.send_as(Some(at), Cmd::SetName(name));
                 }
             });
             ui.horizontal(|ui| {
                 ui.label("Topic");
                 ui.add(
                     egui::TextEdit::singleline(
-                        &mut self.panes.entry(me).or_default().channel_topic,
+                        &mut self.panes.entry(at.clone()).or_default().channel_topic,
                     )
                     .desired_width(240.0),
                 );
                 if ui.button("Set").clicked() {
-                    let topic = self.pane(me).channel_topic.clone();
-                    self.send_as(Some(me), Cmd::SetTopic(topic));
+                    let topic = self.pane(at).channel_topic.clone();
+                    self.send_as(Some(at), Cmd::SetTopic(topic));
                 }
             });
 
@@ -1509,14 +1684,16 @@ impl ChatApp {
             ui.horizontal(|ui| {
                 ui.label("Keep messages for");
                 ui.add(
-                    egui::DragValue::new(&mut self.panes.entry(me).or_default().retention_days)
-                        .range(1..=365)
-                        .suffix(" days"),
+                    egui::DragValue::new(
+                        &mut self.panes.entry(at.clone()).or_default().retention_days,
+                    )
+                    .range(1..=365)
+                    .suffix(" days"),
                 );
                 if ui.button("Set").clicked() {
-                    let days = self.pane(me).retention_days;
+                    let days = self.pane(at).retention_days;
                     self.send_as(
-                        Some(me),
+                        Some(at),
                         Cmd::SetRetention {
                             secs: days * 24 * 60 * 60,
                             max_entries: 0,
@@ -1545,7 +1722,7 @@ impl ChatApp {
                 )
                 .clicked()
             {
-                self.send_as(Some(me), Cmd::Rotate);
+                self.send_as(Some(at), Cmd::Rotate);
             }
         });
 
@@ -1560,12 +1737,12 @@ impl ChatApp {
             .on_hover_text("You stop receiving this conversation. Nobody else loses it.")
             .clicked()
         {
-            self.send_as(Some(me), Cmd::Leave);
+            self.send_as(Some(at), Cmd::Leave);
             ctx.navigator.back();
         }
 
         ui.add_space(tokens::SPACING_SM);
-        let pane = self.panes.entry(me).or_default();
+        let pane = self.panes.entry(at.clone()).or_default();
         if !pane.confirming_destroy {
             if ui
                 .add(egui::Button::new(
@@ -1582,12 +1759,12 @@ impl ChatApp {
             );
             ui.horizontal(|ui| {
                 if ui.button("Yes, destroy it").clicked() {
-                    self.panes.entry(me).or_default().confirming_destroy = false;
-                    self.send_as(Some(me), Cmd::Destroy);
+                    self.panes.entry(at.clone()).or_default().confirming_destroy = false;
+                    self.send_as(Some(at), Cmd::Destroy);
                     ctx.navigator.back();
                 }
                 if ui.button("Cancel").clicked() {
-                    self.panes.entry(me).or_default().confirming_destroy = false;
+                    self.panes.entry(at.clone()).or_default().confirming_destroy = false;
                 }
             });
         }
@@ -1604,10 +1781,11 @@ impl ChatApp {
     fn join_call(
         &mut self,
         ctx: &mut AppContext<'_>,
-        me: PubKey,
+        at: &At,
         ring: &Ring,
         egui_ctx: &egui::Context,
     ) {
+        let me = at.0;
         if self.calls.contains_key(&me) {
             return;
         }
@@ -1688,7 +1866,7 @@ impl ChatApp {
     fn ringing_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
-        me: PubKey,
+        at: &At,
         state: &ChatState,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
@@ -1735,7 +1913,7 @@ impl ChatApp {
                             .clicked()
                         {
                             self.send_as(
-                                Some(me),
+                                Some(at),
                                 Cmd::Decline {
                                     channel: ring.channel,
                                     seq: ring.seq,
@@ -1745,13 +1923,13 @@ impl ChatApp {
                         if ui.button("Answer").clicked() {
                             let ring = ring.clone();
                             self.send_as(
-                                Some(me),
+                                Some(at),
                                 Cmd::Answer {
                                     channel: ring.channel,
                                     seq: ring.seq,
                                 },
                             );
-                            self.join_call(ctx, me, &ring, ui.ctx());
+                            self.join_call(ctx, at, &ring, ui.ctx());
                         }
                     });
                 });
@@ -1760,7 +1938,8 @@ impl ChatApp {
     }
 
     /// The bar shown while audio is actually flowing.
-    fn in_call_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn in_call_ui(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let me = at.0;
         let Some(live) = self.calls.get(&me) else {
             return;
         };
@@ -1797,7 +1976,7 @@ impl ChatApp {
                             && let Some((channel, seq, seconds)) = self.leave_call(me)
                         {
                             self.send_as(
-                                Some(me),
+                                Some(at),
                                 Cmd::Hangup {
                                     channel,
                                     seq,
@@ -1826,10 +2005,11 @@ impl ChatApp {
     /// permanently, for everybody in them and not only for you.
     fn devices_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
-        let Some(me) = Self::showing(ctx) else {
+        let Some(at) = self.showing_at(ctx) else {
             return AppResponse::default();
         };
-        let state = self.state_of(Some(me));
+        let at = &at;
+        let state = self.state_of(Some(at));
 
         ui.horizontal(|ui| {
             if ui.button("← Back").clicked() {
@@ -1837,7 +2017,7 @@ impl ChatApp {
             }
             ui.heading("Devices");
             if ui.button("Refresh").clicked() {
-                self.send_as(Some(me), Cmd::Devices);
+                self.send_as(Some(at), Cmd::Devices);
             }
         });
 
@@ -1901,7 +2081,7 @@ impl ChatApp {
                             )
                             .clicked()
                         {
-                            self.send_as(Some(me), Cmd::RevokeDevice(device.device));
+                            self.send_as(Some(at), Cmd::RevokeDevice(device.device));
                         }
                     });
                 }
@@ -1919,18 +2099,18 @@ impl ChatApp {
         ui.horizontal(|ui| {
             ui.label("Its key");
             ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().linking)
+                egui::TextEdit::singleline(&mut self.panes.entry(at.clone()).or_default().linking)
                     .hint_text("base58")
                     .desired_width(260.0),
             );
             if ui.button("Write credential").clicked() {
-                let typed = self.pane(me).linking.trim().to_string();
+                let typed = self.pane(at).linking.trim().to_string();
                 match typed.parse::<PubKey>() {
                     Ok(device) => {
-                        self.pane(me).linking.clear();
-                        self.send_as(Some(me), Cmd::LinkDevice { device, days: 90 });
+                        self.pane(at).linking.clear();
+                        self.send_as(Some(at), Cmd::LinkDevice { device, days: 90 });
                     }
-                    Err(e) => self.pane(me).add_trouble = Some(format!("that is not a key: {e}")),
+                    Err(e) => self.pane(at).add_trouble = Some(format!("that is not a key: {e}")),
                 }
             }
         });

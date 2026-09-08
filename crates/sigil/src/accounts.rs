@@ -30,10 +30,58 @@ use sqnr_core::PubKey;
 
 use crate::account::Account;
 
+/// One identity's line in the remembered roster.
+///
+/// Paths and exchange names. **Never a seed** — a seed on disk outside
+/// `~/.sqnr` would be a second copy of somebody's identity, in a file nobody
+/// chose to create and no passphrase protects.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Remembered {
+    path: PathBuf,
+    #[serde(default)]
+    exchanges: Vec<String>,
+}
+
+/// One identity, and the exchanges it is connected to.
+///
+/// **An account, in the sense somebody means it, is a pair**: an identity *at*
+/// an exchange. The identity is the same key everywhere, but its conversations,
+/// its channel keys and its SIP-17 counters belong to one exchange and do not
+/// move. So the two are held together here rather than the identity alone.
+#[derive(Debug)]
+pub struct Held {
+    account: Account,
+    /// Exchanges beyond the one discovery finds, as the person typed them: a
+    /// domain, or `host:port`.
+    ///
+    /// The default is not in this list. It has no name to be in it by — it is
+    /// whatever the identity's own SIP-38 handle and `~/.sqnr/config` resolve
+    /// to, which is the answer for almost everybody and needs no configuring.
+    extra: Vec<String>,
+}
+
+impl Held {
+    pub fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// Every exchange this identity should be connected to.
+    ///
+    /// The empty string is the default one, and is always first. It is a
+    /// *name* for an exchange rather than an exchange: what it resolves to is
+    /// not known until something dials it, which is why sessions are keyed on
+    /// this and report the key they reached.
+    pub fn exchanges(&self) -> Vec<String> {
+        let mut all = vec![String::new()];
+        all.extend(self.extra.iter().cloned());
+        all
+    }
+}
+
 /// The identities sigil is holding, and the one being shown.
 #[derive(Debug)]
 pub struct Accounts {
-    entries: Vec<Account>,
+    entries: Vec<Held>,
     active: usize,
     generation: u64,
 }
@@ -52,6 +100,13 @@ impl Accounts {
         } else {
             entries
         };
+        let entries = entries
+            .into_iter()
+            .map(|account| Held {
+                account,
+                extra: Vec::new(),
+            })
+            .collect();
         Accounts {
             entries,
             active: 0,
@@ -74,11 +129,23 @@ impl Accounts {
         )
     }
 
-    /// What to remember. Paths only, never seeds.
+    /// What to remember. Paths and exchange names, never seeds.
     pub fn paths(&self) -> Vec<PathBuf> {
         self.entries
             .iter()
-            .map(|a| a.path().to_path_buf())
+            .map(|h| h.account.path().to_path_buf())
+            .collect()
+    }
+
+    /// What is written to disk: where each identity lives and which exchanges
+    /// it is connected to.
+    fn remembered(&self) -> Vec<Remembered> {
+        self.entries
+            .iter()
+            .map(|h| Remembered {
+                path: h.account.path().to_path_buf(),
+                exchanges: h.extra.clone(),
+            })
             .collect()
     }
 
@@ -102,18 +169,32 @@ impl Accounts {
     }
 
     pub fn active(&self) -> &Account {
+        &self.entries[self.active].account
+    }
+
+    /// The identity being shown, with its exchanges.
+    pub fn active_held(&self) -> &Held {
         &self.entries[self.active]
     }
 
     pub fn active_mut(&mut self) -> &mut Account {
-        &mut self.entries[self.active]
+        &mut self.entries[self.active].account
     }
 
     pub fn get(&self, i: usize) -> Option<&Account> {
+        self.entries.get(i).map(|h| &h.account)
+    }
+
+    pub fn held(&self, i: usize) -> Option<&Held> {
         self.entries.get(i)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Account> {
+        self.entries.iter().map(|h| &h.account)
+    }
+
+    /// Every identity with the exchanges it is connected to.
+    pub fn all(&self) -> impl Iterator<Item = &Held> {
         self.entries.iter()
     }
 
@@ -123,7 +204,47 @@ impl Accounts {
     pub fn unlocked(&self) -> impl Iterator<Item = (PubKey, &crate::account::Unlocked)> {
         self.entries
             .iter()
-            .filter_map(|a| a.unlocked().map(|u| (u.me(), u)))
+            .filter_map(|h| h.account.unlocked().map(|u| (u.me(), u)))
+    }
+
+    /// Connect the identity at `i` to another exchange as well.
+    ///
+    /// The identity is the same key there, and nothing else is: conversations,
+    /// channel keys and SIP-17 counters all belong to one exchange. This is
+    /// therefore closer to adding an account than to changing a setting, and
+    /// the interface should say so.
+    pub fn add_exchange(&mut self, i: usize, named: &str) -> bool {
+        let named = named.trim().to_string();
+        let Some(held) = self.entries.get_mut(i) else {
+            return false;
+        };
+        // The empty name is the default exchange and is always present, so it
+        // cannot be added; and one already here is not added twice, which
+        // would give two sessions racing for one lock.
+        if named.is_empty() || held.extra.contains(&named) {
+            return false;
+        }
+        held.extra.push(named);
+        self.generation += 1;
+        true
+    }
+
+    /// Stop connecting the identity at `i` to `named`.
+    ///
+    /// The default exchange cannot be dropped: an identity connected to
+    /// nothing is not an identity anybody can use, and there would be no way
+    /// back to it from the interface.
+    pub fn drop_exchange(&mut self, i: usize, named: &str) -> bool {
+        let Some(held) = self.entries.get_mut(i) else {
+            return false;
+        };
+        let before = held.extra.len();
+        held.extra.retain(|e| e != named);
+        if held.extra.len() == before {
+            return false;
+        }
+        self.generation += 1;
+        true
     }
 
     /// Show a different account. No effect on which are live.
@@ -142,11 +263,14 @@ impl Accounts {
     /// store, and the second would be refused its lock and sit there broken
     /// for a reason that looks like somebody else's fault.
     pub fn add(&mut self, path: PathBuf) -> usize {
-        if let Some(i) = self.entries.iter().position(|a| a.path() == path) {
+        if let Some(i) = self.entries.iter().position(|h| h.account.path() == path) {
             self.switch_to(i);
             return i;
         }
-        self.entries.push(Account::discover(Some(path)));
+        self.entries.push(Held {
+            account: Account::discover(Some(path)),
+            extra: Vec::new(),
+        });
         self.active = self.entries.len() - 1;
         self.generation += 1;
         self.active
@@ -161,7 +285,7 @@ impl Accounts {
             return false;
         }
         if self.entries.len() == 1 {
-            self.entries[0].lock();
+            self.entries[0].account.lock();
         } else {
             self.entries.remove(i);
             if self.active >= self.entries.len() {
@@ -183,7 +307,7 @@ impl Accounts {
         let Some(account) = self.entries.get_mut(i) else {
             return false;
         };
-        let opened = account.unlock(passphrase);
+        let opened = account.account.unlock(passphrase);
         if opened {
             self.generation += 1;
         }
@@ -195,10 +319,10 @@ impl Accounts {
         let Some(account) = self.entries.get_mut(i) else {
             return false;
         };
-        if !account.is_unlocked() {
+        if !account.account.is_unlocked() {
             return false;
         }
-        account.lock();
+        account.account.lock();
         self.generation += 1;
         true
     }
@@ -207,8 +331,8 @@ impl Accounts {
     pub fn rediscover(&mut self) {
         let paths: Vec<PathBuf> = self.paths();
         for (account, path) in self.entries.iter_mut().zip(paths) {
-            if !account.is_unlocked() {
-                *account = Account::discover(Some(path));
+            if !account.account.is_unlocked() {
+                account.account = Account::discover(Some(path));
             }
         }
         self.generation += 1;
@@ -230,6 +354,15 @@ impl Accounts {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Accounts::discover(None);
         };
+        // The current shape first, then the one written before identities
+        // could hold more than one exchange. A file already on somebody's
+        // machine is what every upgrade actually reads, and a roster silently
+        // reset to one account is a worse outcome than any of the parsing.
+        if let Ok(remembered) = serde_json::from_str::<Vec<Remembered>>(&text)
+            && !remembered.is_empty()
+        {
+            return Accounts::of_remembered(remembered);
+        }
         match serde_json::from_str::<Vec<PathBuf>>(&text) {
             Ok(paths) if !paths.is_empty() => Accounts::restore(&paths),
             // Unreadable rather than absent. Say so and carry on with the
@@ -240,6 +373,20 @@ impl Accounts {
                 tracing::warn!(path = %path.display(), error = %e, "cannot read the remembered accounts");
                 Accounts::discover(None)
             }
+        }
+    }
+
+    fn of_remembered(remembered: Vec<Remembered>) -> Accounts {
+        Accounts {
+            entries: remembered
+                .into_iter()
+                .map(|r| Held {
+                    account: Account::discover(Some(r.path)),
+                    extra: r.exchanges,
+                })
+                .collect(),
+            active: 0,
+            generation: 0,
         }
     }
 
@@ -257,7 +404,7 @@ impl Accounts {
             tracing::warn!(path = %parent.display(), error = %e, "cannot make the settings directory");
             return;
         }
-        match serde_json::to_string_pretty(&self.paths()) {
+        match serde_json::to_string_pretty(&self.remembered()) {
             Ok(text) => {
                 if let Err(e) = std::fs::write(&path, text) {
                     tracing::warn!(path = %path.display(), error = %e, "cannot remember the accounts");
@@ -276,15 +423,15 @@ impl Accounts {
         let Some(account) = self.entries.get(i) else {
             return String::new();
         };
-        match account.unlocked() {
+        match account.account.unlocked() {
             Some(u) => {
                 let key = u.me().to_string();
                 format!("{}…", &key[..key.len().min(10)])
             }
-            None => Path::new(account.path())
+            None => Path::new(account.account.path())
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_else(|| account.path().display().to_string()),
+                .unwrap_or_else(|| account.account.path().display().to_string()),
         }
     }
 }
@@ -373,5 +520,101 @@ mod tests {
         let restored = Accounts::restore(&paths);
         assert_eq!(restored.len(), 2);
         assert!(restored.iter().all(|a| !a.is_unlocked()));
+    }
+}
+
+#[cfg(test)]
+mod exchanges {
+    use super::*;
+
+    fn held(n: u8) -> Account {
+        Account::unlocked_for_test([n; 32])
+    }
+
+    #[test]
+    fn an_identity_starts_at_one_exchange_and_it_has_no_name() {
+        let accounts = Accounts::of(vec![held(1)]);
+        // The default is whatever the identity's own handle and config
+        // resolve to. It is in the list, and it is the empty name, because
+        // there is nothing for somebody to have typed.
+        assert_eq!(accounts.active_held().exchanges(), vec![String::new()]);
+    }
+
+    #[test]
+    fn adding_one_makes_it_a_second_exchange_not_a_replacement() {
+        let mut accounts = Accounts::of(vec![held(1)]);
+        let was = accounts.generation();
+        assert!(accounts.add_exchange(0, "indra.org"));
+        assert_eq!(
+            accounts.active_held().exchanges(),
+            vec![String::new(), "indra.org".to_string()]
+        );
+        assert!(accounts.generation() > was, "apps have to reconcile");
+    }
+
+    #[test]
+    fn the_same_exchange_is_not_added_twice() {
+        // Two sessions for one pair would race for one store lock, and the
+        // loser would report that somebody else is using the account.
+        let mut accounts = Accounts::of(vec![held(1)]);
+        assert!(accounts.add_exchange(0, "indra.org"));
+        assert!(!accounts.add_exchange(0, "indra.org"));
+        assert!(!accounts.add_exchange(0, "  indra.org  "));
+        assert_eq!(accounts.active_held().exchanges().len(), 2);
+    }
+
+    #[test]
+    fn the_default_exchange_cannot_be_dropped() {
+        // An identity connected to nothing is one nothing in the interface can
+        // get back to.
+        let mut accounts = Accounts::of(vec![held(1)]);
+        assert!(!accounts.drop_exchange(0, ""));
+        assert_eq!(accounts.active_held().exchanges().len(), 1);
+    }
+
+    #[test]
+    fn dropping_an_added_one_leaves_the_rest() {
+        let mut accounts = Accounts::of(vec![held(1)]);
+        accounts.add_exchange(0, "indra.org");
+        accounts.add_exchange(0, "squic.org");
+        assert!(accounts.drop_exchange(0, "indra.org"));
+        assert_eq!(
+            accounts.active_held().exchanges(),
+            vec![String::new(), "squic.org".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_roster_written_before_exchanges_existed_still_loads() {
+        // What every upgrade actually reads. A roster silently reset to one
+        // account would be a worse outcome than any parse error.
+        let old = serde_json::to_string(&vec![
+            std::path::PathBuf::from("/one"),
+            std::path::PathBuf::from("/two"),
+        ])
+        .unwrap();
+        let remembered: Vec<PathBuf> = serde_json::from_str(&old).unwrap();
+        let accounts = Accounts::restore(&remembered);
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts.active_held().exchanges(), vec![String::new()]);
+    }
+
+    #[test]
+    fn what_is_written_carries_the_exchanges_and_no_seed() {
+        let mut accounts = Accounts::of(vec![held(1)]);
+        accounts.add_exchange(0, "indra.org");
+        let written = serde_json::to_string(&accounts.remembered()).unwrap();
+        assert!(written.contains("indra.org"));
+        // Round-trips.
+        let back: Vec<Remembered> = serde_json::from_str(&written).unwrap();
+        let reopened = Accounts::of_remembered(back);
+        assert_eq!(
+            reopened.active_held().exchanges(),
+            vec![String::new(), "indra.org".to_string()]
+        );
+        assert!(
+            !reopened.active().is_unlocked(),
+            "nothing written can reconstruct a seed"
+        );
     }
 }

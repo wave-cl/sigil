@@ -39,6 +39,7 @@ fn a_conversation() -> ChatState {
     let channel = [9u8; 32];
     ChatState {
         me: Some(me()),
+        exchange: Some(PubKey::new([3u8; 32])),
         link: LinkState::Up,
         trouble: None,
         conversations: vec![
@@ -222,6 +223,32 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
                 notify: &sigil::Silent,
             };
             let _ = app.render_nav(&mut app_ctx, ui, &token);
+        })
+}
+
+/// A harness whose identity is connected to more than one exchange.
+fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    for name in extra {
+        assert!(accounts.add_exchange(0, name));
+    }
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            let _ = app.render(&mut app_ctx, ui);
         })
 }
 
@@ -487,4 +514,43 @@ fn a_revoked_device_says_it_has_been_revoked() {
     let mut h = harness_at(state, sigil_chat::Route::Devices);
     h.run();
     assert!(text_of(&h).contains("revoked"), "{}", text_of(&h));
+}
+
+/// The exchange a conversation list belongs to is on screen, in full.
+///
+/// It is the key a receipt verifies under, and the one a client must pin
+/// independently of whatever it is connected to. A name for it is not enough.
+#[test]
+fn the_exchange_this_list_belongs_to_is_shown_in_full() {
+    let mut h = harness(true);
+    h.run();
+    let key = PubKey::new([3u8; 32]).to_string();
+    assert!(
+        text_of(&h).contains(&key),
+        "the exchange's key belongs on screen: {}",
+        text_of(&h)
+    );
+}
+
+/// One exchange is not a choice, so there is nothing to switch between.
+#[test]
+fn a_single_exchange_offers_no_switcher() {
+    let mut h = harness_at_exchanges(a_conversation(), &[]);
+    h.run();
+    let said = text_of(&h);
+    assert!(!said.contains("indra.org"), "{said}");
+    // But adding one is always offered.
+    assert!(said.contains("Add an exchange"), "{said}");
+}
+
+/// A second exchange is offered as somewhere to switch to.
+#[test]
+fn a_second_exchange_appears_as_somewhere_to_switch_to() {
+    let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("indra.org"),
+        "the added exchange is offered: {said}"
+    );
 }

@@ -125,3 +125,93 @@ async fn switching_which_identity_is_shown_stops_nothing() {
     // account away, and must not cost the other one its messages.
     assert_eq!(before, app.running_as_for_test());
 }
+
+/// One identity at two exchanges is **two** sessions.
+///
+/// # Why the pair and not the key
+///
+/// The identity is the same key at every exchange and nothing else is. A
+/// direct message's channel identifier is derived from its two accounts, so
+/// one conversation has identical channel bytes everywhere it exists — which
+/// is why the store scopes every row by exchange and SIP-31 binds the exchange
+/// into every entry signature. A client keyed on the account alone would hold
+/// one session and show one exchange's conversations as though they were all
+/// of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_identity_at_two_exchanges_is_two_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = key_of(&one);
+    let mut accounts = Accounts::of(vec![one]);
+
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(
+        app.running_at_for_test(),
+        vec![(me, String::new())],
+        "one identity starts at its default exchange, which has no name"
+    );
+
+    assert!(accounts.add_exchange(0, "indra.org"));
+    pass(&mut app, &mut accounts, &egui_ctx);
+
+    assert_eq!(
+        app.running_at_for_test(),
+        vec![(me, String::new()), (me, "indra.org".to_string())],
+        "adding one gives a second session, not a replacement"
+    );
+    // One key, two sessions. A test counting identities would see one and miss
+    // the whole point.
+    assert_eq!(app.running_as_for_test(), vec![me]);
+}
+
+/// Dropping an exchange stops that session and leaves the other running.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_an_exchange_stops_only_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = key_of(&one);
+    let mut accounts = Accounts::of(vec![one]);
+    accounts.add_exchange(0, "indra.org");
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(app.running_at_for_test().len(), 2);
+
+    assert!(accounts.drop_exchange(0, "indra.org"));
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(
+        app.running_at_for_test(),
+        vec![(me, String::new())],
+        "the one dropped stops; the one kept does not"
+    );
+}
+
+/// Closing the identity stops every one of its exchanges.
+///
+/// The same silent failure as before, one level up: a session left running for
+/// an identity that has been put away keeps connecting and keeps succeeding,
+/// and now there can be several of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_an_identity_stops_all_of_its_exchanges() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+
+    let mut accounts = Accounts::of(vec![Account::unlocked_for_test([1u8; 32])]);
+    accounts.add_exchange(0, "indra.org");
+    accounts.add_exchange(0, "squic.org");
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(app.running_at_for_test().len(), 3);
+
+    assert!(accounts.lock(0));
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert!(
+        app.running_at_for_test().is_empty(),
+        "every exchange goes with the identity: {:?}",
+        app.running_at_for_test()
+    );
+}

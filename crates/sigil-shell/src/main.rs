@@ -158,7 +158,8 @@ fn main() -> eframe::Result<()> {
                 accounts.len(),
                 if accounts.len() == 1 { "y" } else { "ies" }
             );
-            for (i, account) in accounts.iter().enumerate() {
+            for (i, held) in accounts.all().enumerate() {
+                let account = held.account();
                 let shown = if i == accounts.active_index() {
                     " (shown)"
                 } else {
@@ -171,6 +172,16 @@ fn main() -> eframe::Result<()> {
                         account.path().display(),
                         account.describe()
                     ),
+                }
+                // Which exchanges, by name. This is remembered state read back
+                // from a file, and state that came from a file with nothing
+                // announcing it leaves nobody able to say what the program
+                // thinks it is holding.
+                for exchange in held.exchanges() {
+                    match exchange.as_str() {
+                        "" => tracing::info!("      at the exchange this identity names"),
+                        named => tracing::info!("      at {named}"),
+                    }
                 }
             }
 
