@@ -214,6 +214,7 @@ fn a_conversation() -> ChatState {
         // The whole conversation, so the paging control is out of the way of
         // everything else here. `a_paged_conversation` is what covers it.
         earlier: 0,
+        locked_out: None,
     }
 }
 
@@ -901,6 +902,29 @@ fn having_no_name_offers_the_way_to_claim_one() {
     assert!(
         said.contains("Bound at this exchange"),
         "the two things called a name are not told apart: {said}"
+    );
+}
+
+/// An exchange can be taken back off.
+///
+/// There was a control to add one and none to remove one, so a name added by
+/// mistake — or one that turned out to be the default under another spelling,
+/// which is how this was found — could only be undone by editing the roster
+/// file by hand.
+#[test]
+fn an_added_exchange_can_be_removed_again() {
+    let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
+    h.run();
+    open_identity(&mut h);
+    assert!(text_of(&h).contains("indra.org"), "{}", text_of(&h));
+
+    h.get_by_label("Remove").click();
+    h.run();
+    open_identity(&mut h);
+    assert!(
+        !text_of(&h).contains("indra.org"),
+        "the exchange is still there: {}",
+        text_of(&h)
     );
 }
 

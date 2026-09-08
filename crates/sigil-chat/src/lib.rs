@@ -34,6 +34,38 @@ pub enum Route {
     Devices,
 }
 
+/// The added exchange name to drop, when a session lost the store lock to
+/// another session of the **same identity**.
+///
+/// A free function over plain data rather than a method reaching into the
+/// live sessions: what it decides is worth testing, and two sessions on one
+/// exchange is precisely the state that cannot be arranged in a test — the
+/// second one is refused, which is the whole subject.
+///
+/// `locked_out` is the exchange this session could not lock; `others` is every
+/// other live session and the exchange it reports. `None` when the lock is
+/// genuinely somebody else's — another sigil, or the terminal client — which
+/// is a different problem with a different answer and keeps its own words.
+fn duplicate_of(
+    at: &At,
+    locked_out: Option<PubKey>,
+    others: &[(At, Option<PubKey>)],
+) -> Option<String> {
+    let wanted = locked_out?;
+    let sibling = others
+        .iter()
+        .find(|(other, exchange)| other.0 == at.0 && other != at && *exchange == Some(wanted))?;
+    // Always the *named* one of the pair. The default is not a name in the
+    // roster — it is whatever the identity resolves to — so there would be
+    // nothing to remove.
+    let spare = if at.1.is_empty() {
+        sibling.0.1.clone()
+    } else {
+        at.1.clone()
+    };
+    (!spare.is_empty()).then_some(spare)
+}
+
 /// What the identity block says when the exchange knows no name for you.
 ///
 /// One word, because it goes under your own name in a corner and the sentence
@@ -676,10 +708,53 @@ impl ChatApp {
                 });
             });
         });
-        if let Some(trouble) = &state.trouble {
-            ui.colored_label(theme.destructive, trouble);
+        // A lock this identity's *own* other session is holding reads, from
+        // the store's point of view, exactly like a second program. It is not
+        // one, and saying so sends somebody hunting for a client that is not
+        // running.
+        match self.duplicate_exchange(at, state) {
+            Some(spare) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        theme.warning,
+                        format!(
+                            "Already connected to this exchange — \"{spare}\" resolves to \
+                             the same place as this identity's default."
+                        ),
+                    );
+                    let which = ctx.accounts.active_index();
+                    if ui.button("Remove it").clicked() {
+                        ctx.accounts.drop_exchange(which, &spare);
+                        self.showing.remove(&at.0);
+                    }
+                });
+            }
+            None => {
+                if let Some(trouble) = &state.trouble {
+                    ui.colored_label(theme.destructive, trouble);
+                }
+            }
         }
         ui.separator();
+    }
+
+    /// The added exchange name to drop, when this session lost the store lock
+    /// to another of **this identity's own** sessions.
+    ///
+    /// `None` when the lock is genuinely somebody else's — another sigil, or
+    /// the terminal client — which is a different problem with a different
+    /// answer, and must keep its own words.
+    ///
+    /// Always the *named* one of the pair: the default is not a name in the
+    /// roster, it is whatever the identity resolves to, and there would be
+    /// nothing to remove.
+    fn duplicate_exchange(&self, at: &At, state: &ChatState) -> Option<String> {
+        let others: Vec<(At, Option<PubKey>)> = self
+            .sessions
+            .iter()
+            .map(|(other, session)| (other.clone(), session.state().exchange))
+            .collect();
+        duplicate_of(at, state.locked_out, &others)
     }
 
     /// Who you are, at the top right, with everything about you behind it.
@@ -887,9 +962,9 @@ impl ChatApp {
         // Only when there is a choice. A switcher over one exchange is a
         // control that cannot do anything.
         if named.len() > 1 {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("At");
-                for name in &named {
+            let which = ctx.accounts.active_index();
+            for name in &named {
+                ui.horizontal(|ui| {
                     let selected = *name == at.1;
                     let label = if name.is_empty() {
                         // The default has no name to show; what it resolved to
@@ -904,8 +979,36 @@ impl ChatApp {
                     if ui.selectable_label(selected, label).clicked() && !selected {
                         self.showing.insert(me, name.clone());
                     }
-                }
-            });
+                    // **A way out, beside the way in.** There was a control to
+                    // add an exchange and none to remove one, so a name added
+                    // by mistake -- or one that turned out to be the default
+                    // under another spelling -- could only be taken back by
+                    // editing the roster file by hand.
+                    //
+                    // The default is not one of these: it is not a name in the
+                    // roster, it is whatever this identity resolves to, and
+                    // there would be nothing to remove.
+                    if name.is_empty() {
+                        return;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Remove")
+                            .on_hover_text(
+                                "Stop connecting to this exchange. Nothing said there is \
+                                 deleted -- the conversations stay in this store and come \
+                                 back if it is added again.",
+                            )
+                            .clicked()
+                        {
+                            ctx.accounts.drop_exchange(which, name);
+                            // Back to the default, or the interface would be
+                            // showing a conversation list for an exchange it
+                            // is no longer connected to.
+                            self.showing.remove(&me);
+                        }
+                    });
+                });
+            }
         }
         // The full key of whatever is being talked to, always reachable, and
         // **labelled** -- unlabelled beside the account's own key it was just
@@ -2711,5 +2814,77 @@ impl ChatApp {
             }
         }
         AppResponse::default()
+    }
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    /// The added name is what gets offered, whichever of the two lost the race.
+    ///
+    /// Which one loses depends on which connected first, so both orders have
+    /// to give the same answer — otherwise the advice would be "remove the
+    /// default", which is not a thing that can be done.
+    #[test]
+    fn the_added_name_is_the_one_to_remove_either_way() {
+        let me = key(1);
+        let exchange = key(9);
+        let default = (me, String::new());
+        let added = (me, "squic.org".to_string());
+
+        // The added one lost.
+        assert_eq!(
+            duplicate_of(&added, Some(exchange), &[(default.clone(), Some(exchange))]),
+            Some("squic.org".to_string())
+        );
+        // The default lost.
+        assert_eq!(
+            duplicate_of(&default, Some(exchange), &[(added.clone(), Some(exchange))]),
+            Some("squic.org".to_string())
+        );
+    }
+
+    /// A lock somebody else holds keeps its own words.
+    ///
+    /// Another sigil, or the terminal client, is a different problem with a
+    /// different answer — and telling somebody to remove an exchange they have
+    /// only one session for would leave them without it and no better off.
+    #[test]
+    fn a_lock_nobody_here_holds_is_not_called_a_duplicate() {
+        let me = key(1);
+        let exchange = key(9);
+        let added = (me, "squic.org".to_string());
+
+        // Nothing else running.
+        assert_eq!(duplicate_of(&added, Some(exchange), &[]), None);
+        // Something running, at a different exchange.
+        assert_eq!(
+            duplicate_of(
+                &added,
+                Some(exchange),
+                &[((me, String::new()), Some(key(8)))]
+            ),
+            None
+        );
+        // Another identity, at the same exchange. Its lock is on its own
+        // store, so it cannot be what refused this one.
+        assert_eq!(
+            duplicate_of(
+                &added,
+                Some(exchange),
+                &[((key(2), String::new()), Some(exchange))]
+            ),
+            None
+        );
+        // And no refusal at all.
+        assert_eq!(
+            duplicate_of(&added, None, &[((me, String::new()), Some(exchange))]),
+            None
+        );
     }
 }

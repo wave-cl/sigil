@@ -277,6 +277,16 @@ pub struct ChatState {
     /// to is not known until it is dialled. It is the key a receipt verifies
     /// under, so an interface shows it rather than the name it was asked for.
     pub exchange: Option<PubKey>,
+    /// The exchange this session could not take the store lock for.
+    ///
+    /// Two interactive clients on one account at one exchange would disagree
+    /// about the next SIP-17 counter, so the second is refused. **Usually that
+    /// second client is sigil itself**: an identity whose default exchange
+    /// resolves to the same place as one of its added ones has two sessions
+    /// for one pair, and the store cannot tell them apart. Reported as the key
+    /// rather than as a sentence so the interface can look at its own other
+    /// sessions and say which of the two it is.
+    pub locked_out: Option<PubKey>,
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
@@ -916,6 +926,13 @@ async fn run(
     // at one exchange would disagree about the next message counter, and
     // reusing one costs the confidentiality of two messages.
     let _lock = store::lock(&path, &endpoint.server).map_err(|e| {
+        // Which exchange, so the interface can check whether the client
+        // already holding it is one of its own. The message stands on its own
+        // for the case where it is not.
+        state.send_modify(|s| {
+            s.exchange = Some(endpoint.server);
+            s.locked_out = Some(endpoint.server);
+        });
         format!("another client is already using this account at this exchange: {e}")
     })?;
     let store = Store::open(&seed, Some(&path)).map_err(|e| e.to_string())?;
