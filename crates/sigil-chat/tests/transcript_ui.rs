@@ -6,11 +6,13 @@
 //! against a real exchange.
 
 use egui_kittest::Harness;
-use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
-use sigil_chat::{Attached, ChatApp, ChatState, Line, LinkState, Member, Person, Receipt, Summary};
+use sigil_chat::{
+    Attached, ChatApp, ChatState, Happened, Line, LinkState, Member, Person, Receipt, Summary,
+};
 use sqnr_core::PubKey;
 
 /// 2026-09-08 12:00:00 UTC. Pinned, because a day separator says "Today" and
@@ -194,6 +196,16 @@ fn a_conversation() -> ChatState {
         searched_messages: false,
         divider: Some(3),
         unread_on_open: 2,
+        // Between the two of today's messages, so the interleaving is what is
+        // actually being drawn rather than an event tacked on the end.
+        events: vec![Happened {
+            seq: 3,
+            at: NOW - 120,
+            said: "Ada added Bram".into(),
+            actor: them(),
+            subject: PubKey::new([4u8; 32]),
+            caveat: None,
+        }],
     }
 }
 
@@ -344,6 +356,78 @@ fn the_unread_divider_says_how_many() {
     let mut h = harness(true);
     h.run();
     assert!(text_of(&h).contains("2 new messages"));
+}
+
+/// The markers that belong to the whole conversation are centred.
+///
+/// The day, the unread mark and what happened to the channel were not said by
+/// anybody. Pinned to the left they read as a message from whoever is on that
+/// side; centred, they read as what they are. Asserted as geometry rather than
+/// looked at in a snapshot, because "it drifted 200px left" and "it is fine"
+/// are the same picture to a threshold.
+#[test]
+fn a_marker_that_belongs_to_nobody_is_centred() {
+    let mut h = harness(true);
+    h.run();
+    // The bubbles say where the transcript is: the marker has to be centred
+    // in *that*, not in the window, and the conversation list is half of one
+    // and none of the other. One of ours is right-aligned and one of theirs
+    // is left-aligned, so between them they span it.
+    //
+    // The rightmost match, because our own text appears twice -- once as the
+    // bubble and once quoted inside the reply below it.
+    let mine = h
+        .get_all_by_label_contains("mine, on the other side")
+        .map(|n| n.rect())
+        .fold(f32::MIN, |right, r| right.max(r.right()));
+    let theirs = h.get_by_label_contains("yesterday's message").rect().left();
+    let pane = egui::Rect::from_x_y_ranges(theirs..=mine, 0.0..=1.0);
+    for marker in ["2 new messages", "Ada added Bram", "Today"] {
+        let rect = h.get_by_label_contains(marker).rect();
+        let off = (rect.center().x - pane.center().x).abs();
+        assert!(
+            off < 24.0,
+            "{marker} sits {off:.0}px off the middle of the transcript              ({:?} in {:?})",
+            rect.center(),
+            pane
+        );
+    }
+}
+
+/// A group gaining and losing people shows in the conversation.
+///
+/// The exchange signs an entry for every membership and metadata change and
+/// the fold used to discard all twelve kinds, so a channel could be created,
+/// gain four people and lose one with nothing on screen to show for it.
+#[test]
+fn what_happened_to_the_channel_is_in_the_transcript() {
+    let mut h = harness(true);
+    h.run();
+    assert!(
+        text_of(&h).contains("Ada added Bram"),
+        "the exchange's own record is not drawn: {}",
+        text_of(&h)
+    );
+}
+
+/// **A key is always reachable from a name.** These events name people, and a
+/// name is an assertion attested by nobody.
+#[test]
+fn an_event_keeps_the_keys_it_names_within_reach() {
+    let mut h = harness(true);
+    h.run();
+    h.get_by_label("Ada added Bram").hover();
+    h.run();
+    let said = text_of(&h);
+    let subject = PubKey::new([4u8; 32]).to_string();
+    assert!(
+        said.contains(&subject),
+        "the account it names is nowhere: {said}"
+    );
+    assert!(
+        said.contains(&them().to_string()),
+        "and neither is who did it: {said}"
+    );
 }
 
 #[test]
@@ -552,5 +636,34 @@ fn a_second_exchange_appears_as_somewhere_to_switch_to() {
     assert!(
         said.contains("indra.org"),
         "the added exchange is offered: {said}"
+    );
+}
+
+/// Replying and reacting are on the message, not behind a right-click.
+///
+/// They lived only in a context menu, which is a control nobody finds: there
+/// is nothing on screen to suggest the gesture, and these are the two most
+/// common things anybody does to a message. Hovering is how a desktop offers
+/// a per-item control, so hovering is what this asserts.
+#[test]
+fn hovering_a_message_offers_replying_and_reacting() {
+    let mut h = harness(true);
+    h.run();
+    // At rest the transcript is a transcript, not a field of buttons.
+    assert!(
+        !text_of(&h).contains("Reply"),
+        "the controls are not on every message all the time: {}",
+        text_of(&h)
+    );
+
+    h.get_by_label("one").hover();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Reply"), "hovering offers a reply: {said}");
+    assert!(said.contains("React"), "and a reaction: {said}");
+    assert!(
+        said.contains("More"),
+        "and the rest, behind one more control: {said}"
     );
 }

@@ -192,24 +192,91 @@ impl BubbleAction {
     }
 }
 
+/// The emoji offered by the picker.
+///
+/// A short list, like the terminal client's, and for the same reason: it is
+/// what fits without becoming a grid nobody wants. **Any emoji can still be
+/// sent** — the wire carries the string, not an index into this — so this is a
+/// convenience and not the set.
+pub const REACTIONS: &[&str] = &[
+    "\u{1f44d}",
+    "\u{1f389}",
+    "\u{1f9e1}",
+    "\u{1f602}",
+    "\u{1f914}",
+    "\u{1f440}",
+];
+
+/// A label centred in the transcript with a rule either side of it.
+///
+/// The shape every whole-conversation marker takes -- the day, the unread
+/// mark, and what happened to the channel. Centred because none of them was
+/// said by anybody: a marker pinned to the left reads as a message from
+/// whoever is on that side, and one of these is not from a person at all.
+/// `rule` paints a hairline either side; `None` centres the words alone.
+fn centred(
+    ui: &mut egui::Ui,
+    label: egui::WidgetText,
+    rule: Option<egui::Color32>,
+) -> egui::Response {
+    // Measured, not guessed. The rules used to be `available_width() * 0.5 -
+    // 40.0`, which centres only a label that happens to be 80px wide and puts
+    // everything else off to one side.
+    let text = label.into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body);
+    let gap = ui.spacing().item_spacing.x;
+    let width = ((ui.available_width() - text.size().x) * 0.5 - gap).max(0.0);
+    let row = ui.horizontal(|ui| {
+        let line = |ui: &mut egui::Ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+            if let Some(colour) = rule {
+                ui.painter()
+                    .hline(rect.x_range(), rect.center().y, (1.0, colour));
+            }
+        };
+        line(ui);
+        ui.add(egui::Label::new(text).selectable(false));
+        line(ui);
+    });
+    // `horizontal` senses nothing on its own, so the row it returns would
+    // never report a hover -- the same trap as a `Frame`'s response.
+    row.response.interact(egui::Sense::hover())
+}
+
 /// A date, once, above the first message of each day.
 pub fn day_separator(ui: &mut egui::Ui, label: &str) {
     let theme = ColorTheme::current(ui.ctx());
     ui.add_space(tokens::SPACING_MD);
-    ui.horizontal(|ui| {
-        let line = |ui: &mut egui::Ui| {
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width() * 0.5 - 40.0, 1.0),
-                egui::Sense::hover(),
-            );
-            ui.painter()
-                .hline(rect.x_range(), rect.center().y, (1.0, theme.border_default));
-        };
-        line(ui);
-        ui.colored_label(theme.text_muted, label);
-        line(ui);
-    });
+    let _ = centred(
+        ui,
+        egui::RichText::new(label).color(theme.text_muted).into(),
+        Some(theme.border_default),
+    );
     ui.add_space(tokens::SPACING_XS);
+}
+
+/// Something that happened *to* the conversation rather than in it.
+///
+/// A membership or metadata change, which the exchange writes and signs
+/// itself (SIP-16). Drawn as a marker and never as a bubble: nobody said it,
+/// and a client that dressed it as a message would be putting words in the
+/// mouth of whoever it names.
+/// Returns the row, so a caller can hang the keys it names off it.
+pub fn system_line(ui: &mut egui::Ui, said: &str) -> egui::Response {
+    let theme = ColorTheme::current(ui.ctx());
+    ui.add_space(tokens::SPACING_SM);
+    let row = centred(
+        ui,
+        egui::RichText::new(said)
+            .small()
+            .color(theme.text_muted)
+            .into(),
+        // No rules. The day separator and the unread mark both have them, and
+        // a third thing wearing the same clothes reads as one of those two --
+        // this one is a sentence, and should look like one.
+        None,
+    );
+    ui.add_space(tokens::SPACING_XS);
+    row
 }
 
 /// The frozen line above the first message that was unread on opening.
@@ -220,19 +287,16 @@ pub fn day_separator(ui: &mut egui::Ui, label: &str) {
 pub fn unread_divider(ui: &mut egui::Ui, count: usize) {
     let theme = ColorTheme::current(ui.ctx());
     ui.add_space(tokens::SPACING_SM);
-    ui.horizontal(|ui| {
-        ui.colored_label(
-            theme.accent,
-            match count {
-                1 => "1 new message".to_string(),
-                n => format!("{n} new messages"),
-            },
-        );
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter()
-            .hline(rect.x_range(), rect.center().y, (1.0, theme.accent));
-    });
+    let _ = centred(
+        ui,
+        egui::RichText::new(match count {
+            1 => "1 new message".to_string(),
+            n => format!("{n} new messages"),
+        })
+        .color(theme.accent)
+        .into(),
+        Some(theme.accent),
+    );
     ui.add_space(tokens::SPACING_XS);
 }
 
@@ -261,6 +325,20 @@ pub fn unread_pill(ui: &mut egui::Ui, count: u32) {
 }
 
 /// Draw one message, and report what was done to it.
+///
+/// # Aligning one's own messages
+///
+/// Three shapes were tried before this one and all three left them on the
+/// left: `allocate_ui_with_layout` with a zero height, `scope` plus
+/// `set_width`, and a `horizontal` wrapping a right-to-left layout. In every
+/// case the child sizes itself to its content, so there is nothing for a
+/// right-to-left layout to push against and the result looks *almost* right —
+/// which is why it survived several passes.
+///
+/// What works is `Layout::top_down(Align::Max)` with the bubble as a **direct**
+/// child. A frame sizes to its content and the layout right-aligns it. Nothing
+/// may be wrapped around it that takes the full width, which is why the two
+/// sides are laid out differently rather than by one path with a flag.
 pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
     let theme = ColorTheme::current(ui.ctx());
     let mut action = BubbleAction::default();
@@ -271,20 +349,23 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
         tokens::SPACING_SM
     });
 
-    let layout = if b.mine {
-        egui::Layout::right_to_left(egui::Align::TOP)
+    let limit = (ui.available_width() * 0.72).max(160.0);
+    if b.mine {
+        // Measured, not filled. A frame in a top-down layout takes the width
+        // it is given, so capping at the limit made every message the same
+        // width as the longest one it was allowed to be — a wall of identical
+        // blocks rather than a conversation.
+        let width = wanted(ui, b).clamp(120.0, limit);
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+            ui.set_max_width(width);
+            body(ui, b, &theme, &mut action);
+        });
     } else {
-        egui::Layout::left_to_right(egui::Align::TOP)
-    };
-
-    ui.with_layout(layout, |ui| {
-        // The avatar column keeps its width even when grouped, so a run of
-        // messages from one person stays aligned instead of stepping sideways.
-        if !b.mine {
-            // The gutter is the *same width* either way, so a run of messages
-            // from one person stays in a column instead of stepping sideways
-            // as the avatar comes and goes. `add_space` and a widget are not
-            // interchangeable here: item spacing follows a widget and not a
+        ui.horizontal(|ui| {
+            // The avatar column keeps its width even when grouped, so a run of
+            // messages from one person stays in a column instead of stepping
+            // sideways as the avatar comes and goes. `add_space` and a widget
+            // are not interchangeable: item spacing follows a widget and not a
             // space, which is exactly the few pixels that made them disagree.
             let size = tokens::AVATAR_SM;
             if b.grouped {
@@ -292,100 +373,184 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
             } else {
                 crate::identicon(ui, b.key, size);
             }
-        }
+            ui.vertical(|ui| {
+                ui.set_max_width(limit);
+                body(ui, b, &theme, &mut action);
+            });
+        });
+    }
 
-        let fill = if b.mine {
-            theme.accent_muted
-        } else {
-            theme.surface_elevated
-        };
+    action
+}
 
-        ui.vertical(|ui| {
-            ui.set_max_width((ui.available_width() * 0.78).max(120.0));
-            let frame = egui::Frame::NONE
-                .fill(fill)
-                .corner_radius(tokens::RADIUS_LG)
-                .inner_margin(egui::Margin::symmetric(
-                    tokens::SPACING_MD as i8,
-                    tokens::SPACING_SM as i8,
-                ));
-            let inner = frame.show(ui, |ui| {
-                if !b.grouped && !b.mine {
-                    author_line(ui, b, &theme);
-                }
-                if let Some((who, stub)) = b.reply_to {
-                    reply_stub(ui, who, stub, &theme);
-                }
-                // Before the text: a message is usually a picture *with* a
-                // caption rather than a caption with a picture attached.
-                if !b.redacted {
-                    for (i, a) in b.attachments.iter().enumerate() {
-                        if crate::attachment(ui, a).save {
-                            action.save = Some(i);
-                        }
+/// How wide this bubble would like to be, before any cap.
+///
+/// The widest line it holds, laid out without wrapping, plus the frame's own
+/// margins. Anything with a picture in it asks for everything, because an
+/// image is sized by the space it is given rather than by its text.
+fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
+    if !b.attachments.is_empty() {
+        return f32::INFINITY;
+    }
+    let measure = |text: &str, style: egui::TextStyle| {
+        let font = style.resolve(ui.style());
+        ui.ctx()
+            .fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, egui::Color32::PLACEHOLDER))
+            .rect
+            .width()
+    };
+    let body = if b.redacted {
+        measure("Deleted", egui::TextStyle::Body)
+    } else {
+        measure(b.text, egui::TextStyle::Body)
+    };
+    // The furniture under the text: a time, possibly "edited", and a receipt.
+    let mut meta = measure(b.at, egui::TextStyle::Small) + tokens::SPACING_XL;
+    if b.edited {
+        meta += measure("edited", egui::TextStyle::Small) + tokens::SPACING_SM;
+    }
+    let author = match (b.grouped, b.mine, b.name) {
+        (false, false, Some(name)) => measure(name, egui::TextStyle::Body),
+        (false, false, None) => measure(&short(b.key), egui::TextStyle::Body),
+        _ => 0.0,
+    };
+    let reply = b
+        .reply_to
+        .map(|(who, stub)| measure(&format!("{who}: {stub}"), egui::TextStyle::Small))
+        .unwrap_or(0.0);
+    body.max(meta).max(author).max(reply) + tokens::SPACING_MD * 2.0
+}
+
+/// The bubble itself: the frame, what is in it, and the reactions under it.
+fn body(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, action: &mut BubbleAction) {
+    let fill = if b.mine {
+        theme.accent_muted
+    } else {
+        theme.surface_elevated
+    };
+    let frame = egui::Frame::NONE
+        .fill(fill)
+        .corner_radius(tokens::RADIUS_LG)
+        .inner_margin(egui::Margin::symmetric(
+            tokens::SPACING_MD as i8,
+            tokens::SPACING_SM as i8,
+        ));
+    let inner = frame.show(ui, |ui| {
+        // **Inside the bubble, always left to right.** The right-alignment
+        // that puts one's own message on the right is a property of where the
+        // bubble sits, not of what is in it — inherited, it reversed the
+        // metadata row into "read edited 11:00" and would reverse any text
+        // that wrapped.
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            if !b.grouped && !b.mine {
+                author_line(ui, b, theme);
+            }
+            if let Some((who, stub)) = b.reply_to {
+                reply_stub(ui, who, stub, theme);
+            }
+            // Before the text: a message is usually a picture *with* a caption
+            // rather than a caption with a picture attached.
+            if !b.redacted {
+                for (i, a) in b.attachments.iter().enumerate() {
+                    if crate::attachment(ui, a).save {
+                        action.save = Some(i);
                     }
                 }
-                if b.redacted {
-                    // The tombstone. Deleting the row instead would destroy the
-                    // one thing a redaction is for: the record that something
-                    // was here.
-                    ui.label(
-                        egui::RichText::new("Deleted")
-                            .italics()
-                            .color(theme.text_muted),
-                    );
-                } else if !b.text.is_empty() {
-                    ui.add(egui::Label::new(b.text).wrap().selectable(true));
+            }
+            if b.redacted {
+                // The tombstone. Deleting the row instead would destroy the one
+                // thing a redaction is for: the record that something was here.
+                ui.label(
+                    egui::RichText::new("Deleted")
+                        .italics()
+                        .color(theme.text_muted),
+                );
+            } else if !b.text.is_empty() {
+                ui.add(egui::Label::new(b.text).wrap().selectable(true));
+            }
+
+            // Our own bubble is filled with the accent, and `text_muted` is chosen
+            // to sit on a *surface*. On the accent it comes out near-invisible --
+            // which is how the time and the "edited" mark disappeared from exactly
+            // the messages whose delivery somebody most wants to check.
+            let quiet = if b.mine {
+                faded(theme.text_primary, theme.accent_muted)
+            } else {
+                theme.text_muted
+            };
+            ui.horizontal(|ui| {
+                ui.colored_label(quiet, egui::RichText::new(b.at).small());
+                if b.edited {
+                    ui.colored_label(quiet, egui::RichText::new("edited").small());
                 }
-                // Our own bubble is filled with the accent, and `text_muted`
-                // is chosen to sit on a *surface*. On the accent it comes out
-                // near-invisible -- which is how the time and the "edited"
-                // mark disappeared from exactly the messages whose delivery
-                // somebody most wants to check.
-                let quiet = if b.mine {
-                    faded(theme.text_primary, theme.accent_muted)
-                } else {
-                    theme.text_muted
-                };
+                if let Some(r) = b.receipt {
+                    let colour = match r {
+                        Receipt::Failed => theme.destructive,
+                        Receipt::Read if !b.mine => theme.accent,
+                        Receipt::Read => theme.success,
+                        _ => quiet,
+                    };
+                    receipt(ui, r, colour).on_hover_text(r.word());
+                }
+            });
+        });
+    });
+
+    if !b.reactions.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            for (emoji, count, ours) in b.reactions {
+                if reaction_chip(ui, emoji, *count, *ours).clicked() {
+                    action.react = Some(emoji.clone());
+                }
+            }
+        });
+    }
+
+    // **The controls, on the message.** These lived only in a right-click
+    // menu, which is a control nobody finds: replying and reacting are the two
+    // most common things anybody does to a message, and both were hidden
+    // behind a gesture with nothing on screen suggesting it.
+    //
+    // Shown while the pointer is over the message, so a transcript at rest is
+    // a transcript and not a field of buttons.
+    // `Frame::show`'s response senses nothing, so `hovered()` on it is always
+    // false. The pointer has to be asked about the rect directly, and the
+    // reactions row below the bubble counts as part of the message.
+    let reach = inner
+        .response
+        .rect
+        .expand2(egui::vec2(0.0, tokens::SPACING_SM));
+    let over = ui.rect_contains_pointer(reach);
+    if over && !b.redacted {
+        ui.horizontal(|ui| {
+            if crate::icon_button(ui, crate::Icon::Reply).clicked() {
+                action.reply = true;
+            }
+
+            // Painted openers, not glyph labels. `menu_button` takes text, and
+            // the two obvious characters for these — a face and an ellipsis —
+            // are exactly the sort this font set has already turned into boxes
+            // twice. `Popup::menu` takes any response, so the button can be a
+            // shape we drew ourselves.
+            let react = crate::icon_button(ui, crate::Icon::React);
+            egui::Popup::menu(&react).show(|ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(quiet, egui::RichText::new(b.at).small());
-                    if b.edited {
-                        ui.colored_label(quiet, egui::RichText::new("edited").small());
-                    }
-                    if let Some(r) = b.receipt {
-                        let colour = match r {
-                            Receipt::Failed => theme.destructive,
-                            Receipt::Read if !b.mine => theme.accent,
-                            Receipt::Read => theme.success,
-                            _ => quiet,
-                        };
-                        receipt(ui, r, colour).on_hover_text(r.word());
+                    for emoji in REACTIONS {
+                        if ui.button(*emoji).clicked() {
+                            action.react = Some((*emoji).to_string());
+                            ui.close();
+                        }
                     }
                 });
             });
 
-            if !b.reactions.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    for (emoji, count, ours) in b.reactions {
-                        if reaction_chip(ui, emoji, *count, *ours).clicked() {
-                            action.react = Some(emoji.clone());
-                        }
-                    }
-                });
-            }
-
-            // The per-message menu. Everything the terminal client's pick mode
-            // offers, on a control that does not need to be discovered.
-            inner.response.context_menu(|ui| {
-                if ui.button("Reply").clicked() {
-                    action.reply = true;
-                    ui.close();
-                }
-                if b.mine && !b.redacted && ui.button("Edit").clicked() {
+            let more = crate::icon_button(ui, crate::Icon::More);
+            egui::Popup::menu(&more).show(|ui| {
+                if b.mine && ui.button("Edit").clicked() {
                     action.edit = true;
                     ui.close();
                 }
-                if !b.redacted && ui.button("Delete").clicked() {
+                if ui.button("Delete").clicked() {
                     action.redact = true;
                     ui.close();
                 }
@@ -399,9 +564,7 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                 }
             });
         });
-    });
-
-    action
+    }
 }
 
 /// Text that is quieter than the body but still legible on `over`.

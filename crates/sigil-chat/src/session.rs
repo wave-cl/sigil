@@ -29,7 +29,11 @@ use std::sync::Arc;
 
 use sqex_chat::client::{Chat, Link};
 use sqex_chat::store::{self, Store};
-use sqex_proto::channel::{Role, Visibility};
+use sqex_proto::channel::{
+    EVENT_ADDED, EVENT_CREATED, EVENT_DEMOTED, EVENT_JOINED, EVENT_LEFT, EVENT_PROMOTED,
+    EVENT_REMOVED, EVENT_RENAMED, EVENT_REPLICATE, EVENT_RETENTION, EVENT_ROTATED,
+    EVENT_UNREPLICATE, Role, Visibility,
+};
 use sqex_proto::events::Event;
 use sqex_proto::message::{
     CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, MEDIA_AUDIO, RING_ACCEPTED, RING_DECLINED,
@@ -95,6 +99,29 @@ pub struct Line {
     pub attachments: Vec<Attached>,
 }
 
+/// Something that happened *to* the conversation rather than in it.
+///
+/// The exchange writes and signs an entry for every membership and metadata
+/// change — SIP-16 defines twelve — and they belong in the transcript in the
+/// order everybody sees them: whether somebody was in the room when a thing
+/// was said is not a detail.
+///
+/// Plain data, like [`Line`]: the words are built here, where names resolve,
+/// so the widget draws a string and understands no wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Happened {
+    pub seq: u64,
+    pub at: u64,
+    /// What happened, in words, with people already named.
+    pub said: String,
+    /// The keys the words name, so a name is never the only thing on offer.
+    pub actor: PubKey,
+    pub subject: PubKey,
+    /// Anything a reader would otherwise have to know. `None` for the events
+    /// that mean exactly what they say.
+    pub caveat: Option<&'static str>,
+}
+
 /// How far a message is known to have got.
 ///
 /// **Under-claiming is the only safe direction.** `Read` means *everybody* in
@@ -157,6 +184,9 @@ pub struct ChatState {
     /// Which conversation is on screen, and what is in it.
     pub open: Option<[u8; 32]>,
     pub lines: Vec<Line>,
+    /// What happened to the conversation, in the same sequence space as
+    /// `lines` so the two interleave.
+    pub events: Vec<Happened>,
     /// Somebody is typing in the open conversation (SIP-19's only signal).
     pub typing: bool,
     /// What is wrong with the open conversation, if anything.
@@ -1589,6 +1619,92 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         })
         .unwrap_or_default();
 
+    // What happened *to* the channel, from the exchange's own signed entries.
+    let events: Vec<Happened> = open
+        .map(|(_, k)| {
+            let named = |who: &PubKey| {
+                people
+                    .get(who)
+                    .and_then(|p| p.name.clone())
+                    .unwrap_or_else(|| short(who))
+            };
+            k.timeline
+                .events()
+                .map(|h| {
+                    let (actor, subject) = (h.what.actor, h.what.subject);
+                    let (who, them) = (named(&actor), named(&subject));
+                    // The exchange's own record put into words. `you` rather
+                    // than your own name: reading "Ada added Ada" about
+                    // yourself is a puzzle nobody should have to solve.
+                    let me_or = |k: &PubKey, name: &str| {
+                        if *k == me {
+                            "you".to_string()
+                        } else {
+                            name.to_string()
+                        }
+                    };
+                    let a = me_or(&actor, &who);
+                    let b = me_or(&subject, &them);
+                    let (said, caveat) = match h.what.event {
+                        EVENT_CREATED => (format!("{a} made this channel"), None),
+                        EVENT_ADDED => (format!("{a} added {b}"), None),
+                        EVENT_REMOVED => (
+                            format!("{a} removed {b}"),
+                            // Said here because it is the one thing a reader
+                            // would get wrong: removal rotates the key, and it
+                            // does not take back what they already hold.
+                            Some(
+                                "The key was rotated. Everything they were given before \
+                                 stays readable to them.",
+                            ),
+                        ),
+                        EVENT_LEFT => (format!("{b} left"), None),
+                        EVENT_JOINED => (format!("{b} joined"), None),
+                        EVENT_PROMOTED => (format!("{a} made {b} an admin"), None),
+                        EVENT_DEMOTED => (format!("{a} took {b}'s admin away"), None),
+                        EVENT_ROTATED => (
+                            format!("{a} rotated the key"),
+                            Some("Messages from before it are still readable to whoever held the old one."),
+                        ),
+                        EVENT_RETENTION => (
+                            format!("{a} changed how long messages are kept"),
+                            // Narrowing retention is a deletion, applied at
+                            // once, and it is the sort of thing somebody
+                            // learns afterwards if nobody says it.
+                            Some("Narrowing it deletes what falls outside, immediately."),
+                        ),
+                        EVENT_RENAMED => (format!("{a} changed the name or topic"), None),
+                        // The subject of these two is an **exchange**, not a
+                        // person, so it is never resolved as one.
+                        EVENT_REPLICATE => (
+                            format!("{a} let {} hold a copy of this channel", short(&subject)),
+                            Some("Another operator now receives everything posted here."),
+                        ),
+                        EVENT_UNREPLICATE => (
+                            // Never "recalled". SIP-35 is explicit that this
+                            // is the end of a subscription and takes nothing
+                            // back, and an interface that implied otherwise
+                            // would be telling somebody they are safe.
+                            format!("{a} stopped {} receiving this channel", short(&subject)),
+                            Some("What it already holds stays where it is. Nothing is recalled."),
+                        ),
+                        // Unreachable: an event this version does not know
+                        // decodes to nothing at all and never reaches here.
+                        _ => (format!("{a} did something this version does not know"), None),
+                    };
+                    Happened {
+                        seq: h.seq,
+                        at: h.posted,
+                        said,
+                        actor,
+                        subject,
+                        caveat,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Calls ringing anywhere, not only in the conversation on screen.
     //
     // Derived from the **log** and not from a signal: SIP-36 is explicit that
@@ -1635,6 +1751,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         s.link = link;
         s.conversations = summaries;
         s.lines = lines;
+        s.events = events;
         s.typing = typing;
         s.trouble_with = trouble;
         s.people = people;

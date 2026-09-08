@@ -406,6 +406,44 @@ async fn a_group_is_created_invited_to_and_read() {
     .await;
     assert!(read, "and can read it: {:?}", bob.state().lines);
 
+    // And the group's own history: the exchange signs an entry for creating it
+    // and for every member added, and both belong in the conversation.
+    //
+    // **Against a real exchange rather than a fixture.** The whole chain has
+    // to hold -- sqexd writes the entry, the client decodes SIP-16's `System`
+    // layout instead of dropping it, and the session puts it into words -- and
+    // a test that built the event itself would prove only the last step.
+    let told = until(
+        || {
+            let s = alice.state();
+            s.events
+                .iter()
+                .any(|e| e.said.contains("made this channel"))
+                && s.events.iter().any(|e| e.said.contains("added"))
+        },
+        20,
+    )
+    .await;
+    assert!(
+        told,
+        "the channel's own record is missing: {:?}",
+        alice.state().events
+    );
+    // Named, and with the account it names carried alongside -- a name is an
+    // assertion (SIP-21) and the key is what the exchange actually recorded.
+    let added = alice
+        .state()
+        .events
+        .iter()
+        .find(|e| e.said.contains("added"))
+        .cloned()
+        .expect("checked above");
+    assert_eq!(added.subject, b_id, "{added:?}");
+    assert!(
+        added.said.contains("you"),
+        "the actor is us, and reading our own name back is a puzzle: {added:?}"
+    );
+
     alice.stop();
     bob.stop();
 }
