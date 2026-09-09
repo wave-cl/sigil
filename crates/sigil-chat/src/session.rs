@@ -62,6 +62,20 @@ const RING_SECS: u16 = 45;
 /// never waits behind it.
 const TICK_MS: u64 = 700;
 
+/// How long the loop waits when there is nothing outstanding.
+///
+/// **The timer is a backstop now, not the clock.** SIP-30's events say what
+/// moved and the stream knocks the moment one arrives, so this is only what
+/// catches what the stream never mentioned: a subscription that died quietly, a
+/// reconnect, the periodic rebuild of the list. Measured with two clients idle
+/// in one conversation, at 700ms it was still the largest source of traffic
+/// either of them made.
+///
+/// Anything the loop is in the middle of -- a link that is down and being
+/// redialled, a note that has to disappear on time, channels an event named,
+/// pictures still to fetch -- puts it back to [`TICK_MS`] until that is done.
+const QUIET_MS: u64 = 5_000;
+
 /// How many messages a conversation opens on, and how many more each time
 /// somebody asks for earlier ones.
 ///
@@ -984,7 +998,7 @@ pub fn start(
         signer,
         store_at,
         wake,
-        std::time::Duration::from_millis(TICK_MS),
+        std::time::Duration::from_millis(QUIET_MS),
     )
 }
 
@@ -1118,9 +1132,27 @@ async fn run(
     (wake)();
 
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
-    let mut tick = tokio::time::interval(every);
+    // The backstop's own clock. `sleep` rather than `interval`, because how
+    // long to wait is decided each time round from what is outstanding.
+    let busy = std::cmp::min(every, std::time::Duration::from_millis(TICK_MS));
+    let mut ticked = tokio::time::Instant::now();
+    // Set when a pass left work it could not finish -- a picture still to
+    // fetch, chiefly -- so the next pass comes round at once rather than in
+    // five seconds' time.
+    let mut more = false;
 
     loop {
+        // **What is outstanding decides the wait.** A link being redialled
+        // advances a slice per pass and would take minutes at the quiet
+        // interval; a note has to disappear five seconds after it appeared,
+        // not ten; a channel an event named is one somebody is waiting to see.
+        let quick = more
+            || chat.link() != Link::Up
+            || !desk.dirty.is_empty()
+            || desk.restructure
+            || state.borrow().note.is_some();
+        let want = if quick { busy } else { every };
+        let until = want.saturating_sub(ticked.elapsed());
         tokio::select! {
             // Commands first and unconditionally. Typing must never wait behind
             // the network, which is the discipline `sqex-chat`'s own loop keeps
@@ -1145,16 +1177,32 @@ async fn run(
                 {
                     desk.restructure = false;
                     desk.synced = true;
-                    desk.since_sync = 0;
+                    desk.synced_at = std::time::Instant::now();
                 }
                 if refresh(&mut chat, &state, &mut desk, me, &mut cmds).await {
                     (wake)();
                 }
+                // A message with pictures in it arrives as one event; without
+                // this they would come in one per backstop, five seconds
+                // apart, however fast the exchange was.
+                more = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
             }
-            _ = tick.tick() => {
+            _ = tokio::time::sleep(until) => {
+                ticked = tokio::time::Instant::now();
                 chat.keep_alive().await;
-                if chat.link() == Link::Up && !chat.subscribed() {
-                    let _ = chat.subscribe().await;
+                // **A fresh subscription carries nothing from before it was
+                // made.** SIP-30's stream has no replay, so the list and every
+                // conversation in it are stale on the far side of one -- which
+                // is what `Chat::subscribe` means by "a caller must reconcile
+                // after this returns". `Ok(true)` is a stream that was just
+                // opened, so a reconnection reconciles and a tick that finds
+                // one already open does nothing.
+                if chat.link() == Link::Up
+                    && !chat.subscribed()
+                    && matches!(chat.subscribe().await, Ok(true))
+                {
+                    desk.restructure = true;
+                    desk.dirty.extend(desk.channels.keys().copied());
                 }
                 // **SIP-30's events say which channels moved**, and that is
                 // what decides where to look. This used to drain and discard
@@ -1197,7 +1245,7 @@ async fn run(
                         Ok(()) => {
                             desk.restructure = false;
                             desk.synced = true;
-                            desk.since_sync = 0;
+                            desk.synced_at = std::time::Instant::now();
                         }
                         Err(e) => {
                             state.send_modify(|s| s.trouble = Some(e));
@@ -1212,7 +1260,7 @@ async fn run(
                 // tick spent two and a half seconds on pictures before asking
                 // whether anything had been said.
                 moved |= refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
-                fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                more = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
                 // **Only when something moved.** eframe is reactive: with
                 // nothing asking for a repaint it sleeps. This wake used to
                 // fire on every tick regardless, which held the window at 1.4
@@ -1367,14 +1415,18 @@ struct Desk {
     /// Blobs we tried and could not get, so a broken one is not retried on
     /// every pass for as long as the conversation is open.
     unfetchable: HashSet<[u8; 32]>,
-    /// Ticks since the list was last rebuilt.
+    /// When the list was last rebuilt. See [`BACKSTOP`].
     ///
     /// A backstop, not the mechanism. Events are what make this responsive,
     /// but a subscription can drop and reconnect with a gap in it, and a
     /// conversation list that is only ever event-driven would then be wrong
     /// until something else happened to change it -- which, for somebody who
     /// has been added to a channel and told about it nowhere else, is never.
-    since_sync: u32,
+    ///
+    /// **A time rather than a count of ticks**, because a tick is no longer a
+    /// fixed length: the loop waits on the exchange and falls back to a timer
+    /// whose interval depends on whether anything is outstanding.
+    synced_at: std::time::Instant,
 }
 
 impl Default for Desk {
@@ -1392,7 +1444,7 @@ impl Default for Desk {
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
             synced: false,
-            since_sync: 0,
+            synced_at: std::time::Instant::now(),
         }
     }
 }
@@ -1403,13 +1455,14 @@ impl Default for Desk {
 /// than this proves only that the backstop works — it passes whether or not
 /// SIP-30's events are being acted on at all, which is how the stranger test
 /// passed at 28.9 seconds while the event path was broken.
-pub const BACKSTOP: std::time::Duration =
-    std::time::Duration::from_millis(TICK_MS * Desk::RESYNC_TICKS as u64);
+///
+/// **Counted in time, not in ticks.** A tick is no longer a fixed length: the
+/// loop waits on what the exchange has to say and falls back to a timer whose
+/// interval depends on whether anything is outstanding, so counting forty of
+/// them would mean anything between half a minute and three.
+pub const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(28);
 
 impl Desk {
-    /// How often the list is rebuilt regardless of events. See `since_sync`.
-    const RESYNC_TICKS: u32 = 40;
-
     fn note(&mut self, event: Event, me: PubKey) {
         match event {
             Event::Channel { channel, .. } | Event::Signal { channel } => {
@@ -1477,8 +1530,7 @@ impl Desk {
     }
 
     fn age(&mut self) {
-        self.since_sync = self.since_sync.saturating_add(1);
-        if self.since_sync >= Self::RESYNC_TICKS {
+        if self.synced_at.elapsed() >= BACKSTOP {
             self.restructure = true;
         }
     }
@@ -1662,7 +1714,38 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
     }
     desk.channels.retain(|c, _| present.contains(c));
     desk.dirty.retain(|c| present.contains(c));
+    ask_about_unfetched(desk);
     Ok(())
+}
+
+/// Everything the exchange has never answered about is asked about once.
+///
+/// **Events say what changed while somebody was listening.** They say nothing
+/// about what changed before that: SIP-30's stream carries what happens from
+/// the moment it is opened and has no replay, so every entry posted while this
+/// client was shut down -- or in the second between its connection coming up
+/// and its subscription being made -- is news nothing will ever mention again.
+/// Without this the only thing that fetched such a conversation was somebody
+/// opening it, so an overnight message left the list showing yesterday and the
+/// unread count showing nothing.
+///
+/// A stranger's first message is the sharp end of it: the `Membership` and
+/// `Channel` events that announce it are both published in the moment the
+/// conversation is created, which is before the person being written to has
+/// heard of the channel at all. The row arrives from `mine()`; this is what
+/// then reads it.
+///
+/// Cheap by construction: `fetched` is set by the first answered poll, so this
+/// hands over each conversation once per session, and `this_tick` spreads them
+/// a few per pass.
+fn ask_about_unfetched(desk: &mut Desk) {
+    let asking: Vec<[u8; 32]> = desk
+        .channels
+        .iter()
+        .filter(|(_, k)| !k.fetched)
+        .map(|(c, _)| *c)
+        .collect();
+    desk.dirty.extend(asking);
 }
 
 /// Everything this machine already knows, before the exchange is asked.
@@ -1720,6 +1803,10 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
             trouble: Trouble::default(),
         });
     }
+    // What the disc holds is what was true when this client last ran. See
+    // `ask_about_unfetched`: everything here is asked about once, so a
+    // conversation that moved overnight says so without being opened.
+    ask_about_unfetched(desk);
 }
 
 /// How many conversations one tick will ask the exchange about.
@@ -2010,15 +2097,16 @@ fn to_put_down(
 /// Bounded three ways — kind, size, and one attempt per blob — because this
 /// runs on a tick. `download` verifies the blob's name against the ciphertext
 /// **before decrypting**, so what arrives is what was named or nothing.
+/// Fetch one picture, and say whether more are waiting.
 async fn fetch_files(
     chat: &mut Chat,
     state: &watch::Sender<ChatState>,
     desk: &mut Desk,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
-) {
-    let Some(open) = desk.open else { return };
+) -> bool {
+    let Some(open) = desk.open else { return false };
     let Some(known) = desk.channels.get(&open) else {
-        return;
+        return false;
     };
     let wanted: Vec<sqex_proto::blob::Attachment> = known
         .timeline
@@ -2030,33 +2118,36 @@ async fn fetch_files(
         .cloned()
         .collect();
 
-    // **One a tick.** A picture takes as long as it takes -- one of them was
+    // **One a pass.** A picture takes as long as it takes -- one of them was
     // measured at two and a half seconds -- and the whole of that is time the
-    // task cannot answer anybody in. Ten pictures is ten ticks, and the tenth
-    // was going to be late anyway.
-    for a in wanted.into_iter().take(1) {
-        // And not at all while somebody is waiting for something. A reader who
-        // has moved on should not be behind a picture for a conversation that
-        // is already on the disc.
-        attend(chat, state, desk, cmds).await;
-        if !cmds.is_empty() {
-            return;
+    // task cannot answer anybody in. The caller comes straight back round for
+    // the next one, so ten pictures is ten passes and not ten backstops.
+    let waiting = wanted.len();
+    let Some(a) = wanted.into_iter().next() else {
+        return false;
+    };
+    // And not at all while somebody is waiting for something. A reader who has
+    // moved on should not be behind a picture for a conversation that is
+    // already on the disc.
+    attend(chat, state, desk, cmds).await;
+    if !cmds.is_empty() {
+        return true;
+    }
+    match chat.download(&a).await {
+        Ok(bytes) => {
+            if desk.files.insert(a.blob, bytes.into()).is_none() {
+                desk.fetched.push(a.blob);
+            }
+            put_down_what_is_not_wanted(desk);
         }
-        match chat.download(&a).await {
-            Ok(bytes) => {
-                if desk.files.insert(a.blob, bytes.into()).is_none() {
-                    desk.fetched.push(a.blob);
-                }
-                put_down_what_is_not_wanted(desk);
-            }
-            // Remembered as a failure rather than retried every tick. A blob
-            // that has passed its retention window is gone, and asking again
-            // four times a second will not bring it back.
-            Err(_) => {
-                desk.unfetchable.insert(a.blob);
-            }
+        // Remembered as a failure rather than retried every pass. A blob that
+        // has passed its retention window is gone, and asking again four times
+        // a second will not bring it back.
+        Err(_) => {
+            desk.unfetchable.insert(a.blob);
         }
     }
+    waiting > 1
 }
 
 /// Keep the held files inside [`HOLD_BYTES`], sparing the conversation on

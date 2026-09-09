@@ -222,20 +222,24 @@ async fn an_open_conversation_is_quiet_when_nothing_is_said() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     let after = asked().await;
 
-    // Three seconds is four ticks each, and each client still polls the
-    // conversation it has open on its own tick — that is what the long poll
-    // will replace. So the floor is eight, and eight is what this measures.
+    // Three seconds is **at most one pass each** now: with the exchange
+    // knocking when something happens, the timer only catches what no event
+    // mentioned, and it waits `QUIET_MS` — five seconds — when nothing is
+    // outstanding. Each pass polls the conversation the client has open, which
+    // is the one request left and what the long poll will replace.
     //
     // It was forty: a read mark and a cursor fetch per tick per client, the
     // events those provoked at the other end, and — the larger half, found by
     // logging every request rather than by reasoning about it — a
     // `/channel/info` and one `/device/list` per member inside every poll,
-    // asked whether or not anything had arrived to attribute.
+    // asked whether or not anything had arrived to attribute. Then eight, on a
+    // 700ms tick. The ceiling here is four, so raising the tick back cannot
+    // pass unnoticed.
     let spent = after - before - 1; // the probe's own /status
     assert!(
-        spent <= 12,
+        spent <= 4,
         "two idle clients made {spent} requests in three seconds with nobody \
-         saying anything; the floor is eight"
+         saying anything; at the quiet interval it should be two"
     );
 
     alice.stop();
@@ -778,15 +782,24 @@ async fn a_message_from_a_stranger_appears_without_adding_them_first() {
     alice.send(Cmd::Send("out of the blue".into()));
 
     // Bob's list has to grow a row for a person he has never heard of, and it
-    // has to happen because SIP-30 said so rather than because the periodic
-    // rebuild came round. Those are different mechanisms and only one of them
-    // is fast enough to be a chat client, so the wait is pinned well inside
-    // the backstop -- and asserted against it, so that lowering the backstop
+    // has to happen promptly rather than when the periodic rebuild comes
+    // round. Those are different mechanisms and only one of them is fast
+    // enough to be a chat client, so the wait is pinned well inside the
+    // backstop -- and asserted against it, so that lowering the backstop
     // cannot quietly turn this back into a test of the backstop.
+    //
+    // **Which of the two prompt paths carries it is a race, and both are
+    // required.** If Bob's subscription was open when Alice created the
+    // channel, SIP-30's `Membership` event says so; if it was not -- and at
+    // startup it usually is not, because the conversation is created in the
+    // same second the two sessions come up -- the row arrives from `mine()`
+    // and the message from the sweep that asks about anything the exchange has
+    // never answered for. Measured, not assumed: with that sweep removed this
+    // fails, having received nothing but a `Cursor` and a heartbeat.
     const WAIT: u64 = 10;
     assert!(
         std::time::Duration::from_secs(WAIT) * 2 < sigil_chat::session::BACKSTOP,
-        "this test no longer proves the event path: it waits {WAIT}s against a          backstop of {:?}",
+        "this test no longer proves anything but the backstop: it waits {WAIT}s against a backstop of {:?}",
         sigil_chat::session::BACKSTOP
     );
     let listed = until(
@@ -845,6 +858,117 @@ async fn a_message_from_a_stranger_appears_without_adding_them_first() {
     )
     .await;
     assert!(read, "opening it shows it and clears it: {:?}", bob.state());
+
+    alice.stop();
+    bob.stop();
+}
+
+/// What was said while the client was shut down is on screen when it starts.
+///
+/// **SIP-30's stream has no replay.** It carries what happens from the moment
+/// it is opened, so everything said while this account was not running is news
+/// no event will ever mention. Nothing else asked either: conversations were
+/// fetched when an event named them or when somebody opened them, and a client
+/// that had been closed overnight therefore showed yesterday's last word and an
+/// unread count of nothing until each conversation was clicked into.
+///
+/// So the list is asked about once per session — see `ask_about_unfetched` —
+/// and this is that, from the far side: Bob reads a message, is closed, misses
+/// one, and comes back to find it counted without opening anything.
+#[tokio::test]
+async fn what_was_said_while_it_was_closed_is_counted_when_it_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(51);
+    let (b_signer, b_id) = signer(52);
+    let bobs_store = dir.path().join("b.db");
+
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &bobs_store);
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(|| alice.state().open.is_some(), 15).await,
+        "Alice should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+    alice.send(Cmd::Send("while you were in".into()));
+
+    // Bob has to have the conversation on his disc before he can be closed
+    // with it there, which is what the second half of this tests. Counted
+    // rather than merely listed: a count means it was fetched and stored.
+    assert!(
+        until(
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id) && c.unread > 0),
+            15
+        )
+        .await,
+        "Bob should have been told the first message: {:?}",
+        bob.state().conversations
+    );
+
+    // Closed, and *finished* closing: the store's lock is released when the
+    // task's future is dropped, not when it is asked to stop, and the session
+    // started below would be refused it.
+    let closing = bob.close();
+    assert!(
+        until(|| closing.is_finished(), 15).await,
+        "Bob's session should stop"
+    );
+
+    alice.send(Cmd::Send("while you were out".into()));
+    assert!(
+        until(|| alice.state().lines.len() == 2, 15).await,
+        "Alice should have said both: {:?}",
+        alice.state().lines
+    );
+
+    // Nothing will announce this one: it was said to a client with no stream
+    // open, and the stream Bob opens now begins where it is opened.
+    let (b_signer, _) = signer(52);
+    let bob = start_at(endpoint, b_signer, &bobs_store);
+
+    // Pinned well inside the backstop, or this proves only that the periodic
+    // rebuild eventually comes round -- which it did, half a minute later,
+    // and which is not a chat client.
+    const WAIT: u64 = 10;
+    assert!(
+        std::time::Duration::from_secs(WAIT) * 2 < sigil_chat::session::BACKSTOP,
+        "this test no longer proves the startup sweep: it waits {WAIT}s against a backstop of {:?}",
+        sigil_chat::session::BACKSTOP
+    );
+    let counted = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id) && c.unread > 0)
+        },
+        WAIT,
+    )
+    .await;
+    assert!(
+        counted,
+        "the message said while Bob was closed must be counted without opening it: {:?}",
+        bob.state().conversations
+    );
 
     alice.stop();
     bob.stop();
