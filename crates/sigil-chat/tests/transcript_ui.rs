@@ -1073,6 +1073,39 @@ fn a_picker_survives_the_pointer_leaving_the_message() {
     );
 }
 
+/// A name you hold can be given up.
+///
+/// Claiming one has been offered since there was a route for it; letting go
+/// had no control at all, so a name taken by mistake was taken for good.
+#[test]
+fn a_name_you_hold_can_be_given_up() {
+    let mut h = harness(true);
+    h.run();
+    open_identity(&mut h);
+    let said = text_of(&h);
+    // The fixture's identity holds one, so the control is there.
+    assert!(said.contains("me@squic.org"), "{said}");
+    assert!(
+        said.contains("Give it up"),
+        "a name can be taken and not returned: {said}"
+    );
+}
+
+/// And there is nothing to give up when the exchange knows no name.
+#[test]
+fn having_no_name_offers_nothing_to_give_up() {
+    let mut state = a_conversation();
+    state.mine.handle = None;
+    let mut h = harness_with(state, true);
+    h.run();
+    open_identity(&mut h);
+    assert!(
+        !text_of(&h).contains("Give it up"),
+        "a control that cannot do anything: {}",
+        text_of(&h)
+    );
+}
+
 /// A ring shows the caller's key in full, and does not dress it as proven.
 ///
 /// Carried over from the voice app, which used to own ringing. The rule did

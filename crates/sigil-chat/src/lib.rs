@@ -913,6 +913,36 @@ impl ChatApp {
                 .wrap()
                 .selectable(true),
         );
+        // The name this exchange knows you by, and the way to let go of it.
+        // Claiming one has been offered since there was a claim route; giving
+        // one up had no control at all, so a name taken by mistake was taken
+        // for good.
+        if let Some(handle) = &state.mine.handle {
+            ui.separator();
+            ui.colored_label(theme.text_muted, egui::RichText::new("Name here").small());
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(egui::RichText::new(handle).monospace().small()).wrap());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Give it up")
+                        .on_hover_text(
+                            "Stop being reachable at this name. Nothing is deleted — your \
+                             conversations, keys and counters are untouched — and somebody \
+                             else may take it afterwards.",
+                        )
+                        .clicked()
+                    {
+                        // The bare name, without the domain: a claim and a
+                        // release both name the local part, and the exchange
+                        // it is released at is the one being talked to.
+                        let local = handle.split('@').next().unwrap_or(handle).to_string();
+                        self.send_as(Some(at), Cmd::ReleaseName(local));
+                        ui.close();
+                    }
+                });
+            });
+            ui.separator();
+        }
+
         if ui.button("Edit your profile").clicked() {
             let (name, title) = (
                 state.mine.name.clone().unwrap_or_default(),

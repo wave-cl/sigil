@@ -619,6 +619,8 @@ pub enum Cmd {
     /// attests; a SIP-38 name is bound at the exchange, resolves to exactly
     /// one account, and is what makes `name@domain` work.
     ClaimName(String),
+    /// Give up a SIP-38 name this account holds.
+    ReleaseName(String),
 
     // ---- making conversations ------------------------------------------
     /// A private group. Its name is a sealed entry, not the exchange's.
@@ -2276,6 +2278,16 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
             }
         }
+        Cmd::ReleaseName(name) => match chat.release_name(&name).await {
+            Ok(()) => {
+                // Read back rather than assumed, like the claim: the handle
+                // shown everywhere else is the exchange's, and a client that
+                // cleared its own would be hiding a name still resolving.
+                desk.restale.insert(chat.me);
+                note(state, format!("{name} is nobody's here now."));
+            }
+            Err(e) => trouble(state, e),
+        },
         Cmd::Reconnect => chat.reconnect_now(),
 
         Cmd::React { target, emoji } => {

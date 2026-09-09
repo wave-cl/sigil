@@ -113,11 +113,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/events", Chat),
     // ---- names, written side --------------------------------------------
     ("POST", "/name/claim", Chat),
-    (
-        "POST",
-        "/name/release",
-        NotYet("the other half of claiming one"),
-    ),
+    ("POST", "/name/release", Chat),
     // ---- voice -----------------------------------------------------------
     ("POST", "/session/open", Voice),
     ("POST", "/session/send", Voice),
@@ -318,7 +314,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 56,
+        reached, 57,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );
