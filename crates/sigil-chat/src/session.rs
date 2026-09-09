@@ -1111,8 +1111,8 @@ async fn run(
                     }
                 }
                 learn_names(&mut chat, &mut desk).await;
-                fetch_files(&mut chat, &mut desk).await;
-                refresh(&mut chat, &state, &mut desk, me).await;
+                fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
                 (wake)();
             }
         }
@@ -1575,23 +1575,79 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
     }
 }
 
+/// How many conversations one tick will ask the exchange about.
+///
+/// Every one of them is a round trip -- measured at 100-250ms to a real
+/// exchange -- and they are made one after another, so a tick that polls
+/// everything the events named takes seconds. During that the task is inside
+/// `refresh` and cannot take a command, which is what made switching
+/// conversations slow: the click waited for the whole sweep.
+///
+/// The rest stay dirty and are asked about on the next tick. Nothing is lost
+/// by being late; the events say what changed, and they keep saying it.
+const PER_TICK: usize = 4;
+
+/// Which conversations this tick asks about, and which wait for the next one.
+///
+/// The open one first and always: it is the one somebody is looking at, and
+/// everything else in the sweep is somewhere they are not. The rest are
+/// bounded by [`PER_TICK`] and keep their turn rather than losing it -- being
+/// late costs nothing, since the events that named them keep naming them until
+/// they are read.
+///
+/// A free function over plain data because the ordering is the part worth
+/// testing: a sweep that starves the conversation on screen is one where new
+/// messages arrive everywhere except where somebody is reading.
+fn this_tick(open: Option<[u8; 32]>, dirty: Vec<[u8; 32]>) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    let mut now: Vec<[u8; 32]> = dirty;
+    if let Some(open) = open {
+        now.retain(|c| *c != open);
+        now.insert(0, open);
+    }
+    let later = if now.len() > PER_TICK {
+        now.split_off(PER_TICK)
+    } else {
+        Vec::new()
+    };
+    (now, later)
+}
+
+/// Anything the reader has asked for, before the next round trip.
+///
+/// **Between the round trips, not after them.** A conversation opens from the
+/// disc and needs no network at all, so the only reason a switch waited was
+/// that the task was in the middle of a sweep it could not be interrupted in.
+async fn attend(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+) {
+    while let Ok(cmd) = cmds.try_recv() {
+        apply(chat, cmd, state, desk).await;
+    }
+}
+
 /// Fetch what has changed and publish the result.
-async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk, me: PubKey) {
+async fn refresh(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    me: PubKey,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+) {
     // The open conversation is always fetched: it is the one somebody is
     // looking at, and a signal there (typing) has no event of its own until it
     // is delivered.
-    let mut to_poll: Vec<[u8; 32]> = desk.dirty.drain().collect();
-    if let Some(open) = desk.open
-        && !to_poll.contains(&open)
-    {
-        to_poll.push(open);
-    }
+    let (to_poll, later) = this_tick(desk.open, desk.dirty.drain().collect());
+    desk.dirty.extend(later);
 
     // Collected rather than written straight into `desk`, which is borrowed
     // mutably for the channel being polled.
     let mut accepted: Vec<([u8; 32], u64)> = Vec::new();
 
     for channel in to_poll {
+        attend(chat, state, desk, cmds).await;
         let Some(known) = desk.channels.get_mut(&channel) else {
             continue;
         };
@@ -1753,7 +1809,12 @@ const AUTO_FETCH_MAX: u64 = 4 * 1024 * 1024;
 /// Bounded three ways — kind, size, and one attempt per blob — because this
 /// runs on a tick. `download` verifies the blob's name against the ciphertext
 /// **before decrypting**, so what arrives is what was named or nothing.
-async fn fetch_files(chat: &mut Chat, desk: &mut Desk) {
+async fn fetch_files(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+) {
     let Some(open) = desk.open else { return };
     let Some(known) = desk.channels.get(&open) else {
         return;
@@ -1769,6 +1830,10 @@ async fn fetch_files(chat: &mut Chat, desk: &mut Desk) {
         .collect();
 
     for a in wanted {
+        // A picture takes as long as it takes -- one of them was measured at
+        // two and a half seconds -- and a reader who has moved on should not
+        // be waiting behind it for a conversation that is already on the disc.
+        attend(chat, state, desk, cmds).await;
         match chat.download(&a).await {
             Ok(bytes) => {
                 desk.files.insert(a.blob, bytes);
@@ -3114,4 +3179,58 @@ fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
         s.unread_on_open = unread;
         s.divider = divider;
     });
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::{PER_TICK, this_tick};
+
+    fn channels(n: u8) -> Vec<[u8; 32]> {
+        (0..n).map(|i| [i; 32]).collect()
+    }
+
+    /// The conversation on screen is asked about first, however much else is
+    /// waiting. Anything less and a busy account leaves the one being read
+    /// until last -- or, past the bound, until some later tick.
+    #[test]
+    fn the_open_conversation_goes_first() {
+        let (now, _) = this_tick(Some([9; 32]), channels(20));
+        assert_eq!(now[0], [9; 32]);
+    }
+
+    /// Even when the events have already named it: once, not twice.
+    #[test]
+    fn the_open_conversation_is_asked_about_once() {
+        let mut dirty = channels(3);
+        dirty.push([9; 32]);
+        let (now, later) = this_tick(Some([9; 32]), dirty);
+        assert_eq!(now.iter().filter(|c| **c == [9; 32]).count(), 1);
+        assert!(!later.contains(&[9; 32]));
+    }
+
+    /// A sweep is bounded, and what it leaves it hands back.
+    ///
+    /// Each of these is a round trip -- 100 to 250ms to a real exchange -- and
+    /// they are made one after another, so an unbounded sweep is seconds
+    /// during which nothing else can happen.
+    #[test]
+    fn a_tick_is_bounded_and_loses_nothing() {
+        let all = channels(20);
+        let (now, later) = this_tick(None, all.clone());
+        assert_eq!(now.len(), PER_TICK);
+        assert_eq!(now.len() + later.len(), all.len());
+        for c in &all {
+            assert!(
+                now.contains(c) || later.contains(c),
+                "a conversation was dropped rather than left for later"
+            );
+        }
+    }
+
+    /// Nothing to do is nothing to do.
+    #[test]
+    fn a_quiet_tick_asks_about_nothing() {
+        let (now, later) = this_tick(None, Vec::new());
+        assert!(now.is_empty() && later.is_empty());
+    }
 }
