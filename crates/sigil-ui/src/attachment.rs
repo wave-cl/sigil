@@ -345,8 +345,16 @@ mod tests {
 
         // Loaders decode on demand and may answer `Pending` the first time, so
         // ask until it settles rather than asserting on one frame.
+        //
+        // The decode happens on another thread, so the wait has to be in
+        // *time* and not in turns: spinning sixty-four polls with nothing
+        // between them takes microseconds, and under a full parallel suite
+        // the decoder has not been scheduled once in that window. Alone it
+        // won the race every time, which is the worst way for this to be
+        // wrong.
         let mut seen = None;
-        for _ in 0..64 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             match ctx.try_load_image(uri, egui::SizeHint::Scale(1.0.into())) {
                 Ok(egui::load::ImagePoll::Ready { image }) => {
                     seen = Some(image.size);
@@ -357,6 +365,7 @@ mod tests {
                         ui.add(egui::Image::from_bytes(uri, png.clone()));
                     });
                     o.textures_delta.clear();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => panic!("nothing can decode a PNG: {e}"),
             }
