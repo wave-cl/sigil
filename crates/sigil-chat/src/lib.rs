@@ -103,6 +103,85 @@ fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
     }
 }
 
+/// Where a picture sits inside the viewer, and how large.
+///
+/// `zoom` is a multiple of the size the picture is drawn at when it fits: 1 is
+/// the whole of it on screen, and anything more is closer in. `pan` moves it
+/// under the viewport, in screen pixels, from the middle.
+///
+/// A type of its own with the arithmetic on it, because the arithmetic is the
+/// part worth testing: keeping the point under the pointer still while the
+/// picture grows around it, and refusing to let somebody drag the picture out
+/// of the window they are looking at it through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Look {
+    zoom: f32,
+    pan: egui::Vec2,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Look {
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+        }
+    }
+}
+
+impl Look {
+    /// The picture's size on screen: what it is when it fits, times the zoom.
+    fn size(self, fitted: egui::Vec2) -> egui::Vec2 {
+        fitted * self.zoom
+    }
+
+    /// Move it, and no further than its own edges.
+    fn dragged(self, by: egui::Vec2, view: egui::Vec2, fitted: egui::Vec2) -> Self {
+        Look {
+            pan: self.pan + by,
+            ..self
+        }
+        .held(view, fitted)
+    }
+
+    /// Zoom to `to`, keeping whatever is under `pointer` under it.
+    ///
+    /// Without that, zooming in walks towards the middle of the picture and
+    /// the thing somebody was looking at slides away from the pointer they
+    /// aimed at it with -- which is what makes a viewer feel like it is
+    /// arguing.
+    fn zoomed(
+        self,
+        to: f32,
+        from_middle: egui::Vec2,
+        view: egui::Vec2,
+        fitted: egui::Vec2,
+    ) -> Self {
+        let ratio = to / self.zoom;
+        Look {
+            zoom: to,
+            pan: from_middle * (1.0 - ratio) + self.pan * ratio,
+        }
+        .held(view, fitted)
+    }
+
+    /// Keep the picture over the hole it is seen through.
+    ///
+    /// Along an axis where the picture is smaller than the viewport there is
+    /// nowhere to go, so it stays in the middle; along one where it is larger,
+    /// it may move by half the difference before its edge would come inside.
+    fn held(self, view: egui::Vec2, fitted: egui::Vec2) -> Self {
+        let size = self.size(fitted);
+        let room = ((size - view) / 2.0).max(egui::Vec2::ZERO);
+        Look {
+            zoom: self.zoom,
+            pan: egui::vec2(
+                self.pan.x.clamp(-room.x, room.x),
+                self.pan.y.clamp(-room.y, room.y),
+            ),
+        }
+    }
+}
+
 /// Which conversation to open on arriving, if any.
 ///
 /// The newest one, chosen **by its time** rather than by taking the first row
@@ -253,6 +332,8 @@ struct Pane {
     /// files. Kept per identity like everything else here, so switching away
     /// and back does not leave somebody else's picture over the screen.
     viewing: Option<(u64, usize)>,
+    /// How that picture is being looked at: how close in, and where.
+    look: Look,
     /// The key being invited to the open channel.
     inviting: String,
     /// The SIP-38 name being claimed.
@@ -315,6 +396,7 @@ impl Default for Pane {
             exchange: String::new(),
             forwarding: None,
             viewing: None,
+            look: Look::default(),
             inviting: String::new(),
             naming: String::new(),
             channel_name: String::new(),
@@ -1396,11 +1478,68 @@ impl ChatApp {
                     // The same URI the transcript uses, so the decoded texture
                     // is the one already in hand rather than a second copy of
                     // the same picture under another name.
-                    ui.add(
-                        egui::Image::from_bytes(format!("bytes://{}", file.id), bytes)
-                            .max_size(screen * 0.86)
-                            .corner_radius(tokens::RADIUS_MD),
-                    );
+                    let image = egui::Image::from_bytes(format!("bytes://{}", file.id), bytes)
+                        .corner_radius(tokens::RADIUS_MD);
+                    let room = screen * 0.86;
+                    match image.load_for_size(ui.ctx(), room) {
+                        Ok(egui::load::TexturePoll::Ready { texture }) => {
+                            // **The window on the picture stays the size the
+                            // whole picture needs**, and zooming happens
+                            // inside it. A viewer that grows as it zooms
+                            // pushes its own controls off the screen.
+                            let scale = (room.x / texture.size.x)
+                                .min(room.y / texture.size.y)
+                                .min(1.0);
+                            let fitted = texture.size * scale;
+                            let (view, held) =
+                                ui.allocate_exact_size(fitted, egui::Sense::click_and_drag());
+                            let look = self.pane(at).look;
+
+                            if held.dragged() {
+                                let moved = look.dragged(held.drag_delta(), fitted, fitted);
+                                self.pane(at).look = moved;
+                            } else if held.clicked() {
+                                // In to the picture's own pixels, or twice its
+                                // size when that is smaller than the window --
+                                // clicking must always do something -- and out
+                                // again from anywhere closer than fitting.
+                                let closest = (1.0 / scale).max(2.0);
+                                let to = if look.zoom > 1.01 { 1.0 } else { closest };
+                                let at_pointer = held
+                                    .interact_pointer_pos()
+                                    .map(|p| p - view.center())
+                                    .unwrap_or(egui::Vec2::ZERO);
+                                self.pane(at).look = look.zoomed(to, at_pointer, fitted, fitted);
+                            }
+
+                            let look = self.pane(at).look;
+                            if look.zoom > 1.01 {
+                                ui.ctx().set_cursor_icon(if held.dragged() {
+                                    egui::CursorIcon::Grabbing
+                                } else {
+                                    egui::CursorIcon::Grab
+                                });
+                            }
+                            // Clipped to the window, so what is outside it is
+                            // out of sight rather than over the rest of the
+                            // dialog.
+                            let painting = ui.new_child(
+                                egui::UiBuilder::new().id_salt("picture").max_rect(view),
+                            );
+                            let mut painting = painting;
+                            painting.set_clip_rect(view);
+                            image.paint_at(
+                                &painting,
+                                egui::Rect::from_center_size(
+                                    view.center() + look.pan,
+                                    look.size(fitted),
+                                ),
+                            );
+                        }
+                        _ => {
+                            ui.add(image.max_size(room));
+                        }
+                    }
                     ui.add_space(tokens::SPACING_SM);
                     ui.horizontal(|ui| {
                         ui.colored_label(
@@ -2516,6 +2655,10 @@ impl ChatApp {
             }
             if let Some(index) = did.open {
                 self.pane(at).viewing = Some((seq, index));
+                // Opened as it is: whole, and in the middle. A picture that
+                // came back at the zoom somebody left the *last* one at is a
+                // picture that opens showing a corner of itself.
+                self.pane(at).look = Look::default();
             }
             if let Some(index) = did.save {
                 // The dialog is native and blocking, which is fine here: it is
@@ -3706,5 +3849,71 @@ mod first_look_tests {
         // The tie-break, so it is an answer rather than whichever the
         // iterator happened to reach last.
         assert_eq!(first_look(None, false, false, &convos), Some([1; 32]));
+    }
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::Look;
+    use egui::vec2;
+
+    /// A hundred-pixel window onto a hundred-pixel picture.
+    const VIEW: egui::Vec2 = vec2(100.0, 100.0);
+
+    /// Dragging stops where the picture's own edge would come inside the
+    /// window. Anything else lets somebody drag a picture out of the frame and
+    /// then hunt for it.
+    #[test]
+    fn a_picture_cannot_be_dragged_off_its_own_window() {
+        let close = Look {
+            zoom: 2.0,
+            pan: egui::Vec2::ZERO,
+        };
+        // Twice the size in a window of one: fifty pixels of room each way.
+        let moved = close.dragged(vec2(500.0, -500.0), VIEW, VIEW);
+        assert_eq!(moved.pan, vec2(50.0, -50.0));
+    }
+
+    /// And a picture that fits has nowhere to go at all.
+    #[test]
+    fn a_picture_that_fits_does_not_move() {
+        let whole = Look::default();
+        assert_eq!(
+            whole.dragged(vec2(80.0, 80.0), VIEW, VIEW).pan,
+            egui::Vec2::ZERO
+        );
+    }
+
+    /// What is under the pointer stays under the pointer.
+    ///
+    /// Zooming about the middle instead slides whatever somebody was looking
+    /// at away from the pointer they aimed at it with, which is the difference
+    /// between a viewer that follows and one that argues.
+    #[test]
+    fn zooming_keeps_what_is_under_the_pointer_under_it() {
+        let at = vec2(20.0, -10.0);
+        let whole = Look::default();
+        // Where that point is in the picture, as a fraction of it.
+        let before = (at - whole.pan) / whole.size(VIEW);
+        let close = whole.zoomed(2.0, at, VIEW, VIEW);
+        let after = (at - close.pan) / close.size(VIEW);
+        assert!(
+            (before - after).length() < 0.001,
+            "the point under the pointer moved from {before:?} to {after:?}"
+        );
+    }
+
+    /// Zooming back out puts the whole picture in the middle, because at that
+    /// size there is nowhere else for it to be.
+    #[test]
+    fn zooming_out_brings_it_back_to_the_middle() {
+        let close = Look {
+            zoom: 4.0,
+            pan: vec2(120.0, -90.0),
+        };
+        assert_eq!(
+            close.zoomed(1.0, vec2(30.0, 30.0), VIEW, VIEW).pan,
+            egui::Vec2::ZERO
+        );
     }
 }
