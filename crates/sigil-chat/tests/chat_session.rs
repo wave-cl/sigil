@@ -156,6 +156,83 @@ async fn two_sessions_hold_a_conversation() {
     bob.stop();
 }
 
+/// A message is on screen before the timer would have asked for it.
+///
+/// The session used to learn about everything on its own 700ms tick: an event
+/// had crossed the world in ninety milliseconds and then sat in a queue for up
+/// to seven times that before anything looked at it. The exchange knocks now,
+/// and the tick is a backstop.
+///
+/// **Measured against the tick, not against a number I chose.** Anything at or
+/// past 700ms is what the old behaviour did; the assertion is that it beats
+/// that, with room for a slow machine.
+#[tokio::test]
+async fn a_message_arrives_without_waiting_for_the_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(25);
+    let (b_signer, b_id) = signer(26);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    // **Bob's backstop is ten seconds**, so nothing can arrive on the timer
+    // within the deadline below. Everything else runs exactly as it does in
+    // the application. With the ordinary 700ms tick the two ways a message can
+    // arrive are indistinguishable, which is how the first version of this
+    // test passed with the knock taken out.
+    let bob = session::start_every(
+        endpoint,
+        b_signer,
+        Some(dir.path().join("b.db")),
+        || {},
+        Duration::from_secs(10),
+    );
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+    // Everything that was going to happen, before the clock starts.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let sent = tokio::time::Instant::now();
+    alice.send(Cmd::Send("no waiting".into()));
+    assert!(
+        until(
+            || bob.state().lines.iter().any(|l| l.text == "no waiting"),
+            20
+        )
+        .await,
+        "the message never arrived at all: {:?}",
+        bob.state().trouble
+    );
+    let took = sent.elapsed();
+
+    // Bob's timer is ten seconds away. Two round trips to a loopback exchange
+    // are milliseconds, so anything in this region came from the knock.
+    assert!(
+        took < Duration::from_secs(2),
+        "a message took {took:?} to reach the screen, which is the backstop \
+         rather than the exchange"
+    );
+}
+
 /// A session with nothing happening wakes nobody.
 ///
 /// eframe is reactive: with nothing asking for a repaint it sleeps. The tick

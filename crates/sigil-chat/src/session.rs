@@ -979,6 +979,30 @@ pub fn start(
     store_at: Option<std::path::PathBuf>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> ChatHandle {
+    start_every(
+        dial,
+        signer,
+        store_at,
+        wake,
+        std::time::Duration::from_millis(TICK_MS),
+    )
+}
+
+/// The same, with the backstop at a chosen interval.
+///
+/// **A timer, not a path.** Everything runs exactly as it does in the
+/// application; only how often the loop gives up waiting and asks anyway
+/// changes. A test that wants to know whether something arrived *because the
+/// exchange said so* has to be able to tell that apart from arriving because
+/// the timer came round -- and at 700ms the two are indistinguishable, which
+/// is how the first version of that test passed with the knock taken out.
+pub fn start_every(
+    dial: impl Into<Dial>,
+    signer: SoftwareSigner,
+    store_at: Option<std::path::PathBuf>,
+    wake: impl Fn() + Send + Sync + 'static,
+    every: std::time::Duration,
+) -> ChatHandle {
     let (state_tx, state_rx) = watch::channel(ChatState::default());
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let wake = Arc::new(wake);
@@ -992,6 +1016,7 @@ pub fn start(
             state_tx.clone(),
             cmd_rx,
             wake.clone(),
+            every,
         )
         .await
         {
@@ -1014,6 +1039,7 @@ async fn run(
     state: watch::Sender<ChatState>,
     mut cmds: mpsc::UnboundedReceiver<Cmd>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    every: std::time::Duration,
 ) -> Result<(), String> {
     use sqnr_core::Signer;
     let seed = signer.seed();
@@ -1073,6 +1099,13 @@ async fn run(
         s.domain = domain;
     });
 
+    // **Somewhere for the exchange to knock.** The tick is a backstop now, not
+    // the clock: an event says which conversation moved, and waiting 700ms to
+    // hear it is 700ms of a message sitting in a queue that has already
+    // crossed the world.
+    let knock: sqex_chat::events::Wake = Arc::new(tokio::sync::Notify::new());
+    chat.wake_on_events(knock.clone());
+
     let mut desk = Desk::default();
     // **Before the exchange is asked anything.** Everything below this point
     // is a round trip -- prekeys, then the list, then a fetch per channel --
@@ -1085,7 +1118,7 @@ async fn run(
     (wake)();
 
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
+    let mut tick = tokio::time::interval(every);
 
     loop {
         tokio::select! {
@@ -1095,6 +1128,28 @@ async fn run(
             Some(cmd) = cmds.recv() => {
                 apply(&mut chat, cmd, &state, &mut desk).await;
                 (wake)();
+            }
+            // **What the exchange has to say, the moment it says it.**
+            //
+            // The events themselves arrive on their own QUIC stream and are
+            // queued by a task that never waits for this loop; all this does is
+            // stop the queue sitting there until the next tick. An event is a
+            // hint -- "this channel moved" -- so the answer to one is the same
+            // sweep the tick does, and no more.
+            _ = knock.notified() => {
+                for event in chat.take_events() {
+                    desk.note(event, me);
+                }
+                if desk.restructure
+                    && let Ok(()) = sync_channels(&mut chat, &mut desk).await
+                {
+                    desk.restructure = false;
+                    desk.synced = true;
+                    desk.since_sync = 0;
+                }
+                if refresh(&mut chat, &state, &mut desk, me, &mut cmds).await {
+                    (wake)();
+                }
             }
             _ = tick.tick() => {
                 chat.keep_alive().await;
