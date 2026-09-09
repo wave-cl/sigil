@@ -559,8 +559,10 @@ impl Shell {
         ui.vertical_centered(|ui| {
             // Enough to sit off the top edge, and no more: the card grew a
             // mark and an eighty-pixel disc pushed the Unlock button off the
-            // bottom of a short window.
-            ui.add_space(ui.available_height() * 0.10);
+            // bottom of a short window. It came down again when the window
+            // grew a strip of its own at the top for the system's buttons --
+            // two gaps stacked read as one large one, and the card sat low.
+            ui.add_space(ui.available_height() * 0.05);
             ui.allocate_ui_with_layout(
                 egui::vec2(CARD_WIDTH, 0.0),
                 egui::Layout::top_down(egui::Align::Min),
