@@ -25,6 +25,9 @@ egui_kittest = { workspace = true }
 sqexd = { workspace = true }
 squic = { workspace = true }
 tempfile = "3"
+# The exchange's own request counter, read from `/status`, is the only place
+# the traffic two idle clients make is visible.
+serde_json = "1"
 toml = "0.8"
 hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

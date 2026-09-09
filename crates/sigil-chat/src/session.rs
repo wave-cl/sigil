@@ -1262,6 +1262,17 @@ struct Known {
     /// The newest thing said here. What the list sorts on.
     last_at: u64,
     unread: usize,
+    /// The read mark this client has already written to the exchange.
+    ///
+    /// **A cursor is only worth writing when it has moved.** It was written on
+    /// every tick while a conversation was open; the exchange stores it
+    /// unconditionally and publishes a `Cursor` event to every other member
+    /// whether or not the value changed, and each of those marks the channel
+    /// dirty at the other end, which fetches, which writes its own cursor.
+    /// Two people with the same conversation open kept that going between them
+    /// at 1.4 rounds a second, for as long as both windows were open, with
+    /// nobody typing.
+    told: u64,
     /// They have published no prekeys, so nothing can be sealed to them yet.
     waiting: bool,
     typing: bool,
@@ -1327,6 +1338,9 @@ struct Desk {
     open: Option<[u8; 32]>,
     /// Channels an event says have changed. Only these are fetched.
     dirty: HashSet<[u8; 32]>,
+    /// Channels whose read marks somebody has moved, so the receipts beside
+    /// our own messages are worth asking about again.
+    cursors_moved: HashSet<[u8; 32]>,
     /// The conversation list itself needs rebuilding from the exchange.
     restructure: bool,
     /// Whether the exchange has ever answered about the list, this session.
@@ -1369,6 +1383,7 @@ impl Default for Desk {
             channels: HashMap::new(),
             open: None,
             dirty: HashSet::new(),
+            cursors_moved: HashSet::new(),
             restale: HashSet::new(),
             answered: HashSet::new(),
             files: HashMap::new(),
@@ -1402,8 +1417,11 @@ impl Desk {
             }
             // Somebody's read mark moved. Ours moving is not news; theirs is,
             // once receipts are drawn.
+            // Somebody read something. The receipts beside our own messages
+            // are the only thing that changes, so this asks for the marks and
+            // not for the entries.
             Event::Cursor { channel } => {
-                self.dirty.insert(channel);
+                self.cursors_moved.insert(channel);
             }
             Event::Membership {
                 channel, account, ..
@@ -1572,6 +1590,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 wanted: PAGE,
                 last_at,
                 unread: 0,
+                told: 0,
                 waiting: false,
                 typing: false,
                 fetched: false,
@@ -1616,6 +1635,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             // Nothing has happened here yet, so it sorts below anything that
             // has rather than claiming a time it does not have.
             last_at: 0,
+            told: 0,
             waiting: false,
             typing: false,
             fetched: false,
@@ -1693,6 +1713,7 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
             wanted: PAGE,
             last_at,
             unread: 0,
+            told: 0,
             waiting: false,
             typing: false,
             fetched: false,
@@ -1842,7 +1863,13 @@ async fn refresh(
         && let Some(known) = desk.channels.get_mut(&open)
     {
         known.unread = 0;
-        if let Some(last) = known.timeline.messages().last().map(|m| m.seq) {
+        // **Only when it has moved.** See `Known::told`: writing an unchanged
+        // cursor tells every other member that something happened, and what
+        // they do about it is fetch and write their own.
+        if let Some(last) = known.timeline.messages().last().map(|m| m.seq)
+            && last > known.told
+        {
+            known.told = last;
             let _ = chat.mark_read(&open, last).await;
         }
     }
@@ -1857,7 +1884,11 @@ async fn refresh(
     // it. So a mark of `read: 0` beside a real `delivered` is somebody who
     // opted out, not somebody who has not read -- and `receipt_for`
     // under-claims on exactly that.
+    // **Asked for when somebody's cursor moved**, which is what the `Cursor`
+    // event says, and when a conversation is opened. It was another round trip
+    // on every tick to be told the same numbers as the tick before.
     if let Some(open) = desk.open
+        && desk.cursors_moved.remove(&open)
         && let Ok(marks) = chat.marks(&open).await
         && let Some(known) = desk.channels.get_mut(&open)
     {
@@ -2635,6 +2666,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     wanted: PAGE,
                     last_at: 0,
                     unread: 0,
+                    told: 0,
                     waiting,
                     typing: false,
                     fetched: false,
@@ -3381,6 +3413,8 @@ fn close(desk: &mut Desk, state: &watch::Sender<ChatState>) {
 fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
     desk.open = Some(channel);
     desk.dirty.insert(channel);
+    // Where everybody else has got to, once, on arriving.
+    desk.cursors_moved.insert(channel);
     // Back to one page. A channel somebody scrolled a long way into last week
     // should not cost that again today -- and **at least the unread run**,
     // because the divider marks where they stopped and a divider above the

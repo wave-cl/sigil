@@ -156,6 +156,92 @@ async fn two_sessions_hold_a_conversation() {
     bob.stop();
 }
 
+/// Two people with a conversation open do not talk to the exchange about
+/// nothing.
+///
+/// A read mark used to be written on every tick while a conversation was open.
+/// The exchange stores it unconditionally and publishes a `Cursor` event to
+/// every other member whether or not the value moved; the other client marks
+/// the channel dirty, fetches it, and writes its own mark. Two windows open on
+/// one conversation kept that going between them at 1.4 rounds a second, for
+/// as long as both were open, with nobody typing.
+///
+/// **Counted at the exchange**, in its own `/status`, because the traffic is
+/// the thing being fixed and the interface cannot see it: none of this
+/// produced a repaint, an unread count, or anything else a client-side
+/// assertion could have noticed.
+#[tokio::test]
+async fn an_open_conversation_is_quiet_when_nothing_is_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(27);
+    let (b_signer, b_id) = signer(28);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    alice.send(Cmd::Send("one thing, and then quiet".into()));
+    assert!(
+        until(
+            || bob
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "one thing, and then quiet"),
+            20
+        )
+        .await,
+        "the message should arrive before the quiet starts"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let asked = || async {
+        let mut probe = sqnr::Client::connect(addr, &server_pub)
+            .await
+            .expect("the exchange answers a status");
+        let (code, body) = probe.get("/status").await.expect("status");
+        assert_eq!(code, 200);
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        json["requests"].as_u64().expect("a request count")
+    };
+
+    let before = asked().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after = asked().await;
+
+    // Three seconds is four ticks each, and each client still polls the
+    // conversation it has open on its own tick — that is what the long poll
+    // will replace. So the floor is eight, and eight is what this measures.
+    //
+    // It was forty: a read mark and a cursor fetch per tick per client, the
+    // events those provoked at the other end, and — the larger half, found by
+    // logging every request rather than by reasoning about it — a
+    // `/channel/info` and one `/device/list` per member inside every poll,
+    // asked whether or not anything had arrived to attribute.
+    let spent = after - before - 1; // the probe's own /status
+    assert!(
+        spent <= 12,
+        "two idle clients made {spent} requests in three seconds with nobody \
+         saying anything; the floor is eight"
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
 /// A message is on screen before the timer would have asked for it.
 ///
 /// The session used to learn about everything on its own 700ms tick: an event
