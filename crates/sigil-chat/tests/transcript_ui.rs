@@ -54,7 +54,7 @@ fn a_conversation() -> ChatState {
                 waiting: false,
                 preview: Some("the second one, then".into()),
                 at: Some(NOW - 60),
-                public: false,
+                public: Some(false),
                 group: false,
                 typing: false,
             },
@@ -66,7 +66,7 @@ fn a_conversation() -> ChatState {
                 waiting: false,
                 preview: Some("anybody may join this one".into()),
                 at: Some(NOW - 2 * DAY),
-                public: true,
+                public: Some(true),
                 group: true,
                 typing: false,
             },
@@ -161,6 +161,10 @@ fn a_conversation() -> ChatState {
             },
         ],
         typing: false,
+        // The fixture is a conversation the exchange has already answered
+        // about: what this file is testing is a transcript, not a wait.
+        loading: false,
+        synced: true,
         trouble_with: Default::default(),
         people: [(
             them(),
@@ -985,6 +989,44 @@ fn asking_to_switch_identity_is_said_once() {
         said,
         vec![sigil::app::AppAction::ChooseIdentity],
         "the ask was dropped, or kept being made"
+    );
+}
+
+/// A conversation nobody has answered about yet says it is still asking.
+///
+/// "Nothing here yet" is a claim about the conversation, and it was being made
+/// about every one of them for as long as the exchange took to answer --
+/// including the one sigil opens for you on the way in. What this machine
+/// holds is drawn at once now, so an empty transcript *and* a fetch still out
+/// is the only case left, and it says so.
+#[test]
+fn a_conversation_still_being_fetched_says_so_rather_than_that_it_is_empty() {
+    let mut state = a_conversation();
+    state.lines.clear();
+    state.events.clear();
+    state.loading = true;
+    let mut h = harness_with(state, true);
+    // Stepped: a spinner asks for another frame for ever, and `run` waits for
+    // the interface to go still.
+    h.run_steps(3);
+    let said = text_of(&h);
+    assert!(
+        said.contains("Loading this conversation"),
+        "an unanswered conversation is drawn as an empty one: {said}"
+    );
+    assert!(!said.contains("Nothing here yet"), "{said}");
+
+    // Answered, and there really is nothing in it.
+    let mut state = a_conversation();
+    state.lines.clear();
+    state.events.clear();
+    state.loading = false;
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(
+        text_of(&h).contains("Nothing here yet"),
+        "an answered, empty conversation says nothing at all: {}",
+        text_of(&h)
     );
 }
 

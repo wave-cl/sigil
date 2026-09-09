@@ -1784,6 +1784,19 @@ impl ChatApp {
             return;
         }
 
+        // **Empty and unasked are not the same screen.** An empty list means
+        // either "you have no conversations" or "we have not been told yet",
+        // and the first was being said during the second on every launch --
+        // to somebody whose conversations were about to appear underneath it.
+        if state.conversations.is_empty() && !state.synced {
+            ui.add_space(tokens::SPACING_SM);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.colored_label(theme.text_secondary, "Loading your chats…");
+            });
+            return;
+        }
+
         if state.conversations.is_empty() {
             // Both halves, every time: that it is empty, and what to do about
             // it. A bare "nothing here" leaves somebody hunting for a control.
@@ -1880,7 +1893,12 @@ impl ChatApp {
             // — a bearer capability, SIP-36 — would be handed to whoever
             // turned up next. There is nothing to fix about that at the point
             // somebody presses it, so the control is not there.
-            let public = open.is_some_and(|c| c.public);
+            // **Only when the exchange has said it is private.** A kind
+            // nobody has answered yet is not a licence to offer the call: the
+            // list restores from this machine's own copy on the way in, and
+            // the store knows a group from a direct message but not a public
+            // channel from a private one.
+            let callable = open.is_some_and(|c| c.public == Some(false));
 
             // **The controls are laid out first, from the right.** Given the
             // name first, a long one takes the row and the controls wrap onto
@@ -1906,7 +1924,7 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::Blocked);
                     ctx.navigator.push_here(Route::Members);
                 }
-                if !public
+                if callable
                     && !self.calls.contains_key(&me)
                     && !state.ringing.iter().any(|r| r.mine)
                     && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked()
@@ -2121,7 +2139,19 @@ impl ChatApp {
         if state.lines.is_empty() && state.events.is_empty() {
             ui.add_space(tokens::SPACING_XL);
             ui.vertical_centered(|ui| {
-                ui.colored_label(theme.text_secondary, "Nothing here yet.");
+                // **"Nothing here yet" is a claim about the conversation**,
+                // and it was being made about every conversation that had not
+                // been fetched -- which is all of them, for as long as the
+                // exchange took to answer. What this machine holds is drawn
+                // the moment a conversation is opened, so an empty pane and a
+                // pending fetch together mean the answer is still coming.
+                if state.loading {
+                    ui.spinner();
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.colored_label(theme.text_secondary, "Loading this conversation…");
+                } else {
+                    ui.colored_label(theme.text_secondary, "Nothing here yet.");
+                }
             });
             return;
         }
@@ -3466,7 +3496,7 @@ mod first_look_tests {
             unread: 0,
             preview: None,
             at,
-            public: false,
+            public: Some(false),
             group: false,
             typing: false,
             waiting: false,

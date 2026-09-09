@@ -18,9 +18,16 @@ fn harness(account: Account) -> Harness<'static> {
     connected(account, empty())
 }
 
+/// Connected, and the exchange has answered: there really is nothing here.
+///
+/// `synced` is what tells the two empties apart -- "you have no
+/// conversations" from "we have not asked yet" -- so a fixture that means the
+/// first has to say so. Without it these tests read the loading screen, which
+/// is the right screen for the other one.
 fn empty() -> ChatState {
     ChatState {
         link: LinkState::Up,
+        synced: true,
         ..ChatState::default()
     }
 }
@@ -343,6 +350,48 @@ fn an_exchange_that_cannot_be_added_says_why() {
 }
 
 /// A key that is not a key is refused where it was typed, rather than swallowed.
+/// An empty list says which empty it is.
+///
+/// "No conversations yet" is a claim about somebody's account. It was being
+/// made on every launch, during the second or two before the exchange answered
+/// -- to people whose conversations were about to appear underneath it, and
+/// beside a button offering to start their first one.
+#[test]
+fn a_list_nobody_has_answered_about_yet_says_it_is_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let waiting = ChatState {
+        link: LinkState::Up,
+        synced: false,
+        ..ChatState::default()
+    };
+    let mut h = connected(unlocked(dir.path()), waiting);
+    // Stepped, not run: a spinner asks for the next frame for ever, and `run`
+    // waits for the interface to go still.
+    h.run_steps(3);
+    let said = text_of(&h);
+    assert!(
+        said.contains("Loading your chats"),
+        "nothing says the list is still coming: {said}"
+    );
+    assert!(
+        !said.contains("No conversations yet"),
+        "an account with conversations in it was told it has none: {said}"
+    );
+
+    // And once it has been answered for, the empty really is empty. Its own
+    // folder: `unlocked` writes an identity and `generate` refuses to
+    // overwrite one, which is the refusal that belongs there.
+    let other = tempfile::tempdir().unwrap();
+    let mut h = harness(unlocked(other.path()));
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("No conversations yet"),
+        "an answered, empty list says nothing at all: {said}"
+    );
+    assert!(!said.contains("Loading your chats"), "{said}");
+}
+
 /// An empty pane must not point at a column that is not on screen.
 ///
 /// The list is there on arriving, so "pick a conversation" names something

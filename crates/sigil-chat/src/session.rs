@@ -255,7 +255,12 @@ pub struct Summary {
     /// Anybody may find and join it, and **nothing in it is encrypted** —
     /// everyone who may join would hold any key it used, so encrypting would
     /// look end-to-end and not be. A reader has to see this before they type.
-    pub public: bool,
+    ///
+    /// `None` until the exchange has said. A conversation restored from this
+    /// machine's own copy knows it is a group, because that is in the store;
+    /// whether it is *public* is not, and neither guess may be made on
+    /// somebody's behalf. Drawn as neither until the answer arrives.
+    pub public: Option<bool>,
     /// More than two people.
     pub group: bool,
     /// Somebody in it is typing.
@@ -308,6 +313,21 @@ pub struct ChatState {
     /// What happened to the conversation, in the same sequence space as
     /// `lines` so the two interleave.
     pub events: Vec<Happened>,
+    /// Whether the exchange has answered about the conversation on screen
+    /// yet, this session.
+    ///
+    /// What is drawn before that is this machine's own copy, which is the only
+    /// copy that can ever be read anyway -- opening an epoch key spends the
+    /// prekey it was sealed against. It is worth drawing at once, and it is
+    /// not the whole story, so a conversation with nothing in it yet says it
+    /// is still asking rather than that there is nothing here.
+    pub loading: bool,
+    /// Whether the conversation list has been fetched at least once.
+    ///
+    /// An empty list means two entirely different things -- "you have no
+    /// conversations" and "we have not asked yet" -- and the first one was
+    /// being said during the second, on every launch.
+    pub synced: bool,
     /// How many messages there are before the first one in `lines`.
     ///
     /// Zero means the transcript is whole. Anything else is what the reader
@@ -1011,16 +1031,25 @@ async fn run(
     chat.set_domain(domain.clone());
     // So a lost connection can be rebuilt without restarting the session.
     chat.dials(endpoint.address, endpoint.server.as_bytes().to_owned());
-    chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
 
     state.send_modify(|s| {
         s.me = Some(me);
         s.exchange = Some(endpoint.server);
         s.domain = domain;
     });
-    (wake)();
 
     let mut desk = Desk::default();
+    // **Before the exchange is asked anything.** Everything below this point
+    // is a round trip -- prekeys, then the list, then a fetch per channel --
+    // and none of it is needed to draw what this machine already holds. The
+    // local copy is also the only copy that can ever be read: opening an
+    // epoch key spends the prekey it was sealed against, so the disc is not a
+    // cache of the exchange's data, it is the data.
+    sync_local(&mut chat, &mut desk, me);
+    publish(&chat, &state, &desk, me);
+    (wake)();
+
+    chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
 
     loop {
@@ -1075,6 +1104,7 @@ async fn run(
                     match sync_channels(&mut chat, &mut desk).await {
                         Ok(()) => {
                             desk.restructure = false;
+                            desk.synced = true;
                             desk.since_sync = 0;
                         }
                         Err(e) => state.send_modify(|s| s.trouble = Some(e)),
@@ -1094,8 +1124,9 @@ struct Known {
     /// The other party, for a direct message. `None` for a group or a public
     /// channel.
     peer: Option<PubKey>,
-    /// Anybody may find and join it, and nothing in it is encrypted.
-    public: bool,
+    /// Anybody may find and join it, and nothing in it is encrypted. `None`
+    /// until the exchange has said which; see [`Summary::public`].
+    public: Option<bool>,
     /// More than two people.
     group: bool,
     label: String,
@@ -1126,6 +1157,10 @@ struct Known {
     /// They have published no prekeys, so nothing can be sealed to them yet.
     waiting: bool,
     typing: bool,
+    /// Whether the exchange has been asked about this channel yet, this
+    /// session. What is on screen before that is this machine's own copy,
+    /// which is worth showing at once and is not the whole story.
+    fetched: bool,
     trouble: Trouble,
 }
 
@@ -1186,6 +1221,9 @@ struct Desk {
     dirty: HashSet<[u8; 32]>,
     /// The conversation list itself needs rebuilding from the exchange.
     restructure: bool,
+    /// Whether the exchange has ever answered about the list, this session.
+    /// What is on screen before that came off this machine's own disc.
+    synced: bool,
     /// Accounts whose profile an event says has moved on.
     restale: HashSet<PubKey>,
     /// Calls somebody has said they are taking, by (channel, invitation).
@@ -1227,6 +1265,7 @@ impl Default for Desk {
             unfetchable: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
+            synced: false,
             since_sync: 0,
         }
     }
@@ -1411,7 +1450,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             let seen = timeline.messages().count();
             Known {
                 peer: None,
-                public,
+                public: Some(public),
                 group,
                 label: String::new(),
                 admins: Vec::new(),
@@ -1424,11 +1463,12 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 unread: 0,
                 waiting: false,
                 typing: false,
+                fetched: false,
                 trouble: Trouble::default(),
             }
         });
         entry.peer = peer.map(|(a, _)| a);
-        entry.public = public;
+        entry.public = Some(public);
         entry.group = group;
         entry.label = label;
         entry.admins = admins;
@@ -1448,7 +1488,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
         present.insert(channel);
         desk.channels.entry(channel).or_insert_with(|| Known {
             peer: Some(c.account),
-            public: false,
+            public: Some(false),
             group: false,
             label: if c.label.is_empty() {
                 c.account.to_string()
@@ -1467,6 +1507,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             last_at: 0,
             waiting: false,
             typing: false,
+            fetched: false,
             trouble: Trouble::default(),
         });
     }
@@ -1476,6 +1517,62 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
     desk.channels.retain(|c, _| present.contains(c));
     desk.dirty.retain(|c| present.contains(c));
     Ok(())
+}
+
+/// Everything this machine already knows, before the exchange is asked.
+///
+/// # Why this exists at all
+///
+/// The conversation list came from `mine()` and every transcript from a
+/// `fetch`, so nothing was on screen until the connection was up, the prekeys
+/// topped up, the list fetched and the open channel polled -- four round trips
+/// before the first word appeared, on a client whose disc already held every
+/// one of those words. A public channel with a few hundred messages therefore
+/// "took a long time to load" while its whole history sat in a file.
+///
+/// What the store cannot say is which of its groups are **public**: it keeps
+/// `kind` as group-or-not, and nothing else. That is why `public` is an
+/// `Option` and stays `None` here -- see [`Summary::public`]. A direct message
+/// is the exception, being never public and derivable: its identifier is
+/// derived from the two accounts, so the other member of a two-member channel
+/// that derives back to itself is the peer.
+fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
+    let Ok(channels) = chat.store().channels() else {
+        return;
+    };
+    for (channel, group, label, admins) in channels {
+        let timeline = chat.history(&channel, &admins).unwrap_or_default();
+        let last_at = timeline.messages().last().map(|m| m.posted).unwrap_or(0);
+        let seen = timeline.messages().count();
+        let peer = (!group)
+            .then(|| admins.iter().copied().find(|a| *a != me))
+            .flatten()
+            .filter(|other| chat.dm_with(other) == channel);
+        desk.channels.entry(channel).or_insert(Known {
+            peer,
+            // Not `false`. Drawing a public channel as private claims its
+            // contents are sealed, and drawing a private group as public
+            // claims the opposite; neither is a guess to make on somebody's
+            // behalf, and the answer is one round trip away.
+            public: if group { None } else { Some(false) },
+            group,
+            label,
+            // Remembered from the last time the exchange said so, which is
+            // what the fold above just used.
+            admins,
+            members: Vec::new(),
+            marks: Vec::new(),
+            timeline,
+            seen,
+            wanted: PAGE,
+            last_at,
+            unread: 0,
+            waiting: false,
+            typing: false,
+            fetched: false,
+            trouble: Trouble::default(),
+        });
+    }
 }
 
 /// Fetch what has changed and publish the result.
@@ -1515,6 +1612,9 @@ async fn refresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut D
                     accepted.push((channel, seq));
                 }
                 known.waiting = false;
+                // Answered for. Until this, what is on screen came off the
+                // disc and the interface says it is still asking.
+                known.fetched = true;
                 known.trouble = Trouble {
                     unreadable: conversation.unreadable.len(),
                     gap: conversation.gap,
@@ -1756,6 +1856,16 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
 
 /// Build what the interface draws from what the task holds.
 fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) {
+    // Whether what follows is the whole story or only this machine's copy of
+    // it. Both are worth drawing; only one of them means "there is nothing
+    // here", and saying that during the other is how a conversation somebody
+    // has been having for a month greets them as empty.
+    let loading = desk
+        .open
+        .and_then(|c| desk.channels.get(&c))
+        .map(|k| !k.fetched)
+        .unwrap_or(desk.open.is_some());
+    let synced = desk.synced;
     let people = people_of(chat, desk);
     let mine = Person {
         name: chat.display_name(&me),
@@ -2143,6 +2253,8 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         s.lines = lines;
         s.events = events;
         s.earlier = earlier;
+        s.loading = loading;
+        s.synced = synced;
         s.typing = typing;
         s.trouble_with = trouble;
         s.people = people;
@@ -2220,7 +2332,8 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 desk.restructure = true;
                 desk.channels.entry(channel).or_insert_with(|| Known {
                     peer: Some(peer),
-                    public: false,
+                    // A direct message, and a direct message is never public.
+                    public: Some(false),
                     group: false,
                     label: peer.to_string(),
                     admins: vec![chat.me, peer],
@@ -2233,6 +2346,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     unread: 0,
                     waiting,
                     typing: false,
+                    fetched: false,
                     trouble: Trouble::default(),
                 });
                 if let Some(k) = desk.channels.get_mut(&channel) {
@@ -2242,7 +2356,17 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
             Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
         },
-        Cmd::Show(channel) => open(desk, state, channel),
+        Cmd::Show(channel) => {
+            open(desk, state, channel);
+            // **At once, from the disc.** `open` clears the transcript and
+            // marks the channel for the next poll, and the poll is a round
+            // trip: until this, opening a conversation showed an empty pane
+            // for as long as the exchange took to answer -- on every open,
+            // including the one sigil does for you on the way in. The history
+            // is already folded and sitting in `desk`.
+            let me = chat.me;
+            publish(chat, state, desk, me);
+        }
         Cmd::Refetch => {
             // Everything that failed, not one file: a fetch fails for reasons
             // that are rarely about the one blob — the link was down, the key

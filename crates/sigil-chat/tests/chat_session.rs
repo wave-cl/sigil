@@ -156,6 +156,97 @@ async fn two_sessions_hold_a_conversation() {
     bob.stop();
 }
 
+/// A conversation is drawn from this machine's own copy, not from the
+/// exchange.
+///
+/// The exchange is **stopped** before the conversation is reopened, so
+/// anything that appears afterwards can only have come off the disc. That is
+/// also the only place it could come from in earnest: opening an epoch key
+/// spends the prekey it was sealed against, so what this client wrote down is
+/// the only copy of these messages that can ever be read.
+///
+/// # What this does not pin
+///
+/// **Not the speed.** Publishing on `Cmd::Show` puts the history up the
+/// instant a conversation is opened rather than at the end of the next
+/// refresh, and this test passes either way -- the refresh republishes from
+/// the same folded history a tick later. Distinguishing them means winning a
+/// race against a 700ms tick, and a test that has to win a race is a test that
+/// fails on a slow morning. What is pinned here is the property underneath
+/// both: the transcript does not need the exchange.
+#[tokio::test]
+async fn a_conversation_is_read_from_the_disc_with_the_exchange_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, server) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(1);
+    let (b_signer, b_id) = signer(2);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    alice.send(Cmd::Send("written down here".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "written down here"),
+            20
+        )
+        .await,
+        "the message should be in the transcript first: {:?}",
+        alice.state().trouble
+    );
+    let channel = alice.state().open.expect("a conversation is open");
+
+    // Away from it, so the transcript is genuinely empty...
+    alice.send(Cmd::Close);
+    assert!(
+        until(|| alice.state().lines.is_empty(), 10).await,
+        "closing should empty the transcript"
+    );
+    // ...and the exchange is gone, so nothing can be fetched back.
+    server.abort();
+    bob.stop();
+
+    alice.send(Cmd::Show(channel));
+    let back = until(
+        || {
+            alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "written down here")
+        },
+        20,
+    )
+    .await;
+    assert!(
+        back,
+        "opening a conversation showed nothing while the exchange was unreachable, \
+         though every message in it is on this disc: {:?}",
+        alice.state().trouble
+    );
+
+    alice.stop();
+}
+
 /// The store is `flock`ed for the life of a session, because two interactive
 /// clients would each keep their own idea of the next message counter and
 /// reusing one costs the confidentiality of two messages.
@@ -359,7 +450,7 @@ async fn a_group_is_created_invited_to_and_read() {
                 .state()
                 .conversations
                 .iter()
-                .any(|c| c.group && !c.public)
+                .any(|c| c.group && c.public == Some(false))
         },
         15,
     )
@@ -373,7 +464,7 @@ async fn a_group_is_created_invited_to_and_read() {
         .state()
         .conversations
         .iter()
-        .find(|c| c.group && !c.public)
+        .find(|c| c.group && c.public == Some(false))
         .map(|c| c.channel)
         .unwrap();
 
@@ -622,7 +713,15 @@ async fn a_public_channel_is_found_in_the_directory_and_joined() {
         topic: "anybody at all".into(),
     });
     assert!(
-        until(|| alice.state().conversations.iter().any(|c| c.public), 15).await,
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.public == Some(true)),
+            15
+        )
+        .await,
         "the public channel should appear for its creator: {:?}",
         alice.state().conversations
     );
@@ -657,7 +756,7 @@ async fn a_public_channel_is_found_in_the_directory_and_joined() {
             bob.state()
                 .conversations
                 .iter()
-                .any(|c| c.channel == found.channel && c.public)
+                .any(|c| c.channel == found.channel && c.public == Some(true))
         },
         15,
     )
@@ -713,7 +812,8 @@ async fn a_private_group_never_appears_in_the_directory() {
         until(
             || {
                 let c = alice.state().conversations;
-                c.iter().any(|c| c.group && !c.public) && c.iter().any(|c| c.public)
+                c.iter().any(|c| c.group && c.public == Some(false))
+                    && c.iter().any(|c| c.public == Some(true))
             },
             15
         )

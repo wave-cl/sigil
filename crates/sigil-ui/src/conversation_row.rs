@@ -27,7 +27,14 @@ pub struct ConversationRow<'a> {
     pub at: &'a str,
     pub unread: u32,
     /// Anybody may find and join it, and **nothing in it is encrypted**.
-    pub public: bool,
+    ///
+    /// `None` while nobody has said yet -- a conversation restored from this
+    /// machine's own copy, before the exchange has answered. The store keeps
+    /// whether a channel is a group and not whether it is public, and neither
+    /// guess is safe: calling a private group public claims its contents are
+    /// in the clear, and calling a public one private claims the opposite. So
+    /// an unanswered kind is drawn as neither.
+    pub public: Option<bool>,
     /// More than two people.
     pub group: bool,
     /// Nothing can be sealed to them yet: they have published no prekeys, so
@@ -79,12 +86,12 @@ pub fn conversation_row(
                     // join it and everything in it is in the clear -- that is
                     // the difference that matters about it, and a reader has to
                     // be able to see it before they type.
-                    if row.public {
+                    if row.public == Some(true) {
                         ui.colored_label(theme.warning, egui::RichText::new("#").strong())
                             .on_hover_text(
                                 "public — anybody may join, and nothing here is encrypted",
                             );
-                    } else if row.group {
+                    } else if row.group && row.public == Some(false) {
                         ui.colored_label(theme.text_muted, "◇")
                             .on_hover_text("group");
                     }
