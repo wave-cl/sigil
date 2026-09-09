@@ -98,6 +98,17 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
             // things happened in.
             ui.ctx().include_bytes(uri.clone(), bytes.to_vec());
             let image = egui::Image::from_bytes(uri.clone(), bytes.to_vec())
+                // **From the picture's own size, not from the space left.**
+                //
+                // `Image` defaults to `ImageFit::Fraction([1, 1])`, which is
+                // `available_size * 1.0` — and inside a scrolling transcript
+                // the available *height* is zero for everything below the
+                // fold. So every picture in a scrolled conversation was drawn
+                // 320 wide and 0 tall: fetched, decoded, uploaded, and
+                // invisible. Three passes of diagnostics went past this
+                // because each of them asked whether the picture had *loaded*,
+                // and it always had.
+                .fit_to_original_size(1.0)
                 // Both, not only the height. A wide picture given an unbounded
                 // width takes the whole pane and pushes the bubble off it.
                 .max_size(egui::vec2(side, side))

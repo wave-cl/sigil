@@ -22,6 +22,46 @@ fn said(h: &Harness<'static>) -> String {
     found.join(" | ")
 }
 
+/// How tall the attachment drew, in a ui with the height it is given.
+///
+/// `None` for the height means what a scrolling transcript actually gives a
+/// message below the fold: **zero**.
+fn tall(bytes: &'static [u8], height: Option<f32>) -> f32 {
+    let took = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let seen = took.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(500.0, 400.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ui.allocate_ui_with_layout(
+                egui::vec2(320.0, height.unwrap_or(0.0)),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let before = ui.min_rect().height();
+                    sigil_ui::attachment(
+                        ui,
+                        &sigil_ui::Attachment {
+                            kind: sigil_ui::attachment::IMAGE,
+                            described: "[image, 28 KiB]",
+                            preview: &[],
+                            bytes: Some(bytes),
+                            missing: false,
+                            id: "sized",
+                        },
+                    );
+                    let grew = ui.min_rect().height() - before;
+                    seen.store(grew.max(0.0) as u32, std::sync::atomic::Ordering::Relaxed);
+                },
+            );
+        });
+    // Twice: the texture is not ready on the pass that asks for it.
+    h.run();
+    h.run();
+    took.load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
 fn drawn(bytes: &'static [u8]) -> Harness<'static> {
     Harness::builder()
         .with_size(egui::vec2(500.0, 400.0))
@@ -157,5 +197,32 @@ fn the_whole_chain_is_asked_about_and_not_only_the_first_link() {
     assert!(
         said.contains("opening") || !said.contains("will not open"),
         "a good picture is neither drawn nor explained: {said}"
+    );
+}
+
+/// A picture is sized by the picture, not by the room left below it.
+///
+/// `Image` defaults to `ImageFit::Fraction([1, 1])` — `available_size * 1.0` —
+/// and inside a scrolling transcript the available *height* is zero for
+/// everything below the fold. Every picture in a scrolled conversation was
+/// therefore drawn 320 wide and **0 tall**: fetched, decoded, uploaded to the
+/// GPU, and invisible.
+///
+/// Three rounds of diagnostics went straight past it, because each of them
+/// asked whether the picture had *loaded*, and it always had. This asks the
+/// only question that was failing: how much room did it take.
+#[test]
+fn a_picture_takes_room_even_where_there_is_none_left() {
+    let with_room = tall(a_png(), Some(400.0));
+    let with_none = tall(a_png(), None);
+    assert!(
+        with_none > 0.0,
+        "a picture below the fold takes no height at all, which is how it \
+         becomes invisible"
+    );
+    // And the same picture either way: its size is its own.
+    assert_eq!(
+        with_none, with_room,
+        "the space left over changes how big the picture is"
     );
 }
