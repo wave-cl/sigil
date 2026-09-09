@@ -277,6 +277,16 @@ pub struct ChatState {
     /// to is not known until it is dialled. It is the key a receipt verifies
     /// under, so an interface shows it rather than the name it was asked for.
     pub exchange: Option<PubKey>,
+    /// The domain that key was discovered at, when it was discovered at one.
+    ///
+    /// **What the default exchange is called.** The default has no name in the
+    /// roster — it is whatever this identity's own SIP-38 handle and
+    /// `~/.sqnr/config` resolve to — so the switcher labelled it with a
+    /// truncated public key, which is unreadable and says nothing about where
+    /// it is. This is the same value `Chat::handle` composes `name@domain`
+    /// from, so the two cannot disagree. `None` when the connection was made
+    /// to an address, which has no domain to report.
+    pub domain: Option<String>,
     /// The exchange this session could not take the store lock for.
     ///
     /// Two interactive clients on one account at one exchange would disagree
@@ -985,9 +995,11 @@ async fn run(
     // the claim having actually worked. Read off the same layers the
     // connection was made from, and only when they name a domain: an address
     // is not one, and `name@203.0.113.1` is not a handle.
-    if let Dial::Discover(layers) = &dial {
-        chat.set_domain(sigil_net::domain_of(layers));
-    }
+    let domain = match &dial {
+        Dial::Discover(layers) => sigil_net::domain_of(layers),
+        Dial::At(_) => None,
+    };
+    chat.set_domain(domain.clone());
     // So a lost connection can be rebuilt without restarting the session.
     chat.dials(endpoint.address, endpoint.server.as_bytes().to_owned());
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
@@ -995,6 +1007,7 @@ async fn run(
     state.send_modify(|s| {
         s.me = Some(me);
         s.exchange = Some(endpoint.server);
+        s.domain = domain;
     });
     (wake)();
 

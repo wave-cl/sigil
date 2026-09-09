@@ -34,6 +34,56 @@ pub enum Route {
     Devices,
 }
 
+/// What to call the default exchange in the switcher.
+///
+/// The default has no name in the roster — it is whatever this identity's own
+/// SIP-38 handle and `~/.sqnr/config` resolve to — so it was labelled with a
+/// truncated public key. That is unreadable and says nothing about *where* it
+/// is, which is the only question a switcher answers. The domain it was
+/// discovered at is the answer when there is one; the key is the fallback,
+/// because a connection made to an address has no domain to report and a key
+/// is still better than a word that names nothing.
+fn default_label(its: Option<ChatState>) -> String {
+    match its {
+        Some(s) => match (s.domain, s.exchange) {
+            (Some(domain), _) if !domain.is_empty() => domain,
+            (_, Some(key)) => sigil_ui::message::short(&key.to_string()),
+            (_, None) => "default".to_string(),
+        },
+        None => "default".to_string(),
+    }
+}
+
+/// Which of an identity's exchanges to show.
+///
+/// # Why the default is not always the answer
+///
+/// An identity's *default* exchange is whatever its own SIP-38 handle sidecar
+/// and `~/.sqnr/config` resolve to, and an identity with neither has no
+/// default at all — nothing is configured, so no session is started for it.
+/// Falling back to the default regardless then showed **"not connected"** for
+/// an identity that was connected perfectly well at a named exchange nobody
+/// was looking at; and adding that exchange again was refused, correctly, as
+/// one it already had. Not connected and already connected, about the same
+/// account, at the same moment.
+///
+/// An explicit choice is always honoured, including a choice of a default
+/// that does not work — somebody who picked it is owed the truth about it
+/// rather than a silent move somewhere else.
+fn showing_exchange(me: PubKey, chosen: Option<&String>, live: &[At]) -> String {
+    if let Some(named) = chosen {
+        return named.clone();
+    }
+    let default = (me, String::new());
+    if live.contains(&default) {
+        return String::new();
+    }
+    live.iter()
+        .find(|at| at.0 == me)
+        .map(|at| at.1.clone())
+        .unwrap_or_default()
+}
+
 /// The words for a ringing call.
 ///
 /// A free function over plain data for the same reason as [`duplicate_of`]:
@@ -371,8 +421,8 @@ impl ChatApp {
     /// the same key at every exchange and its conversations are not.
     fn showing_at(&self, ctx: &AppContext<'_>) -> Option<At> {
         let me = Self::showing(ctx)?;
-        let named = self.showing.get(&me).cloned().unwrap_or_default();
-        Some((me, named))
+        let live: Vec<At> = self.sessions.keys().cloned().collect();
+        Some((me, showing_exchange(me, self.showing.get(&me), &live)))
     }
 
     fn state_of(&self, at: Option<&At>) -> ChatState {
@@ -700,6 +750,13 @@ impl ChatApp {
         theme: &ColorTheme,
     ) {
         let me = at.0;
+        // **Which of the two it is.** An identity with no exchange at all and
+        // one whose *shown* exchange has no session are different problems
+        // with different answers, and saying the first about the second told
+        // somebody their identity named nothing while it was connected
+        // perfectly well somewhere they were not looking.
+        let held = ctx.accounts.active_held().exchanges();
+        let only = held.len() == 1;
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.25);
             sigil_ui::identicon(ui, &me.to_string(), tokens::AVATAR_LG);
@@ -707,7 +764,12 @@ impl ChatApp {
             ui.heading("Not connected");
             ui.colored_label(
                 theme.text_secondary,
-                "This identity names no exchange, so there is nothing for it to talk to.",
+                if only {
+                    "This identity names no exchange, so there is nothing for it to talk to."
+                } else {
+                    "Not connected to this exchange. The others this identity holds are in \
+                     the block in the corner."
+                },
             );
             ui.add_space(tokens::SPACING_SM);
             ui.add(
@@ -1095,12 +1157,18 @@ impl ChatApp {
                 ui.horizontal(|ui| {
                     let selected = *name == at.1;
                     let label = if name.is_empty() {
-                        // The default has no name to show; what it resolved to
-                        // is the useful thing, once it is known.
-                        match state.exchange {
-                            Some(key) => sigil_ui::message::short(&key.to_string()),
-                            None => "default".to_string(),
-                        }
+                        // The default has no name in the roster, so it is
+                        // labelled with what it turned out to be: the domain
+                        // it was discovered at, and only failing that the key.
+                        // A truncated key is unreadable and says nothing about
+                        // *where* it is, which is the whole question a
+                        // switcher answers.
+                        //
+                        // Read from the default's **own** session rather than
+                        // from whichever one is on screen: this row is about
+                        // the default whether or not the default is what is
+                        // being shown.
+                        default_label(self.sessions.get(&(me, String::new())).map(|s| s.state()))
                     } else {
                         name.clone()
                     };
@@ -3187,5 +3255,95 @@ mod ring_tests {
             !said.contains("colin@squic.org"),
             "a fact nobody was in doubt about: {said}"
         );
+    }
+}
+
+#[cfg(test)]
+mod showing_tests {
+    use super::*;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    /// An identity connected only at a named exchange is shown there.
+    ///
+    /// Its default is nothing — no handle sidecar, no `server` in the config —
+    /// so no session is started for it, and showing the default anyway said
+    /// *not connected* about an account that was connected, while adding the
+    /// exchange it already had was refused as a duplicate.
+    #[test]
+    fn an_identity_with_no_working_default_is_shown_where_it_is_connected() {
+        let me = key(1);
+        let live = [(me, "squic.org".to_string())];
+        assert_eq!(showing_exchange(me, None, &live), "squic.org");
+    }
+
+    /// The default wins when it works.
+    #[test]
+    fn the_default_is_preferred_when_there_is_a_session_for_it() {
+        let me = key(1);
+        let live = [(me, String::new()), (me, "squic.org".to_string())];
+        assert_eq!(showing_exchange(me, None, &live), "");
+    }
+
+    /// A choice is a choice, even a choice of something broken.
+    #[test]
+    fn an_explicit_choice_is_honoured_whether_or_not_it_works() {
+        let me = key(1);
+        let live = [(me, "squic.org".to_string())];
+        let chosen = String::new();
+        assert_eq!(showing_exchange(me, Some(&chosen), &live), "");
+        let other = "indra.org".to_string();
+        assert_eq!(showing_exchange(me, Some(&other), &live), "indra.org");
+    }
+
+    /// Somebody else's sessions are not this identity's.
+    #[test]
+    fn another_identitys_exchange_is_not_borrowed() {
+        let me = key(1);
+        let live = [(key(2), "squic.org".to_string())];
+        assert_eq!(showing_exchange(me, None, &live), "");
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn at(domain: Option<&str>, key: Option<u8>) -> ChatState {
+        ChatState {
+            domain: domain.map(str::to_string),
+            exchange: key.map(|b| PubKey::new([b; 32])),
+            ..ChatState::default()
+        }
+    }
+
+    /// The domain, when the connection was discovered at one.
+    #[test]
+    fn the_default_exchange_is_called_by_its_domain() {
+        assert_eq!(
+            default_label(Some(at(Some("squic.org"), Some(3)))),
+            "squic.org"
+        );
+    }
+
+    /// The key when there is no domain — an address was dialled, and an
+    /// address has none. Still better than a word naming nothing.
+    #[test]
+    fn without_a_domain_the_key_stands_in() {
+        let said = default_label(Some(at(None, Some(3))));
+        assert_ne!(said, "default");
+        assert!(
+            said.starts_with(&PubKey::new([3u8; 32]).to_string()[..8]),
+            "{said}"
+        );
+    }
+
+    /// Nothing known yet, and nothing invented.
+    #[test]
+    fn with_no_session_at_all_it_is_just_the_default() {
+        assert_eq!(default_label(None), "default");
+        assert_eq!(default_label(Some(at(None, None))), "default");
     }
 }

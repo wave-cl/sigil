@@ -42,6 +42,7 @@ fn a_conversation() -> ChatState {
     ChatState {
         me: Some(me()),
         exchange: Some(PubKey::new([3u8; 32])),
+        domain: Some("squic.org".into()),
         link: LinkState::Up,
         trouble: None,
         conversations: vec![
