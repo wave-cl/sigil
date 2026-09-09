@@ -294,7 +294,22 @@ impl Shell {
                 .resizable(false)
                 .exact_size(self.top_inset)
                 .frame(egui::Frame::NONE.fill(theme.surface_primary))
-                .show(ui, |_| {});
+                .show(ui, |ui| {
+                    // Double-click to fill the screen, and again to go back:
+                    // what a title bar has done on every desktop for thirty
+                    // years, and this strip is the title bar.
+                    //
+                    // Only reached when the system did not handle it first --
+                    // a click in that region goes to one place, so if egui was
+                    // given it, macOS's own zoom was not.
+                    let bar = ui.allocate_rect(ui.max_rect(), egui::Sense::click());
+                    if bar.double_clicked() {
+                        let full = ui.ctx().input(|i| i.viewport().maximized);
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                            !full.unwrap_or(false),
+                        ));
+                    }
+                });
         }
         // Nothing sealed gets a rail. Every app behind it would be a tab onto
         // an identity that cannot do anything, and offering four of those is

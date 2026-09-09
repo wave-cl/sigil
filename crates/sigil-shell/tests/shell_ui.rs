@@ -236,6 +236,13 @@ fn with_inset(points: f32) -> Harness<'static> {
         ]));
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
+        // **Fast enough for a double click to be one.** The harness gives each
+        // queued event a frame of its own and advances a quarter of a second
+        // per frame by default, so a press and a release are half a second
+        // apart and two clicks are a second: egui's double-click window is
+        // three tenths, and every double click in this harness was two single
+        // ones. Nothing said so -- the widget simply never saw a double.
+        .with_step_dt(0.05)
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             theme::install(&ctx, theme::light(), theme::dark());
@@ -245,7 +252,95 @@ fn with_inset(points: f32) -> Harness<'static> {
         })
 }
 
-/// The window's buttons are not drawn over the rail.
+/// Double-clicking the top strip fills the screen, and again puts it back.
+///
+/// That strip **is** the title bar -- sigil draws behind a transparent one --
+/// so it has to do what a title bar does. macOS handles the double-click
+/// itself when the click reaches its own bar; a click goes to one place, so
+/// egui seeing one means the system did not, and this is what answers it.
+#[test]
+fn double_clicking_the_top_strip_maximises_and_restores() {
+    let mut h = with_inset(40.0);
+    h.run();
+    // In the strip: below the top edge, and past the buttons on the left.
+    let at = egui::pos2(400.0, 20.0);
+
+    h.hover_at(at);
+    // Press and release, twice. Each queued event gets a frame of its own, so
+    // what makes this a double click rather than two is the harness's step
+    // being short -- see `with_inset`.
+    for _ in 0..2 {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+
+    assert_eq!(
+        maximised_asks(&h),
+        vec![true],
+        "a double click on the title bar did not ask the window to fill the screen"
+    );
+
+    // And back. The harness does not resize a window -- there is no window --
+    // so the state the toggle reads is set here, which is the same thing the
+    // desktop reports once it has done as it was asked.
+    // A pause first, or the next pair is a *triple* click rather than a second
+    // double one -- egui looks back twice the double-click window for that,
+    // and a triple is not a double. Two seconds of frames at this step.
+    for _ in 0..40 {
+        h.step();
+    }
+    h.input_mut()
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .expect("the root viewport")
+        .maximized = Some(true);
+    for _ in 0..2 {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    assert_eq!(
+        maximised_asks(&h),
+        vec![false],
+        "the second double click did not put the window back"
+    );
+}
+
+/// What the last frame asked the window to become, if anything.
+fn maximised_asks(h: &Harness<'static>) -> Vec<bool> {
+    h.output()
+        .viewport_output
+        .values()
+        .flat_map(|v| v.commands.iter())
+        .filter_map(|c| match c {
+            egui::ViewportCommand::Maximized(to) => Some(*to),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The window's buttons are not drawn over the rail.""
 ///
 /// sigil's title bar is transparent with the content behind it, which is what
 /// makes the top of the window sigil's colour rather than the system's grey.
