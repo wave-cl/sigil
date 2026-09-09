@@ -2022,7 +2022,7 @@ impl ChatApp {
         if state.conversations.is_empty() && !state.synced {
             ui.add_space(tokens::SPACING_SM);
             ui.horizontal(|ui| {
-                ui.spinner();
+                sigil_ui::working(ui);
                 ui.colored_label(theme.text_secondary, "Loading your chats…");
             });
             return;
@@ -2474,7 +2474,7 @@ impl ChatApp {
                 // the moment a conversation is opened, so an empty pane and a
                 // pending fetch together mean the answer is still coming.
                 if state.loading {
-                    ui.spinner();
+                    sigil_ui::working(ui);
                     ui.add_space(tokens::SPACING_SM);
                     ui.colored_label(theme.text_secondary, "Loading this conversation…");
                 } else {

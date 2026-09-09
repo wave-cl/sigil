@@ -365,8 +365,8 @@ fn a_list_nobody_has_answered_about_yet_says_it_is_loading() {
         ..ChatState::default()
     };
     let mut h = connected(unlocked(dir.path()), waiting);
-    // Stepped, not run: a spinner asks for the next frame for ever, and `run`
-    // waits for the interface to go still.
+    // Stepped, not run: the loading mark asks for the next *step* of itself,
+    // and `run` waits for the interface to stop asking for anything at all.
     h.run_steps(3);
     let said = text_of(&h);
     assert!(

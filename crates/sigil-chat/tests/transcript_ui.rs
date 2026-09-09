@@ -1481,8 +1481,7 @@ fn a_conversation_still_being_fetched_says_so_rather_than_that_it_is_empty() {
     state.events.clear();
     state.loading = true;
     let mut h = harness_with(state, true);
-    // Stepped: a spinner asks for another frame for ever, and `run` waits for
-    // the interface to go still.
+    // Stepped: the loading mark asks for the next step of itself.
     h.run_steps(3);
     let said = text_of(&h);
     assert!(
