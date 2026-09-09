@@ -103,6 +103,37 @@ fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
     }
 }
 
+/// Which conversation to open on arriving, if any.
+///
+/// The newest one, chosen **by its time** rather than by taking the first row
+/// of the list: the list happens to arrive newest-first, and a view that
+/// depends on somebody else's sort order is one that breaks silently the day
+/// the sort changes. The tie-break is the channel, the same one the session
+/// sorts by, so two conversations of the same age do not disagree about which
+/// is newer.
+///
+/// `None` — leave it alone — when something is already open, when this has
+/// been done once for this identity, when there is nothing to open, or in a
+/// one-pane window, where opening a conversation *is* hiding the list.
+fn first_look(
+    open: Option<[u8; 32]>,
+    done: bool,
+    one_pane: bool,
+    conversations: &[Summary],
+) -> Option<[u8; 32]> {
+    if open.is_some() || done || one_pane {
+        return None;
+    }
+    conversations
+        .iter()
+        .max_by(|a, b| {
+            a.at.unwrap_or(0)
+                .cmp(&b.at.unwrap_or(0))
+                .then_with(|| b.channel.cmp(&a.channel))
+        })
+        .map(|c| c.channel)
+}
+
 /// The added exchange name to drop, when a session lost the store lock to
 /// another session of the **same identity**.
 ///
@@ -236,6 +267,12 @@ struct Pane {
     /// profile so cancelling really cancels.
     name: String,
     title: String,
+    /// Whether the first look has happened for this identity.
+    ///
+    /// Opening the newest conversation is something sigil does **once**, on
+    /// arriving. Without the flag, closing a conversation would reopen it on
+    /// the very next pass, and there would be no way to sit in the list.
+    looked: bool,
 }
 
 impl Default for Pane {
@@ -259,6 +296,7 @@ impl Default for Pane {
             naming: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
+            looked: false,
             // The protocol's own default, not zero: a retention field starting
             // outside its own range offers to set something the exchange will
             // refuse, and the refusal would read as sigil's fault.
@@ -282,15 +320,16 @@ pub struct ChatApp {
     /// Which exchange is being shown, for each identity. Absent means the
     /// default one.
     showing: HashMap<PubKey, String>,
-    /// Whether the conversation column is on screen. **Closed to begin with.**
+    /// Whether the conversation column is on screen. **Open to begin with.**
     ///
     /// One preference for the whole app rather than one per identity: it is
     /// about how much room the transcript gets, which is a fact about the
     /// window and not about who you are being in it.
     ///
-    /// The control that opens it lives in the conversation's own bar and is
-    /// drawn whenever the column is away, so starting closed hides the list
-    /// and never the way to it.
+    /// It started closed, on the reasoning that a conversation is what
+    /// somebody opened sigil to read. Signing in to a transcript with no
+    /// list beside it reads as an application with one chat in it, so the
+    /// list is there from the start and the hamburger puts it away.
     columns_open: bool,
     config: Config,
     /// Where the stores live, when it is not `~/.sqex/chat`.
@@ -340,9 +379,9 @@ impl ChatApp {
             closing: Vec::new(),
             panes: HashMap::new(),
             showing: HashMap::new(),
-            // Closed. The conversation is what somebody opened sigil to read,
-            // and a list of the others beside it is a thing they ask for.
-            columns_open: false,
+            // Open, with the newest conversation in it: what somebody signs
+            // in to is their chats, not an empty pane.
+            columns_open: true,
             config: Config::load(),
             store_root: None,
             now: None,
@@ -654,7 +693,23 @@ impl App for ChatApp {
         // `sigil::layout` is the shared rule for this, so the deck and the
         // conversation view cannot drift into two answers about what "narrow"
         // means.
-        match sigil::layout(ui.available_width(), 2) {
+        let layout = sigil::layout(ui.available_width(), 2);
+
+        // Arriving at a conversation rather than at an empty pane. Decided
+        // once per identity, and never in a one-pane window -- there, opening
+        // something *is* hiding the list, which is not a thing to do to
+        // somebody who has just signed in.
+        if let Some(channel) = first_look(
+            state.open,
+            self.pane(at).looked,
+            matches!(layout, sigil::Layout::Single),
+            &state.conversations,
+        ) {
+            self.pane(at).looked = true;
+            self.send_as(Some(at), Cmd::Show(channel));
+        }
+
+        match layout {
             sigil::Layout::Single => {
                 // One pane: the list until something is open, then the
                 // conversation with a way back. Not both squeezed together --
@@ -1894,21 +1949,51 @@ impl ChatApp {
             .frame(
                 egui::Frame::NONE
                     .fill(theme.surface_primary)
-                    // Room above it. The last bubble sat against the top of
-                    // the box, so a message and the thing you type the next
-                    // one into read as one block.
-                    .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_LG as i8)),
+                    // Room above it, and more of it than below. The rule the
+                    // panel draws on its own top edge is a line between two
+                    // things, and a line with the box against it reads as the
+                    // box's own border rather than as the end of the
+                    // transcript.
+                    .inner_margin(egui::Margin {
+                        top: tokens::SPACING_XL as i8,
+                        bottom: tokens::SPACING_LG as i8,
+                        ..Default::default()
+                    }),
             )
             .show(ui, |ui| self.composer_ui(at, state, ui, theme));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
+                // **Inside** the scroll area, not around it. The margin has to
+                // shrink the *content* while the bar stays against the pane
+                // edge; put it on the outside and the bar moves in with the
+                // text and clashes with it again.
+                //
+                // Wide enough for the bar at its widest: egui's scroll bars
+                // float by default, which means they allocate no width and
+                // draw *over* the last ten pixels of whatever is there. A
+                // right-aligned bubble is exactly what is there, so one's own
+                // messages sat under the scrollbar. Taken from the style
+                // rather than written as a number, so it follows if the style
+                // changes.
+                let bar = ui.spacing().scroll.bar_width;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        self.messages_ui(at, state, ui, theme, now);
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin {
+                                right: (bar + tokens::SPACING_XS) as i8,
+                                // And room under the last message, so the
+                                // transcript ends before the rule does rather
+                                // than against it.
+                                bottom: tokens::SPACING_MD as i8,
+                                ..Default::default()
+                            })
+                            .show(ui, |ui| {
+                                self.messages_ui(at, state, ui, theme, now);
+                            });
                     });
             });
     }
@@ -3352,5 +3437,75 @@ mod label_tests {
     fn with_no_session_at_all_it_is_just_the_default() {
         assert_eq!(default_label(None), "default");
         assert_eq!(default_label(Some(at(None, None))), "default");
+    }
+}
+
+#[cfg(test)]
+mod first_look_tests {
+    use super::*;
+
+    fn convo(channel: u8, at: Option<u64>) -> Summary {
+        Summary {
+            channel: [channel; 32],
+            peer: None,
+            label: String::new(),
+            unread: 0,
+            preview: None,
+            at,
+            public: false,
+            group: false,
+            typing: false,
+            waiting: false,
+        }
+    }
+
+    /// The newest, and not the first row handed over.
+    #[test]
+    fn arriving_opens_the_latest_conversation() {
+        // Deliberately out of order: a list sorted the other way must still
+        // give the same answer, or this is testing the session's sort.
+        let convos = [convo(1, Some(10)), convo(2, Some(90)), convo(3, Some(50))];
+        assert_eq!(first_look(None, false, false, &convos), Some([2; 32]));
+        let backwards = [convo(3, Some(50)), convo(2, Some(90)), convo(1, Some(10))];
+        assert_eq!(first_look(None, false, false, &backwards), Some([2; 32]));
+    }
+
+    /// Once. Closing a conversation must not reopen it on the next pass,
+    /// which is the whole reason the flag exists.
+    #[test]
+    fn it_happens_once_and_not_on_every_pass() {
+        let convos = [convo(1, Some(10)), convo(2, Some(90))];
+        assert_eq!(first_look(None, true, false, &convos), None);
+    }
+
+    /// Something already open is what somebody chose, and is not replaced.
+    #[test]
+    fn what_is_already_open_stays_open() {
+        let convos = [convo(1, Some(10)), convo(2, Some(90))];
+        assert_eq!(first_look(Some([1; 32]), false, false, &convos), None);
+    }
+
+    /// One pane: opening a conversation is hiding the list, so arriving does
+    /// not do it on somebody's behalf.
+    #[test]
+    fn a_one_pane_window_is_left_on_the_list() {
+        let convos = [convo(1, Some(10)), convo(2, Some(90))];
+        assert_eq!(first_look(None, false, true, &convos), None);
+    }
+
+    /// Nothing to open, and nothing invented.
+    #[test]
+    fn an_empty_list_opens_nothing() {
+        assert_eq!(first_look(None, false, false, &[]), None);
+    }
+
+    /// A conversation with nothing said in it still counts, because a new
+    /// chat somebody just started is the one they are looking for.
+    #[test]
+    fn a_conversation_with_no_messages_is_still_a_conversation() {
+        let convos = [convo(1, None), convo(2, None)];
+        // The tie-break, so it is an answer rather than whichever the
+        // iterator happened to reach last.
+        assert_eq!(first_look(None, false, false, &convos), Some([1; 32]));
     }
 }

@@ -90,15 +90,6 @@ fn fields(h: &Harness<'static>) -> usize {
     n
 }
 
-/// Show the conversation list.
-///
-/// It starts away: the conversation is what somebody opened sigil to read, and
-/// the list of the others is a thing they ask for.
-fn open_column(h: &mut Harness<'static>) {
-    h.get_by_label("Show the chats").click();
-    h.run();
-}
-
 fn text_of(h: &Harness<'static>) -> String {
     fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
         let n = node.accesskit_node();
@@ -170,7 +161,6 @@ fn somebody_can_be_added_by_key() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(unlocked(dir.path()));
     h.run();
-    open_column(&mut h);
     // The property, not the wording: an empty list has to say *both* that it
     // is empty and what to do about it. A bare "nothing here" leaves somebody
     // looking for a control they have not found.
@@ -212,7 +202,6 @@ fn the_column_holds_no_forms_until_one_is_asked_for() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(unlocked(dir.path()));
     h.run();
-    open_column(&mut h);
     // One: the search box. Searching is not a form -- it filters what is
     // already on screen, so it belongs beside the thing it filters.
     assert_eq!(
@@ -356,12 +345,26 @@ fn an_exchange_that_cannot_be_added_says_why() {
 /// A key that is not a key is refused where it was typed, rather than swallowed.
 /// An empty pane must not point at a column that is not on screen.
 ///
-/// The list starts away, so "pick a conversation" was an instruction to use
-/// something nobody could see.
+/// The list is there on arriving, so "pick a conversation" names something
+/// somebody can see. Put it away and the same pane has to stop naming it and
+/// offer it instead — the sentence follows the screen, not the other way
+/// round.
 #[test]
-fn nothing_open_offers_the_list_rather_than_naming_it() {
+fn an_empty_pane_names_the_list_only_while_it_is_on_screen() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(unlocked(dir.path()));
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Chats"),
+        "signing in did not land on the chats: {said}"
+    );
+    assert!(
+        said.contains("Pick a conversation"),
+        "the list is right there and the pane does not say so: {said}"
+    );
+
+    h.get_by_label("Hide the chats").click();
     h.run();
     let said = text_of(&h);
     assert!(
@@ -386,7 +389,6 @@ fn a_bad_key_is_refused_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(unlocked(dir.path()));
     h.run();
-    open_column(&mut h);
     h.get_by_label("New conversation").click();
     h.run();
     // Nothing has been typed, so the empty field is not a key.
@@ -414,7 +416,6 @@ fn chat_dark() {
 fn chat_dialog_dark() {
     let mut h = harness(fixed());
     h.run();
-    open_column(&mut h);
     h.get_by_label("New conversation").click();
     h.run();
     h.snapshot("chat_dialog_dark");

@@ -333,12 +333,20 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
         })
 }
 
-/// Show the conversation list.
+/// Put the conversation list away.
 ///
-/// It starts away: the conversation is what somebody opened sigil to read, and
-/// the list of the others is a thing they ask for.
-fn open_column(h: &mut Harness<'static>) {
-    h.get_by_label("Show the chats").click();
+/// It is **on screen from the start**: signing in lands on the chats with the
+/// newest one open. A test about the transcript alone hides it, both to give
+/// the transcript the width and because a row's preview repeats the text of
+/// the message it previews — which makes a query for that text ambiguous
+/// rather than wrong, and an ambiguous query fails loudly.
+fn hide_column(h: &mut Harness<'static>) {
+    h.get_by_label("Hide the chats").click();
+    h.run();
+    // The pointer is left where it clicked, which draws the button hovered
+    // and the cursor over it in anything captured afterwards. A picture of a
+    // transcript should not have a mouse in it.
+    h.remove_cursor();
     h.run();
 }
 
@@ -673,7 +681,7 @@ fn a_whole_conversation_has_no_door_at_the_top_of_it() {
 fn the_conversation_column_can_be_put_away_and_found_again() {
     let mut h = harness(true);
     h.run();
-    open_column(&mut h);
+    // There from the start, without being asked for.
     assert!(text_of(&h).contains("Chats"), "{}", text_of(&h));
 
     h.get_by_label("Hide the chats").click();
@@ -712,7 +720,6 @@ fn the_conversation_column_can_be_put_away_and_found_again() {
 fn a_dialog_outlives_the_column_it_was_opened_from() {
     let mut h = harness(true);
     h.run();
-    open_column(&mut h);
     h.get_by_label("New conversation").click();
     h.run();
     assert!(text_of(&h).contains("Write to"), "{}", text_of(&h));
@@ -764,7 +771,6 @@ fn a_public_channel_is_marked_in_the_list() {
     // somebody types into one.
     let mut h = harness(true);
     h.run();
-    open_column(&mut h);
     let said = text_of(&h);
     assert!(said.contains("release check"), "{said}");
     assert!(
@@ -778,20 +784,20 @@ fn a_public_channel_is_marked_in_the_list() {
 fn transcript_dark() {
     let mut h = harness(true);
     h.run();
+    hide_column(&mut h);
     h.snapshot("transcript_dark");
 }
 
 /// The conversation list, which nothing else renders.
 ///
-/// It is behind a modal in `chat_dialog_dark` and away by default everywhere
-/// else, so the rows themselves — the marks, the marker on a channel, the
+/// It is behind a modal in `chat_dialog_dark` and hidden by the transcript
+/// pictures, so the rows themselves — the marks, the marker on a channel, the
 /// unread pill — had no picture anybody could look at.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn list_dark() {
     let mut h = harness(true);
     h.run();
-    open_column(&mut h);
     h.snapshot("list_dark");
 }
 
@@ -800,6 +806,7 @@ fn list_dark() {
 fn transcript_light() {
     let mut h = harness(false);
     h.run();
+    hide_column(&mut h);
     h.snapshot("transcript_light");
 }
 
@@ -939,6 +946,7 @@ fn an_added_exchange_can_be_removed_again() {
 fn the_controls_are_beside_the_message_and_on_its_free_side() {
     let mut h = harness(true);
     h.run();
+    hide_column(&mut h);
     // One of theirs, which sits on the left: the controls belong to its right.
     let bubble = h.get_by_label_contains("the second one, then").rect();
     h.get_by_label_contains("the second one, then").hover();
@@ -975,6 +983,7 @@ fn ones_own_messages_sit_on_the_other_side() {
     state.lines[n - 2].mine = false;
     let mut h = harness_with(state, true);
     h.run();
+    hide_column(&mut h);
 
     let mine = h.get_by_label_contains("sent by me").rect();
     let theirs = h.get_by_label_contains("the second one, then").rect();
@@ -982,6 +991,52 @@ fn ones_own_messages_sit_on_the_other_side() {
         mine.left() > theirs.right(),
         "one's own message is on the same side as everybody else's: \
          {mine:?} against {theirs:?}"
+    );
+}
+
+/// One's own message stops before the scrollbar rather than under it.
+///
+/// egui's scroll bars **float** by default: they allocate no width and are
+/// painted over the last `bar_width` pixels of the content. A right-aligned
+/// bubble is what is there, so one's own messages ran under the bar and the
+/// bar sat on top of the text.
+///
+/// # What is being measured, and what a short message would measure instead
+///
+/// The accessibility tree carries the **text**, not the frame around it, and a
+/// short message does not reach its own bubble's edge -- so the first version
+/// of this passed with the margin taken away, by 917 against a limit of 962.
+/// The message here is long enough to wrap, which makes the text exactly as
+/// wide as the bubble allows and puts its right edge one padding in from the
+/// frame's.
+///
+/// The pane's right edge comes from the identity block, which is right-aligned
+/// in the same pane -- rather than from the window, which would be measuring
+/// this harness's own frame.
+#[test]
+fn ones_own_messages_stop_before_the_scrollbar() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].mine = true;
+    state.lines[n - 1].text = format!(
+        "sent by me, {}",
+        "and it goes on for long enough to wrap, ".repeat(6)
+    );
+    let mut h = harness_with(state, true);
+    h.run();
+    hide_column(&mut h);
+
+    let bar = h.ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
+    let pad = sigil::tokens::SPACING_LG;
+    let edge = h.get_by_label("Your identity").rect().right();
+    let mine = h.get_by_label_contains("sent by me").rect();
+    assert!(
+        mine.right() + pad <= edge - bar,
+        "one's own message runs under the scrollbar: its text ends at {}, \
+         the bubble a padding of {pad} past that, the pane at {edge}, \
+         and the bar is {bar} wide",
+        mine.right()
     );
 }
 
@@ -1048,6 +1103,7 @@ fn the_controls_are_vertically_centred_on_the_message() {
 fn a_picker_survives_the_pointer_leaving_the_message() {
     let mut h = harness(true);
     h.run();
+    hide_column(&mut h);
     h.get_by_label_contains("the second one, then").hover();
     h.step();
     h.step();
