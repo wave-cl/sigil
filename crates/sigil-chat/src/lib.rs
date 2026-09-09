@@ -575,7 +575,14 @@ impl App for ChatApp {
         // list, and the light said *connected* because that was the default.
         // Nothing anybody typed did anything and nothing said why.
         if self.fixed.is_none() && !self.sessions.contains_key(at) {
-            self.dialogs_ui(ctx, at, &ChatState::default(), ui, &theme);
+            let none = ChatState::default();
+            self.dialogs_ui(ctx, at, &none, ui, &theme);
+            // **The bar stays.** Without it this screen had no identity block
+            // and therefore no chevron — so there was no way to switch to an
+            // identity that does work, and nothing on it reflected an exchange
+            // being added either. The one instruction it gave pointed at a
+            // corner that was empty.
+            self.session_bar_ui(ctx, at, &none, ui, &theme);
             self.unconnected_ui(ctx, at, ui, &theme);
             return AppResponse::default();
         }
@@ -724,6 +731,7 @@ impl ChatApp {
                     .small(),
                 );
             }
+            let _ = ctx;
         });
     }
 
@@ -1474,6 +1482,9 @@ impl ChatApp {
             )
             .small(),
         );
+        if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
+            ui.colored_label(theme.destructive, trouble);
+        }
         ui.add_space(tokens::SPACING_SM);
         ui.horizontal(|ui| {
             if ui.button("Add").clicked() {
@@ -1481,10 +1492,21 @@ impl ChatApp {
                 if ctx.accounts.add_exchange(which, &named) {
                     let pane = self.pane(at);
                     pane.exchange.clear();
+                    pane.add_trouble = None;
                     pane.dialog = None;
                     // Shown straight away: adding one and staying where you
                     // were makes it look as though nothing happened.
                     self.showing.insert(me, named);
+                } else {
+                    // **Refused where it was typed.** `add_exchange` answers
+                    // `false` for an empty name and for one already held, and
+                    // this dropped both on the floor: the dialog stayed open
+                    // with the text still in it and nothing said why.
+                    self.pane(at).add_trouble = Some(if named.is_empty() {
+                        "Name an exchange — a domain, or host:port.".to_string()
+                    } else {
+                        format!("This identity is already connected to {named}.")
+                    });
                 }
             }
             if ui.button("Cancel").clicked() {

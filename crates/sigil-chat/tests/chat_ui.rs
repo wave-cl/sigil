@@ -263,6 +263,96 @@ fn an_identity_with_nowhere_to_connect_says_so() {
     );
 }
 
+/// Adding an exchange from the "not connected" pane actually adds one.
+#[test]
+fn an_exchange_can_be_added_from_the_pane_that_offers_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift(unlocked(dir.path()));
+    h.run();
+
+    h.get_by_label("Add an exchange").click();
+    h.run();
+    assert!(
+        text_of(&h).contains("a domain, or host:port") || text_of(&h).contains("Exchange"),
+        "the dialog did not open: {}",
+        text_of(&h)
+    );
+
+    // Type into it, the way somebody would.
+    // The only field on this screen. Matched on the node's own role name
+    // rather than on accesskit's `Role`, which `kittest` does not re-export.
+    let field = h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    );
+    field.focus();
+    field.type_text("indra.org");
+    h.run();
+    h.get_by_label("Add").click();
+    h.run();
+    h.run();
+
+    // The pane itself does not list exchanges, so this asks the identity
+    // menu, which does — and which is on this screen because the bar is.
+    h.get_by_label("Your identity").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("indra.org"),
+        "the exchange was not added: {said}"
+    );
+}
+
+/// An exchange that cannot be added says why, rather than doing nothing.
+///
+/// `add_exchange` answers `false` for an empty name and for one already held,
+/// and both were dropped on the floor: the dialog stayed open with the text
+/// still in it and nothing said what had happened.
+#[test]
+fn an_exchange_that_cannot_be_added_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift(unlocked(dir.path()));
+    h.run();
+    h.get_by_label("Add an exchange").click();
+    h.run();
+
+    // Nothing typed.
+    h.get_by_label("Add").click();
+    h.run();
+    assert!(
+        text_of(&h).contains("Name an exchange"),
+        "an empty name did nothing at all: {}",
+        text_of(&h)
+    );
+
+    // And one already held.
+    let field = h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    );
+    field.focus();
+    field.type_text("indra.org");
+    h.run();
+    h.get_by_label("Add").click();
+    h.run();
+    h.get_by_label("Add an exchange").click();
+    h.run();
+    let field = h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    );
+    field.focus();
+    field.type_text("indra.org");
+    h.run();
+    h.get_by_label("Add").click();
+    h.run();
+    assert!(
+        text_of(&h).contains("already connected to indra.org"),
+        "adding the same exchange twice did nothing at all: {}",
+        text_of(&h)
+    );
+}
+
 /// A key that is not a key is refused where it was typed, rather than swallowed.
 /// An empty pane must not point at a column that is not on screen.
 ///
