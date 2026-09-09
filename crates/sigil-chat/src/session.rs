@@ -911,6 +911,35 @@ impl ChatHandle {
         self.state.borrow().clone()
     }
 
+    /// One question about the state, answered without copying the rest of it.
+    ///
+    /// # Why these exist
+    ///
+    /// `state()` clones everything: every line, its text, its reactions, its
+    /// attachments. Three callers walk **every session** on **every pass** to
+    /// read a single field each -- what is ringing, how much is unread, which
+    /// exchange this one is on -- and each of those walks was a full clone per
+    /// session per frame. Reading one field off the borrow costs nothing and
+    /// says what it wants.
+    pub fn ringing(&self) -> Vec<Ring> {
+        self.state.borrow().ringing.clone()
+    }
+
+    /// How much is waiting here, across every conversation.
+    pub fn unread(&self) -> usize {
+        self.state
+            .borrow()
+            .conversations
+            .iter()
+            .map(|c| c.unread)
+            .sum()
+    }
+
+    /// Which exchange this session is talking to, once it knows.
+    pub fn exchange(&self) -> Option<PubKey> {
+        self.state.borrow().exchange
+    }
+
     /// Ask the task to do something. Never blocks, and never fails visibly: a
     /// dropped task means the session is over, which the state already says.
     pub fn send(&self, cmd: Cmd) {
@@ -1052,7 +1081,7 @@ async fn run(
     // epoch key spends the prekey it was sealed against, so the disc is not a
     // cache of the exchange's data, it is the data.
     sync_local(&mut chat, &mut desk, me);
-    publish(&chat, &state, &desk, me);
+    let _ = publish(&chat, &state, &desk, me);
     (wake)();
 
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
@@ -1092,6 +1121,7 @@ async fn run(
                 // Checked before modifying: `send_modify` reports a change
                 // whether or not anything changed, and a watch that always
                 // says so wakes the interface on every tick for nothing.
+                let mut moved = false;
                 if state
                     .borrow()
                     .note
@@ -1099,6 +1129,7 @@ async fn run(
                     .is_some_and(|n| now.saturating_sub(n.at) >= NOTE_SECS)
                 {
                     state.send_modify(|s| s.note = None);
+                    moved = true;
                 }
                 if desk.restructure {
                     // **Cleared only on success.** Clearing it first meant a
@@ -1113,7 +1144,10 @@ async fn run(
                             desk.synced = true;
                             desk.since_sync = 0;
                         }
-                        Err(e) => state.send_modify(|s| s.trouble = Some(e)),
+                        Err(e) => {
+                            state.send_modify(|s| s.trouble = Some(e));
+                            moved = true;
+                        }
                     }
                 }
                 learn_names(&mut chat, &mut desk).await;
@@ -1122,9 +1156,17 @@ async fn run(
                 // looking at in a moment. Measured the other way round, one
                 // tick spent two and a half seconds on pictures before asking
                 // whether anything had been said.
-                refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
+                moved |= refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
                 fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
-                (wake)();
+                // **Only when something moved.** eframe is reactive: with
+                // nothing asking for a repaint it sleeps. This wake used to
+                // fire on every tick regardless, which held the window at 1.4
+                // frames a second for ever -- each of them cloning the state
+                // several times and laying out every message in view -- for an
+                // account where nothing at all was happening.
+                if moved {
+                    (wake)();
+                }
             }
         }
     }
@@ -1661,7 +1703,7 @@ async fn refresh(
     desk: &mut Desk,
     me: PubKey,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
-) {
+) -> bool {
     // The open conversation is always fetched: it is the one somebody is
     // looking at, and a signal there (typing) has no event of its own until it
     // is delivered.
@@ -1764,7 +1806,7 @@ async fn refresh(
         known.marks = marks;
     }
 
-    publish(chat, state, desk, me);
+    publish(chat, state, desk, me)
 }
 
 /// Re-read who we are blocking.
@@ -1953,7 +1995,7 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
 }
 
 /// Build what the interface draws from what the task holds.
-fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) {
+fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
     // Whether what follows is the whole story or only this machine's copy of
     // it. Both are worth drawing; only one of them means "there is nothing
     // here", and saying that during the other is how a conversation somebody
@@ -2345,23 +2387,43 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         .unwrap_or_default();
     let link = LinkState::from(chat.link());
 
-    state.send_modify(|s| {
-        s.link = link;
-        s.conversations = summaries;
-        s.lines = lines;
-        s.events = events;
-        s.earlier = earlier;
-        s.loading = loading;
-        s.synced = synced;
-        s.typing = typing;
-        s.trouble_with = trouble;
-        s.people = people;
-        s.mine = mine;
-        s.members = members;
-        s.i_am_admin = i_am_admin;
-        s.topic = topic;
-        s.ringing = ringing;
-    });
+    // **Published only where it differs, and it says whether it did.**
+    //
+    // `send_modify` reports a change whether or not anything changed, and the
+    // tick used to wake the interface unconditionally afterwards -- so an
+    // account with nothing happening repainted the window 1.4 times a second
+    // for ever, and each of those frames cloned the state several times over
+    // and laid out every message in view. A field-by-field comparison is
+    // cheaper than one frame of that by a wide margin.
+    //
+    // The caller wakes the interface when this returns true, and only then.
+    state.send_if_modified(|s| {
+        let mut moved = false;
+        macro_rules! set {
+            ($field:ident, $value:expr) => {
+                if s.$field != $value {
+                    s.$field = $value;
+                    moved = true;
+                }
+            };
+        }
+        set!(link, link);
+        set!(conversations, summaries);
+        set!(lines, lines);
+        set!(events, events);
+        set!(earlier, earlier);
+        set!(loading, loading);
+        set!(synced, synced);
+        set!(typing, typing);
+        set!(trouble_with, trouble);
+        set!(people, people);
+        set!(mine, mine);
+        set!(members, members);
+        set!(i_am_admin, i_am_admin);
+        set!(topic, topic);
+        set!(ringing, ringing);
+        moved
+    })
 }
 
 /// How far one of our own messages is known to have got.
@@ -2463,7 +2525,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             // including the one sigil does for you on the way in. The history
             // is already folded and sitting in `desk`.
             let me = chat.me;
-            publish(chat, state, desk, me);
+            let _ = publish(chat, state, desk, me);
         }
         Cmd::Refetch => {
             // Everything that failed, not one file: a fetch fails for reasons

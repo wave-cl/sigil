@@ -918,13 +918,7 @@ impl App for ChatApp {
     /// The badge is what tells somebody to come back, and an account they are
     /// not currently looking at is exactly the one they would otherwise miss.
     fn tab_notifications(&self) -> TabNotifications {
-        TabNotifications::count(
-            self.sessions
-                .values()
-                .flat_map(|s| s.state().conversations)
-                .map(|c| c.unread as u32)
-                .sum(),
-        )
+        TabNotifications::count(self.sessions.values().map(|s| s.unread() as u32).sum())
     }
 
     fn title(&self) -> &str {
@@ -1125,10 +1119,16 @@ impl ChatApp {
     /// roster, it is whatever the identity resolves to, and there would be
     /// nothing to remove.
     fn duplicate_exchange(&self, at: &At, state: &ChatState) -> Option<String> {
+        // **Nothing at all unless this session is locked out.** It is the only
+        // case the answer is about, and the walk below reads one field from
+        // every other session -- which used to mean cloning every other
+        // session's entire state, on every pass, to find out that nobody was
+        // locked out of anything.
+        state.locked_out?;
         let others: Vec<(At, Option<PubKey>)> = self
             .sessions
             .iter()
-            .map(|(other, session)| (other.clone(), session.state().exchange))
+            .map(|(other, session)| (other.clone(), session.exchange()))
             .collect();
         duplicate_of(at, state.locked_out, &others)
     }
@@ -3272,18 +3272,20 @@ impl ChatApp {
         let held = self.sessions.len();
         let mut fresh: Vec<String> = Vec::new();
         for (at, session) in &self.sessions {
-            let state = session.state();
-            for ring in &state.ringing {
+            // The rings, not the whole state: this runs for every identity on
+            // every pass, and what it wants is a list that is nearly always
+            // empty.
+            let ringing = session.ringing();
+            for ring in &ringing {
                 if ring.mine || self.announced.contains(&(ring.channel, ring.seq)) {
                     continue;
                 }
                 self.announced.insert((ring.channel, ring.seq));
-                fresh.push(ring_said(
-                    &ring.from,
-                    &ring.label,
-                    &state.mine.label(&at.0),
-                    held,
-                ));
+                // The whole state, but only for a ring nobody has been told
+                // about yet -- which happens about as often as a telephone
+                // rings, rather than sixty times a second.
+                let me = session.state().mine.label(&at.0);
+                fresh.push(ring_said(&ring.from, &ring.label, &me, held));
             }
         }
         for said in fresh {

@@ -156,6 +156,84 @@ async fn two_sessions_hold_a_conversation() {
     bob.stop();
 }
 
+/// A session with nothing happening wakes nobody.
+///
+/// eframe is reactive: with nothing asking for a repaint it sleeps. The tick
+/// used to wake the interface unconditionally, so an idle account held the
+/// window at 1.4 frames a second for ever — each of those frames cloning the
+/// state several times and laying out every message in view, for an account
+/// where nothing at all had happened.
+///
+/// Counted, not timed: the wake is a callback, so a test can hold the counter.
+#[tokio::test]
+async fn an_idle_session_stops_waking_the_interface() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(23);
+    let (b_signer, b_id) = signer(24);
+
+    let woke = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = woke.clone();
+    let alice = session::start(
+        endpoint,
+        a_signer,
+        Some(dir.path().join("a.db")),
+        move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        },
+    );
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+
+    // Let everything that was going to happen happen.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let settled = woke.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Four ticks of nothing at all.
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let idle = woke.load(std::sync::atomic::Ordering::Relaxed) - settled;
+    assert_eq!(
+        idle, 0,
+        "an idle session woke the interface {idle} times in three seconds"
+    );
+
+    // And it still wakes when there is something to say.
+    bob.send(Cmd::Send("something to wake for".into()));
+    assert!(
+        until(
+            || woke.load(std::sync::atomic::Ordering::Relaxed) > settled,
+            20
+        )
+        .await,
+        "a message arrived and the interface was never told"
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
 /// The interface is handed the picture, not a copy of it.
 ///
 /// The state is cloned four or five times a frame -- to draw, to badge the tray
