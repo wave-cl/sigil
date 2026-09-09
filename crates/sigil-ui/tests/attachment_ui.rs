@@ -87,6 +87,73 @@ fn drawn(bytes: &'static [u8]) -> Harness<'static> {
         })
 }
 
+/// A PNG of any size, spelled out.
+///
+/// A decoder is exactly what would be needed to read a fixture file, and a
+/// decoder is part of what these tests are about. The zlib stream is stored
+/// blocks -- uncompressed, which is a legal deflate stream and needs no
+/// compressor here.
+fn png_of(w: u32, h: u32) -> Vec<u8> {
+    fn crc(parts: &[&[u8]]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for part in parts {
+            for &x in *part {
+                c ^= x as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+        }
+        c ^ 0xFFFF_FFFF
+    }
+    fn chunk(kind: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&crc(&[kind, data]).to_be_bytes());
+        out
+    }
+
+    let mut header = w.to_be_bytes().to_vec();
+    header.extend_from_slice(&h.to_be_bytes());
+    // 8 bits per channel, colour type 2 (rgb), no interlace.
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+
+    // One filter byte per row, then three bytes a pixel.
+    let mut raw = Vec::with_capacity((h * (1 + w * 3)) as usize);
+    for y in 0..h {
+        raw.push(0);
+        for x in 0..w {
+            raw.extend_from_slice(&[(x % 251) as u8, (y % 251) as u8, 128]);
+        }
+    }
+
+    let mut z = vec![0x78, 0x01];
+    for (i, block) in raw.chunks(65_535).enumerate() {
+        let last = (i + 1) * 65_535 >= raw.len();
+        z.push(u8::from(last));
+        z.extend_from_slice(&(block.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in &raw {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(chunk(b"IHDR", &header));
+    png.extend(chunk(b"IDAT", &z));
+    png.extend(chunk(b"IEND", b""));
+    png
+}
+
 /// A one-pixel PNG, spelled out.
 ///
 /// A decoder is exactly what would be needed to produce a fixture file, and a
@@ -230,32 +297,112 @@ fn a_picture_takes_room_even_where_there_is_none_left() {
     );
 }
 
-/// A picture takes the same room before it arrives as after.
+/// A picture keeps its own shape.
 ///
-/// It used to take whatever each stage needed: one line of words while the
-/// blob was fetched, another while it decoded, then a few hundred pixels when
-/// it appeared. So every picture changed the height of everything below it two
-/// or three times as it loaded, and scrolling through a channel with pictures
-/// in it moved the text under the reader's eyes -- the transcript's content
-/// height was measured wandering by forty to two hundred pixels at a time
-/// while nobody had touched anything.
+/// One fixed box for every picture was wrong in both directions: a picture
+/// 1620 by 262 sat in a 240-tall box with two thirds of it empty.
 ///
-/// The three states are the three this can be in: nothing fetched, bytes that
-/// will not decode, and a picture. They have to agree to the pixel.
+/// Self-calibrating, so it measures the shape and not the furniture around it:
+/// two pictures the same width and twice the height apart must differ in drawn
+/// height by exactly that, scaled by the width they are given. Everything else
+/// on the row -- the description underneath, the spacing -- is the same in
+/// both and cancels.
 #[test]
-fn every_stage_of_a_picture_takes_the_same_room() {
-    let fetching = tall(None, Some(400.0));
-    let broken = tall(Some(b"this is not a picture"), Some(400.0));
-    let drawn = tall(Some(a_png()), Some(400.0));
+fn a_picture_is_drawn_in_its_own_shape() {
+    let wide: &'static [u8] = Box::leak(png_of(400, 100).into_boxed_slice());
+    let taller: &'static [u8] = Box::leak(png_of(400, 200).into_boxed_slice());
 
-    assert!(fetching > 0.0, "a picture on its way takes no room at all");
-    assert_eq!(
-        fetching, drawn,
-        "the transcript moves when a picture arrives: {fetching} before, {drawn} after"
+    let short = tall(Some(wide), Some(400.0));
+    let deep = tall(Some(taller), Some(400.0));
+    // 400 wide into a column of 320 is a scale of 0.8, so 100 more pixels of
+    // picture is 80 more pixels on screen.
+    assert!(
+        (deep - short - 80.0).abs() <= 4.0,
+        "a picture twice as tall drew {deep} against {short}, a difference of \
+         {} where the shape says 80",
+        deep - short
     );
-    assert_eq!(
-        broken, drawn,
-        "the transcript moves when a picture turns out to be unopenable: \
-         {broken} against {drawn}"
+    // And the wide one is nowhere near the tallest a picture may be: that was
+    // the letterbox.
+    assert!(
+        short < 160.0,
+        "a picture four times as wide as it is tall took {short} pixels"
+    );
+}
+
+/// Every state of a picture reserves what the picture takes, once anything has
+/// measured it.
+///
+/// Each stage used to take whatever it needed -- a line of words while the
+/// blob was fetched, another while it decoded, then a few hundred pixels when
+/// it appeared -- so every picture changed the height of everything below it
+/// two or three times as it loaded, and scrolling a channel with pictures in
+/// it moved the text under the reader's eyes. The height is remembered against
+/// the blob, so a re-fetch or a scroll back to it reserves the same room.
+///
+/// **One context throughout**, because that is where the memory lives: a fresh
+/// harness per state would be a fresh window, and a fresh window has never
+/// seen the picture.
+#[test]
+fn a_picture_reserves_what_it_took_last_time() {
+    let bytes: &'static [u8] = Box::leak(png_of(400, 100).into_boxed_slice());
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(Some(bytes)));
+    let took = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
+
+    let (state, seen) = (shown.clone(), took.clone());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(500.0, 400.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ui.allocate_ui_with_layout(
+                egui::vec2(320.0, 400.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let before = ui.min_rect().height();
+                    sigil_ui::attachment(
+                        ui,
+                        &sigil_ui::Attachment {
+                            kind: sigil_ui::attachment::IMAGE,
+                            described: "[image, 28 KiB]",
+                            preview: &[],
+                            bytes: *state.borrow(),
+                            missing: false,
+                            id: "remembered",
+                        },
+                        sigil::ColorTheme::current(&ctx).surface_elevated,
+                    );
+                    seen.set(ui.min_rect().height() - before);
+                },
+            );
+        });
+    // Three: the texture is not ready on the pass that asks for it, and the
+    // height it settles on is reserved the pass after that.
+    h.run();
+    h.run();
+    h.run();
+    let drawn = took.get();
+    assert!(drawn > 60.0, "the picture drew nothing: {drawn}");
+    // **The room follows the picture.** Without that, the two halves of this
+    // test agree at whatever was guessed and prove nothing: a box that never
+    // changes is trivially the same before and after. 400 by 100 into a column
+    // of 320 is 80 pixels of picture, and the guess for one nobody has
+    // measured is 180.
+    assert!(
+        drawn < 140.0,
+        "the picture is 80 pixels tall and it reserved {drawn}, which is the \
+         guess rather than the measurement"
+    );
+
+    // The blob goes away -- fetched again, or scrolled far enough that it was
+    // dropped. The room it takes must not.
+    *shown.borrow_mut() = None;
+    h.run();
+    h.run();
+    assert!(
+        (took.get() - drawn).abs() < 1.0,
+        "a picture on its way took {} where the same picture takes {drawn}",
+        took.get()
     );
 }

@@ -52,23 +52,36 @@ pub struct Attachment<'a> {
 /// row reading `[image, 28 KiB]`.
 pub const PICTURE: f32 = 320.0;
 
-/// And how tall.
+/// The tallest a picture is drawn, whatever shape it is.
 ///
-/// **A picture takes the same room before it arrives as after.** It used to
-/// take whatever it happened to need at each stage -- a line of words while
-/// the blob was fetched, another while it decoded, then a few hundred pixels
-/// when it appeared -- so every picture in a conversation changed the height
-/// of everything below it two or three times as it loaded. Scrolling through a
-/// channel with pictures in it moved the text under the reader's eyes: the
-/// content height was measured wandering by forty to two hundred pixels at a
-/// time while nobody had touched anything.
+/// A portrait photograph would otherwise be a page of its own in the middle of
+/// a conversation. Past this it is scaled down, and clicking it opens it at
+/// full size.
+pub const PICTURE_MAX_TALL: f32 = 320.0;
+
+/// How much room a picture is given **before anybody knows its shape**.
 ///
-/// So the box is fixed and the picture is fitted inside it, and the only way
-/// to do that without knowing the shape in advance is to choose the shape. A
-/// landscape photograph is letterboxed by thirty pixels; a portrait one is
-/// narrower than the box. Both are stable, and clicking either opens it full
-/// size, which is where the shape stops being a compromise.
-pub const PICTURE_TALL: f32 = 240.0;
+/// # Why a picture's height is remembered rather than fixed
+///
+/// Each stage of loading used to take whatever it needed -- a line of words
+/// while the blob was fetched, another while it decoded, then a few hundred
+/// pixels when it appeared -- so every picture changed the height of
+/// everything below it two or three times, and scrolling a channel with
+/// pictures in it moved the text under the reader's eyes.
+///
+/// The first answer to that was one fixed box for every picture, and it was
+/// wrong in both directions: a picture 1620 by 262 sat in a 240-tall box with
+/// two thirds of it empty, and a thumbnail standing in for one that had not
+/// arrived was drawn tiny in the middle of that emptiness rather than filling
+/// it.
+///
+/// So a picture keeps its own shape, and its measured height is **remembered
+/// against the blob** for as long as the window is open: every state of it
+/// after the first reserves exactly what it will take, including a re-fetch
+/// and a scroll back to it. This is the room given to one nobody has ever
+/// measured -- sixteen by nine at [`PICTURE`] wide, which is the commonest
+/// photograph there is.
+pub const PICTURE_GUESS: f32 = 180.0;
 
 /// What the reader did to a file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -80,18 +93,20 @@ pub struct AttachmentAction {
     pub retry: bool,
 }
 
-/// The largest rect of `size`'s shape that fits inside `into`, centred -- and
-/// never larger than `size` itself.
+/// How large to draw a picture of `natural` size in a column `side` wide.
 ///
-/// Blowing a thumbnail up to fill the box makes a worse picture of the same
-/// thing, and a small image drawn at four times its size reads as a mistake
-/// rather than as a small image.
-fn fit(into: egui::Rect, size: egui::Vec2) -> egui::Rect {
-    if size.x <= 0.0 || size.y <= 0.0 {
-        return into;
+/// Its own shape, bounded by the width and by [`PICTURE_MAX_TALL`]. A picture
+/// smaller than the column is left alone -- one blown up to four times its
+/// size reads as a mistake rather than as a small picture -- **except** a
+/// thumbnail, which is not a small picture but a stand-in for a large one and
+/// is scaled to the room the real one will take.
+fn fit(natural: egui::Vec2, side: f32, whole: bool) -> egui::Vec2 {
+    if natural.x <= 0.0 || natural.y <= 0.0 {
+        return egui::vec2(side, PICTURE_GUESS);
     }
-    let scale = (into.width() / size.x).min(into.height() / size.y).min(1.0);
-    egui::Rect::from_center_size(into.center(), size * scale)
+    let scale = (side / natural.x).min(PICTURE_MAX_TALL / natural.y);
+    let scale = if whole { scale.min(1.0) } else { scale };
+    natural * scale
 }
 
 /// Draw one.
@@ -113,14 +128,23 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
         // we have neither. Each is strictly better than the last and every one
         // of them is better than an empty space where a picture should be --
         // and **all three take the same room**, so which one is on screen
-        // never moves anything else. See [`PICTURE_TALL`].
+        // never moves anything else. See [`PICTURE_GUESS`].
         let (bytes, whole) = match (a.bytes, a.preview.is_empty()) {
             (Some(b), _) => (Some(b), true),
             (None, false) => (Some(a.preview), false),
             (None, true) => (None, false),
         };
         let side = PICTURE.min(ui.available_width().max(160.0));
-        let box_size = egui::vec2(side, PICTURE_TALL);
+        // **The height this picture took last time it was measured.** Kept
+        // against the blob rather than the message, because it is a fact about
+        // the picture; kept in the context rather than in the caller, because
+        // every view that draws a transcript wants the same answer.
+        let remembered = egui::Id::new(("sigil-picture-tall", a.id));
+        let tall: f32 = ui
+            .ctx()
+            .data(|d| d.get_temp(remembered))
+            .unwrap_or(PICTURE_GUESS);
+        let box_size = egui::vec2(side, tall);
         let (rect, response) = ui.allocate_exact_size(box_size, egui::Sense::click());
         // The ground the picture sits on, so a letterboxed one reads as a
         // picture in a frame rather than as a hole in the bubble.
@@ -190,9 +214,22 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             // the widget itself asks.
             match image.load_for_size(ui.ctx(), box_size) {
                 Ok(egui::load::TexturePoll::Ready { texture }) => {
-                    // Fitted, and never blown up: a thumbnail stretched to
-                    // fill this box is a worse picture of the same thing.
-                    image.paint_at(ui, fit(rect, texture.size));
+                    // **The picture's own shape**, bounded by the width a
+                    // bubble gives it and by how tall anything in a transcript
+                    // may be. A thumbnail is scaled up to that; it is standing
+                    // in for the picture, and one drawn at ninety-six pixels
+                    // in the middle of the space the real one will take reads
+                    // as a mistake rather than as a picture on its way.
+                    let drawn = fit(texture.size, side, whole);
+                    // Remembered, so every later state of this picture --
+                    // fetched again, scrolled back to, drawn while decoding --
+                    // reserves what it actually takes. A frame late the first
+                    // time, and never again.
+                    if (drawn.y - tall).abs() > 0.5 {
+                        ui.ctx().data_mut(|d| d.insert_temp(remembered, drawn.y));
+                        ui.ctx().request_repaint();
+                    }
+                    image.paint_at(ui, egui::Rect::from_center_size(rect.center(), drawn));
                     if response.clicked() {
                         action.open = true;
                     }
