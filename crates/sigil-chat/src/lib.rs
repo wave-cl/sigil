@@ -160,6 +160,8 @@ struct Pane {
     query: String,
     /// The key of a device being linked.
     linking: String,
+    /// A credential another device wrote, being presented by this one.
+    presenting: String,
     /// The message search box.
     searching: String,
     /// The exchange being added.
@@ -198,6 +200,7 @@ impl Default for Pane {
             editing: None,
             query: String::new(),
             linking: String::new(),
+            presenting: String::new(),
             searching: String::new(),
             exchange: String::new(),
             forwarding: None,
@@ -2948,6 +2951,46 @@ impl ChatApp {
                 ui.ctx().copy_text(credential.clone());
             }
         }
+
+        // **The other half.** The screen could write a credential and had
+        // nowhere to present one, so the second device of an account could be
+        // named and never enrolled — and a linked device is the only backup an
+        // epoch key can have.
+        ui.add_space(tokens::SPACING_XL);
+        ui.heading("Use a credential");
+        ui.colored_label(
+            theme.text_secondary,
+            "If another of your devices wrote one for this one, paste it here. The \
+             exchange checks it names *this* device, so one somebody found is one they \
+             cannot use.",
+        );
+        ui.add_space(tokens::SPACING_SM);
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().presenting,
+            "the credential your other device wrote, in base58",
+            width,
+        );
+        ui.add_space(tokens::SPACING_SM);
+        if ui.button("Register this device").clicked() {
+            let typed = self.pane(at).presenting.trim().to_string();
+            if !typed.is_empty() {
+                self.pane(at).presenting.clear();
+                self.send_as(Some(at), Cmd::RegisterSelf(typed));
+            }
+        }
+        // Said before it is needed, not after it is missed: registering makes
+        // this device act for the account and hands it no keys at all.
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Registering does not bring any conversation with it. An epoch key is \
+                 sealed to a device, so the other one has to hand them over before \
+                 anything already said can be read here.",
+            )
+            .small(),
+        );
         AppResponse::default()
     }
 }

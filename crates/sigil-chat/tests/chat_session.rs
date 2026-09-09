@@ -1074,3 +1074,112 @@ async fn a_name_is_claimed_and_a_taken_one_is_said_in_words() {
     alice.stop();
     bob.stop();
 }
+
+/// A second device is named by one client and enrolled by the other.
+///
+/// The Devices screen could write a credential and had nowhere to present
+/// one, so an account's second device could be named and never enrolled — and
+/// a linked device is the only backup an epoch key can have, because opening
+/// one spends the prekey it arrived under.
+///
+/// Both halves in one run, against a real exchange: writing it proves nothing
+/// on its own, since the exchange is what decides whether it is honoured.
+#[tokio::test]
+async fn a_credential_written_by_one_device_enrols_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    // One account, two devices. `start_at` takes a signer, and a device *is* a
+    // key — so the second session is simply a second key, which is what a
+    // second machine would be.
+    let (first_signer, first) = signer(41);
+    let (second_signer, second) = signer(42);
+    let one = start_at(endpoint, first_signer, &dir.path().join("one.db"));
+    let two = start_at(endpoint, second_signer, &dir.path().join("two.db"));
+    assert!(
+        until(
+            || one.state().me == Some(first) && two.state().me == Some(second),
+            15
+        )
+        .await,
+        "both should come up"
+    );
+
+    // The first writes a credential naming the second.
+    one.send(Cmd::LinkDevice {
+        device: second,
+        days: 90,
+    });
+    let written = until(|| one.state().credential.is_some(), 20).await;
+    assert!(
+        written,
+        "no credential was written: {:?}",
+        one.state().trouble
+    );
+    let credential = one.state().credential.expect("checked above");
+
+    // The second presents it, on its own connection.
+    two.send(Cmd::RegisterSelf(credential.clone()));
+    let enrolled = until(
+        || {
+            two.state()
+                .note
+                .is_some_and(|n| n.said.contains("acts for the account"))
+        },
+        20,
+    )
+    .await;
+    assert!(
+        enrolled,
+        "the credential was refused: {:?} / {:?}",
+        two.state().note,
+        two.state().trouble
+    );
+
+    // And the exchange says so, which is the only word that counts.
+    one.send(Cmd::Devices);
+    let listed = until(
+        || one.state().devices.iter().any(|d| d.device == second),
+        20,
+    )
+    .await;
+    assert!(
+        listed,
+        "the exchange does not hold the new device: {:?}",
+        one.state().devices
+    );
+
+    one.stop();
+    two.stop();
+}
+
+/// A credential that is not one is refused where it was typed.
+#[tokio::test]
+async fn something_that_is_not_a_credential_is_refused_in_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(43);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(until(|| alice.state().me == Some(a_id), 15).await);
+
+    alice.send(Cmd::RegisterSelf("not a credential".into()));
+    let said = until(
+        || {
+            alice
+                .state()
+                .trouble
+                .is_some_and(|t| t.contains("not a credential"))
+        },
+        20,
+    )
+    .await;
+    assert!(said, "refused silently: {:?}", alice.state().trouble);
+}

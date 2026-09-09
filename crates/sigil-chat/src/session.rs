@@ -621,6 +621,13 @@ pub enum Cmd {
     ClaimName(String),
     /// Give up a SIP-38 name this account holds.
     ReleaseName(String),
+    /// Present a credential another device of this account wrote, and become
+    /// one of its devices (SIP-20/22).
+    ///
+    /// The **new** device runs this, on its own connection: the credential
+    /// names the delegate, and the exchange checks that against who is asking
+    /// — so one somebody found is one they cannot use.
+    RegisterSelf(String),
 
     // ---- making conversations ------------------------------------------
     /// A private group. Its name is a sealed entry, not the exchange's.
@@ -2484,6 +2491,31 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     );
                 }
                 Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::RegisterSelf(encoded) => {
+            let decoded = bs58::decode(encoded.trim())
+                .into_vec()
+                .map_err(|e| format!("that is not a credential: {e}"))
+                .and_then(|raw| {
+                    sqex_proto::credential::Credential::decode(&raw)
+                        .map_err(|e| format!("that is not a credential: {e}"))
+                });
+            match decoded {
+                Err(e) => trouble(state, e),
+                Ok(credential) => match chat.register_self(&credential).await {
+                    Ok(()) => {
+                        refresh_devices(chat, state).await;
+                        note(
+                            state,
+                            "This device acts for the account now. It holds no epoch keys \
+                             yet — the other device has to hand them over before anything \
+                             already said can be read here."
+                                .into(),
+                        );
+                    }
+                    Err(e) => trouble(state, e),
+                },
             }
         }
         Cmd::RevokeDevice(device) => match chat.revoke_device(&device).await {

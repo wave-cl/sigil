@@ -98,15 +98,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/block/list", Chat),
     ("POST", "/device/list", Chat),
     ("POST", "/device/revoke", Chat),
-    (
-        "POST",
-        "/device/register",
-        NotYet(
-            "sigil is always the first device of its account, which registers itself. \
-             Registering *with* a credential is how a second one is enrolled, and that \
-             is the other half of the Devices screen",
-        ),
-    ),
+    ("POST", "/device/register", Chat),
     ("POST", "/admission/request", Chat),
     ("POST", "/name/resolve", Chat),
     ("POST", "/name/reverse", Beneath),
@@ -314,7 +306,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 57,
+        reached, 58,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );
