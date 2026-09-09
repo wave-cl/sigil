@@ -66,9 +66,15 @@ pub struct AttachmentAction {
 ///
 /// The picture when there is one, the thumbnail while there is not, and a row
 /// naming it when it is not a picture at all.
-pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
+/// `over` is what this is being drawn on, which decides what "quiet" can be:
+/// the palette's muted text is chosen for a surface and is unreadable on the
+/// accent that fills one's own bubble. See [`crate::message::faded`].
+pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) -> AttachmentAction {
     let theme = ColorTheme::current(ui.ctx());
     let mut action = AttachmentAction::default();
+    // For anything written straight onto `over`. Text inside one of the
+    // frames below sits on that frame instead, and keeps the palette's own.
+    let quiet = crate::message::faded(theme.text_primary, over);
 
     if a.kind == IMAGE {
         // Whole image if we have it, thumbnail if we do not, and the words if
@@ -127,9 +133,9 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
             if let Ok(egui::load::TexturePoll::Pending { .. }) = poll {
                 // Still decoding. Saying so beats an empty space, and the next
                 // pass is asked for so it does not sit here.
-                ui.colored_label(theme.text_muted, egui::RichText::new("opening…").small());
+                ui.colored_label(quiet, egui::RichText::new("opening…").small());
                 ui.ctx().request_repaint();
-                ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
+                ui.colored_label(quiet, egui::RichText::new(a.described).small());
                 return action;
             }
             if let Err(why) = poll {
@@ -176,7 +182,7 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
                 // reading a blurry 96-pixel image as the whole of what was
                 // sent.
                 ui.colored_label(
-                    theme.text_muted,
+                    quiet,
                     egui::RichText::new("preview — fetching the full image").small(),
                 );
             }
@@ -194,7 +200,7 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
             // own controls beside it, where every other thing done to a
             // message is — a Save button on the picture put the one action
             // nobody takes often in the loudest place on the bubble.
-            ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
+            ui.colored_label(quiet, egui::RichText::new(a.described).small());
             return action;
         }
     }

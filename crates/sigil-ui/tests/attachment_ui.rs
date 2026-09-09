@@ -50,6 +50,7 @@ fn tall(bytes: &'static [u8], height: Option<f32>) -> f32 {
                             missing: false,
                             id: "sized",
                         },
+                        sigil::ColorTheme::current(&ctx).surface_elevated,
                     );
                     let grew = ui.min_rect().height() - before;
                     seen.store(grew.max(0.0) as u32, std::sync::atomic::Ordering::Relaxed);
@@ -80,6 +81,7 @@ fn drawn(bytes: &'static [u8]) -> Harness<'static> {
                     missing: false,
                     id: "notapicture",
                 },
+                sigil::ColorTheme::current(&ctx).surface_elevated,
             );
         })
 }

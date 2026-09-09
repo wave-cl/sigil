@@ -608,6 +608,24 @@ fn body(
         // the shape a message has.
         .corner_radius(tokens::RADIUS_PILL)
         .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
+    // **Computed here, and given to everything drawn on this bubble.** Every
+    // one of these used `text_muted`, which is chosen for a surface and comes
+    // out at 1.25 against the accent: the reply being answered and the name of
+    // an attached file were both grey-on-blue. They were also the two things
+    // that say what a message is *about*.
+    let quiet = if b.mine {
+        faded(theme.text_primary, fill)
+    } else {
+        theme.text_muted
+    };
+    // The quoted rule is the accent, which on an accent-filled bubble is the
+    // bubble. On one's own it is the text colour instead, where it reads as
+    // the mark it is.
+    let rule = if b.mine {
+        theme.text_primary
+    } else {
+        theme.accent
+    };
     let inner = frame.show(ui, |ui| {
         // **Inside the bubble, always left to right.** The right-alignment
         // that puts one's own message on the right is a property of where the
@@ -619,13 +637,13 @@ fn body(
                 author_line(ui, b, theme);
             }
             if let Some((who, stub)) = b.reply_to {
-                reply_stub(ui, who, stub, theme);
+                reply_stub(ui, who, stub, quiet, rule);
             }
             // Before the text: a message is usually a picture *with* a caption
             // rather than a caption with a picture attached.
             if !b.redacted {
                 for (i, a) in b.attachments.iter().enumerate() {
-                    let did = crate::attachment(ui, a);
+                    let did = crate::attachment(ui, a, fill);
                     if did.save {
                         action.save = Some(i);
                     }
@@ -649,15 +667,6 @@ fn body(
                 ui.add(egui::Label::new(b.text).wrap().selectable(true));
             }
 
-            // Our own bubble is filled with the accent, and `text_muted` is chosen
-            // to sit on a *surface*. On the accent it comes out near-invisible --
-            // which is how the time and the "edited" mark disappeared from exactly
-            // the messages whose delivery somebody most wants to check.
-            let quiet = if b.mine {
-                faded(theme.text_primary, theme.accent_muted)
-            } else {
-                theme.text_muted
-            };
             ui.horizontal(|ui| {
                 ui.colored_label(quiet, egui::RichText::new(b.at).small());
                 if b.edited {
@@ -700,9 +709,18 @@ fn body(
 /// Text that is quieter than the body but still legible on `over`.
 ///
 /// Mixed towards the background rather than taken from a fixed muted colour,
-/// because "muted" is only meaningful relative to what it sits on.
-fn faded(text: egui::Color32, over: egui::Color32) -> egui::Color32 {
-    let mix = |a: u8, b: u8| ((a as u16 * 62 + b as u16 * 38) / 100) as u8;
+/// because "muted" is only meaningful relative to what it sits on. The
+/// palette's own `text_muted` is chosen for a *surface*: on the accent that
+/// fills one's own bubble it comes out at a contrast of **1.25**, which is a
+/// colour nobody can read.
+///
+/// The mix is three quarters text. It was 62%, which reads on a surface and
+/// gives 2.74 on the accent -- under the 3.0 floor this palette holds itself
+/// to everywhere else, and quietly, because that floor is only ever checked
+/// against the three surfaces. Three quarters gives 3.30 dark and 3.93 light,
+/// and is still plainly quieter than the body text beside it.
+pub fn faded(text: egui::Color32, over: egui::Color32) -> egui::Color32 {
+    let mix = |a: u8, b: u8| ((a as u16 * 75 + b as u16 * 25) / 100) as u8;
     egui::Color32::from_rgb(
         mix(text.r(), over.r()),
         mix(text.g(), over.g()),
@@ -742,7 +760,7 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
 /// **A painted bar rather than an arrow.** `↳` is not in the fonts egui
 /// bundles and came out as `□`. It is also the better shape — a rule down the
 /// left is what every messenger uses, and it does not have to be understood.
-fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, theme: &ColorTheme) {
+fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, quiet: egui::Color32, rule: egui::Color32) {
     // Room of its own, on all four sides. The bubble's padding came down and
     // this went with it: the quote ended up jammed against the name above and
     // the words below, reading as a first line of the message rather than as
@@ -754,8 +772,7 @@ fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, theme: &ColorTheme) {
         let h = ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS;
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(tokens::STROKE_THICK, h), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, tokens::RADIUS_SM, theme.accent);
+        ui.painter().rect_filled(rect, tokens::RADIUS_SM, rule);
         ui.add_space(tokens::SPACING_XXS);
         // **Truncated, not extended.** A `horizontal` layout does not wrap, so
         // a label long enough grows the frame around it — past the width the
@@ -766,7 +783,7 @@ fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, theme: &ColorTheme) {
             egui::Label::new(
                 egui::RichText::new(format!("{who}: {stub}"))
                     .small()
-                    .color(theme.text_muted),
+                    .color(quiet),
             )
             .truncate(),
         );
@@ -851,6 +868,64 @@ pub fn preview(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything quiet inside one's own bubble is still legible on it.
+    ///
+    /// # Why this is not covered by the palette's own contrast test
+    ///
+    /// That one checks `text_muted` against the three **surfaces**, and passes
+    /// -- while the same colour on the accent that fills one's own bubble
+    /// comes out at 1.25, which is grey on blue and unreadable. A bubble is a
+    /// surface somebody reads text on and was not in the list, so the reply
+    /// being quoted and the name of an attached file were both unreadable in
+    /// every message anyone sent, and nothing failed.
+    ///
+    /// The floor is the palette's own 3.0. The failing value is asserted too:
+    /// without it this passes for any colour at all that happens to be light.
+    #[test]
+    fn the_quiet_parts_of_ones_own_bubble_are_legible_on_it() {
+        fn luminance(c: egui::Color32) -> f32 {
+            let f = |v: u8| {
+                let s = v as f32 / 255.0;
+                if s <= 0.03928 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        }
+        fn ratio(a: egui::Color32, b: egui::Color32) -> f32 {
+            let (x, y) = (luminance(a), luminance(b));
+            let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+
+        for (name, t) in [
+            ("dark", sigil::theme::dark()),
+            ("light", sigil::theme::light()),
+        ] {
+            let quiet = faded(t.text_primary, t.accent_muted);
+            let r = ratio(quiet, t.accent_muted);
+            assert!(
+                r >= 3.0,
+                "{name}: quiet text on one's own bubble is {r:.2}, under the 3.0 floor"
+            );
+            // The colour this replaced, and the reason it had to be replaced.
+            let was = ratio(t.text_muted, t.accent_muted);
+            assert!(
+                was < 3.0,
+                "{name}: `text_muted` on the accent is {was:.2} -- if that is now legible, \
+                 this test has stopped being about anything"
+            );
+            // Quiet, and not merely legible: at the body's own colour there is
+            // nothing to tell the message apart from what is said about it.
+            assert!(
+                r < ratio(t.text_primary, t.accent_muted),
+                "{name}: the quiet text is as loud as the message"
+            );
+        }
+    }
 
     /// The crash: `&s[..8]` landing inside a character.
     ///

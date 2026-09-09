@@ -833,6 +833,38 @@ fn list_dark() {
     h.snapshot("list_dark");
 }
 
+/// One's own bubble, with the two things that are written *about* a message
+/// rather than in it: the reply it answers, and the file it carries.
+///
+/// A picture of its own because both were unreadable and both were correct in
+/// every other sense -- present, positioned, and grey on blue. Nothing but
+/// looking at it, or a contrast figure, can catch that.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn mine_dark() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].mine = true;
+    state.lines[n - 1].name = None;
+    state.lines[n - 1].who = me();
+    state.lines[n - 1].text = "sent by me, with something attached".into();
+    state.lines[n - 1].reply_to = Some(("Ada".into(), "the second one, then".into()));
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: 0x04,
+        described: "[notes.txt, 2.1 kB]".into(),
+        size: 2100,
+        preview: Vec::new(),
+        bytes: None,
+        missing: false,
+        id: "mine123".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    hide_column(&mut h);
+    h.snapshot("mine_dark");
+}
+
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn transcript_light() {
