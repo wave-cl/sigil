@@ -113,6 +113,17 @@ pub struct Shell {
     /// whoever ran it, and the damage would show up on their *next* launch,
     /// nowhere near the test that did it.
     remember: bool,
+    /// The opening screen, reached again to change identity.
+    ///
+    /// `Some(i)` while it is up, where `i` is the identity that was on screen
+    /// when it was asked for -- so cancelling puts back what was there rather
+    /// than whatever the list was left pointing at.
+    ///
+    /// **Nothing is locked to get here.** Every identity sigil holds stays
+    /// open, its session running and its messages arriving; this only changes
+    /// which one is drawn. Locking the one being left would drop a live
+    /// connection to leave a screen.
+    choosing: Option<usize>,
     /// How much of the top of the window the desktop's own chrome sits over.
     ///
     /// sigil's window has a **transparent** title bar with the content drawn
@@ -165,6 +176,7 @@ impl Shell {
             shown_unread: 0,
             welcome: Welcome::default(),
             remember: true,
+            choosing: None,
             top_inset: 0.0,
         }
     }
@@ -287,7 +299,7 @@ impl Shell {
         // Nothing sealed gets a rail. Every app behind it would be a tab onto
         // an identity that cannot do anything, and offering four of those is
         // offering a choice that does not exist yet.
-        if !self.accounts.active().is_unlocked() {
+        if !self.accounts.active().is_unlocked() || self.choosing.is_some() {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::NONE
@@ -388,7 +400,13 @@ impl Shell {
                         }
                     });
                     ui.add_space(tokens::SPACING_LG);
-                    ui.heading("Open an identity");
+                    // The same screen either way, and it says which errand it
+                    // is on: arriving, or coming back to be somebody else.
+                    ui.heading(if self.choosing.is_some() {
+                        "Switch identity"
+                    } else {
+                        "Open an identity"
+                    });
                     ui.colored_label(
                         theme.text_secondary,
                         "Your key is what identifies you. Everything sigil does is done as \
@@ -469,6 +487,8 @@ impl Shell {
                             let passphrase = std::mem::take(&mut self.welcome.passphrase);
                             if self.accounts.unlock(active, &passphrase) {
                                 self.welcome.trouble = None;
+                                // Opened, so this screen has done its errand.
+                                self.choosing = None;
                             } else {
                                 // Said here, and the box left empty rather
                                 // than holding a passphrase that did not work.
@@ -476,6 +496,30 @@ impl Shell {
                                     Some("That passphrase did not open it.".into());
                             }
                         }
+                    }
+                    // Already open -- which is the ordinary case when
+                    // switching, since every identity sigil holds stays live.
+                    // There is nothing to unlock, so the button says the only
+                    // thing left to do.
+                    if self.choosing.is_some() && self.accounts.active().is_unlocked() {
+                        if ui
+                            .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Open"))
+                            .clicked()
+                        {
+                            self.choosing = None;
+                        }
+                        ui.add_space(tokens::SPACING_SM);
+                    }
+                    // A way back that changes nothing. Somebody who opened
+                    // this to look at the list and then thought better of it
+                    // would otherwise have to unlock their way out of it.
+                    if let Some(previous) = self.choosing
+                        && ui
+                            .add_sized([CARD_WIDTH, tokens::BUTTON_MD], egui::Button::new("Cancel"))
+                            .clicked()
+                    {
+                        self.accounts.switch_to(previous);
+                        self.choosing = None;
                     }
                     if let Some(trouble) = &self.welcome.trouble {
                         ui.add_space(tokens::SPACING_SM);
@@ -564,6 +608,14 @@ impl Shell {
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            // Back to the opening screen. Where it came from is remembered
+            // here and not there: the screen changes which identity is active
+            // as somebody looks through the list, so by the time they cancel
+            // it no longer knows what they started on.
+            Some(AppAction::ChooseIdentity) => {
+                self.choosing = Some(self.accounts.active_index());
+                self.welcome = Welcome::default();
             }
             Some(AppAction::None) | None => {}
         }

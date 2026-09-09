@@ -273,6 +273,38 @@ fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'s
         })
 }
 
+/// A harness that keeps what the app asked the shell for, pass by pass.
+///
+/// Every other harness here drops the render's answer on the floor, which is
+/// fine while the answer is always the default -- and blind the moment it is
+/// not. What an app *returns* is the whole of how it reaches the shell.
+fn harness_watching_asks(
+    state: ChatState,
+    asks: std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            if let Some(action) = app.render(&mut app_ctx, ui).action {
+                asks.borrow_mut().push(action);
+            }
+        })
+}
+
 fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
@@ -850,18 +882,37 @@ fn a_name_never_appears_without_its_key_reachable() {
     );
 }
 
-/// Every identity this host holds is offered, and one is not a choice.
+/// The way to another identity is a door, not a roster.
 ///
-/// **Moved here from the shell's rail.** Identities used to be chosen at the
-/// bottom of the rail, which meant switching happened in one place and
-/// everything else about an identity — its key, its exchanges, its profile —
-/// was read in another. They are all behind the same block now.
+/// **Moved here from the shell's rail**, and then cut down to one item. The
+/// menu listed every identity sigil happened to be holding, which put a second
+/// and shorter list beside the opening screen's — shorter because it could
+/// only name the ones already in the roster, so an identity sitting in
+/// `~/.sqnr` that sigil had never opened was unreachable from here. One item
+/// that goes back to the screen which lists them all, draws each one's mark,
+/// says what is wrong with a file and can ask for a passphrase.
 #[test]
-fn every_identity_is_offered_and_one_is_not_a_choice() {
+fn the_identity_menu_offers_one_way_out_and_not_a_list() {
     let one = Account::unlocked_for_test([1u8; 32]);
     let two = Account::unlocked_for_test([2u8; 32]);
-    let first = one.unlocked().unwrap().me().to_string();
+    let other = two.unlocked().unwrap().me().to_string();
 
+    let mut h = harness_with_accounts(a_conversation(), vec![one, two]);
+    h.run();
+    open_identity(&mut h);
+    let said = text_of(&h);
+    assert!(
+        said.contains("Switch identity"),
+        "no way to be anybody else: {said}"
+    );
+    assert!(
+        !said.contains(&other[..10]),
+        "the other identity is listed here as well as on the screen that lists them: {said}"
+    );
+
+    // And with one identity held, where the old list drew nothing at all: the
+    // opening screen has every identity in `~/.sqnr`, so there is somewhere to
+    // go even when sigil is holding a single one.
     let mut h = harness_with_accounts(
         a_conversation(),
         vec![Account::unlocked_for_test([1u8; 32])],
@@ -869,19 +920,39 @@ fn every_identity_is_offered_and_one_is_not_a_choice() {
     h.run();
     open_identity(&mut h);
     assert!(
-        !text_of(&h).contains("Identities"),
-        "one account is not a choice, so there is nothing to switch between: {}",
+        text_of(&h).contains("Switch identity"),
+        "holding one identity is not the same as there being one: {}",
         text_of(&h)
     );
+}
 
-    let mut h = harness_with_accounts(a_conversation(), vec![one, two]);
+/// Asking for the opening screen is said to the shell **once**.
+///
+/// The item sets a flag and `render` returns it, because an app reaches the
+/// shell by what it returns. A flag that is read rather than taken keeps
+/// returning it, and the shell would then draw the opening screen on every
+/// pass for ever -- a screen nobody can leave, from an interface that looks
+/// entirely correct in a screenshot.
+#[test]
+fn asking_to_switch_identity_is_said_once() {
+    let asks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_watching_asks(a_conversation(), asks.clone());
     h.run();
     open_identity(&mut h);
-    let said = text_of(&h);
-    assert!(said.contains("Identities"), "{said}");
     assert!(
-        said.contains(&first[..10]),
-        "each held identity is offered: {said}"
+        asks.borrow().is_empty(),
+        "the app asked for something nobody pressed: {:?}",
+        asks.borrow()
+    );
+
+    h.get_by_label("Switch identity").click();
+    h.run();
+    h.run();
+    let said: Vec<_> = asks.borrow().clone();
+    assert_eq!(
+        said,
+        vec![sigil::app::AppAction::ChooseIdentity],
+        "the ask was dropped, or kept being made"
     );
 }
 

@@ -320,6 +320,12 @@ pub struct ChatApp {
     /// Which exchange is being shown, for each identity. Absent means the
     /// default one.
     showing: HashMap<PubKey, String>,
+    /// Somebody asked for the opening screen, to be somebody else.
+    ///
+    /// Set in the identity menu and answered at the end of `render`, because
+    /// the menu is drawn several layers inside it and an app says what it
+    /// wants of the shell by **returning** it, not by reaching for it.
+    switching: bool,
     /// Whether the conversation column is on screen. **Open to begin with.**
     ///
     /// One preference for the whole app rather than one per identity: it is
@@ -379,6 +385,7 @@ impl ChatApp {
             closing: Vec::new(),
             panes: HashMap::new(),
             showing: HashMap::new(),
+            switching: false,
             // Open, with the newest conversation in it: what somebody signs
             // in to is their chats, not an empty pane.
             columns_open: true,
@@ -673,7 +680,12 @@ impl App for ChatApp {
             // corner that was empty.
             self.session_bar_ui(ctx, at, &none, ui, &theme);
             self.unconnected_ui(ctx, at, ui, &theme);
-            return AppResponse::default();
+            // **Here too.** The identity menu is on this screen as well, and
+            // it is the screen somebody is most likely to want to leave: an
+            // identity with no exchange is exactly when you go and be another
+            // one. Returning the default here made the item do nothing on the
+            // one pane it matters most on.
+            return self.answer();
         }
         let state = self.state_of(Some(at));
 
@@ -762,7 +774,7 @@ impl App for ChatApp {
                     });
             }
         }
-        AppResponse::default()
+        self.answer()
     }
 
     /// Unread across **every** identity, not the one on screen.
@@ -789,6 +801,19 @@ impl App for ChatApp {
 }
 
 impl ChatApp {
+    /// What the shell is being asked for, if anything.
+    ///
+    /// Taken rather than read: an ask is one event, and a flag left set would
+    /// send the shell back to the opening screen on every pass afterwards --
+    /// which looks exactly like an interface that cannot be dismissed.
+    fn answer(&mut self) -> AppResponse {
+        if std::mem::take(&mut self.switching) {
+            AppResponse::action(sigil::app::AppAction::ChooseIdentity)
+        } else {
+            AppResponse::default()
+        }
+    }
+
     /// This identity is not talking to any exchange, and why.
     ///
     /// The reason is always the same one: nothing names an exchange for it.
@@ -1151,34 +1176,23 @@ impl ChatApp {
         ui.separator();
         self.exchanges_ui(ctx, at, state, ui, theme);
 
-        // Every identity this host is holding. **All of them are live** --
-        // switching changes what is drawn and stops nothing, so there is
-        // nothing here to warn about losing.
-        if ctx.accounts.len() > 1 {
-            ui.separator();
-            ui.colored_label(theme.text_muted, egui::RichText::new("Identities").small());
-            let active = ctx.accounts.active_index();
-            for i in 0..ctx.accounts.len() {
-                let label = ctx.accounts.label(i);
-                let open = ctx.accounts.get(i).is_some_and(|a| a.is_unlocked());
-                // A sealed account reads differently from an open one, because
-                // choosing it gets a passphrase field and not a conversation.
-                let text = if open {
-                    egui::RichText::new(label)
-                } else {
-                    egui::RichText::new(format!("{label} (locked)")).color(theme.text_muted)
-                };
-                let selected = i == active;
-                let response = ui.selectable_label(selected, text);
-                // The full key on hover, wherever a short form is shown.
-                if let Some(unlocked) = ctx.accounts.get(i).and_then(|a| a.unlocked()) {
-                    response.clone().on_hover_text(unlocked.me().to_string());
-                }
-                if response.clicked() && !selected {
-                    ctx.accounts.switch_to(i);
-                    ui.close();
-                }
-            }
+        // **One way out, not a roster.** This menu used to list every
+        // identity in the roster, which put a second and shorter list of them
+        // beside the opening screen's -- and only the roster's, so an identity
+        // sitting in `~/.sqnr` that sigil had never been told about could not
+        // be reached from here at all. The opening screen is the one place
+        // that lists them all, draws the mark, says what is wrong with a file
+        // and can ask for a passphrase. This goes back to it.
+        ui.separator();
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Switch, "Switch identity")
+            .on_hover_text(
+                "Choose another identity. This one stays open — its messages keep arriving \
+                 and a call on it keeps running.",
+            )
+            .clicked()
+        {
+            self.switching = true;
+            ui.close();
         }
         let _ = me;
     }

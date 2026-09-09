@@ -75,6 +75,8 @@ pub enum Icon {
     React,
     /// More, on one message.
     More,
+    /// Be somebody else: back to the opening screen to choose an identity.
+    Switch,
 }
 
 impl Icon {
@@ -101,6 +103,7 @@ impl Icon {
             Icon::Reply => "Reply",
             Icon::React => "React",
             Icon::More => "More",
+            Icon::Switch => "Switch identity",
         }
     }
 }
@@ -283,6 +286,30 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 egui::Stroke::NONE,
             ));
         }
+        Icon::Switch => {
+            // Two lines passing each other, each with a head at the end it is
+            // going to: one thing leaving as another arrives, which is what
+            // switching between two identities is. Not a circular arrow --
+            // that is `Refresh`, and it means "the same thing again".
+            let head = |tip: egui::Pos2, towards: egui::Vec2| {
+                let d = towards.normalized();
+                let n = egui::vec2(-d.y, d.x);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        tip,
+                        tip - d * s * 0.20 + n * s * 0.13,
+                        tip - d * s * 0.20 - n * s * 0.13,
+                    ],
+                    colour,
+                    egui::Stroke::NONE,
+                ));
+            };
+            let right = egui::vec2(1.0, 0.0);
+            line(p(0.22, 0.34), p(0.70, 0.34));
+            head(p(0.80, 0.34), right);
+            line(p(0.30, 0.66), p(0.78, 0.66));
+            head(p(0.20, 0.66), -right);
+        }
         Icon::Pencil => {
             path(vec![
                 p(0.24, 0.76),
@@ -348,6 +375,55 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             );
         }
     }
+}
+
+/// A menu row: the picture and the words, as one thing to press.
+///
+/// A menu is the one place where an icon alone will not do — there is room for
+/// the word, and a column of bare shapes is a quiz. It is also the one place a
+/// bare word is worse than it looks: everything else in this interface is
+/// found by its shape first, so an item with no shape is the one nobody sees.
+///
+/// Full width, so the whole row is the hit target rather than the text in it.
+pub fn icon_item(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
+    let theme = ColorTheme::current(ui.ctx());
+    let gap = tokens::SPACING_SM;
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, theme.text_primary);
+    let height = tokens::BUTTON_MD.max(galley.size().y);
+    let width = ui
+        .available_width()
+        .max(tokens::BUTTON_MD + gap + galley.size().x);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    // The word, not the shape: an icon's `word()` is what it means in general
+    // and this says what it does here.
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
+        }
+        let square = egui::Rect::from_min_size(
+            rect.left_top(),
+            egui::vec2(tokens::BUTTON_MD, rect.height()),
+        );
+        draw(
+            ui.painter(),
+            square.shrink(tokens::SPACING_XS),
+            icon,
+            theme.text_primary,
+        );
+        let at = egui::pos2(
+            square.right() + gap,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(at, galley, theme.text_primary);
+    }
+    response
 }
 
 /// A button that is an icon.

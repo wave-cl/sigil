@@ -29,11 +29,16 @@ const ALL: &[Icon] = &[
     Icon::Reply,
     Icon::React,
     Icon::More,
+    Icon::Switch,
 ];
 
 fn harness(dark: bool) -> Harness<'static> {
     Harness::builder()
-        .with_size(egui::vec2(560.0, 220.0))
+        // Tall enough for both rows of both sizes. It was 220, which fitted
+        // until the set grew: the sheet then clipped the last two icons at the
+        // larger size in silence, and the one thing this picture is for is
+        // seeing whether a shape works big.
+        .with_size(egui::vec2(560.0, 280.0))
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             theme::install(&ctx, theme::light(), theme::dark());

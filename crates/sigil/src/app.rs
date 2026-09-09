@@ -51,6 +51,13 @@ pub enum AppAction {
     /// Bring the window forward and focus it. Raised by a ring, so an incoming
     /// call reaches someone who is looking at something else.
     Present,
+    /// Go back to the opening screen to choose an identity.
+    ///
+    /// Not a switch in itself: the choosing happens on that screen, which is
+    /// the one place that lists every identity in `~/.sqnr` and can ask for a
+    /// passphrase. An app asking for this is asking to be *shown* it -- what
+    /// is live stays live, including the identity being switched away from.
+    ChooseIdentity,
 }
 
 /// An app's answer to being rendered.

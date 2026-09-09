@@ -14,11 +14,28 @@ use sigil::theme;
 struct Stub {
     title: &'static str,
     unread: u32,
+    /// Ask the shell for the opening screen, once, on the next pass. An app
+    /// that asked on every pass would be an app nobody could leave, which is
+    /// the failure the shell's own `take` is there to prevent.
+    asks_to_switch: bool,
+}
+
+impl Stub {
+    fn named(title: &'static str, unread: u32) -> Self {
+        Stub {
+            title,
+            unread,
+            asks_to_switch: false,
+        }
+    }
 }
 
 impl App for Stub {
     fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         ui.heading(self.title);
+        if std::mem::take(&mut self.asks_to_switch) {
+            return AppResponse::action(sigil::app::AppAction::ChooseIdentity);
+        }
         AppResponse::default()
     }
     fn title(&self) -> &str {
@@ -81,14 +98,8 @@ fn sealed(dark: bool) -> Harness<'static> {
 
 fn with_account(dark: bool, account: sigil::Account) -> Harness<'static> {
     let apps: Vec<Box<dyn App>> = vec![
-        Box::new(Stub {
-            title: "Calls",
-            unread: 0,
-        }),
-        Box::new(Stub {
-            title: "Chat",
-            unread: 3,
-        }),
+        Box::new(Stub::named("Calls", 0)),
+        Box::new(Stub::named("Chat", 3)),
     ];
     // No platform: this is headless, with no tray and no notification
     // daemon, and it should not pretend to have either.
@@ -114,17 +125,110 @@ fn with_account(dark: bool, account: sigil::Account) -> Harness<'static> {
         })
 }
 
+/// A shell whose app asks, on its first pass, to be shown the opening screen.
+fn asking_to_switch() -> Harness<'static> {
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub {
+        title: "Calls",
+        unread: 0,
+        asks_to_switch: true,
+    })];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+            sigil::Account::unlocked_for_test([5u8; 32]),
+        ]));
+    Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        })
+}
+
+/// Switching identity is done on the opening screen, and getting there costs
+/// nothing.
+///
+/// The identity menu used to carry its own list of identities. It now carries
+/// one item, which brings this screen back -- the one place that lists every
+/// identity in `~/.sqnr`, draws each one's mark and can ask for a passphrase.
+///
+/// **Nothing is locked to get here.** The identity being left stays open, so
+/// the screen offers to open it again rather than asking for its passphrase.
+#[test]
+fn an_app_can_ask_for_the_opening_screen_without_locking_anything() {
+    let mut h = asking_to_switch();
+    h.run();
+    let seen = said(&h);
+    assert!(
+        seen.contains("Switch identity"),
+        "the app asked for the opening screen and did not get it: {seen}"
+    );
+    assert!(
+        seen.contains("Open") && !seen.contains("Passphrase"),
+        "the identity is still open, so there is nothing to unlock: {seen}"
+    );
+}
+
+/// And the way back changes nothing.
+///
+/// Somebody who opens this to look and thinks better of it would otherwise
+/// have to unlock their way out of a screen they never meant to be on.
+#[test]
+fn the_opening_screen_can_be_left_again() {
+    let mut h = asking_to_switch();
+    h.run();
+    h.get_by_label("Cancel").click();
+    h.run();
+    let seen = said(&h);
+    assert!(
+        !seen.contains("Switch identity"),
+        "the opening screen stayed up: {seen}"
+    );
+    assert!(
+        seen.contains("Calls"),
+        "and what was on screen before did not come back: {seen}"
+    );
+}
+
+/// The ask is one event, not a state.
+///
+/// A flag left set sends the shell back to the opening screen on every pass
+/// afterwards, which looks exactly like a screen that cannot be dismissed --
+/// and both halves of that (the app's and the shell's) have to take it.
+#[test]
+fn asking_once_does_not_ask_for_ever() {
+    let mut h = asking_to_switch();
+    h.run();
+    h.get_by_label("Open").click();
+    h.run();
+    h.run();
+    let seen = said(&h);
+    assert!(
+        !seen.contains("Switch identity"),
+        "the opening screen came back on its own: {seen}"
+    );
+}
+
+/// The same screen on its other errand: coming back to be somebody else.
+///
+/// Worth a picture of its own because it is not the opening screen with a
+/// different heading -- the identity is already open, so where the passphrase
+/// box would be there are two buttons, and one of them undoes coming here.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn switching_dark() {
+    let mut h = asking_to_switch();
+    h.run();
+    h.snapshot("switching_dark");
+}
+
 /// A shell told how much of its top the window's own chrome covers.
 fn with_inset(points: f32) -> Harness<'static> {
     let apps: Vec<Box<dyn App>> = vec![
-        Box::new(Stub {
-            title: "Calls",
-            unread: 0,
-        }),
-        Box::new(Stub {
-            title: "Chat",
-            unread: 3,
-        }),
+        Box::new(Stub::named("Calls", 0)),
+        Box::new(Stub::named("Chat", 3)),
     ];
     let mut shell =
         sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
