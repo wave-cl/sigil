@@ -207,62 +207,45 @@ mod tests {
     /// decoder, and a decoder is exactly what would be needed to *produce* a
     /// fixture, so the bytes are spelled out.
     fn a_png() -> Vec<u8> {
-        // 1x1 opaque red, deflate-stored, CRCs computed rather than copied.
+        // 1x1 opaque red, stored (uncompressed) deflate, CRCs computed.
+        fn crc(bytes: &[&[u8]]) -> u32 {
+            let mut c = 0xFFFF_FFFFu32;
+            for part in bytes {
+                for &x in *part {
+                    c ^= x as u32;
+                    for _ in 0..8 {
+                        c = if c & 1 != 0 {
+                            0xEDB8_8320 ^ (c >> 1)
+                        } else {
+                            c >> 1
+                        };
+                    }
+                }
+            }
+            c ^ 0xFFFF_FFFF
+        }
         fn chunk(kind: &[u8], data: &[u8]) -> Vec<u8> {
             let mut out = (data.len() as u32).to_be_bytes().to_vec();
             out.extend_from_slice(kind);
             out.extend_from_slice(data);
-            let mut crc = crc32(kind);
-            crc = crc32_with(crc, data);
-            out.extend_from_slice(&crc.to_be_bytes());
+            out.extend_from_slice(&crc(&[kind, data]).to_be_bytes());
             out
         }
-        fn crc32(b: &[u8]) -> u32 {
-            crc32_with(0xFFFF_FFFF, b) ^ 0
-        }
-        fn crc32_with(mut c: u32, b: &[u8]) -> u32 {
-            for &x in b {
-                c ^= x as u32;
-                for _ in 0..8 {
-                    c = if c & 1 != 0 {
-                        0xEDB8_8320 ^ (c >> 1)
-                    } else {
-                        c >> 1
-                    };
-                }
-            }
-            c
-        }
-        // The CRC in a PNG is over kind+data and finishes with a xor; the two
-        // helpers above keep the running value, so finish it here.
-        fn real_chunk(kind: &[u8], data: &[u8]) -> Vec<u8> {
-            let mut out = (data.len() as u32).to_be_bytes().to_vec();
-            out.extend_from_slice(kind);
-            out.extend_from_slice(data);
-            let mut c = 0xFFFF_FFFFu32;
-            c = crc32_with(c, kind);
-            c = crc32_with(c, data);
-            out.extend_from_slice(&(c ^ 0xFFFF_FFFF).to_be_bytes());
-            out
-        }
-        let _ = chunk(b"", b"");
-        let _ = crc32(b"");
+
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        let ihdr = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
-        png.extend(real_chunk(b"IHDR", &ihdr));
-        // One scanline: filter 0, then RGB. Stored (uncompressed) deflate.
+        png.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+        // One scanline: a filter byte, then one RGB pixel.
         let raw = [0u8, 255, 0, 0];
         let mut z = vec![0x78, 0x01, 0x01, 4, 0, 0xFB, 0xFF];
         z.extend_from_slice(&raw);
-        let mut a: u32 = 1;
-        let mut b: u32 = 0;
+        let (mut a, mut b) = (1u32, 0u32);
         for &x in &raw {
             a = (a + x as u32) % 65521;
             b = (b + a) % 65521;
         }
-        z.extend_from_slice(&(((b << 16) | a) as u32).to_be_bytes());
-        png.extend(real_chunk(b"IDAT", &z));
-        png.extend(real_chunk(b"IEND", b""));
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        png.extend(chunk(b"IDAT", &z));
+        png.extend(chunk(b"IEND", b""));
         png
     }
 
