@@ -44,6 +44,10 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayl
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["all_loaders"] }
 egui-wgpu = "0.36"
+# The same version eframe carries, so `eframe::Frame`'s handle is the type this
+# crate's trait is implemented for. Used for one thing: asking macOS how large
+# the window's own buttons are, since sigil draws behind them.
+raw-window-handle = "0.6.2"
 
 # --- desktop integration --------------------------------------------------
 tray-icon = "0.24"

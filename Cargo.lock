@@ -5843,6 +5843,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "raw-window-handle",
  "sigil",
  "sigil-admin",
  "sigil-chat",

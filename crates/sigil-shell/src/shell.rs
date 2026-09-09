@@ -113,6 +113,19 @@ pub struct Shell {
     /// whoever ran it, and the damage would show up on their *next* launch,
     /// nowhere near the test that did it.
     remember: bool,
+    /// How much of the top of the window the desktop's own chrome sits over.
+    ///
+    /// sigil's window has a **transparent** title bar with the content drawn
+    /// behind it, so that the bar is sigil's colour rather than the system's
+    /// grey and carries no title -- somebody looking at their own chat client
+    /// knows what it is. The close, minimise and zoom buttons are still the
+    /// system's, still where macOS puts them, and still drag the window.
+    ///
+    /// What they are *not* is out of the way: they sit over the top-left of
+    /// the content, which is where the rail and the chats column's own
+    /// controls are. So the top of the window is left empty by this much.
+    /// Zero everywhere but macOS, where nothing is drawn behind the bar.
+    top_inset: f32,
 }
 
 impl Shell {
@@ -152,7 +165,17 @@ impl Shell {
             shown_unread: 0,
             welcome: Welcome::default(),
             remember: true,
+            top_inset: 0.0,
         }
+    }
+
+    /// How much of the top the window's own chrome sits over. See
+    /// [`Shell::top_inset`].
+    ///
+    /// Set every pass by the host, which is the only thing holding a window
+    /// handle to ask. Tests set it directly to check the room is left.
+    pub fn set_top_inset(&mut self, points: f32) {
+        self.top_inset = points.max(0.0);
     }
 
     /// Start with a particular identity, rather than whatever `~/.sqnr` holds.
@@ -244,6 +267,23 @@ impl Shell {
         self.handle_shell_keys(ui.ctx());
 
         let theme = ColorTheme::current(ui.ctx());
+
+        // The window's own buttons sit over the content, so the content
+        // starts below them. Empty on purpose: this strip is the title bar's
+        // drag region, and a widget in it is a widget somebody would have to
+        // avoid to move their window. Painted in the application's colour,
+        // which is the point of drawing behind the bar at all -- the bar has
+        // no colour of its own to be wrong.
+        //
+        // First, and outside the sealed-identity branch below, so the opening
+        // screen is not under the buttons either.
+        if self.top_inset > 0.0 {
+            egui::Panel::top("sigil_window_chrome")
+                .resizable(false)
+                .exact_size(self.top_inset)
+                .frame(egui::Frame::NONE.fill(theme.surface_primary))
+                .show(ui, |_| {});
+        }
         // Nothing sealed gets a rail. Every app behind it would be a tab onto
         // an identity that cannot do anything, and offering four of those is
         // offering a choice that does not exist yet.

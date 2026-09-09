@@ -5,7 +5,7 @@
 //! pixels are the same on every machine and in CI.
 
 use egui_kittest::Harness;
-use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sigil::app::{App, AppContext, AppResponse};
 use sigil::theme;
 
@@ -112,6 +112,62 @@ fn with_account(dark: bool, account: sigil::Account) -> Harness<'static> {
             });
             shell.ui(ui);
         })
+}
+
+/// A shell told how much of its top the window's own chrome covers.
+fn with_inset(points: f32) -> Harness<'static> {
+    let apps: Vec<Box<dyn App>> = vec![
+        Box::new(Stub {
+            title: "Calls",
+            unread: 0,
+        }),
+        Box::new(Stub {
+            title: "Chat",
+            unread: 3,
+        }),
+    ];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.set_top_inset(points);
+            shell.ui(ui);
+        })
+}
+
+/// The window's buttons are not drawn over the rail.
+///
+/// sigil's title bar is transparent with the content behind it, which is what
+/// makes the top of the window sigil's colour rather than the system's grey.
+/// The price is that close, minimise and zoom sit **over** the top-left of the
+/// content -- exactly where the rail's first icon is -- so the shell leaves
+/// that much room and everything starts below it.
+#[test]
+fn the_windows_own_buttons_leave_the_rail_alone() {
+    let inset = 40.0;
+
+    // The rail's second icon, whose label carries its badge and so names one
+    // node: the first app's title is also drawn as the heading of the pane it
+    // is showing, and a query for "Calls" finds both.
+    let mut bare = with_inset(0.0);
+    bare.run();
+    let without = bare.get_by_label("Chat (3)").rect().top();
+
+    let mut below = with_inset(inset);
+    below.run();
+    let with = below.get_by_label("Chat (3)").rect().top();
+
+    assert!(
+        with >= without + inset,
+        "the rail moved down by {}, and the buttons need {inset}",
+        with - without
+    );
 }
 
 #[test]

@@ -22,9 +22,42 @@ impl eframe::App for Sigil {
         self.shell.update_all(ctx, hidden);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.shell.set_top_inset(chrome_inset(ui.ctx(), frame));
         self.shell.ui(ui);
     }
+}
+
+/// How far down the window sigil's own content has to start.
+///
+/// The title bar is transparent and the content is drawn behind it (see the
+/// viewport below), so the close, minimise and zoom buttons sit **over** the
+/// top-left of whatever is there. This is how much room they need.
+///
+/// Measured from the window rather than written down as a number: the buttons
+/// are the system's, their size is a system decision, and a constant here
+/// would be a guess that goes wrong quietly on the day it changes. Divided by
+/// the zoom factor because the metrics come back in the window's own scale and
+/// everything in egui is in points.
+#[cfg(target_os = "macos")]
+fn chrome_inset(ctx: &egui::Context, frame: &eframe::Frame) -> f32 {
+    use raw_window_handle::HasWindowHandle as _;
+
+    let Ok(handle) = frame.window_handle() else {
+        // No window to ask. Anything drawn now is drawn behind the buttons,
+        // but there is nothing better to say than "no room needed".
+        return 0.0;
+    };
+    eframe::WindowChromeMetrics::from_window_handle(&handle.as_raw())
+        .map(|m| m.traffic_lights_size.y / ctx.zoom_factor())
+        .unwrap_or(0.0)
+}
+
+/// Everywhere else the desktop draws its own title bar above the window, and
+/// nothing of sigil's is underneath it.
+#[cfg(not(target_os = "macos"))]
+fn chrome_inset(_ctx: &egui::Context, _frame: &eframe::Frame) -> f32 {
+    0.0
 }
 
 fn main() -> eframe::Result<()> {
@@ -97,7 +130,23 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            // Kept, and not shown: the window manager, the dock and every
+            // window list still want a name. What nobody wants is the word
+            // "sigil" written across the top of sigil.
             .with_title("sigil")
+            .with_title_shown(false)
+            // The bar goes transparent and the content is drawn behind it, so
+            // the top of the window is the application's own colour instead of
+            // the system's grey. macOS only; on the others the desktop draws
+            // the bar and these are ignored.
+            //
+            // **The buttons stay.** `titlebar_shown(false)` makes the bar
+            // transparent rather than removing it, so close, minimise and zoom
+            // are where they always are and the bar still drags the window --
+            // which is why this is not `decorations(false)`, where sigil would
+            // have to draw and drag all three itself.
+            .with_titlebar_shown(false)
+            .with_fullsize_content_view(true)
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([420.0, 400.0]),
         ..Default::default()

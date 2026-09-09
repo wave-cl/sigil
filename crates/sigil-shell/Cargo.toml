@@ -8,6 +8,8 @@ description = "The sigil binary: eframe shell, tab strip, column deck."
 [dependencies]
 eframe = { workspace = true }
 egui = { workspace = true }
+# macOS only in effect: `chrome_inset` asks the window how big its buttons are.
+raw-window-handle = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
