@@ -72,6 +72,46 @@ struct Welcome {
     /// from anything else on the screen — the identity dropdown could not be
     /// opened, because the box grabbed the keyboard again the instant it was.
     focused: bool,
+    /// Making a new identity, rather than opening one that exists.
+    making: bool,
+    /// What it will be called, and the passphrase that will seal it. Twice,
+    /// because there is nothing to check a mistyped one against: the file is
+    /// the only copy of the key and a passphrase nobody knows loses it.
+    new_name: String,
+    new_passphrase: String,
+    new_again: String,
+}
+
+/// The file a new identity would be written to, or why the name will not do.
+///
+/// A free function over plain data: what it decides is worth testing, and the
+/// thing it guards against — a name that collides with an identity somebody
+/// already has — cannot be arranged inside a rendering test.
+///
+/// The shape is `sqnr`'s: an identity is `identity` or `identity-<something>`
+/// in one directory, and a name with a dot in it is a **sidecar**
+/// (`identity.handles`) rather than an identity. So a dot is refused here
+/// instead of writing a file that the scan for identities would skip, which
+/// would look exactly like the identity never being created.
+fn new_identity_path(dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give it a name, so you can tell it from the others.".into());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Letters, numbers, dashes and underscores — it is a file name.".into());
+    }
+    let path = dir.join(format!("identity-{name}"));
+    if path.exists() {
+        // Checked here as well as in `sqnr::identity::generate`, which refuses
+        // to overwrite and says so in a sentence about a path. This is the
+        // same refusal in the words of the person choosing a name.
+        return Err(format!("There is already an identity called {name}."));
+    }
+    Ok(path)
 }
 
 pub struct Shell {
@@ -113,6 +153,13 @@ pub struct Shell {
     /// whoever ran it, and the damage would show up on their *next* launch,
     /// nowhere near the test that did it.
     remember: bool,
+    /// Where identities live, when it is not `~/.sqnr`.
+    ///
+    /// **Tests must set this.** Making one writes a file, and a test that
+    /// wrote into the real folder would leave an identity in somebody's list
+    /// for ever -- discovered on their next launch, nowhere near the test that
+    /// did it.
+    identities: Option<std::path::PathBuf>,
     /// The opening screen, reached again to change identity.
     ///
     /// `Some(i)` while it is up, where `i` is the identity that was on screen
@@ -176,6 +223,7 @@ impl Shell {
             shown_unread: 0,
             welcome: Welcome::default(),
             remember: true,
+            identities: None,
             choosing: None,
             top_inset: 0.0,
         }
@@ -202,6 +250,22 @@ impl Shell {
         self.accounts = accounts;
         self.remember = false;
         self
+    }
+
+    /// Keep identities somewhere other than `~/.sqnr`. Tests only.
+    pub fn with_identities(mut self, dir: std::path::PathBuf) -> Self {
+        self.identities = Some(dir);
+        self
+    }
+
+    /// The folder new identities are written to.
+    fn identity_dir(&self) -> Option<std::path::PathBuf> {
+        if let Some(dir) = &self.identities {
+            return Some(dir.clone());
+        }
+        sqnr::identity::default_identity_path()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
     }
 
     /// The roster, for the shell's own switcher and for tests.
@@ -361,6 +425,132 @@ impl Shell {
     /// the ones sigil happens to have been holding: somebody who made a second
     /// identity with `sqnr` should find it here rather than having to know
     /// about a roster file.
+    /// Making one, rather than opening one that is already there.
+    ///
+    /// # Why it is sealed, and why the passphrase is asked for twice
+    ///
+    /// The file this writes is the **only** copy of the key: nothing else has
+    /// it, and nothing can mint it again. A passphrase that was mistyped is
+    /// therefore not an inconvenience -- it is an identity nobody will ever
+    /// open, including the person who just made it, and they will not find out
+    /// until the next time they try. So it is typed twice and the two are
+    /// compared, which is the only check that is possible.
+    ///
+    /// Sealed and not optional, for the same reason `sqnr keygen` encrypts by
+    /// default: an unsealed identity file is a private key sitting in a folder
+    /// in the clear.
+    fn making_ui(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.label("Name");
+        let name = sigil_ui::field(
+            ui,
+            &mut self.welcome.new_name,
+            "work, phone, the-other-one",
+            CARD_WIDTH,
+        );
+        // The keyboard lands in the first box, the same way it lands in the
+        // passphrase box on the way in. Once, not every pass, or nothing else
+        // on the screen could ever hold it -- see `Welcome::focused`.
+        if !self.welcome.focused {
+            self.welcome.focused = true;
+            name.request_focus();
+        }
+        ui.add_space(tokens::SPACING_MD);
+
+        ui.label("Passphrase");
+        sigil_ui::password_field(
+            ui,
+            &mut self.welcome.new_passphrase,
+            "something you will not lose",
+            CARD_WIDTH,
+        );
+        ui.add_space(tokens::SPACING_SM);
+        sigil_ui::password_field(ui, &mut self.welcome.new_again, "again", CARD_WIDTH);
+        ui.add_space(tokens::SPACING_SM);
+        ui.colored_label(
+            theme.text_secondary,
+            "It seals the key on this machine. Nothing can recover it and nothing else \
+             holds a copy — a passphrase nobody knows is an identity nobody can open.",
+        );
+        ui.add_space(tokens::SPACING_MD);
+
+        if ui
+            .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Create"))
+            .clicked()
+        {
+            self.make_identity();
+        }
+        ui.add_space(tokens::SPACING_SM);
+        if ui
+            .add_sized([CARD_WIDTH, tokens::BUTTON_MD], egui::Button::new("Cancel"))
+            .clicked()
+        {
+            // The name and both passphrases go with it. What was typed towards
+            // an identity that was never made is not worth keeping, and one of
+            // those fields is a passphrase.
+            self.welcome = Welcome::default();
+        }
+        if let Some(trouble) = &self.welcome.trouble {
+            ui.add_space(tokens::SPACING_SM);
+            ui.colored_label(theme.destructive, trouble);
+        }
+    }
+
+    /// Write it, hold it, and open it.
+    ///
+    /// Everything that can be wrong is said in one place and in the words of
+    /// the person typing, rather than as whatever the layer underneath calls
+    /// it: the identity is not made unless all of it is right.
+    fn make_identity(&mut self) {
+        let Some(dir) = self.identity_dir() else {
+            self.welcome.trouble =
+                Some("There is nowhere on this machine to keep an identity.".into());
+            return;
+        };
+        let path = match new_identity_path(&dir, &self.welcome.new_name) {
+            Ok(path) => path,
+            Err(why) => {
+                self.welcome.trouble = Some(why);
+                return;
+            }
+        };
+        if self.welcome.new_passphrase.is_empty() {
+            self.welcome.trouble = Some("It needs a passphrase to be sealed with.".into());
+            return;
+        }
+        if self.welcome.new_passphrase != self.welcome.new_again {
+            // Both cleared, not one: the point of the second box is that
+            // neither of them is known to be the one that was meant.
+            self.welcome.new_passphrase.clear();
+            self.welcome.new_again.clear();
+            self.welcome.trouble = Some("Those two passphrases are not the same.".into());
+            return;
+        }
+        if let Err(why) = std::fs::create_dir_all(&dir) {
+            self.welcome.trouble = Some(format!("{} cannot be made: {why}", dir.display()));
+            return;
+        }
+        let passphrase = std::mem::take(&mut self.welcome.new_passphrase);
+        if let Err(why) = sqnr::identity::generate(&path, Some(&passphrase)) {
+            self.welcome.trouble = Some(why);
+            return;
+        }
+        // Held, and open. It was just sealed with a passphrase this screen
+        // still has, so asking for it back a second later would be asking
+        // somebody to prove they meant what they typed twice already.
+        let i = self.accounts.use_path(path);
+        if !self.accounts.unlock(i, &passphrase) {
+            self.welcome.trouble = Some("It was made, but it will not open.".into());
+            return;
+        }
+        self.welcome = Welcome::default();
+        self.choosing = None;
+        // Not saved here. Every path that changes the roster bumps its
+        // generation and `reconcile_accounts` remembers it, which is stated
+        // there as the reason no call site does its own -- and a second place
+        // that writes the settings file is a second place that can be wrong
+        // about them.
+    }
+
     fn welcome(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
         let found = Accounts::found();
         let active = self.accounts.active_index();
@@ -417,7 +607,9 @@ impl Shell {
                     ui.add_space(tokens::SPACING_LG);
                     // The same screen either way, and it says which errand it
                     // is on: arriving, or coming back to be somebody else.
-                    ui.heading(if self.choosing.is_some() {
+                    ui.heading(if self.welcome.making {
+                        "New identity"
+                    } else if self.choosing.is_some() {
                         "Switch identity"
                     } else {
                         "Open an identity"
@@ -428,6 +620,11 @@ impl Shell {
                          one of these.",
                     );
                     ui.add_space(tokens::SPACING_LG);
+
+                    if self.welcome.making {
+                        self.making_ui(ui, theme);
+                        return;
+                    }
 
                     ui.label("Identity");
                     // A name, not a path: the folder is the same for all of
@@ -535,6 +732,24 @@ impl Shell {
                     {
                         self.accounts.switch_to(previous);
                         self.choosing = None;
+                    }
+                    // **Under everything, and always there.** Somebody with
+                    // no identity at all meets this screen with nothing on it
+                    // they can do -- the combo lists a folder that is empty
+                    // and the passphrase box has nothing to open. That is also
+                    // the first thing that ever happens to anybody.
+                    ui.add_space(tokens::SPACING_MD);
+                    if ui
+                        .add_sized(
+                            [CARD_WIDTH, tokens::BUTTON_MD],
+                            egui::Button::new("Create a new identity"),
+                        )
+                        .clicked()
+                    {
+                        self.welcome.making = true;
+                        self.welcome.trouble = None;
+                        // The keyboard moves to the first box of the form.
+                        self.welcome.focused = false;
                     }
                     if let Some(trouble) = &self.welcome.trouble {
                         ui.add_space(tokens::SPACING_SM);
@@ -718,5 +933,54 @@ impl Shell {
         if let Some(id) = self.focus.get(&active).copied() {
             ctx.memory_mut(|m| m.request_focus(id));
         }
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::new_identity_path;
+
+    /// The shape `sqnr` scans for, and no other.
+    #[test]
+    fn a_name_becomes_an_identity_file_beside_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = new_identity_path(dir.path(), "work").expect("a path");
+        assert_eq!(path.file_name().unwrap(), "identity-work");
+        assert_eq!(path.parent().unwrap(), dir.path());
+        // Trimmed, because a trailing space in a file name is a thing nobody
+        // means and nothing shows.
+        assert_eq!(
+            new_identity_path(dir.path(), "  work  ").unwrap(),
+            path,
+            "the name was taken literally, spaces and all"
+        );
+    }
+
+    /// **A dot makes a sidecar, not an identity.**
+    ///
+    /// `identity.handles` is the SIP-38 hints file beside `identity`, so the
+    /// scan skips any name with a dot in it. Writing `identity-my.key` would
+    /// therefore create a file that never appears in the list — an identity
+    /// that was made, and cannot be found, and said nothing.
+    #[test]
+    fn a_name_that_would_not_be_found_again_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["my.key", "../elsewhere", "with/slash", "two words", ""] {
+            assert!(
+                new_identity_path(dir.path(), name).is_err(),
+                "{name:?} was accepted"
+            );
+        }
+    }
+
+    /// An identity that exists is never written over. It is somebody's only
+    /// copy of a key, and a second one under the same name is not a name
+    /// collision -- it is the first key gone.
+    #[test]
+    fn a_name_already_taken_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("identity-work"), "not really a key").unwrap();
+        let why = new_identity_path(dir.path(), "work").expect_err("refused");
+        assert!(why.contains("work"), "which name, though: {why}");
     }
 }

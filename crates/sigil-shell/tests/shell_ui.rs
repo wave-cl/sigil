@@ -211,6 +211,35 @@ fn asking_once_does_not_ask_for_ever() {
     );
 }
 
+/// The screen with nothing on it yet: making one.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn making_dark() {
+    let dir = tempfile::tempdir().unwrap();
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Calls", 0))];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: dir.path().join("nothing-here"),
+            },
+        ]))
+        .with_identities(dir.path().to_path_buf());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+    h.get_by_label("Create a new identity").click();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("making_dark");
+}
+
 /// The same screen on its other errand: coming back to be somebody else.
 ///
 /// Worth a picture of its own because it is not the opening screen with a
@@ -445,6 +474,136 @@ fn the_opening_screen_shows_the_chosen_identitys_own_mark() {
     );
     // And the list above it names a *file*, which is something somebody typed.
     assert!(said(&h).contains("identity (the default)"), "{}", said(&h));
+}
+
+/// An identity can be made from the opening screen, and it opens straight
+/// into the application.
+///
+/// The first thing that ever happens to anybody is this screen with nothing on
+/// it they can use: a list of a folder that is empty, and a passphrase box
+/// with nothing to open. Somebody in that position had to go and find `sqnr`
+/// on a command line.
+///
+/// **Into a temporary folder.** Making an identity writes a file, and a test
+/// that wrote into the real `~/.sqnr` would leave one in somebody's list for
+/// ever -- found on their next launch, nowhere near the test that did it.
+#[test]
+fn an_identity_can_be_made_here_and_is_open_when_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let made = dir.path().join("identity-work");
+
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Calls", 0))];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: dir.path().join("nothing-here"),
+            },
+        ]))
+        .with_identities(dir.path().to_path_buf());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+
+    h.get_by_label("Create a new identity").click();
+    h.run();
+    type_into(&mut h, &["work", "open sesame", "open sesame"]);
+
+    h.get_by_label("Create").click();
+    h.run();
+
+    assert!(made.exists(), "no identity was written");
+    assert!(
+        sqnr::identity::is_encrypted(&made).expect("readable"),
+        "the key was written in the clear"
+    );
+    let seen = said(&h);
+    assert!(
+        !seen.contains("Open an identity") && !seen.contains("Create a new identity"),
+        "the screen stayed up, so it was made and not opened: {seen}"
+    );
+    assert!(
+        seen.contains("Calls"),
+        "and the application is not there: {seen}"
+    );
+}
+
+/// Two passphrases that do not match make nothing.
+///
+/// The file is the only copy of the key, so a mistyped passphrase is not an
+/// inconvenience: it is an identity nobody can ever open, found out later.
+/// Comparing two boxes is the only check that is possible.
+#[test]
+fn two_passphrases_that_differ_make_no_identity() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Calls", 0))];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: dir.path().join("nothing-here"),
+            },
+        ]))
+        .with_identities(dir.path().to_path_buf());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+    h.get_by_label("Create a new identity").click();
+    h.run();
+    type_into(&mut h, &["work", "open sesame", "open sesamd"]);
+    h.get_by_label("Create").click();
+    h.run();
+
+    assert!(
+        !dir.path().join("identity-work").exists(),
+        "an identity was made with a passphrase nobody typed twice"
+    );
+    assert!(
+        said(&h).contains("not the same"),
+        "and nothing said why: {}",
+        said(&h)
+    );
+}
+
+/// Type into the screen's fields in the order they appear.
+///
+/// By position, because there is nothing else to go on: a field's hint never
+/// reaches the accessibility tree, and a password field's value is empty on
+/// purpose. The order is the order they are drawn in.
+fn type_into(h: &mut Harness<'static>, texts: &[&str]) {
+    fn fields<'a>(node: egui_kittest::Node<'a>, out: &mut Vec<egui_kittest::Node<'a>>) {
+        let role = format!("{:?}", node.accesskit_node().role());
+        if role == "TextInput" || role == "PasswordInput" {
+            out.push(node);
+        }
+        for child in node.children() {
+            fields(child, out);
+        }
+    }
+    for (i, text) in texts.iter().enumerate() {
+        let mut found = Vec::new();
+        fields(h.root(), &mut found);
+        assert!(
+            found.len() > i,
+            "there are {} boxes on the screen and this is number {}",
+            found.len(),
+            i + 1
+        );
+        found[i].focus();
+        found[i].type_text(text);
+        h.run();
+    }
 }
 
 /// You can type your passphrase the moment the window opens.

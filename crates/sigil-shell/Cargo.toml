@@ -10,6 +10,9 @@ eframe = { workspace = true }
 egui = { workspace = true }
 # macOS only in effect: `chrome_inset` asks the window how big its buttons are.
 raw-window-handle = { workspace = true }
+# The opening screen makes identities as well as opening them, and `generate`
+# is what writes one -- including refusing to overwrite.
+sqnr = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
