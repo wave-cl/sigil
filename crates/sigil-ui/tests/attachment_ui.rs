@@ -406,3 +406,55 @@ fn a_picture_reserves_what_it_took_last_time() {
         took.get()
     );
 }
+
+/// The thumbnail stays up while the picture itself decodes.
+///
+/// The two are different pictures as far as egui is concerned -- they have to
+/// be, or the thumbnail would still be on screen after the real one arrived --
+/// so the pass that first asks for the full image finds it pending. Putting
+/// the word "opening" there blanks a picture somebody is already looking at,
+/// and it comes back a frame or two later: the flicker between the blurry one
+/// and the sharp one.
+#[test]
+fn the_thumbnail_stays_up_while_the_picture_decodes() {
+    let preview: &'static [u8] = Box::leak(png_of(40, 10).into_boxed_slice());
+    let full: &'static [u8] = Box::leak(png_of(400, 100).into_boxed_slice());
+    let bytes = std::rc::Rc::new(std::cell::RefCell::new(None::<&'static [u8]>));
+    let words = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+
+    let (shown, said_now) = (bytes.clone(), words.clone());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(500.0, 400.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            sigil_ui::attachment(
+                ui,
+                &sigil_ui::Attachment {
+                    kind: sigil_ui::attachment::IMAGE,
+                    described: "[image, 28 KiB]",
+                    preview,
+                    bytes: *shown.borrow(),
+                    missing: false,
+                    id: "swapping",
+                },
+                sigil::ColorTheme::current(&ctx).surface_elevated,
+            );
+            said_now.borrow_mut().clear();
+        });
+    // The thumbnail, on screen and settled.
+    h.run();
+    h.run();
+
+    // The picture arrives. On this very pass it has not decoded yet -- that is
+    // the pass this is about.
+    *bytes.borrow_mut() = Some(full);
+    h.step();
+    let _ = words;
+    assert!(
+        !said(&h).contains("opening"),
+        "the thumbnail was replaced by words while the picture decoded: {}",
+        said(&h)
+    );
+}

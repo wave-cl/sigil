@@ -716,6 +716,47 @@ fn reaching_the_top_asks_for_one_page_and_not_one_a_frame() {
     );
 }
 
+/// The next page is asked for before the reader reaches the end of this one.
+///
+/// Waiting until the control is *visible* means arriving at the top of the
+/// transcript and stopping there while the exchange is asked -- which reads as
+/// a wall rather than as more conversation. A screen early, so it is on its
+/// way before anybody gets there.
+#[test]
+fn the_next_page_is_asked_for_a_screen_early() {
+    let mut state = a_page(50, 80);
+    state.earlier = 50;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    assert!(
+        asked.borrow().is_empty(),
+        "a conversation opened at the bottom asked for more of it: {:?}",
+        asked.borrow()
+    );
+
+    // Up towards the top, but not to it. Measured on this fixture: 2,376
+    // pixels of transcript in a 421-pixel pane, so it opens at an offset of
+    // 1,955 and sixteen notches of 120 leave it around 170 -- inside one
+    // screen of the top, with the control itself, forty pixels tall at the
+    // very start of the content, still off it.
+    h.hover_at(egui::pos2(600.0, 300.0));
+    for _ in 0..16 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.step();
+    }
+    assert!(
+        asked.borrow().iter().any(|c| c == "Earlier"),
+        "scrolling towards the top asked for nothing: {:?}",
+        asked.borrow()
+    );
+}
+
 /// And it is anchored on the very pass that shows it.
 ///
 /// Correcting the offset after the pass puts the right number in the right

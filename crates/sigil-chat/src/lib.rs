@@ -2306,15 +2306,33 @@ impl ChatApp {
                     1 => "1 earlier message".to_string(),
                     n => format!("{n} earlier messages"),
                 });
-                // Asked for by reaching the top as well as by pressing it.
-                // Scrolling is how anybody actually gets there, and a control
-                // that only answers a click makes somebody hunt for a button
-                // they have already scrolled past.
-                let reached = ui.clip_rect().contains(more.rect.center());
+                // Asked for by *approaching* the top as well as by pressing
+                // it. Scrolling is how anybody actually gets there, and a
+                // control that only answers a click makes somebody hunt for a
+                // button they have already scrolled past.
+                //
+                // A screen early, so the page is on its way before the reader
+                // arrives at the end of what they have: waiting until the
+                // control is visible means reaching the top of the transcript
+                // and stopping there while the exchange is asked, which is the
+                // pause that made this read as a wall rather than as more
+                // conversation.
+                //
+                // **From where the transcript is scrolled, not from whether
+                // this button can be seen.** On the pass that first draws a
+                // conversation there is no clip rectangle worth the name --
+                // everything is "visible" -- so a rule about visibility asks
+                // for the previous page the instant a conversation is opened,
+                // which is the whole of what paging exists to avoid. The
+                // scroll position is measured and says nothing until there is
+                // something to measure.
+                let (content, offset) = self.pane(at).scrolled;
+                let view = ui.clip_rect().height();
+                let near_top = content > 0.0 && (content <= view || offset <= view);
                 // **Once, and not again until it has arrived.** Being on
                 // screen is a state and not an event: without the guard this
                 // asks on every frame it can see itself.
-                if (more.clicked() || reached) && !self.pane(at).asking {
+                if (more.clicked() || near_top) && !self.pane(at).asking {
                     self.pane(at).asking = true;
                     self.send_as(Some(at), Cmd::Earlier);
                 }

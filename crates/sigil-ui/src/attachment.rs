@@ -93,6 +93,34 @@ pub struct AttachmentAction {
     pub retry: bool,
 }
 
+/// Draw the thumbnail into `rect`, if it is ready. Says whether it drew.
+///
+/// Used while the picture itself is still decoding, so that what is on screen
+/// stays a picture.
+fn draw_preview(
+    ui: &mut egui::Ui,
+    a: &Attachment<'_>,
+    rect: egui::Rect,
+    side: f32,
+    _quiet: egui::Color32,
+) -> bool {
+    let uri = format!("bytes://{}-preview", a.id);
+    ui.ctx().include_bytes(uri.clone(), a.preview.to_vec());
+    let image = egui::Image::from_bytes(uri, a.preview.to_vec())
+        .fit_to_original_size(1.0)
+        .max_size(rect.size())
+        .corner_radius(tokens::RADIUS_MD)
+        .show_loading_spinner(false);
+    match image.load_for_size(ui.ctx(), rect.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            let drawn = fit(texture.size, side, false);
+            image.paint_at(ui, egui::Rect::from_center_size(rect.center(), drawn));
+            true
+        }
+        _ => false,
+    }
+}
+
 /// How large to draw a picture of `natural` size in a column `side` wide.
 ///
 /// Its own shape, bounded by the width and by [`PICTURE_MAX_TALL`]. A picture
@@ -258,9 +286,23 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     // Still decoding, and the next pass is asked for so it
                     // does not sit here.
                     ui.ctx().request_repaint();
-                    inside(ui, &mut |ui| {
-                        ui.colored_label(quiet, egui::RichText::new("opening…").small());
-                    });
+                    // **The thumbnail stays up while the real one decodes.**
+                    //
+                    // The two are different pictures as far as egui is
+                    // concerned -- they must be, or the thumbnail would still
+                    // be on screen after the image arrived -- so the pass
+                    // where the full one is asked for finds it pending, and
+                    // replacing what is there with the word "opening" blanks a
+                    // picture somebody is already looking at. It came back a
+                    // frame or two later, which is the flicker between the
+                    // blurry one and the sharp one.
+                    let showing =
+                        whole && !a.preview.is_empty() && draw_preview(ui, a, rect, side, quiet);
+                    if !showing {
+                        inside(ui, &mut |ui| {
+                            ui.colored_label(quiet, egui::RichText::new("opening…").small());
+                        });
+                    }
                 }
                 Err(why) => {
                     let why = why.to_string();
