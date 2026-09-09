@@ -443,7 +443,12 @@ pub struct Attached {
     pub size: u64,
     /// The thumbnail the sender put in, if any. Drawn while the blob is
     /// fetched, and the only thing shown at all until it is.
-    pub preview: Vec<u8>,
+    ///
+    /// **Shared, not owned.** A picture used to be copied into every published
+    /// state and again into every clone of one -- and the interface clones the
+    /// whole state four or five times a frame. A two-megabyte photograph on
+    /// screen was ten megabytes of memcpy per frame before anything was drawn.
+    pub preview: std::sync::Arc<[u8]>,
     /// The exchange was asked for it and would not give it.
     ///
     /// **Not the same as "not yet".** A blob past its retention window is gone
@@ -451,11 +456,12 @@ pub struct Attached {
     /// not retried — which left a picture that had failed and one that had not
     /// been reached yet looking identical, and neither of them saying anything.
     pub missing: bool,
-    /// The whole file, once it has been fetched and opened.
+    /// The whole file, once it has been fetched and opened. Shared for the
+    /// reason `preview` is.
     ///
     /// Held here rather than fetched by the view: a view runs sixty times a
     /// second and must never be where a download starts.
-    pub bytes: Option<Vec<u8>>,
+    pub bytes: Option<std::sync::Arc<[u8]>>,
     /// A name for the blob, stable across passes, so the interface can key a
     /// texture on it.
     pub id: String,
@@ -1244,7 +1250,7 @@ struct Desk {
     /// the last place a download should start. Bounded by kind and by size —
     /// a hundred-megabyte video is not something to pull because somebody
     /// scrolled past it.
-    files: HashMap<[u8; 32], Vec<u8>>,
+    files: HashMap<[u8; 32], std::sync::Arc<[u8]>>,
     /// Blobs we tried and could not get, so a broken one is not retried on
     /// every pass for as long as the conversation is open.
     unfetchable: HashSet<[u8; 32]>,
@@ -1863,7 +1869,7 @@ async fn fetch_files(
         }
         match chat.download(&a).await {
             Ok(bytes) => {
-                desk.files.insert(a.blob, bytes);
+                desk.files.insert(a.blob, bytes.into());
             }
             // Remembered as a failure rather than retried every tick. A blob
             // that has passed its retention window is gone, and asking again
@@ -2089,7 +2095,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                             kind: a.effective_kind(),
                             described: sqex_chat::attach::describe(a),
                             size: a.size,
-                            preview: a.preview.clone(),
+                            preview: a.preview.as_slice().into(),
                             bytes: desk.files.get(&a.blob).cloned(),
                             // Asked for and refused, as against not reached
                             // yet. The two look the same on screen otherwise,

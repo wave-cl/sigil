@@ -27,7 +27,7 @@ fn said(h: &Harness<'static>) -> String {
 /// `None` for the height means what a scrolling transcript actually gives a
 /// message below the fold: **zero**. `bytes` of `None` is a picture that has
 /// not been fetched yet.
-fn tall(bytes: Option<&'static [u8]>, height: Option<f32>) -> f32 {
+fn tall(bytes: Option<std::sync::Arc<[u8]>>, height: Option<f32>) -> f32 {
     let took = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let seen = took.clone();
     let mut h = Harness::builder()
@@ -46,8 +46,8 @@ fn tall(bytes: Option<&'static [u8]>, height: Option<f32>) -> f32 {
                         &sigil_ui::Attachment {
                             kind: sigil_ui::attachment::IMAGE,
                             described: "[image, 28 KiB]",
-                            preview: &[],
-                            bytes,
+                            preview: sigil_ui::attachment::no_preview(),
+                            bytes: bytes.as_ref(),
                             missing: false,
                             id: "sized",
                         },
@@ -64,7 +64,7 @@ fn tall(bytes: Option<&'static [u8]>, height: Option<f32>) -> f32 {
     took.load(std::sync::atomic::Ordering::Relaxed) as f32
 }
 
-fn drawn(bytes: &'static [u8]) -> Harness<'static> {
+fn drawn(bytes: std::sync::Arc<[u8]>) -> Harness<'static> {
     Harness::builder()
         .with_size(egui::vec2(500.0, 400.0))
         .build_ui(move |ui| {
@@ -77,8 +77,8 @@ fn drawn(bytes: &'static [u8]) -> Harness<'static> {
                 &sigil_ui::Attachment {
                     kind: sigil_ui::attachment::IMAGE,
                     described: "[image, 28 KiB]",
-                    preview: &[],
-                    bytes: Some(bytes),
+                    preview: sigil_ui::attachment::no_preview(),
+                    bytes: Some(&bytes),
                     missing: false,
                     id: "notapicture",
                 },
@@ -211,7 +211,7 @@ fn a_png() -> &'static [u8] {
 /// application, including the ones that worked.
 #[test]
 fn a_picture_that_is_fine_is_not_reported_as_broken() {
-    let mut h = drawn(a_png());
+    let mut h = drawn(a_png().into());
     h.run();
     h.run();
     let said = said(&h);
@@ -231,7 +231,7 @@ fn a_picture_that_is_fine_is_not_reported_as_broken() {
 /// the interface knew which the whole time.
 #[test]
 fn something_that_is_not_a_picture_says_what_went_wrong() {
-    let mut h = drawn(b"this is not a picture");
+    let mut h = drawn(std::sync::Arc::from(&b"this is not a picture"[..]));
     h.run();
     let said = said(&h);
     assert!(
@@ -256,7 +256,7 @@ fn the_whole_chain_is_asked_about_and_not_only_the_first_link() {
     // A harness has no GPU, so a texture never becomes ready here: what this
     // pins is that the widget asks `load_for_size` — the question covering
     // both steps — rather than `try_load_image`, which covers one.
-    let mut h = drawn(a_png());
+    let mut h = drawn(a_png().into());
     h.run();
     let said = said(&h);
     assert!(
@@ -283,8 +283,8 @@ fn the_whole_chain_is_asked_about_and_not_only_the_first_link() {
 /// only question that was failing: how much room did it take.
 #[test]
 fn a_picture_takes_room_even_where_there_is_none_left() {
-    let with_room = tall(Some(a_png()), Some(400.0));
-    let with_none = tall(Some(a_png()), None);
+    let with_room = tall(Some(a_png().into()), Some(400.0));
+    let with_none = tall(Some(a_png().into()), None);
     assert!(
         with_none > 0.0,
         "a picture below the fold takes no height at all, which is how it \
@@ -309,11 +309,11 @@ fn a_picture_takes_room_even_where_there_is_none_left() {
 /// both and cancels.
 #[test]
 fn a_picture_is_drawn_in_its_own_shape() {
-    let wide: &'static [u8] = Box::leak(png_of(400, 100).into_boxed_slice());
-    let taller: &'static [u8] = Box::leak(png_of(400, 200).into_boxed_slice());
+    let wide: std::sync::Arc<[u8]> = png_of(400, 100).into();
+    let taller: std::sync::Arc<[u8]> = png_of(400, 200).into();
 
-    let short = tall(Some(wide), Some(400.0));
-    let deep = tall(Some(taller), Some(400.0));
+    let short = tall(Some(wide.clone()), Some(400.0));
+    let deep = tall(Some(taller.clone()), Some(400.0));
     // 400 wide into a column of 320 is a scale of 0.8, so 100 more pixels of
     // picture is 80 more pixels on screen.
     assert!(
@@ -345,8 +345,8 @@ fn a_picture_is_drawn_in_its_own_shape() {
 /// seen the picture.
 #[test]
 fn a_picture_reserves_what_it_took_last_time() {
-    let bytes: &'static [u8] = Box::leak(png_of(400, 100).into_boxed_slice());
-    let shown = std::rc::Rc::new(std::cell::RefCell::new(Some(bytes)));
+    let bytes: std::sync::Arc<[u8]> = png_of(400, 100).into();
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(Some(bytes.clone())));
     let took = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
 
     let (state, seen) = (shown.clone(), took.clone());
@@ -366,8 +366,8 @@ fn a_picture_reserves_what_it_took_last_time() {
                         &sigil_ui::Attachment {
                             kind: sigil_ui::attachment::IMAGE,
                             described: "[image, 28 KiB]",
-                            preview: &[],
-                            bytes: *state.borrow(),
+                            preview: sigil_ui::attachment::no_preview(),
+                            bytes: state.borrow().as_ref(),
                             missing: false,
                             id: "remembered",
                         },
@@ -417,9 +417,9 @@ fn a_picture_reserves_what_it_took_last_time() {
 /// and the sharp one.
 #[test]
 fn the_thumbnail_stays_up_while_the_picture_decodes() {
-    let preview: &'static [u8] = Box::leak(png_of(40, 10).into_boxed_slice());
-    let full: &'static [u8] = Box::leak(png_of(400, 100).into_boxed_slice());
-    let bytes = std::rc::Rc::new(std::cell::RefCell::new(None::<&'static [u8]>));
+    let preview: std::sync::Arc<[u8]> = png_of(40, 10).into();
+    let full: std::sync::Arc<[u8]> = png_of(400, 100).into();
+    let bytes = std::rc::Rc::new(std::cell::RefCell::new(None::<std::sync::Arc<[u8]>>));
     let words = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
 
     let (shown, said_now) = (bytes.clone(), words.clone());
@@ -434,8 +434,8 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
                 &sigil_ui::Attachment {
                     kind: sigil_ui::attachment::IMAGE,
                     described: "[image, 28 KiB]",
-                    preview,
-                    bytes: *shown.borrow(),
+                    preview: &preview,
+                    bytes: shown.borrow().as_ref(),
                     missing: false,
                     id: "swapping",
                 },
@@ -449,7 +449,7 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
 
     // The picture arrives. On this very pass it has not decoded yet -- that is
     // the pass this is about.
-    *bytes.borrow_mut() = Some(full);
+    *bytes.borrow_mut() = Some(full.clone());
     h.step();
     let _ = words;
     assert!(

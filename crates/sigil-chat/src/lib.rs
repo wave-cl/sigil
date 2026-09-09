@@ -2558,7 +2558,7 @@ impl ChatApp {
                     kind: a.kind,
                     described: &a.described,
                     preview: &a.preview,
-                    bytes: a.bytes.as_deref(),
+                    bytes: a.bytes.as_ref(),
                     missing: a.missing,
                     id: &a.id,
                 })

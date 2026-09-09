@@ -156,6 +156,112 @@ async fn two_sessions_hold_a_conversation() {
     bob.stop();
 }
 
+/// The interface is handed the picture, not a copy of it.
+///
+/// The state is cloned four or five times a frame -- to draw, to badge the tray
+/// and the rail, to see whether anything is ringing, to read one field about
+/// another identity's exchange. A fetched image used to be copied into every
+/// published state and again into every one of those clones: a two-megabyte
+/// photograph on screen was ten megabytes of memcpy per frame before a pixel
+/// was drawn.
+///
+/// Two snapshots taken a moment apart must point at the same bytes. That is
+/// what says `publish` hands out what the session already holds, rather than
+/// building a fresh copy every 700 milliseconds for every reader.
+#[tokio::test]
+async fn a_published_picture_is_shared_and_not_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(21);
+    let (b_signer, b_id) = signer(22);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+
+    // A `.png`, because only an image is fetched without being asked for --
+    // which is the path that puts bytes into the published state at all. The
+    // content need not decode: the kind comes from the name (`kind_of`).
+    let picture = dir.path().join("a-picture.png");
+    std::fs::write(&picture, vec![9u8; 32 * 1024]).unwrap();
+    alice.send(Cmd::SendFile(picture));
+
+    let arrived = until(
+        || {
+            bob.state()
+                .lines
+                .iter()
+                .any(|l| l.attachments.iter().any(|a| a.bytes.is_some()))
+        },
+        30,
+    )
+    .await;
+    assert!(
+        arrived,
+        "the picture should be fetched and published: {:?}",
+        bob.state().trouble
+    );
+
+    let held = |h: &ChatHandle| {
+        h.state()
+            .lines
+            .into_iter()
+            .find_map(|l| l.attachments.into_iter().find_map(|a| a.bytes))
+            .expect("the picture in the published state")
+    };
+    let first = held(&bob);
+
+    // **Across a publish, not within one.** Two snapshots taken back to back
+    // read the same published value and would share their bytes however
+    // `publish` built them -- the first version of this test passed with the
+    // copy put back. Something has to be published in between, so the message
+    // below is what makes the second snapshot a new one.
+    alice.send(Cmd::Send("and a word after it".into()));
+    assert!(
+        until(
+            || bob
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "and a word after it"),
+            30
+        )
+        .await,
+        "the second message should arrive, or nothing was republished"
+    );
+
+    let again = held(&bob);
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &again),
+        "every published state carries its own copy of the picture, so every \
+         clone of one copies it again"
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
 /// A conversation somebody left does not come back at the next launch.
 ///
 /// The list is folded from this machine's own copy before the exchange is

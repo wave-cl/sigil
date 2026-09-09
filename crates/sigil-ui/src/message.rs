@@ -1002,7 +1002,7 @@ mod tests {
             let file = crate::Attachment {
                 kind: 0x04,
                 described: "[notes.txt, 2.1 kB]",
-                preview: &[],
+                preview: crate::attachment::no_preview(),
                 bytes: None,
                 missing: false,
                 id: "abc123",

@@ -29,9 +29,9 @@ pub struct Attachment<'a> {
     pub described: &'a str,
     /// The sender's thumbnail, if they sent one. Shown while the file is
     /// fetched, and instead of it when it is too big to fetch unasked.
-    pub preview: &'a [u8],
+    pub preview: &'a std::sync::Arc<[u8]>,
     /// The file itself, once fetched and opened.
-    pub bytes: Option<&'a [u8]>,
+    pub bytes: Option<&'a std::sync::Arc<[u8]>>,
     /// A stable name for the blob, so a texture can be keyed on it.
     pub id: &'a str,
     /// The exchange was asked for it and would not give it.
@@ -83,6 +83,15 @@ pub const PICTURE_MAX_TALL: f32 = 320.0;
 /// photograph there is.
 pub const PICTURE_GUESS: f32 = 180.0;
 
+/// The empty thumbnail, shared.
+///
+/// An attachment with no preview still has to name one, and minting an empty
+/// `Arc` for it per attachment per frame is a wasteful way to say nothing.
+pub fn no_preview() -> &'static std::sync::Arc<[u8]> {
+    static NONE: std::sync::OnceLock<std::sync::Arc<[u8]>> = std::sync::OnceLock::new();
+    NONE.get_or_init(|| std::sync::Arc::from(&[][..]))
+}
+
 /// What the reader did to a file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentAction {
@@ -105,8 +114,9 @@ fn draw_preview(
     _quiet: egui::Color32,
 ) -> bool {
     let uri = format!("bytes://{}-preview", a.id);
-    ui.ctx().include_bytes(uri.clone(), a.preview.to_vec());
-    let image = egui::Image::from_bytes(uri, a.preview.to_vec())
+    ui.ctx()
+        .include_bytes(uri.clone(), egui::load::Bytes::Shared(a.preview.clone()));
+    let image = egui::Image::from_bytes(uri, egui::load::Bytes::Shared(a.preview.clone()))
         .fit_to_original_size(1.0)
         .max_size(rect.size())
         .corner_radius(tokens::RADIUS_MD)
@@ -216,22 +226,31 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             // Doing the include ourselves makes the question answerable: from
             // here on, an error is about the bytes and not about the order
             // things happened in.
-            ui.ctx().include_bytes(uri.clone(), bytes.to_vec());
-            let image = egui::Image::from_bytes(uri.clone(), bytes.to_vec())
-                // **From the picture's own size, not from the space left.**
-                //
-                // `Image` defaults to `ImageFit::Fraction([1, 1])`, which is
-                // `available_size * 1.0` — and inside a scrolling transcript
-                // the available *height* is zero for everything below the
-                // fold. So every picture in a scrolled conversation was drawn
-                // 320 wide and 0 tall: fetched, decoded, uploaded, and
-                // invisible. Three passes of diagnostics went past this
-                // because each of them asked whether the picture had *loaded*,
-                // and it always had.
-                .fit_to_original_size(1.0)
-                .max_size(box_size)
-                .corner_radius(tokens::RADIUS_MD)
-                .show_loading_spinner(false);
+            // **Shared, not copied.** `to_vec()` here allocated and memcpied
+            // the whole encoded picture *twice per frame* -- once for a cache
+            // that already holds it and drops the copy on the floor, and once
+            // more inside `from_bytes`, which converts a `Vec` into an `Arc`
+            // with a third. A two-megabyte photograph at sixty frames a second
+            // is a third of a gigabyte a second of pure memcpy, to draw the
+            // same pixels as the frame before.
+            ui.ctx()
+                .include_bytes(uri.clone(), egui::load::Bytes::Shared(bytes.clone()));
+            let image =
+                egui::Image::from_bytes(uri.clone(), egui::load::Bytes::Shared(bytes.clone()))
+                    // **From the picture's own size, not from the space left.**
+                    //
+                    // `Image` defaults to `ImageFit::Fraction([1, 1])`, which is
+                    // `available_size * 1.0` — and inside a scrolling transcript
+                    // the available *height* is zero for everything below the
+                    // fold. So every picture in a scrolled conversation was drawn
+                    // 320 wide and 0 tall: fetched, decoded, uploaded, and
+                    // invisible. Three passes of diagnostics went past this
+                    // because each of them asked whether the picture had *loaded*,
+                    // and it always had.
+                    .fit_to_original_size(1.0)
+                    .max_size(box_size)
+                    .corner_radius(tokens::RADIUS_MD)
+                    .show_loading_spinner(false);
             // **The whole chain, not the first link of it.**
             //
             // Bytes become an image and an image becomes a texture, and
