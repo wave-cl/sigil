@@ -6,10 +6,40 @@ use sigil::account::Account;
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::theme;
-use sigil_chat::ChatApp;
+use sigil_chat::{ChatApp, ChatState, LinkState};
 
+/// A connected session with nothing in it.
+///
+/// **Not the absence of a session**, which is a different screen: without this
+/// these tests drew the "not connected" pane and believed they were drawing
+/// the conversation list, because `state_of` used to fall back to a default
+/// `ChatState` and that default said the link was up.
 fn harness(account: Account) -> Harness<'static> {
+    connected(account, empty())
+}
+
+fn empty() -> ChatState {
+    ChatState {
+        link: LinkState::Up,
+        ..ChatState::default()
+    }
+}
+
+/// An identity with no exchange configured, which is what an account sigil
+/// cannot connect anywhere for actually looks like.
+fn adrift(account: Account) -> Harness<'static> {
+    build(account, None)
+}
+
+fn connected(account: Account, state: ChatState) -> Harness<'static> {
+    build(account, Some(state))
+}
+
+fn build(account: Account, state: Option<ChatState>) -> Harness<'static> {
     let mut app = ChatApp::new();
+    if let Some(state) = state {
+        app.show_state_for_test(state);
+    }
     let mut accounts = sigil::accounts::Accounts::of(vec![account]);
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))
@@ -199,6 +229,37 @@ fn the_column_holds_no_forms_until_one_is_asked_for() {
         fields(&h) > 1,
         "asking for the form produced no field: {}",
         text_of(&h)
+    );
+}
+
+/// An identity with no exchange says so, instead of looking connected.
+///
+/// `state_of` falls back to a default `ChatState` when there is no session,
+/// and every control then talks to a session that does not exist: the command
+/// is dropped, the list is empty because there is nothing to list, and the
+/// light said **connected**, because that was `LinkState`'s default. Nothing
+/// anybody typed did anything and nothing said why.
+#[test]
+fn an_identity_with_nowhere_to_connect_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift(unlocked(dir.path()));
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Not connected"),
+        "an identity with no exchange claims to be connected: {said}"
+    );
+    assert!(
+        said.contains("names no exchange"),
+        "and does not say why: {said}"
+    );
+    // And it offers the way out rather than a dead screen.
+    assert!(said.contains("Add an exchange"), "{said}");
+    // The controls of a session that does not exist are not drawn: every one
+    // of them would talk to nothing.
+    assert!(
+        !said.contains("Search"),
+        "the conversation list is offered by a session that does not exist: {said}"
     );
 }
 

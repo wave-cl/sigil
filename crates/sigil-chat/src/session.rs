@@ -559,7 +559,16 @@ impl Trouble {
 /// [`Link`] without a dependency on the chat crate, and `Default`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LinkState {
+    /// Dialling, and **the default**.
+    ///
+    /// It used to default to `Up`, which meant a session that had not
+    /// connected yet — and a `ChatState::default()` standing in for a session
+    /// that does not exist at all — showed a green light and the word
+    /// *connected*. A fallback that looks like a real value destroys the
+    /// distinction it was standing in for; here it claimed the one thing the
+    /// indicator exists to report.
     #[default]
+    Connecting,
     Up,
     Retrying,
     /// Down through the whole backoff ramp. Still trying.
@@ -569,10 +578,30 @@ pub enum LinkState {
 impl LinkState {
     pub fn word(self) -> &'static str {
         match self {
+            LinkState::Connecting => "connecting…",
             LinkState::Up => "connected",
             LinkState::Retrying => "reconnecting…",
             LinkState::Gone => "offline",
         }
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    /// A state nobody has filled in does not claim to be connected.
+    ///
+    /// `ChatState::default()` stands in for a session that has not connected
+    /// yet, and used to stand in for one that does not exist at all. With `Up`
+    /// as the default both drew a green light and the word *connected* — the
+    /// one thing that indicator exists to report, asserted by a value that
+    /// means "nothing has been reported".
+    #[test]
+    fn an_unfilled_state_does_not_claim_the_link_is_up() {
+        assert_ne!(LinkState::default(), LinkState::Up);
+        assert_eq!(ChatState::default().link, LinkState::Connecting);
+        assert_eq!(LinkState::default().word(), "connecting…");
     }
 }
 

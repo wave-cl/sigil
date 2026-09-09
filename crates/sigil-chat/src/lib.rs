@@ -568,6 +568,17 @@ impl App for ChatApp {
             return AppResponse::default();
         };
         let at = &at;
+        // **No session at all is not the same as a session with nothing in
+        // it.** `state_of` falls back to a default `ChatState`, and every
+        // control here then talks to a session that does not exist: `send_as`
+        // drops the command, the list is empty because there is nothing to
+        // list, and the light said *connected* because that was the default.
+        // Nothing anybody typed did anything and nothing said why.
+        if self.fixed.is_none() && !self.sessions.contains_key(at) {
+            self.dialogs_ui(ctx, at, &ChatState::default(), ui, &theme);
+            self.unconnected_ui(ctx, at, ui, &theme);
+            return AppResponse::default();
+        }
         let state = self.state_of(Some(at));
 
         // Before anything else, and **outside every branch below**. It hung
@@ -666,6 +677,56 @@ impl App for ChatApp {
 }
 
 impl ChatApp {
+    /// This identity is not talking to any exchange, and why.
+    ///
+    /// The reason is always the same one: nothing names an exchange for it.
+    /// An identity gets its default from its own SIP-38 handle sidecar or
+    /// `~/.sqnr/config`, and one with neither has nowhere to connect — so it
+    /// sits in the roster looking like every other account and can do nothing
+    /// at all. The way out is to name an exchange, which is the same control
+    /// as everywhere else.
+    fn unconnected_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let me = at.0;
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.25);
+            sigil_ui::identicon(ui, &me.to_string(), tokens::AVATAR_LG);
+            ui.add_space(tokens::SPACING_MD);
+            ui.heading("Not connected");
+            ui.colored_label(
+                theme.text_secondary,
+                "This identity names no exchange, so there is nothing for it to talk to.",
+            );
+            ui.add_space(tokens::SPACING_SM);
+            ui.add(
+                egui::Label::new(egui::RichText::new(me.to_string()).monospace().small())
+                    .wrap()
+                    .selectable(true),
+            );
+            ui.add_space(tokens::SPACING_MD);
+            if ui.button("Add an exchange").clicked() {
+                self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
+            }
+            // Somebody arriving here by switching identity wants the way back
+            // more often than the way forward.
+            if ctx.accounts.len() > 1 {
+                ui.add_space(tokens::SPACING_SM);
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(
+                        "Or switch to another identity, from the block in the corner.",
+                    )
+                    .small(),
+                );
+            }
+        });
+    }
+
     /// The one row about this session: whether the link is up, and who you are.
     ///
     /// **Over the conversation and not over the whole window.** It used to
@@ -694,7 +755,8 @@ impl ChatApp {
             }
             let colour = match state.link {
                 LinkState::Up => theme.link_up,
-                LinkState::Retrying => theme.link_retrying,
+                // Not up, and not yet an outage either.
+                LinkState::Connecting | LinkState::Retrying => theme.link_retrying,
                 LinkState::Gone => theme.link_gone,
             };
             let up = state.link == LinkState::Up;
