@@ -133,3 +133,29 @@ fn something_that_is_not_a_picture_says_what_went_wrong() {
     assert!(said.contains("[image, 28 KiB]"), "{said}");
     assert!(said.contains("Save"), "{said}");
 }
+
+/// A picture the texture step refuses is reported too.
+///
+/// Bytes become an image and an image becomes a texture, and `Image` swallows
+/// a failure at either step. The first version of this diagnostic asked only
+/// about the image, so the texture step — where an oversized picture is
+/// refused — went on reporting nothing at all, which is the silence the whole
+/// thing was written to end.
+#[test]
+fn the_whole_chain_is_asked_about_and_not_only_the_first_link() {
+    // A harness has no GPU, so a texture never becomes ready here: what this
+    // pins is that the widget asks `load_for_size` — the question covering
+    // both steps — rather than `try_load_image`, which covers one.
+    let mut h = drawn(a_png());
+    h.run();
+    let said = said(&h);
+    assert!(
+        !said.contains("Bytes not found"),
+        "the bytes are still being asked about before they are registered: {said}"
+    );
+    // Either it is on its way or it is here; neither is silence.
+    assert!(
+        said.contains("opening") || !said.contains("will not open"),
+        "a good picture is neither drawn nor explained: {said}"
+    );
+}

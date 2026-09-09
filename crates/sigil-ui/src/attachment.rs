@@ -104,10 +104,24 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
                 .corner_radius(tokens::RADIUS_MD)
                 .show_loading_spinner(false)
                 .sense(egui::Sense::click());
-            if let Err(why) = ui
-                .ctx()
-                .try_load_image(&uri, egui::SizeHint::Scale(1.0.into()))
-            {
+            // **The whole chain, not the first link of it.**
+            //
+            // Bytes become an image and an image becomes a texture, and
+            // `Image` swallows a failure at either step. Asking only about the
+            // image left the texture step — where an oversized picture is
+            // refused by the GPU — reporting nothing at all, which is the
+            // silence this was written to end. `load_for_size` is the question
+            // the widget itself asks.
+            let poll = image.load_for_size(ui.ctx(), ui.available_size());
+            if let Ok(egui::load::TexturePoll::Pending { .. }) = poll {
+                // Still decoding. Saying so beats an empty space, and the next
+                // pass is asked for so it does not sit here.
+                ui.colored_label(theme.text_muted, egui::RichText::new("opening…").small());
+                ui.ctx().request_repaint();
+                ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
+                return action;
+            }
+            if let Err(why) = poll {
                 // In words, where the picture would have been.
                 egui::Frame::NONE
                     .fill(theme.surface_secondary)
