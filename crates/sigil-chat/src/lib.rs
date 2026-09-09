@@ -467,6 +467,15 @@ pub struct ChatApp {
     /// What has been asked of the session while a fixed state is installed.
     /// See `send_as`; tests only, and empty in the real application.
     sent: Vec<String>,
+    /// Every picture this app has handed to egui, by the name it gave it.
+    ///
+    /// **egui keeps what it is given until it is told not to.** Nothing in
+    /// this tree ever called `forget_image`, so the encoded bytes of every
+    /// picture ever drawn stayed in its loader cache for the life of the
+    /// process -- beside the session's own copy and the texture on the GPU.
+    /// The session now puts files down when it holds too many; this is how
+    /// egui hears about it.
+    drawn: std::collections::HashSet<String>,
     /// The call this identity is carrying audio for, and which invitation it
     /// belongs to.
     ///
@@ -511,6 +520,7 @@ impl ChatApp {
             now: None,
             fixed: None,
             sent: Vec::new(),
+            drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
         }
@@ -824,6 +834,7 @@ impl App for ChatApp {
             return self.answer();
         }
         let state = self.state_of(Some(at));
+        self.forget_what_is_gone(&state, ui.ctx());
 
         // Before anything else, and **outside every branch below**. It hung
         // off the conversation list, which is not drawn at all when the column
@@ -931,6 +942,29 @@ impl App for ChatApp {
 }
 
 impl ChatApp {
+    /// Tell egui about pictures the session has put down.
+    ///
+    /// egui holds the encoded bytes of everything it has been given until it is
+    /// told to forget them, so without this its cache grew for the life of the
+    /// process even after the session had dropped its own copy — which made the
+    /// session's own eviction pointless, since two of the three copies stayed.
+    ///
+    /// Named by what the widget names them, which is what `forget_image` wants.
+    fn forget_what_is_gone(&mut self, state: &ChatState, ctx: &egui::Context) {
+        let here: std::collections::HashSet<String> = state
+            .lines
+            .iter()
+            .flat_map(|l| l.attachments.iter())
+            .filter(|a| a.bytes.is_some())
+            .map(|a| a.id.clone())
+            .collect();
+        for id in self.drawn.difference(&here) {
+            ctx.forget_image(&format!("bytes://{id}"));
+            ctx.forget_image(&format!("bytes://{id}-preview"));
+        }
+        self.drawn = here;
+    }
+
     /// What the shell is being asked for, if anything.
     ///
     /// Taken rather than read: an ask is one event, and a flag left set would

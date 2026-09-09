@@ -772,6 +772,65 @@ fn a_row_answers_to_the_pointer() {
     );
 }
 
+/// A picture the session has put down is dropped by the interface too.
+///
+/// egui keeps the encoded bytes of everything it is given until it is told to
+/// forget them, and nothing in this tree ever told it. So the session's own
+/// eviction would have freed one copy of three: its own would go, and egui's
+/// bytes and the texture behind them would stay for the life of the process.
+///
+/// Asked of egui, not of our own bookkeeping: after the picture leaves the
+/// state, the loader must no longer be able to produce it.
+#[test]
+fn a_picture_the_session_has_put_down_is_forgotten_by_the_interface() {
+    let picture: std::sync::Arc<[u8]> = vec![3u8; 4096].into();
+    let with = {
+        let mut state = a_conversation();
+        let n = state.lines.len();
+        // Not the tombstone: a redacted message draws no attachments, which
+        // would make this test about nothing at all.
+        state.lines[n - 1].redacted = false;
+        state.lines[n - 1].attachments = vec![Attached {
+            kind: sigil_ui::attachment::IMAGE,
+            described: "[image, 4 KiB]".into(),
+            size: picture.len() as u64,
+            preview: sigil_ui::attachment::no_preview().clone(),
+            bytes: Some(picture.clone()),
+            missing: false,
+            id: "putdown".into(),
+        }];
+        state
+    };
+    let without = {
+        let mut state = with.clone();
+        let n = state.lines.len();
+        state.lines[n - 1].attachments[0].bytes = None;
+        state
+    };
+
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(with));
+    let mut h = harness_of(shown.clone());
+    h.run();
+    h.run();
+    // Asked of the **bytes** loader, which is what `include_bytes` fills and
+    // `forget_image` empties: whether these particular bytes decode into a
+    // picture is a different question, and not this one.
+    let uri = "bytes://putdown";
+    assert!(
+        h.ctx.try_load_bytes(uri).is_ok(),
+        "the picture never reached egui, so this cannot say whether it leaves"
+    );
+
+    // The session lets it go.
+    *shown.borrow_mut() = without;
+    h.run();
+
+    assert!(
+        h.ctx.try_load_bytes(uri).is_err(),
+        "egui still holds a picture the session has put down"
+    );
+}
+
 /// The row under the pointer is drawn as the one that would be chosen.
 ///
 /// This is the change: a list whose rows do not answer to the pointer is a

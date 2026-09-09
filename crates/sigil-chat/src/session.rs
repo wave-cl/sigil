@@ -1293,6 +1293,8 @@ struct Desk {
     /// a hundred-megabyte video is not something to pull because somebody
     /// scrolled past it.
     files: HashMap<[u8; 32], std::sync::Arc<[u8]>>,
+    /// The order they were fetched in, for [`to_put_down`].
+    fetched: Vec<[u8; 32]>,
     /// Blobs we tried and could not get, so a broken one is not retried on
     /// every pass for as long as the conversation is open.
     unfetchable: HashSet<[u8; 32]>,
@@ -1315,6 +1317,7 @@ impl Default for Desk {
             restale: HashSet::new(),
             answered: HashSet::new(),
             files: HashMap::new(),
+            fetched: Vec::new(),
             unfetchable: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
@@ -1872,6 +1875,50 @@ fn thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
 /// is.
 const AUTO_FETCH_MAX: u64 = 4 * 1024 * 1024;
 
+/// How much of somebody's pictures this session keeps in hand.
+///
+/// **Fetched files used to be kept for ever.** Scrolling back through a channel
+/// with pictures in it grew the process without limit -- four megabytes at a
+/// time, three times over between the session, egui's cache and the texture --
+/// and nothing ever put any of it down.
+///
+/// Sixty-four megabytes is a few dozen photographs, which is more than a
+/// reader is looking at and less than a machine will notice. What goes is what
+/// was fetched longest ago, because pictures are fetched as somebody scrolls
+/// and the oldest are the furthest from where they now are; what stays,
+/// whatever its age, is anything in the conversation on screen.
+const HOLD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Which files to put down, now that `held` has grown past `budget`.
+///
+/// Returns them oldest-first, and never returns one that is `on_screen` --
+/// evicting what somebody is looking at would fetch it again immediately, and
+/// the picture would blink.
+///
+/// A free function over plain data because the policy is the part worth
+/// testing, and a cache that quietly keeps everything looks exactly like one
+/// that is working.
+fn to_put_down(
+    order: &[[u8; 32]],
+    size: impl Fn(&[u8; 32]) -> usize,
+    on_screen: &HashSet<[u8; 32]>,
+    budget: usize,
+) -> Vec<[u8; 32]> {
+    let mut total: usize = order.iter().map(&size).sum();
+    let mut go = Vec::new();
+    for blob in order {
+        if total <= budget {
+            break;
+        }
+        if on_screen.contains(blob) {
+            continue;
+        }
+        total -= size(blob);
+        go.push(*blob);
+    }
+    go
+}
+
 /// Fetch the images in the conversation on screen.
 ///
 /// Bounded three ways — kind, size, and one attempt per blob — because this
@@ -1911,7 +1958,10 @@ async fn fetch_files(
         }
         match chat.download(&a).await {
             Ok(bytes) => {
-                desk.files.insert(a.blob, bytes.into());
+                if desk.files.insert(a.blob, bytes.into()).is_none() {
+                    desk.fetched.push(a.blob);
+                }
+                put_down_what_is_not_wanted(desk);
             }
             // Remembered as a failure rather than retried every tick. A blob
             // that has passed its retention window is gone, and asking again
@@ -1920,6 +1970,32 @@ async fn fetch_files(
                 desk.unfetchable.insert(a.blob);
             }
         }
+    }
+}
+
+/// Keep the held files inside [`HOLD_BYTES`], sparing the conversation on
+/// screen.
+fn put_down_what_is_not_wanted(desk: &mut Desk) {
+    let on_screen: HashSet<[u8; 32]> = desk
+        .open
+        .and_then(|c| desk.channels.get(&c))
+        .map(|k| {
+            k.timeline
+                .messages()
+                .flat_map(|m| m.post.attachments())
+                .map(|a| a.blob)
+                .collect()
+        })
+        .unwrap_or_default();
+    let go = to_put_down(
+        &desk.fetched,
+        |b| desk.files.get(b).map(|f| f.len()).unwrap_or(0),
+        &on_screen,
+        HOLD_BYTES,
+    );
+    for blob in go {
+        desk.files.remove(&blob);
+        desk.fetched.retain(|b| *b != blob);
     }
 }
 
@@ -3332,5 +3408,61 @@ mod tick_tests {
     fn a_quiet_tick_asks_about_nothing() {
         let (now, later) = this_tick(None, Vec::new());
         assert!(now.is_empty() && later.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod holding_tests {
+    use super::{HOLD_BYTES, to_put_down};
+    use std::collections::HashSet;
+
+    fn blob(i: u8) -> [u8; 32] {
+        [i; 32]
+    }
+
+    /// Past the budget, the oldest go, and only enough of them.
+    #[test]
+    fn the_oldest_are_put_down_and_no_more_than_needed() {
+        let order: Vec<[u8; 32]> = (0..5).map(blob).collect();
+        // Five of two megabytes is ten against a budget of six, so two go and
+        // the third is not touched: six is inside six.
+        let go = to_put_down(
+            &order,
+            |_| 2 * 1024 * 1024,
+            &HashSet::new(),
+            6 * 1024 * 1024,
+        );
+        assert_eq!(go, vec![blob(0), blob(1)]);
+    }
+
+    /// Nothing on screen is put down, whatever its age.
+    ///
+    /// Evicting a picture somebody is looking at fetches it again immediately,
+    /// and the picture blinks -- so the cache would be doing work to save
+    /// nothing.
+    #[test]
+    fn what_is_being_looked_at_stays() {
+        let order: Vec<[u8; 32]> = (0..5).map(blob).collect();
+        let on_screen: HashSet<[u8; 32]> = [blob(0), blob(1)].into_iter().collect();
+        let go = to_put_down(&order, |_| 2 * 1024 * 1024, &on_screen, 6 * 1024 * 1024);
+        assert_eq!(go, vec![blob(2), blob(3)]);
+        assert!(go.iter().all(|b| !on_screen.contains(b)));
+    }
+
+    /// Inside the budget, nothing is put down at all.
+    #[test]
+    fn a_cache_that_fits_is_left_alone() {
+        let order: Vec<[u8; 32]> = (0..3).map(blob).collect();
+        assert!(to_put_down(&order, |_| 1024, &HashSet::new(), HOLD_BYTES).is_empty());
+    }
+
+    /// A budget smaller than what is on screen puts down everything else and
+    /// then stops -- it does not loop, and it does not give up and clear.
+    #[test]
+    fn a_budget_smaller_than_the_screen_is_survivable() {
+        let order: Vec<[u8; 32]> = (0..3).map(blob).collect();
+        let on_screen: HashSet<[u8; 32]> = [blob(0)].into_iter().collect();
+        let go = to_put_down(&order, |_| 1024, &on_screen, 0);
+        assert_eq!(go, vec![blob(1), blob(2)]);
     }
 }
