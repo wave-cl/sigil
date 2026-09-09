@@ -85,13 +85,60 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
             // would leave the thumbnail on screen after the image arrived.
             let uri = format!("bytes://{}{}", a.id, if whole { "" } else { "-preview" });
             let side = if whole { PICTURE } else { 96.0 };
-            let image = egui::Image::from_bytes(uri, bytes.to_vec())
+            // **Ask first, and say what comes back.**
+            //
+            // A picture that will not decode drew nothing at all: the loader
+            // answered an error, `Image` swallowed it, and the bubble was a
+            // filename with an empty space where a picture should be — which
+            // is indistinguishable from a picture that had not arrived, from a
+            // bubble drawn too small, and from a loader that was never
+            // installed. All three were suspected in turn, and the interface
+            // knew which the whole time.
+            //
+            // The bytes are registered by `Image::from_bytes`, so the first
+            // ask happens after one is built rather than before.
+            let image = egui::Image::from_bytes(uri.clone(), bytes.to_vec())
                 // Both, not only the height. A wide picture given an unbounded
                 // width takes the whole pane and pushes the bubble off it.
                 .max_size(egui::vec2(side, side))
                 .corner_radius(tokens::RADIUS_MD)
                 .show_loading_spinner(false)
                 .sense(egui::Sense::click());
+            if let Err(why) = ui
+                .ctx()
+                .try_load_image(&uri, egui::SizeHint::Scale(1.0.into()))
+            {
+                // In words, where the picture would have been.
+                egui::Frame::NONE
+                    .fill(theme.surface_secondary)
+                    .corner_radius(tokens::RADIUS_MD)
+                    .inner_margin(egui::Margin::symmetric(
+                        tokens::SPACING_SM as i8,
+                        tokens::SPACING_XS as i8,
+                    ))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.colored_label(
+                                theme.warning,
+                                egui::RichText::new("this picture will not open").small(),
+                            );
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(why.to_string()).small(),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.colored_label(
+                                    theme.text_muted,
+                                    egui::RichText::new(a.described).small(),
+                                );
+                                if ui.small_button("Save").clicked() {
+                                    action.save = true;
+                                }
+                            });
+                        });
+                    });
+                return action;
+            }
             let response = ui.add(image);
             // The thumbnail in the transcript is a thumbnail. Clicking it is
             // how anybody expects to see the picture itself.
