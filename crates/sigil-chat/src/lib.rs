@@ -267,6 +267,21 @@ struct Pane {
     /// profile so cancelling really cancels.
     name: String,
     title: String,
+    /// What to keep the reader looking at when older messages arrive above
+    /// them: the distance from the **bottom** of the transcript, taken when
+    /// they ask for earlier ones.
+    ///
+    /// A page prepended above the viewport moves everything below it down by
+    /// however tall the page is, and a scroll offset is measured from the top
+    /// -- so the reader was thrown backwards by exactly that much. Measured
+    /// on this conversation it was five thousand pixels, which is not a jump,
+    /// it is a different part of the conversation.
+    anchored: Option<f32>,
+    /// The transcript's content height and scroll offset last pass.
+    ///
+    /// Kept here because the control that asks for earlier messages is drawn
+    /// *inside* the scroll area, where neither is known yet.
+    scrolled: (f32, f32),
     /// Whether the first look has happened for this identity.
     ///
     /// Opening the newest conversation is something sigil does **once**, on
@@ -296,6 +311,8 @@ impl Default for Pane {
             naming: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
+            anchored: None,
+            scrolled: (0.0, 0.0),
             looked: false,
             // The protocol's own default, not zero: a retention field starting
             // outside its own range offers to set something the exchange will
@@ -2010,7 +2027,7 @@ impl ChatApp {
                 // rather than written as a number, so it follows if the style
                 // changes.
                 let bar = ui.spacing().scroll.bar_width;
-                egui::ScrollArea::vertical()
+                let out = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
@@ -2027,6 +2044,33 @@ impl ChatApp {
                                 self.messages_ui(at, state, ui, theme, now);
                             });
                     });
+                // **Keep the reader where they were when a page arrives above
+                // them.**
+                //
+                // Earlier messages are asked for the moment the control
+                // reaches the screen, so this happens by scrolling and not by
+                // choosing -- and a scroll offset is measured from the top,
+                // which means everything the reader was looking at moved down
+                // by the height of the page. Measured on a real conversation:
+                // the content went from 5,762 to 10,859 pixels and the offset
+                // stayed at 220, putting them five thousand pixels from where
+                // they had been. Anchored to the **bottom** instead, because
+                // that is the end the new content is not arriving at.
+                //
+                // A frame late, necessarily: the new height is only known
+                // once the pass that drew it is over.
+                let (content, offset) = (out.content_size.y, out.state.offset.y);
+                let grew = content > self.pane(at).scrolled.0 + 0.5;
+                if let Some(from_bottom) = self.pane(at).anchored
+                    && grew
+                {
+                    let mut state = out.state;
+                    state.offset.y = (content - from_bottom).max(0.0);
+                    state.store(ui.ctx(), out.id);
+                    ui.ctx().request_repaint();
+                    self.pane(at).anchored = None;
+                }
+                self.pane(at).scrolled = (content, offset);
             });
     }
 
@@ -2179,6 +2223,10 @@ impl ChatApp {
                 // they have already scrolled past.
                 let reached = ui.clip_rect().contains(more.rect.center());
                 if more.clicked() || reached {
+                    // Where they are, measured from the bottom, so the page
+                    // that arrives above them does not take them with it.
+                    let (content, offset) = self.pane(at).scrolled;
+                    self.pane(at).anchored = Some(content - offset);
                     self.send_as(Some(at), Cmd::Earlier);
                 }
             });

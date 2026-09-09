@@ -686,6 +686,102 @@ fn a_conversation_opened_on_its_last_page_says_there_is_more() {
     h.run();
 }
 
+/// A page arriving above the reader does not take the reader with it.
+///
+/// Earlier messages are asked for the moment their control reaches the screen,
+/// so this happens by scrolling and not by choosing. A scroll offset is
+/// measured from the top of the content, so prepending a page moves everything
+/// the reader was looking at down by the height of the page: on a real
+/// conversation the content went from 5,762 pixels to 10,859 while the offset
+/// stayed at 220, which put the reader five thousand pixels from where they
+/// had been. It read as the transcript hopping about at random, which is
+/// exactly what it was.
+///
+/// Measured on a message, not on the offset: what has to hold still is the
+/// thing somebody is reading.
+#[test]
+fn earlier_messages_arriving_do_not_move_what_is_being_read() {
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(a_page(50, 60)));
+    let mut h = harness_of(shown.clone());
+    h.run();
+
+    // Away from the bottom, or `stick_to_bottom` holds the last message in
+    // place on its own and this measures nothing.
+    h.hover_at(egui::pos2(600.0, 300.0));
+    for _ in 0..6 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.step();
+    }
+    let before = h.get_by_label_contains("message 55").rect().top();
+
+    // The page arrives: fifty older messages above everything on screen, the
+    // way the session publishes them after `Cmd::Earlier`.
+    *shown.borrow_mut() = a_page(0, 60);
+    h.run();
+    h.run();
+
+    let after = h.get_by_label_contains("message 55").rect().top();
+    assert!(
+        (after - before).abs() < 24.0,
+        "the message being read moved {:.0} pixels when older ones arrived above it",
+        after - before
+    );
+}
+
+/// A transcript of `from..to`, each message named so a test can find one.
+fn a_page(from: u32, to: u32) -> ChatState {
+    let mut state = a_conversation();
+    state.earlier = from as usize;
+    state.lines = (from..to)
+        .map(|i| Line {
+            seq: i as u64 + 1,
+            who: them(),
+            name: Some("Ada".into()),
+            mine: false,
+            at: NOW - u64::from(to - i) * 60,
+            text: format!("message {i}"),
+            redacted: false,
+            edited: false,
+            reactions: Vec::new(),
+            reply_to: None,
+            receipt: None,
+            attachments: Vec::new(),
+            standing: Default::default(),
+        })
+        .collect();
+    state.events.clear();
+    state
+}
+
+/// A harness whose state the test can replace between passes, the way the
+/// session republishes it.
+fn harness_of(state: std::rc::Rc<std::cell::RefCell<ChatState>>) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            app.show_state_for_test(state.borrow().clone());
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        })
+}
+
 /// One is one.
 #[test]
 fn one_earlier_message_is_not_one_earlier_messages() {
