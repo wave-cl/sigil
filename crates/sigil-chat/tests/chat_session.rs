@@ -222,24 +222,27 @@ async fn an_open_conversation_is_quiet_when_nothing_is_said() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     let after = asked().await;
 
-    // Three seconds is **at most one pass each** now: with the exchange
-    // knocking when something happens, the timer only catches what no event
-    // mentioned, and it waits `QUIET_MS` — five seconds — when nothing is
-    // outstanding. Each pass polls the conversation the client has open, which
-    // is the one request left and what the long poll will replace.
+    // **Nothing.** Not a smaller number: two clients with a conversation open
+    // and nobody saying anything have nothing to ask about, and the exchange
+    // has a stream open to each of them for the moment that changes.
     //
     // It was forty: a read mark and a cursor fetch per tick per client, the
     // events those provoked at the other end, and — the larger half, found by
     // logging every request rather than by reasoning about it — a
     // `/channel/info` and one `/device/list` per member inside every poll,
     // asked whether or not anything had arrived to attribute. Then eight, on a
-    // 700ms tick. The ceiling here is four, so raising the tick back cannot
-    // pass unnoticed.
+    // 700ms tick. Then two, once the timer became a five-second backstop. The
+    // last two were the open conversation being fetched on every pass because
+    // it was open, which is what the events already say.
+    //
+    // The floor is nought and the ceiling is one, because the backstop rebuild
+    // is 28 seconds away and a three-second window may land on the far side of
+    // one — see `BACKSTOP`.
     let spent = after - before - 1; // the probe's own /status
     assert!(
-        spent <= 4,
+        spent <= 1,
         "two idle clients made {spent} requests in three seconds with nobody \
-         saying anything; at the quiet interval it should be two"
+         saying anything; there is nothing for them to ask"
     );
 
     alice.stop();
@@ -1454,11 +1457,13 @@ async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
     // thing the mailbox did not need — and the reason retiring it is safe is
     // that both parties here are chat clients and so have published prekeys.
     //
-    // **Bob opens nothing.** That is the whole point: the open conversation is
-    // polled every tick whatever happens, so a test where the callee is
-    // already looking at the conversation proves only that polling works. It
+    // **Bob opens nothing.** That is the whole point: the open conversation
+    // was polled every tick whatever happened, so a test where the callee is
+    // already looking at the conversation proved only that polling works. It
     // passed with every event handler disabled, which is how I found out.
-    // Ringing has to reach somebody who is looking somewhere else.
+    // Ringing has to reach somebody who is looking somewhere else. (Nothing is
+    // polled on a timer any more, which makes the distinction moot and the
+    // test no worse.)
     alice.send(Cmd::OpenDm(b_id));
     assert!(
         until(|| alice.state().open.is_some(), 15).await,
@@ -1559,6 +1564,164 @@ async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
         recorded,
         "the caller keeps a record of the refusal: {:?}",
         alice.state().events
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
+/// "Typing…" stops, with nothing sent to say that it has.
+///
+/// Nothing is polled on a timer any more: every kind of news arrives as a
+/// SIP-30 event, and a stream that stops carrying them is noticed and
+/// resubscribed. A typing signal is the exception that proves it. SIP-19
+/// relays it and stores it nowhere, the exchange lets it lapse, and **a lapse
+/// has no event** — so a client that stopped asking would latch the indicator
+/// on and leave a conversation nobody had touched for an hour saying somebody
+/// was writing in it.
+///
+/// So the one conversation that says somebody is typing is asked about until
+/// it stops saying so, and only until then. See `still_live`.
+///
+/// Alice never sends the *stopped* signal here, deliberately: a client that
+/// says so is not the case worth testing — a window that was closed, a laptop
+/// that was shut, and a process that was killed all say nothing at all.
+#[tokio::test]
+async fn typing_stops_looking_like_typing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(53);
+    let (b_signer, b_id) = signer(54);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+
+    alice.send(Cmd::Typing(true));
+    assert!(
+        until(|| bob.state().typing, 10).await,
+        "the other side should see that somebody is writing"
+    );
+
+    // And then nothing: no further signal, and above all no `Typing(false)`.
+    assert!(
+        until(|| !bob.state().typing, 10).await,
+        "the indicator must go out on its own when the signals stop"
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
+/// A call that has been answered stops being drawn as one still ringing.
+///
+/// **Answering writes nothing.** SIP-36 is deliberate that a durable outcome
+/// must not come from a signal, and taking a call is not an outcome — the
+/// entry comes when it ends. So the only thing that ever says a call was
+/// picked up is `Conversation::accepted`, which arrives with a fetch.
+///
+/// Without it the caller shows a ringing phone for the whole ring window and
+/// then writes *missed* of a call that is being spoken on.
+#[tokio::test]
+async fn an_answered_call_stops_ringing_for_the_caller() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(55);
+    let (b_signer, b_id) = signer(56);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(|| alice.state().open.is_some(), 15).await,
+        "the caller should have the conversation open"
+    );
+    assert!(
+        until(
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id)),
+            15
+        )
+        .await,
+        "and the callee should know the conversation exists"
+    );
+
+    alice.send(Cmd::Call);
+    assert!(
+        until(
+            || bob
+                .state()
+                .ringing
+                .iter()
+                .any(|r| r.from == a_id && !r.mine),
+            10
+        )
+        .await,
+        "the call should ring for the person called: {:?}",
+        bob.state().ringing
+    );
+    let ring = bob
+        .state()
+        .ringing
+        .into_iter()
+        .find(|r| r.from == a_id)
+        .unwrap();
+
+    bob.send(Cmd::Answer {
+        channel: ring.channel,
+        seq: ring.seq,
+    });
+
+    // Pinned inside the ring window: a caller told after it has passed has
+    // already drawn the call as missed, which is the failure this prevents.
+    let answered = until(
+        || alice.state().ringing.iter().any(|r| r.mine && r.answered),
+        20,
+    )
+    .await;
+    assert!(
+        answered,
+        "the caller should be told the call was taken: {:?}",
+        alice.state().ringing
     );
 
     alice.stop();

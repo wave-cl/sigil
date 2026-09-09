@@ -1145,11 +1145,15 @@ async fn run(
         // **What is outstanding decides the wait.** A link being redialled
         // advances a slice per pass and would take minutes at the quiet
         // interval; a note has to disappear five seconds after it appeared,
-        // not ten; a channel an event named is one somebody is waiting to see.
+        // not ten; a channel an event named is one somebody is waiting to see;
+        // and "typing..." has to go out when somebody stops, which is the one
+        // thing only asking can find (see `still_live`) -- at the quiet
+        // interval it would linger five seconds after they had gone.
         let quick = more
             || chat.link() != Link::Up
             || !desk.dirty.is_empty()
             || desk.restructure
+            || still_live(&desk).is_some()
             || state.borrow().note.is_some();
         let want = if quick { busy } else { every };
         let until = want.saturating_sub(ticked.elapsed());
@@ -1823,18 +1827,22 @@ const PER_TICK: usize = 4;
 
 /// Which conversations this tick asks about, and which wait for the next one.
 ///
-/// The open one first and always: it is the one somebody is looking at, and
-/// everything else in the sweep is somewhere they are not. The rest are
-/// bounded by [`PER_TICK`] and keep their turn rather than losing it -- being
-/// late costs nothing, since the events that named them keep naming them until
-/// they are read.
+/// The open one first **when it is being asked about at all**: it is the one
+/// somebody is looking at, and everything else in the sweep is somewhere they
+/// are not. It is no longer added to the sweep by being open -- see
+/// [`refresh`] -- so this orders what it is given rather than growing it. The
+/// rest are bounded by [`PER_TICK`] and keep their turn rather than losing it:
+/// being late costs nothing, since the events that named them keep naming them
+/// until they are read.
 ///
 /// A free function over plain data because the ordering is the part worth
 /// testing: a sweep that starves the conversation on screen is one where new
 /// messages arrive everywhere except where somebody is reading.
 fn this_tick(open: Option<[u8; 32]>, dirty: Vec<[u8; 32]>) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
     let mut now: Vec<[u8; 32]> = dirty;
-    if let Some(open) = open {
+    if let Some(open) = open
+        && now.contains(&open)
+    {
         now.retain(|c| *c != open);
         now.insert(0, open);
     }
@@ -1844,6 +1852,35 @@ fn this_tick(open: Option<[u8; 32]>, dirty: Vec<[u8; 32]>) -> (Vec<[u8; 32]>, Ve
         Vec::new()
     };
     (now, later)
+}
+
+/// The conversation whose state will change with nothing to announce it.
+///
+/// Everything else is event-driven now (see [`refresh`]), which works because
+/// every *beginning* is an event: an entry, a read mark, a membership, a ring,
+/// and a signal all produce one. Endings mostly are too — a call that is
+/// declined or hung up writes an entry, and a ring that nobody answers
+/// acquires `CALL_MISSED` from its own window with no help from anybody.
+///
+/// The exception is somebody who **stops typing**. SIP-19's signal is a "now":
+/// the exchange relays it, stores it nowhere, and lets it lapse in silence.
+/// There is no event for a lapse, so a client that stopped asking would latch
+/// the indicator on and leave a conversation nobody had touched for an hour
+/// saying somebody was writing in it.
+///
+/// Bounded by the state itself: the signals stop, the next fetch carries none,
+/// and this stops naming it. Nothing here can hold the loop at its busy
+/// interval for longer than somebody is actually typing.
+///
+/// **Answering a call is not in this list, and was**: taking a call posts no
+/// entry, so `Conversation::accepted` is the only thing that ever says so, and
+/// that reads like a state only a poll can find. It is not — `ring_state`
+/// signals, and a signal is an event. Measured, not reasoned about: the test
+/// that a caller learns their call was taken passes with this clause removed,
+/// which is why it is not here.
+fn still_live(desk: &Desk) -> Option<[u8; 32]> {
+    desk.open
+        .filter(|open| desk.channels.get(open).is_some_and(|k| k.typing))
 }
 
 /// Anything the reader has asked for, before the next round trip.
@@ -1870,9 +1907,19 @@ async fn refresh(
     me: PubKey,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
 ) -> bool {
-    // The open conversation is always fetched: it is the one somebody is
-    // looking at, and a signal there (typing) has no event of its own until it
-    // is delivered.
+    // **Only what something said had changed.** The open conversation used to
+    // be fetched every pass, on the grounds that it is the one somebody is
+    // looking at -- which cost a round trip per client per tick, for ever,
+    // with nobody saying anything. Every kind of news in it arrives as a
+    // SIP-30 event: an entry, a typing signal, a read mark, a ring, a
+    // membership. A stream that stops carrying them is not mistaken for a
+    // quiet one either: it heartbeats, and `Chat::take_events` drops one that
+    // has gone silent, after which the loop resubscribes and reconciles
+    // everything.
+    //
+    // What has no event is somebody *stopping* typing, so the conversation
+    // that says they are is asked about until it stops -- see `still_live`.
+    desk.dirty.extend(still_live(desk));
     let (to_poll, later) = this_tick(desk.open, desk.dirty.drain().collect());
     desk.dirty.extend(later);
 
