@@ -2011,9 +2011,21 @@ impl ChatApp {
             return;
         }
 
+        // **Room for the scrollbar, whether or not it is showing.**
+        //
+        // egui's bars float: they allocate no width and draw *over* the last
+        // ten pixels of whatever is there, which here is the time on every row
+        // and the unread count beside it. The same treatment the transcript's
+        // own bubbles get, for the same reason.
+        //
+        // Not, as this comment first claimed, to stop the rows shifting when
+        // the pointer arrives: a floating bar takes no width, so nothing
+        // moves, and the test written for that could not be made to fail.
+        let bar = ui.spacing().scroll.bar_width;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.set_max_width((ui.available_width() - bar).max(0.0));
                 for convo in &state.conversations {
                     let id = bs58::encode(convo.channel).into_string();
                     let key = convo.peer.map(|p| p.to_string());

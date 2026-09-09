@@ -55,71 +55,108 @@ pub fn conversation_row(
     let theme = ColorTheme::current(ui.ctx());
     let height = tokens::AVATAR_MD + tokens::SPACING_MD;
 
-    let frame = egui::Frame::NONE
-        .fill(if selected {
+    // **The row is the target, not the words in it.** A `Frame` sizes itself
+    // to its contents and answers for that rectangle, so the gaps -- beside a
+    // short name, under a one-line preview, the whole right-hand end of a
+    // narrow row -- were places where pressing a conversation did nothing.
+    // A ui with a sense of its own is the row: it takes the full width, and
+    // everything drawn inside it is inside the thing that answers.
+    let inner = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        ui.set_min_width(ui.available_width());
+        // Reserved now and painted at the end: the background has to go
+        // *under* the contents, and its size is not known until they have
+        // been laid out.
+        let ground = ui.painter().add(egui::Shape::Noop);
+        let response = ui.response();
+        let fill = if selected {
             theme.interactive_hover
+        } else if response.hovered() {
+            // The same colour, quieter: hovering says "this one would be
+            // chosen", and choosing is what the full strength means.
+            theme.interactive_hover.gamma_multiply(0.5)
         } else {
             egui::Color32::TRANSPARENT
-        })
+        };
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let drawn = row_body(ui, row, &theme, height);
+        ui.painter().set(
+            ground,
+            egui::epaint::RectShape::filled(drawn, tokens::RADIUS_MD, fill),
+        );
+    });
+
+    inner.response
+}
+
+/// What is in a row: the mark, the name, the time, and a line of what was
+/// said. Returns the rectangle it covers, which is the row's own.
+fn row_body(
+    ui: &mut egui::Ui,
+    row: &ConversationRow<'_>,
+    theme: &ColorTheme,
+    height: f32,
+) -> egui::Rect {
+    let inner = egui::Frame::NONE
         .corner_radius(tokens::RADIUS_MD)
         .inner_margin(egui::Margin::symmetric(
             tokens::SPACING_SM as i8,
             tokens::SPACING_XS as i8,
-        ));
-
-    let inner = frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            // **On the row, not on what is around it.** A minimum height set
-            // on the frame's own `ui` is satisfied by empty space underneath,
-            // so the row's contents kept their own height and sat above the
-            // middle of it -- the mark by a few pixels in every row at once,
-            // which reads as a list that is slightly falling over.
-            //
-            // Set here, the horizontal layout is that tall and its `Center`
-            // alignment has the whole row to centre in.
-            ui.set_min_height(height);
-            crate::identicon(ui, row.id, tokens::AVATAR_MD);
-            ui.add_space(tokens::SPACING_SM);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    // A public channel is marked, not merely named. Anybody may
-                    // join it and everything in it is in the clear -- that is
-                    // the difference that matters about it, and a reader has to
-                    // be able to see it before they type.
-                    if row.public == Some(true) {
-                        ui.colored_label(theme.warning, egui::RichText::new("#").strong())
-                            .on_hover_text(
-                                "public — anybody may join, and nothing here is encrypted",
-                            );
-                    } else if row.group && row.public == Some(false) {
-                        ui.colored_label(theme.text_muted, "◇")
-                            .on_hover_text("group");
-                    }
-                    let label = ui.label(egui::RichText::new(row.label).strong());
-                    if let Some(key) = row.key {
-                        label.on_hover_text(key.to_string());
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        crate::unread_pill(ui, row.unread);
-                        ui.colored_label(theme.text_muted, egui::RichText::new(row.at).small());
+        ))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // **On the row, not on what is around it.** A minimum height set
+                // on the frame's own `ui` is satisfied by empty space underneath,
+                // so the row's contents kept their own height and sat above the
+                // middle of it -- the mark by a few pixels in every row at once,
+                // which reads as a list that is slightly falling over.
+                //
+                // Set here, the horizontal layout is that tall and its `Center`
+                // alignment has the whole row to centre in.
+                ui.set_min_height(height);
+                crate::identicon(ui, row.id, tokens::AVATAR_MD);
+                ui.add_space(tokens::SPACING_SM);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        // A public channel is marked, not merely named. Anybody may
+                        // join it and everything in it is in the clear -- that is
+                        // the difference that matters about it, and a reader has to
+                        // be able to see it before they type.
+                        if row.public == Some(true) {
+                            ui.colored_label(theme.warning, egui::RichText::new("#").strong())
+                                .on_hover_text(
+                                    "public — anybody may join, and nothing here is encrypted",
+                                );
+                        } else if row.group && row.public == Some(false) {
+                            ui.colored_label(theme.text_muted, "◇")
+                                .on_hover_text("group");
+                        }
+                        let label = ui.label(egui::RichText::new(row.label).strong());
+                        if let Some(key) = row.key {
+                            label.on_hover_text(key.to_string());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            crate::unread_pill(ui, row.unread);
+                            ui.colored_label(theme.text_muted, egui::RichText::new(row.at).small());
+                        });
                     });
+                    let (colour, text) = if row.waiting {
+                        (
+                            theme.text_muted,
+                            "waiting for them to run a client".to_string(),
+                        )
+                    } else if row.typing {
+                        (theme.accent, "typing…".to_string())
+                    } else {
+                        (theme.text_secondary, one_line(row.preview))
+                    };
+                    ui.colored_label(colour, egui::RichText::new(text).small());
                 });
-                let (colour, text) = if row.waiting {
-                    (
-                        theme.text_muted,
-                        "waiting for them to run a client".to_string(),
-                    )
-                } else if row.typing {
-                    (theme.accent, "typing…".to_string())
-                } else {
-                    (theme.text_secondary, one_line(row.preview))
-                };
-                ui.colored_label(colour, egui::RichText::new(text).small());
             });
         });
-    });
 
-    inner.response.interact(egui::Sense::click())
+    inner.response.rect
 }
 
 /// A preview is one line. A message with newlines in it must not push every

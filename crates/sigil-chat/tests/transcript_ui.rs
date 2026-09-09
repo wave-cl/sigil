@@ -716,6 +716,131 @@ fn reaching_the_top_asks_for_one_page_and_not_one_a_frame() {
     );
 }
 
+/// A conversation is chosen by pressing its row, not by finding its name.
+///
+/// **This passed before the row was rebuilt around its own sense**, which is
+/// worth writing down: the contents already filled the width, so there was no
+/// dead ground to press. What was missing was any sign of it -- see
+/// `a_hovered_row_is_drawn_as_the_one_that_would_be_chosen`. This stays as the
+/// thing that would notice if the row ever narrowed to its words.
+#[test]
+fn a_conversation_is_chosen_by_pressing_anywhere_on_its_row() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(a_conversation(), asked.clone());
+    h.run();
+
+    // Beside the name of the other conversation, where there is nothing drawn.
+    let name = h.get_by_label_contains("release check").rect();
+    let empty = egui::pos2(name.right() + 20.0, name.center().y);
+    h.event(egui::Event::PointerButton {
+        pos: empty,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: empty,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+
+    assert!(
+        asked.borrow().iter().any(|c| c.starts_with("Show")),
+        "pressing the row beside the name did nothing: {:?}",
+        asked.borrow()
+    );
+}
+
+/// And the pointer over it says it can be pressed.
+///
+/// egui gives a click-sensing widget the pointing hand on its own, so this
+/// passed before the change too. It pins that the row senses a click at all,
+/// which is the half of "clicking anywhere works" that a cursor can show.
+#[test]
+fn a_row_answers_to_the_pointer() {
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+    let name = h.get_by_label_contains("release check").rect();
+    h.hover_at(egui::pos2(name.right() + 20.0, name.center().y));
+    h.step();
+    assert_eq!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::PointingHand,
+        "the row does not offer itself to the pointer"
+    );
+}
+
+/// The row under the pointer is drawn as the one that would be chosen.
+///
+/// This is the change: a list whose rows do not answer to the pointer is a
+/// list somebody has to try, one row at a time, to find out that all of them
+/// were pressable all along.
+///
+/// **Read off the pixels**, because a fill is not in the accessibility tree
+/// and nothing else can see it. Two bands are compared: one across the row
+/// being hovered, which must change, and one across another row, which must
+/// not -- or this would pass for any repaint at all, including the pointer
+/// egui itself draws into the picture.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn a_hovered_row_is_drawn_as_the_one_that_would_be_chosen() {
+    fn band(image: &image::RgbaImage, rect: egui::Rect) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in rect.top() as u32..rect.bottom() as u32 {
+            for x in rect.left() as u32..rect.right() as u32 {
+                if x < image.width() && y < image.height() {
+                    out.extend_from_slice(&image.get_pixel(x, y).0);
+                }
+            }
+        }
+        assert!(!out.is_empty(), "no pixels in {rect:?}");
+        out
+    }
+
+    let mut h = harness(true);
+    h.run();
+    let hovered = h.get_by_label_contains("release check").rect();
+    // The other row, picked out by being *in the column*: its name is also
+    // the name of the conversation on screen and the author of half of it, so
+    // the name alone finds three of them.
+    let other = h
+        .get_all_by_label_contains("Ada")
+        .map(|n| n.rect())
+        .filter(|r| r.right() < hovered.right() + 200.0)
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the other conversation in the list");
+    // The left end of each row, away from where the pointer will be: egui
+    // paints a cursor into the rendered image, and a band under it changes
+    // whatever the row does.
+    let across = |name: egui::Rect| {
+        egui::Rect::from_min_max(
+            egui::pos2(name.left() - 40.0, name.top() - 4.0),
+            egui::pos2(name.left() - 8.0, name.bottom() + 4.0),
+        )
+    };
+
+    let before = h.render().expect("a renderer");
+    let (row_before, other_before) = (band(&before, across(hovered)), band(&before, across(other)));
+
+    h.hover_at(egui::pos2(hovered.right() + 20.0, hovered.center().y));
+    h.run();
+    let after = h.render().expect("a renderer");
+
+    assert_ne!(
+        band(&after, across(hovered)),
+        row_before,
+        "the row under the pointer is drawn exactly as it was"
+    );
+    assert_eq!(
+        band(&after, across(other)),
+        other_before,
+        "a row nobody is pointing at changed too, so this measures a repaint \
+         rather than a highlight"
+    );
+}
+
 /// The next page is asked for before the reader reaches the end of this one.
 ///
 /// Waiting until the control is *visible* means arriving at the top of the
@@ -1111,6 +1236,21 @@ fn list_dark() {
     let mut h = harness(true);
     h.run();
     h.snapshot("list_dark");
+}
+
+/// The same list with the pointer on a row.
+///
+/// The fill under the pointer is the whole of what says a row can be pressed,
+/// and it is a colour: nothing but looking at it will do.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn list_hovered_dark() {
+    let mut h = harness(true);
+    h.run();
+    let name = h.get_by_label_contains("release check").rect();
+    h.hover_at(egui::pos2(name.right() + 20.0, name.center().y));
+    h.run();
+    h.snapshot("list_hovered_dark");
 }
 
 /// One's own bubble, with the two things that are written *about* a message
