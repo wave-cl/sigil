@@ -2058,82 +2058,96 @@ impl ChatApp {
                 // rather than written as a number, so it follows if the style
                 // changes.
                 let bar = ui.spacing().scroll.bar_width;
+                // **Inside** the scroll area, not around it. The margin has to
+                // shrink the *content* while the bar stays against the pane
+                // edge; put it on the outside and the bar moves in with the
+                // text and clashes with it again.
+                //
+                // Wide enough for the bar at its widest: egui's scroll bars
+                // float by default, which means they allocate no width and
+                // draw *over* the last ten pixels of whatever is there. A
+                // right-aligned bubble is exactly what is there, so one's own
+                // messages sat under the scrollbar.
+                let margin = egui::Margin {
+                    right: (bar + tokens::SPACING_XS) as i8,
+                    // And room under the last message, so the transcript ends
+                    // before the rule does rather than against it.
+                    bottom: tokens::SPACING_MD as i8,
+                    ..Default::default()
+                };
+
+                // **Keep the reader where they were when a page arrives above
+                // them.**
+                //
+                // Earlier messages are asked for the moment the control
+                // reaches the screen, so this happens by scrolling and not by
+                // choosing -- and a scroll offset is measured from the top,
+                // which means everything the reader was looking at moves down
+                // by the height of the page. Measured on a real conversation:
+                // the content went from 5,762 to 10,859 pixels while the
+                // offset stayed at 4,042. Anchored to the **bottom** instead,
+                // because that is the end the new content is not arriving at.
+                //
+                // Decided by `earlier` falling rather than by having asked:
+                // that is prepending and nothing else -- a message arriving at
+                // the bottom does not change it, nor does a picture finding
+                // its size -- so it holds for every helping a page arrives in
+                // and needs no guess about which is the last.
+                let paged =
+                    self.pane(at).saw.0 == state.open && state.earlier < self.pane(at).saw.1;
+
                 let out = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        egui::Frame::NONE
-                            .inner_margin(egui::Margin {
-                                right: (bar + tokens::SPACING_XS) as i8,
-                                // And room under the last message, so the
-                                // transcript ends before the rule does rather
-                                // than against it.
-                                bottom: tokens::SPACING_MD as i8,
-                                ..Default::default()
-                            })
-                            .show(ui, |ui| {
-                                self.messages_ui(at, state, ui, theme, now);
-                            });
+                        egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+                            self.messages_ui(at, state, ui, theme, now);
+                        });
                     });
-                // **Keep the reader where they were when a page arrives above
-                // them.**
+
+                // **The pass that discovered it is thrown away.**
                 //
-                // Earlier messages are asked for the moment the control
-                // reaches the screen, so this happens by scrolling and not by
-                // choosing -- and a scroll offset is measured from the top,
-                // which means everything the reader was looking at moved down
-                // by the height of the page. Measured on a real conversation:
-                // the content went from 5,762 to 10,859 pixels and the offset
-                // stayed at 220, putting them five thousand pixels from where
-                // they had been. Anchored to the **bottom** instead, because
-                // that is the end the new content is not arriving at.
+                // The new height is only known once the pass that drew it is
+                // over, so correcting the offset afterwards puts the right
+                // number in the right place a frame too late -- and that frame
+                // is drawn. For one sixtieth of a second the transcript sat
+                // five thousand pixels from where it belonged and then snapped
+                // back: arithmetically perfect, and visibly a jump. Somebody
+                // reading it called it "subtle, but it still jumps".
                 //
-                // A frame late, necessarily: the new height is only known
-                // once the pass that drew it is over.
-                // **Keep the reader where they were when a page arrives above
-                // them.**
+                // `request_discard` is egui's own answer to needing a pass to
+                // find out how big something is: this one is dropped and run
+                // again immediately, with the offset already corrected, and
+                // only the second one is shown. The events came with the first
+                // pass and are gone by the second, so nothing anybody pressed
+                // happens twice.
                 //
-                // Earlier messages are asked for the moment the control
-                // reaches the screen, so this happens by scrolling and not by
-                // choosing -- and a scroll offset is measured from the top,
-                // which means everything the reader was looking at moved down
-                // by the height of the page. Measured on a real conversation:
-                // the content went from 5,762 to 10,859 pixels and the offset
-                // stayed at 220, putting them five thousand pixels from where
-                // they had been. Anchored to the **bottom** instead, because
-                // that is the end the new content is not arriving at.
-                //
-                // Decided by `earlier` falling rather than by having asked:
-                // that is prepending and nothing else, it says so on every
-                // helping the page arrives in, and it needs no guess about
-                // when the last one has landed. Holding an anchor "until it
-                // settles" let go after the first helping, and the rest of the
-                // page pushed the reader backwards anyway -- half a
-                // conversation, on the one that found this.
-                //
-                // A frame late, necessarily: the new height is only known once
-                // the pass that drew it is over.
-                let (content, offset) = (out.content_size.y, out.state.offset.y);
-                let paged =
-                    self.pane(at).saw.0 == state.open && state.earlier < self.pane(at).saw.1;
-                let offset = if paged {
+                // A page arrives rarely -- once per fifty messages, by
+                // scrolling to the top of them -- so the extra pass is not a
+                // cost anybody will meet often.
+                if paged {
+                    let (content, offset) = (out.content_size.y, out.state.offset.y);
                     let (was_content, was_offset) = self.pane(at).scrolled;
                     let held = (content - (was_content - was_offset)).max(0.0);
                     let mut moved = out.state;
                     moved.offset.y = held;
                     moved.store(ui.ctx(), out.id);
+                    ui.ctx().request_discard("a page arrived above the reader");
                     ui.ctx().request_repaint();
+                    // Remembered as corrected, or the next helping of the same
+                    // page would anchor against a position that no longer
+                    // exists.
+                    self.pane(at).scrolled = (content, held);
+                    let _ = offset;
+                }
+                if paged {
                     self.pane(at).asking = false;
-                    // Remembered as corrected, or the next helping would
-                    // anchor against a position that no longer exists.
-                    held
-                } else {
-                    offset
-                };
+                }
                 // A different conversation is not this one's page arriving,
                 // and an ask that was never answered must not outlive the
                 // conversation it was made in -- otherwise coming back to one
                 // leaves a transcript that will never fetch its own history.
+                //
                 // `is_some`, because the first pass of a pane has seen no
                 // conversation at all -- and reading that as "a different one"
                 // cleared the ask that had just been made, which asked again
@@ -2143,7 +2157,9 @@ impl ChatApp {
                     self.pane(at).asking = false;
                 }
                 self.pane(at).saw = (state.open, state.earlier);
-                self.pane(at).scrolled = (content, offset);
+                if !paged {
+                    self.pane(at).scrolled = (out.content_size.y, out.state.offset.y);
+                }
             });
     }
 

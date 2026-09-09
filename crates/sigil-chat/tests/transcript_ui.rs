@@ -716,6 +716,45 @@ fn reaching_the_top_asks_for_one_page_and_not_one_a_frame() {
     );
 }
 
+/// And it is anchored on the very pass that shows it.
+///
+/// Correcting the offset after the pass puts the right number in the right
+/// place a frame too late -- and that frame is drawn. For one sixtieth of a
+/// second the transcript was five thousand pixels from where it belonged and
+/// then snapped back: arithmetically perfect, and visibly a jump.
+///
+/// **One step**, therefore, and not `run`: what is being asserted is what the
+/// first pass showing the page looked like, not where things ended up.
+#[test]
+fn the_page_is_anchored_on_the_pass_that_shows_it() {
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(a_page(50, 60)));
+    let mut h = harness_of(shown.clone());
+    h.run();
+
+    h.hover_at(egui::pos2(600.0, 300.0));
+    for _ in 0..6 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.step();
+    }
+    let before = h.get_by_label_contains("message 55").rect().top();
+
+    *shown.borrow_mut() = a_page(0, 60);
+    h.step();
+
+    let after = h.get_by_label_contains("message 55").rect().top();
+    assert!(
+        (after - before).abs() < 24.0,
+        "the pass that first showed the page drew it {:.0} pixels from where \
+         the reader was, and corrected it afterwards",
+        after - before
+    );
+}
+
 /// And it holds while the page is still arriving.
 ///
 /// A page lands over several passes -- the messages, then the pictures in them
