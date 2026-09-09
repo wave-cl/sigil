@@ -686,6 +686,106 @@ fn a_conversation_opened_on_its_last_page_says_there_is_more() {
     h.run();
 }
 
+/// Reaching the top asks for one page, not one per frame.
+///
+/// The control that asks for earlier messages asks by **being on screen**, so
+/// it asks on every pass until the answer arrives -- sixty a second against a
+/// session that answers every seven hundred milliseconds. Reaching the top
+/// therefore ordered dozens of pages, the transcript grew by hundreds of
+/// messages, and the reader was left somewhere around the middle of a
+/// conversation they had scrolled two lines into. Being on screen is a state;
+/// asking is an event.
+#[test]
+fn reaching_the_top_asks_for_one_page_and_not_one_a_frame() {
+    // **Short enough that the control stays on screen.** With a longer one
+    // it is only visible on the first pass -- and the first version of this
+    // test used six messages, which passed with the guard taken out.
+    let mut state = a_page(50, 52);
+    state.earlier = 50;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    for _ in 0..12 {
+        h.step();
+    }
+    let earlier = asked.borrow().iter().filter(|c| *c == "Earlier").count();
+    assert_eq!(
+        earlier,
+        1,
+        "reaching the top asked for {earlier} pages: {:?}",
+        asked.borrow()
+    );
+}
+
+/// And it holds while the page is still arriving.
+///
+/// A page lands over several passes -- the messages, then the pictures in them
+/// finding their size -- and an anchor let go after the first of them leaves
+/// the rest of the growth to push the reader backwards. That is the same
+/// defect in a smaller helping, and it is what was left after the first fix:
+/// scrolling up to the first picture landed somewhere near the middle of the
+/// conversation.
+#[test]
+fn the_anchor_holds_while_the_page_is_still_arriving() {
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(a_page(50, 60)));
+    let mut h = harness_of(shown.clone());
+    h.run();
+
+    h.hover_at(egui::pos2(600.0, 300.0));
+    for _ in 0..6 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.step();
+    }
+    let before = h.get_by_label_contains("message 55").rect().top();
+
+    // In two helpings, which is how it actually arrives: the session
+    // republishes on its own tick and the pictures settle after that.
+    *shown.borrow_mut() = a_page(25, 60);
+    h.run();
+    *shown.borrow_mut() = a_page(0, 60);
+    h.run();
+    h.run();
+
+    let after = h.get_by_label_contains("message 55").rect().top();
+    assert!(
+        (after - before).abs() < 24.0,
+        "the message being read moved {:.0} pixels while the page arrived in \
+         two parts",
+        after - before
+    );
+}
+
+/// A harness that keeps what the interface asked the session for.
+fn harness_recording_commands(
+    state: ChatState,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                hidden: false,
+                notify: &sigil::Silent,
+            };
+            let _ = app.render(&mut app_ctx, ui);
+            *asked.borrow_mut() = app.asked_for_test().to_vec();
+        })
+}
+
 /// A page arriving above the reader does not take the reader with it.
 ///
 /// Earlier messages are asked for the moment their control reaches the screen,

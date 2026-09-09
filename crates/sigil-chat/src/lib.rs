@@ -267,16 +267,24 @@ struct Pane {
     /// profile so cancelling really cancels.
     name: String,
     title: String,
-    /// What to keep the reader looking at when older messages arrive above
-    /// them: the distance from the **bottom** of the transcript, taken when
-    /// they ask for earlier ones.
+    /// Whether a page has been asked for and has not arrived.
     ///
-    /// A page prepended above the viewport moves everything below it down by
-    /// however tall the page is, and a scroll offset is measured from the top
-    /// -- so the reader was thrown backwards by exactly that much. Measured
-    /// on this conversation it was five thousand pixels, which is not a jump,
-    /// it is a different part of the conversation.
-    anchored: Option<f32>,
+    /// **A page is asked for once.** The control that asks is drawn at the top
+    /// of the transcript and asks by *being on screen*, which is every frame
+    /// until the answer arrives -- sixty a second against a session that
+    /// answers every seven hundred milliseconds. So reaching the top ordered
+    /// forty pages, the transcript grew by hundreds of messages, and the
+    /// reader ended up somewhere around the middle of the conversation.
+    asking: bool,
+    /// The conversation on screen and how much of it was still above the top
+    /// of it, last pass.
+    ///
+    /// **This is what says a page arrived**: `earlier` falling is prepending
+    /// and nothing else -- a message arriving at the bottom does not change
+    /// it, and neither does a picture finding its size. Kept with the channel
+    /// because a pane is per identity, and switching conversations would
+    /// otherwise read as a page arriving in the new one.
+    saw: (Option<[u8; 32]>, usize),
     /// The transcript's content height and scroll offset last pass.
     ///
     /// Kept here because the control that asks for earlier messages is drawn
@@ -311,7 +319,8 @@ impl Default for Pane {
             naming: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
-            anchored: None,
+            asking: false,
+            saw: (None, 0),
             scrolled: (0.0, 0.0),
             looked: false,
             // The protocol's own default, not zero: a retention field starting
@@ -367,6 +376,9 @@ pub struct ChatApp {
     now: Option<u64>,
     /// A state to draw instead of a session's. See `show_state_for_test`.
     fixed: Option<ChatState>,
+    /// What has been asked of the session while a fixed state is installed.
+    /// See `send_as`; tests only, and empty in the real application.
+    sent: Vec<String>,
     /// The call this identity is carrying audio for, and which invitation it
     /// belongs to.
     ///
@@ -410,6 +422,7 @@ impl ChatApp {
             store_root: None,
             now: None,
             fixed: None,
+            sent: Vec::new(),
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
         }
@@ -512,6 +525,12 @@ impl ChatApp {
         self.fixed = Some(state);
     }
 
+    /// Everything the interface has asked the session for, as `Debug` writes
+    /// it. Recorded only while a fixed state is installed; see `send_as`.
+    pub fn asked_for_test(&self) -> &[String] {
+        &self.sent
+    }
+
     fn pane(&mut self, at: &At) -> &mut Pane {
         self.panes.entry(at.clone()).or_default()
     }
@@ -606,6 +625,18 @@ impl ChatApp {
     }
 
     fn send_as(&mut self, at: Option<&At>, cmd: Cmd) {
+        // **Written down when nothing is listening.** A command with no
+        // session behind it is dropped, which is right -- and it leaves a test
+        // harness, which never has one, unable to see what a control asked
+        // for. "Asked once" is exactly the kind of thing that has to be
+        // counted: a control that asks by *being on screen* asks sixty times a
+        // second, and looks identical from the outside.
+        //
+        // Only while a fixed state is installed, which is a test and nothing
+        // else; the real app would grow this for ever.
+        if self.fixed.is_some() {
+            self.sent.push(format!("{cmd:?}"));
+        }
         if let Some(s) = at.and_then(|at| self.sessions.get(at)) {
             s.send(cmd);
         }
@@ -2059,17 +2090,59 @@ impl ChatApp {
                 //
                 // A frame late, necessarily: the new height is only known
                 // once the pass that drew it is over.
+                // **Keep the reader where they were when a page arrives above
+                // them.**
+                //
+                // Earlier messages are asked for the moment the control
+                // reaches the screen, so this happens by scrolling and not by
+                // choosing -- and a scroll offset is measured from the top,
+                // which means everything the reader was looking at moved down
+                // by the height of the page. Measured on a real conversation:
+                // the content went from 5,762 to 10,859 pixels and the offset
+                // stayed at 220, putting them five thousand pixels from where
+                // they had been. Anchored to the **bottom** instead, because
+                // that is the end the new content is not arriving at.
+                //
+                // Decided by `earlier` falling rather than by having asked:
+                // that is prepending and nothing else, it says so on every
+                // helping the page arrives in, and it needs no guess about
+                // when the last one has landed. Holding an anchor "until it
+                // settles" let go after the first helping, and the rest of the
+                // page pushed the reader backwards anyway -- half a
+                // conversation, on the one that found this.
+                //
+                // A frame late, necessarily: the new height is only known once
+                // the pass that drew it is over.
                 let (content, offset) = (out.content_size.y, out.state.offset.y);
-                let grew = content > self.pane(at).scrolled.0 + 0.5;
-                if let Some(from_bottom) = self.pane(at).anchored
-                    && grew
-                {
-                    let mut state = out.state;
-                    state.offset.y = (content - from_bottom).max(0.0);
-                    state.store(ui.ctx(), out.id);
+                let paged =
+                    self.pane(at).saw.0 == state.open && state.earlier < self.pane(at).saw.1;
+                let offset = if paged {
+                    let (was_content, was_offset) = self.pane(at).scrolled;
+                    let held = (content - (was_content - was_offset)).max(0.0);
+                    let mut moved = out.state;
+                    moved.offset.y = held;
+                    moved.store(ui.ctx(), out.id);
                     ui.ctx().request_repaint();
-                    self.pane(at).anchored = None;
+                    self.pane(at).asking = false;
+                    // Remembered as corrected, or the next helping would
+                    // anchor against a position that no longer exists.
+                    held
+                } else {
+                    offset
+                };
+                // A different conversation is not this one's page arriving,
+                // and an ask that was never answered must not outlive the
+                // conversation it was made in -- otherwise coming back to one
+                // leaves a transcript that will never fetch its own history.
+                // `is_some`, because the first pass of a pane has seen no
+                // conversation at all -- and reading that as "a different one"
+                // cleared the ask that had just been made, which asked again
+                // on the next pass. Exactly twice, which is the sort of
+                // "nearly right" a counting test is for.
+                if self.pane(at).saw.0.is_some() && self.pane(at).saw.0 != state.open {
+                    self.pane(at).asking = false;
                 }
+                self.pane(at).saw = (state.open, state.earlier);
                 self.pane(at).scrolled = (content, offset);
             });
     }
@@ -2222,11 +2295,11 @@ impl ChatApp {
                 // that only answers a click makes somebody hunt for a button
                 // they have already scrolled past.
                 let reached = ui.clip_rect().contains(more.rect.center());
-                if more.clicked() || reached {
-                    // Where they are, measured from the bottom, so the page
-                    // that arrives above them does not take them with it.
-                    let (content, offset) = self.pane(at).scrolled;
-                    self.pane(at).anchored = Some(content - offset);
+                // **Once, and not again until it has arrived.** Being on
+                // screen is a state and not an event: without the guard this
+                // asks on every frame it can see itself.
+                if (more.clicked() || reached) && !self.pane(at).asking {
+                    self.pane(at).asking = true;
                     self.send_as(Some(at), Cmd::Earlier);
                 }
             });
