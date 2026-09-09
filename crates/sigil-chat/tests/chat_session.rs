@@ -156,8 +156,98 @@ async fn two_sessions_hold_a_conversation() {
     bob.stop();
 }
 
+/// A conversation somebody left does not come back at the next launch.
+///
+/// The list is folded from this machine's own copy before the exchange is
+/// asked anything, so anything the store still calls a conversation is one --
+/// including channels left, closed, or belonging to an exchange whose log was
+/// wiped and rebuilt. That showed as **two conversations with the same name**,
+/// one of them ten days stale, for the second before the exchange answered.
+///
+/// The messages stay on the disc; it is the row that makes it a conversation
+/// that goes.
+#[tokio::test]
+async fn a_conversation_that_was_left_does_not_come_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(11);
+    let store_path = dir.path().join("a.db");
+
+    let alice = start_at(endpoint, a_signer, &store_path);
+    assert!(
+        until(|| alice.state().me == Some(a_id), 15).await,
+        "the session should come up: {:?}",
+        alice.state().trouble
+    );
+    alice.send(Cmd::NewGroup("a room to leave".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.label == "a room to leave"),
+            15
+        )
+        .await,
+        "the group should appear: {:?}",
+        alice.state().conversations
+    );
+    alice.send(Cmd::Leave);
+    assert!(
+        until(
+            || !alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.label == "a room to leave"),
+            15
+        )
+        .await,
+        "leaving should take it off the list: {:?}",
+        alice.state().conversations
+    );
+    alice.stop();
+
+    // **Asked of the disc, not of the next session.** What the fold would find
+    // is what is written down, and a flicker on the way in is over in less
+    // time than any polling loop can see -- a test that watched for it would
+    // pass whether or not the row was still there.
+    let (signer, _) = signer(11);
+    let seed = signer.seed();
+    let mut store = None;
+    // The flock goes when the session's task actually finishes, which is not
+    // the instant `stop` returns.
+    for _ in 0..50 {
+        match sqex_chat::store::Store::open(&seed, Some(&store_path)) {
+            Ok(open) => {
+                store = Some(open);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let mut store = store.expect("the store, once the session has let go of it");
+    store.scope_to(&PubKey::new(server_pub)).unwrap();
+    let left: Vec<String> = store
+        .channels()
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, label, _)| label)
+        .collect();
+    assert!(
+        !left.iter().any(|l| l == "a room to leave"),
+        "the disc still calls it a conversation, so the next launch will list \
+         it and the one after that: {left:?}"
+    );
+}
+
 /// A conversation is drawn from this machine's own copy, not from the
-/// exchange.
+/// exchange.""
 ///
 /// The exchange is **stopped** before the conversation is reopened, so
 /// anything that appears afterwards can only have come off the disc. That is

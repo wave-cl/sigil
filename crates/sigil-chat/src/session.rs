@@ -1111,8 +1111,13 @@ async fn run(
                     }
                 }
                 learn_names(&mut chat, &mut desk).await;
-                fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                // **The conversation before the pictures in it.** A refresh is
+                // what somebody is waiting for; a blob is what they will be
+                // looking at in a moment. Measured the other way round, one
+                // tick spent two and a half seconds on pictures before asking
+                // whether anything had been said.
                 refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
+                fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
                 (wake)();
             }
         }
@@ -1514,6 +1519,21 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
 
     // Left, removed, or closed. Dropped from the list rather than left on it
     // as a conversation nothing can be sent to.
+    //
+    // **And forgotten on the disc**, or it comes back: the list is folded from
+    // the store before the exchange is asked anything, so a channel the
+    // exchange no longer lists reappeared on every launch and vanished a
+    // second later. Two conversations called "general", one of them ten days
+    // stale, is what that looked like.
+    //
+    // Only the row that makes it a conversation: `forget_channel` clears
+    // `channel_meta` and leaves the messages, the keys and the cursor alone.
+    // And only against a *complete* answer -- `mine` pages internally and
+    // either returns all of it or fails, and this function returns before here
+    // when it fails.
+    for gone in desk.channels.keys().filter(|c| !present.contains(*c)) {
+        let _ = chat.store().forget_channel(gone);
+    }
     desk.channels.retain(|c, _| present.contains(c));
     desk.dirty.retain(|c| present.contains(c));
     Ok(())
@@ -1829,11 +1849,18 @@ async fn fetch_files(
         .cloned()
         .collect();
 
-    for a in wanted {
-        // A picture takes as long as it takes -- one of them was measured at
-        // two and a half seconds -- and a reader who has moved on should not
-        // be waiting behind it for a conversation that is already on the disc.
+    // **One a tick.** A picture takes as long as it takes -- one of them was
+    // measured at two and a half seconds -- and the whole of that is time the
+    // task cannot answer anybody in. Ten pictures is ten ticks, and the tenth
+    // was going to be late anyway.
+    for a in wanted.into_iter().take(1) {
+        // And not at all while somebody is waiting for something. A reader who
+        // has moved on should not be behind a picture for a conversation that
+        // is already on the disc.
         attend(chat, state, desk, cmds).await;
+        if !cmds.is_empty() {
+            return;
+        }
         match chat.download(&a).await {
             Ok(bytes) => {
                 desk.files.insert(a.blob, bytes);
@@ -3059,6 +3086,11 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             let Some(channel) = desk.open else { return };
             match chat.leave(&channel).await {
                 Ok(()) => {
+                    // The same reason as a channel the exchange stops listing:
+                    // the list is folded from the store on the way in, so a
+                    // conversation somebody left would be waiting for them at
+                    // the next launch. Its messages stay where they are.
+                    let _ = chat.store().forget_channel(&channel);
                     desk.channels.remove(&channel);
                     desk.restructure = true;
                     close(desk, state);
