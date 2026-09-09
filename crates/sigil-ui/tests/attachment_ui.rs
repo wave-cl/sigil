@@ -25,8 +25,9 @@ fn said(h: &Harness<'static>) -> String {
 /// How tall the attachment drew, in a ui with the height it is given.
 ///
 /// `None` for the height means what a scrolling transcript actually gives a
-/// message below the fold: **zero**.
-fn tall(bytes: &'static [u8], height: Option<f32>) -> f32 {
+/// message below the fold: **zero**. `bytes` of `None` is a picture that has
+/// not been fetched yet.
+fn tall(bytes: Option<&'static [u8]>, height: Option<f32>) -> f32 {
     let took = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let seen = took.clone();
     let mut h = Harness::builder()
@@ -46,7 +47,7 @@ fn tall(bytes: &'static [u8], height: Option<f32>) -> f32 {
                             kind: sigil_ui::attachment::IMAGE,
                             described: "[image, 28 KiB]",
                             preview: &[],
-                            bytes: Some(bytes),
+                            bytes,
                             missing: false,
                             id: "sized",
                         },
@@ -215,8 +216,8 @@ fn the_whole_chain_is_asked_about_and_not_only_the_first_link() {
 /// only question that was failing: how much room did it take.
 #[test]
 fn a_picture_takes_room_even_where_there_is_none_left() {
-    let with_room = tall(a_png(), Some(400.0));
-    let with_none = tall(a_png(), None);
+    let with_room = tall(Some(a_png()), Some(400.0));
+    let with_none = tall(Some(a_png()), None);
     assert!(
         with_none > 0.0,
         "a picture below the fold takes no height at all, which is how it \
@@ -226,5 +227,35 @@ fn a_picture_takes_room_even_where_there_is_none_left() {
     assert_eq!(
         with_none, with_room,
         "the space left over changes how big the picture is"
+    );
+}
+
+/// A picture takes the same room before it arrives as after.
+///
+/// It used to take whatever each stage needed: one line of words while the
+/// blob was fetched, another while it decoded, then a few hundred pixels when
+/// it appeared. So every picture changed the height of everything below it two
+/// or three times as it loaded, and scrolling through a channel with pictures
+/// in it moved the text under the reader's eyes -- the transcript's content
+/// height was measured wandering by forty to two hundred pixels at a time
+/// while nobody had touched anything.
+///
+/// The three states are the three this can be in: nothing fetched, bytes that
+/// will not decode, and a picture. They have to agree to the pixel.
+#[test]
+fn every_stage_of_a_picture_takes_the_same_room() {
+    let fetching = tall(None, Some(400.0));
+    let broken = tall(Some(b"this is not a picture"), Some(400.0));
+    let drawn = tall(Some(a_png()), Some(400.0));
+
+    assert!(fetching > 0.0, "a picture on its way takes no room at all");
+    assert_eq!(
+        fetching, drawn,
+        "the transcript moves when a picture arrives: {fetching} before, {drawn} after"
+    );
+    assert_eq!(
+        broken, drawn,
+        "the transcript moves when a picture turns out to be unopenable: \
+         {broken} against {drawn}"
     );
 }

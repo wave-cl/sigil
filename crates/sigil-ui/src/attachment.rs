@@ -52,6 +52,24 @@ pub struct Attachment<'a> {
 /// row reading `[image, 28 KiB]`.
 pub const PICTURE: f32 = 320.0;
 
+/// And how tall.
+///
+/// **A picture takes the same room before it arrives as after.** It used to
+/// take whatever it happened to need at each stage -- a line of words while
+/// the blob was fetched, another while it decoded, then a few hundred pixels
+/// when it appeared -- so every picture in a conversation changed the height
+/// of everything below it two or three times as it loaded. Scrolling through a
+/// channel with pictures in it moved the text under the reader's eyes: the
+/// content height was measured wandering by forty to two hundred pixels at a
+/// time while nobody had touched anything.
+///
+/// So the box is fixed and the picture is fitted inside it, and the only way
+/// to do that without knowing the shape in advance is to choose the shape. A
+/// landscape photograph is letterboxed by thirty pixels; a portrait one is
+/// narrower than the box. Both are stable, and clicking either opens it full
+/// size, which is where the shape stops being a compromise.
+pub const PICTURE_TALL: f32 = 240.0;
+
 /// What the reader did to a file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentAction {
@@ -60,6 +78,20 @@ pub struct AttachmentAction {
     pub open: bool,
     /// Ask the exchange for it again.
     pub retry: bool,
+}
+
+/// The largest rect of `size`'s shape that fits inside `into`, centred -- and
+/// never larger than `size` itself.
+///
+/// Blowing a thumbnail up to fill the box makes a worse picture of the same
+/// thing, and a small image drawn at four times its size reads as a mistake
+/// rather than as a small image.
+fn fit(into: egui::Rect, size: egui::Vec2) -> egui::Rect {
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return into;
+    }
+    let scale = (into.width() / size.x).min(into.height() / size.y).min(1.0);
+    egui::Rect::from_center_size(into.center(), size * scale)
 }
 
 /// Draw one.
@@ -79,18 +111,48 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
     if a.kind == IMAGE {
         // Whole image if we have it, thumbnail if we do not, and the words if
         // we have neither. Each is strictly better than the last and every one
-        // of them is better than an empty space where a picture should be.
+        // of them is better than an empty space where a picture should be --
+        // and **all three take the same room**, so which one is on screen
+        // never moves anything else. See [`PICTURE_TALL`].
         let (bytes, whole) = match (a.bytes, a.preview.is_empty()) {
             (Some(b), _) => (Some(b), true),
             (None, false) => (Some(a.preview), false),
             (None, true) => (None, false),
         };
+        let side = PICTURE.min(ui.available_width().max(160.0));
+        let box_size = egui::vec2(side, PICTURE_TALL);
+        let (rect, response) = ui.allocate_exact_size(box_size, egui::Sense::click());
+        // The ground the picture sits on, so a letterboxed one reads as a
+        // picture in a frame rather than as a hole in the bubble.
+        ui.painter()
+            .rect_filled(rect, tokens::RADIUS_MD, theme.surface_secondary);
+
+        // Words in the middle of the box, for every state that is not a
+        // picture yet. A child ui rather than painted text: two of these carry
+        // a button, and a painted button is not one.
+        //
+        // A child ui **that allocates nothing**: the box is already allocated,
+        // and `scope_builder` ends by advancing the cursor to the child's own
+        // extent -- which is *inside* the box, so everything drawn after it
+        // landed back on top of the picture. Measured, because a test asked
+        // the three states to agree on their height: the description line
+        // disappeared into the box and a fetching picture came out eighteen
+        // pixels shorter than the same one once it had arrived, which is the
+        // wander this whole change is about.
+        let inside = |ui: &mut egui::Ui, draw: &mut dyn FnMut(&mut egui::Ui)| {
+            let mut child =
+                ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(tokens::SPACING_SM)));
+            child.vertical_centered(|ui| {
+                ui.add_space((rect.height() / 2.0 - tokens::SPACING_XL).max(0.0));
+                draw(ui);
+            });
+        };
+
         if let Some(bytes) = bytes {
             // Keyed on the blob, and on whether this is the thumbnail or the
             // real thing: egui caches by URI, so reusing one name for both
             // would leave the thumbnail on screen after the image arrived.
             let uri = format!("bytes://{}{}", a.id, if whole { "" } else { "-preview" });
-            let side = if whole { PICTURE } else { 96.0 };
             // **Registered here, and then asked about.**
             //
             // `Image::from_bytes` registers its bytes when the widget loads
@@ -115,12 +177,9 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                 // because each of them asked whether the picture had *loaded*,
                 // and it always had.
                 .fit_to_original_size(1.0)
-                // Both, not only the height. A wide picture given an unbounded
-                // width takes the whole pane and pushes the bubble off it.
-                .max_size(egui::vec2(side, side))
+                .max_size(box_size)
                 .corner_radius(tokens::RADIUS_MD)
-                .show_loading_spinner(false)
-                .sense(egui::Sense::click());
+                .show_loading_spinner(false);
             // **The whole chain, not the first link of it.**
             //
             // Bytes become an image and an image becomes a texture, and
@@ -129,116 +188,82 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             // refused by the GPU — reporting nothing at all, which is the
             // silence this was written to end. `load_for_size` is the question
             // the widget itself asks.
-            let poll = image.load_for_size(ui.ctx(), ui.available_size());
-            if let Ok(egui::load::TexturePoll::Pending { .. }) = poll {
-                // Still decoding. Saying so beats an empty space, and the next
-                // pass is asked for so it does not sit here.
-                ui.colored_label(quiet, egui::RichText::new("opening…").small());
-                ui.ctx().request_repaint();
-                ui.colored_label(quiet, egui::RichText::new(a.described).small());
-                return action;
-            }
-            if let Err(why) = poll {
-                // In words, where the picture would have been.
-                egui::Frame::NONE
-                    .fill(theme.surface_secondary)
-                    .corner_radius(tokens::RADIUS_MD)
-                    .inner_margin(egui::Margin::symmetric(
-                        tokens::SPACING_SM as i8,
-                        tokens::SPACING_XS as i8,
-                    ))
-                    .show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.colored_label(
-                                theme.warning,
-                                egui::RichText::new("this picture will not open").small(),
-                            );
-                            ui.colored_label(
-                                theme.text_muted,
-                                egui::RichText::new(why.to_string()).small(),
-                            );
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    theme.text_muted,
-                                    egui::RichText::new(a.described).small(),
-                                );
-                                if ui.small_button("Save").clicked() {
-                                    action.save = true;
-                                }
-                            });
-                        });
-                    });
-                return action;
-            }
-            let response = ui.add(image);
-            // The thumbnail in the transcript is a thumbnail. Clicking it is
-            // how anybody expects to see the picture itself.
-            if response.clicked() {
-                action.open = true;
-            }
-            let response = response.on_hover_text("Click to see it full size");
-            if !whole {
-                // A thumbnail is not the picture, and saying so stops somebody
-                // reading a blurry 96-pixel image as the whole of what was
-                // sent.
-                ui.colored_label(
-                    quiet,
-                    egui::RichText::new("preview — fetching the full image").small(),
-                );
-            }
-            response.context_menu(|ui| {
-                if ui.button("See it full size").clicked() {
-                    action.open = true;
-                    ui.close();
-                }
-                if ui.button("Save as…").clicked() {
-                    action.save = true;
-                    ui.close();
-                }
-            });
-            // What it is, quietly, and no button. Saving is on the message's
-            // own controls beside it, where every other thing done to a
-            // message is — a Save button on the picture put the one action
-            // nobody takes often in the loudest place on the bubble.
-            ui.colored_label(quiet, egui::RichText::new(a.described).small());
-            return action;
-        }
-    }
-
-    // A picture that was asked for and refused, or one still on its way. Both
-    // drew as a bare filename before, which says nothing about which.
-    if a.kind == IMAGE {
-        egui::Frame::NONE
-            .fill(theme.surface_secondary)
-            .corner_radius(tokens::RADIUS_MD)
-            .inner_margin(egui::Margin::symmetric(
-                tokens::SPACING_SM as i8,
-                tokens::SPACING_XS as i8,
-            ))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
-                    if a.missing {
-                        ui.colored_label(
-                            theme.warning,
-                            egui::RichText::new("could not be fetched").small(),
-                        )
-                        .on_hover_text(
-                            "The exchange would not hand it over. A file past this \
-                             channel's retention window is gone for good; anything else \
-                             is worth another try.",
-                        );
-                        if ui.small_button("Try again").clicked() {
-                            action.retry = true;
+            match image.load_for_size(ui.ctx(), box_size) {
+                Ok(egui::load::TexturePoll::Ready { texture }) => {
+                    // Fitted, and never blown up: a thumbnail stretched to
+                    // fill this box is a worse picture of the same thing.
+                    image.paint_at(ui, fit(rect, texture.size));
+                    if response.clicked() {
+                        action.open = true;
+                    }
+                    let response = response.on_hover_text("Click to see it full size");
+                    response.context_menu(|ui| {
+                        if ui.button("See it full size").clicked() {
+                            action.open = true;
+                            ui.close();
                         }
-                    } else {
+                        if ui.button("Save as…").clicked() {
+                            action.save = true;
+                            ui.close();
+                        }
+                    });
+                    if !whole {
+                        // A thumbnail is not the picture, and saying so stops
+                        // somebody reading a blurry preview as the whole of
+                        // what was sent.
                         ui.colored_label(
-                            theme.text_muted,
-                            egui::RichText::new("fetching…").small(),
+                            quiet,
+                            egui::RichText::new("preview — fetching the full image").small(),
                         );
                     }
-                });
+                }
+                Ok(egui::load::TexturePoll::Pending { .. }) => {
+                    // Still decoding, and the next pass is asked for so it
+                    // does not sit here.
+                    ui.ctx().request_repaint();
+                    inside(ui, &mut |ui| {
+                        ui.colored_label(quiet, egui::RichText::new("opening…").small());
+                    });
+                }
+                Err(why) => {
+                    let why = why.to_string();
+                    inside(ui, &mut |ui| {
+                        ui.colored_label(
+                            theme.warning,
+                            egui::RichText::new("this picture will not open").small(),
+                        );
+                        ui.colored_label(theme.text_muted, egui::RichText::new(&why).small());
+                        if ui.small_button("Save").clicked() {
+                            action.save = true;
+                        }
+                    });
+                }
+            }
+        } else if a.missing {
+            inside(ui, &mut |ui| {
+                ui.colored_label(
+                    theme.warning,
+                    egui::RichText::new("could not be fetched").small(),
+                )
+                .on_hover_text(
+                    "The exchange would not hand it over. A file past this channel's \
+                     retention window is gone for good; anything else is worth another try.",
+                );
+                if ui.small_button("Try again").clicked() {
+                    action.retry = true;
+                }
             });
+        } else {
+            inside(ui, &mut |ui| {
+                ui.colored_label(quiet, egui::RichText::new("fetching…").small());
+            });
+        }
+
+        // What it is, quietly, and no button. Saving is on the message's own
+        // controls beside it, where every other thing done to a message is — a
+        // Save button on the picture put the one action nobody takes often in
+        // the loudest place on the bubble.
+        ui.colored_label(quiet, egui::RichText::new(a.described).small());
         return action;
     }
 
