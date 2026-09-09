@@ -85,18 +85,18 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
             // would leave the thumbnail on screen after the image arrived.
             let uri = format!("bytes://{}{}", a.id, if whole { "" } else { "-preview" });
             let side = if whole { PICTURE } else { 96.0 };
-            // **Ask first, and say what comes back.**
+            // **Registered here, and then asked about.**
             //
-            // A picture that will not decode drew nothing at all: the loader
-            // answered an error, `Image` swallowed it, and the bubble was a
-            // filename with an empty space where a picture should be — which
-            // is indistinguishable from a picture that had not arrived, from a
-            // bubble drawn too small, and from a loader that was never
-            // installed. All three were suspected in turn, and the interface
-            // knew which the whole time.
+            // `Image::from_bytes` registers its bytes when the widget loads
+            // them — during `add`, not when it is built — so asking the
+            // context beforehand answered *"Bytes not found. Did you forget to
+            // call Context::include_bytes?"* for every picture, and the
+            // diagnostic that was meant to explain a failure became one.
             //
-            // The bytes are registered by `Image::from_bytes`, so the first
-            // ask happens after one is built rather than before.
+            // Doing the include ourselves makes the question answerable: from
+            // here on, an error is about the bytes and not about the order
+            // things happened in.
+            ui.ctx().include_bytes(uri.clone(), bytes.to_vec());
             let image = egui::Image::from_bytes(uri.clone(), bytes.to_vec())
                 // Both, not only the height. A wide picture given an unbounded
                 // width takes the whole pane and pushes the bubble off it.
