@@ -194,6 +194,8 @@ pub struct BubbleAction {
     pub save: Option<usize>,
     /// Look at the file at this index, full size.
     pub open: Option<usize>,
+    /// Ask the exchange for a file it refused, again.
+    pub retry: bool,
     /// Forward the file it carries somewhere else.
     pub forward: bool,
 }
@@ -630,6 +632,9 @@ fn body(
                     if did.open {
                         action.open = Some(i);
                     }
+                    if did.retry {
+                        action.retry = true;
+                    }
                 }
             }
             if b.redacted {
@@ -924,6 +929,7 @@ mod tests {
                 described: "[notes.txt, 2.1 kB]",
                 preview: &[],
                 bytes: None,
+                missing: false,
                 id: "abc123",
             };
             let asked = wanted(ui, &plain("", std::slice::from_ref(&file)));

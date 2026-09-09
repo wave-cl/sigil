@@ -34,6 +34,14 @@ pub struct Attachment<'a> {
     pub bytes: Option<&'a [u8]>,
     /// A stable name for the blob, so a texture can be keyed on it.
     pub id: &'a str,
+    /// The exchange was asked for it and would not give it.
+    ///
+    /// **Not the same as "not yet".** A blob past its retention window is
+    /// gone and asking again four times a second will not bring it back, so
+    /// the fetch is not retried — which left a picture that had failed and one
+    /// that had not been reached yet looking identical, and neither of them
+    /// said anything at all.
+    pub missing: bool,
 }
 
 /// How large a picture is drawn in a transcript.
@@ -50,6 +58,8 @@ pub struct AttachmentAction {
     pub save: bool,
     /// Look at it full size.
     pub open: bool,
+    /// Ask the exchange for it again.
+    pub retry: bool,
 }
 
 /// Draw one.
@@ -117,8 +127,45 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
         }
     }
 
-    // Not a picture, or one we cannot show. A row that says what it is and
-    // offers the only thing that can be done with it.
+    // A picture that was asked for and refused, or one still on its way. Both
+    // drew as a bare filename before, which says nothing about which.
+    if a.kind == IMAGE {
+        egui::Frame::NONE
+            .fill(theme.surface_secondary)
+            .corner_radius(tokens::RADIUS_MD)
+            .inner_margin(egui::Margin::symmetric(
+                tokens::SPACING_SM as i8,
+                tokens::SPACING_XS as i8,
+            ))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(a.described).small());
+                    if a.missing {
+                        ui.colored_label(
+                            theme.warning,
+                            egui::RichText::new("could not be fetched").small(),
+                        )
+                        .on_hover_text(
+                            "The exchange would not hand it over. A file past this \
+                             channel's retention window is gone for good; anything else \
+                             is worth another try.",
+                        );
+                        if ui.small_button("Try again").clicked() {
+                            action.retry = true;
+                        }
+                    } else {
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new("fetching…").small(),
+                        );
+                    }
+                });
+            });
+        return action;
+    }
+
+    // Not a picture. A row that says what it is and offers the only thing that
+    // can be done with it.
     egui::Frame::NONE
         .fill(theme.surface_secondary)
         .corner_radius(tokens::RADIUS_MD)
@@ -153,6 +200,118 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>) -> AttachmentAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-pixel PNG, written by hand.
+    ///
+    /// Not a fixture file: what is being tested is that egui was given a
+    /// decoder, and a decoder is exactly what would be needed to *produce* a
+    /// fixture, so the bytes are spelled out.
+    fn a_png() -> Vec<u8> {
+        // 1x1 opaque red, deflate-stored, CRCs computed rather than copied.
+        fn chunk(kind: &[u8], data: &[u8]) -> Vec<u8> {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let mut crc = crc32(kind);
+            crc = crc32_with(crc, data);
+            out.extend_from_slice(&crc.to_be_bytes());
+            out
+        }
+        fn crc32(b: &[u8]) -> u32 {
+            crc32_with(0xFFFF_FFFF, b) ^ 0
+        }
+        fn crc32_with(mut c: u32, b: &[u8]) -> u32 {
+            for &x in b {
+                c ^= x as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            c
+        }
+        // The CRC in a PNG is over kind+data and finishes with a xor; the two
+        // helpers above keep the running value, so finish it here.
+        fn real_chunk(kind: &[u8], data: &[u8]) -> Vec<u8> {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let mut c = 0xFFFF_FFFFu32;
+            c = crc32_with(c, kind);
+            c = crc32_with(c, data);
+            out.extend_from_slice(&(c ^ 0xFFFF_FFFF).to_be_bytes());
+            out
+        }
+        let _ = chunk(b"", b"");
+        let _ = crc32(b"");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let ihdr = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
+        png.extend(real_chunk(b"IHDR", &ihdr));
+        // One scanline: filter 0, then RGB. Stored (uncompressed) deflate.
+        let raw = [0u8, 255, 0, 0];
+        let mut z = vec![0x78, 0x01, 0x01, 4, 0, 0xFB, 0xFF];
+        z.extend_from_slice(&raw);
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &x in &raw {
+            a = (a + x as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        z.extend_from_slice(&(((b << 16) | a) as u32).to_be_bytes());
+        png.extend(real_chunk(b"IDAT", &z));
+        png.extend(real_chunk(b"IEND", b""));
+        png
+    }
+
+    /// egui was actually given something that can decode a PNG.
+    ///
+    /// # Why this is not obvious
+    ///
+    /// `egui::Image::from_bytes` decodes nothing itself: it hands the bytes to
+    /// a registered loader, and with none registered it draws a broken-picture
+    /// icon — which reads as *this file is damaged* and means only *I have no
+    /// decoder*. Nothing called `install_loaders` for months. Asking the
+    /// context to load the image is the whole check; drawing it would only
+    /// tell us a widget was allocated.
+    #[test]
+    fn an_image_can_actually_be_decoded() {
+        let ctx = egui::Context::default();
+        crate::install_loaders(&ctx);
+        let uri = "bytes://one.png";
+        let png = a_png();
+
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(egui::Image::from_bytes(uri, png.clone()));
+        });
+        output.textures_delta.clear();
+
+        // Loaders decode on demand and may answer `Pending` the first time, so
+        // ask until it settles rather than asserting on one frame.
+        let mut seen = None;
+        for _ in 0..64 {
+            match ctx.try_load_image(uri, egui::SizeHint::Scale(1.0.into())) {
+                Ok(egui::load::ImagePoll::Ready { image }) => {
+                    seen = Some(image.size);
+                    break;
+                }
+                Ok(egui::load::ImagePoll::Pending { .. }) => {
+                    let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        ui.add(egui::Image::from_bytes(uri, png.clone()));
+                    });
+                    o.textures_delta.clear();
+                }
+                Err(e) => panic!("nothing can decode a PNG: {e}"),
+            }
+        }
+        assert_eq!(
+            seen,
+            Some([1, 1]),
+            "the image never decoded, so every attachment draws as a broken picture"
+        );
+    }
 
     #[test]
     fn an_unknown_kind_is_drawn_as_a_file() {

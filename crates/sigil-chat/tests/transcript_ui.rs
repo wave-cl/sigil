@@ -124,6 +124,7 @@ fn a_conversation() -> ChatState {
                     size: 2100,
                     preview: Vec::new(),
                     bytes: None,
+                    missing: false,
                     id: "abc123".into(),
                 }],
                 standing: Default::default(),
@@ -1104,6 +1105,53 @@ fn having_no_name_offers_nothing_to_give_up() {
         !text_of(&h).contains("Give it up"),
         "a control that cannot do anything: {}",
         text_of(&h)
+    );
+}
+
+/// A picture that could not be fetched says so, and offers another try.
+///
+/// A blob past its retention window is gone, so the fetch is not retried on
+/// every tick — which left a picture that had *failed* and one that had not
+/// been reached yet drawing the same bare filename, with nothing to say which
+/// or what to do about it.
+#[test]
+fn a_picture_the_exchange_refused_says_so() {
+    let mut state = a_conversation();
+    let file = state.lines[2]
+        .attachments
+        .get_mut(0)
+        .expect("the fixture's file");
+    file.kind = 0x01;
+    file.described = "[image, 28 KiB]".into();
+    file.missing = true;
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("could not be fetched"),
+        "a refused picture is a bare filename: {said}"
+    );
+    assert!(said.contains("Try again"), "and offers nothing: {said}");
+}
+
+/// One still on its way says *that*, which is a different thing.
+#[test]
+fn a_picture_still_coming_says_it_is_coming() {
+    let mut state = a_conversation();
+    let file = state.lines[2]
+        .attachments
+        .get_mut(0)
+        .expect("the fixture's file");
+    file.kind = 0x01;
+    file.described = "[image, 28 KiB]".into();
+    file.missing = false;
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("fetching"), "{said}");
+    assert!(
+        !said.contains("could not be fetched"),
+        "a picture on its way is reported as lost: {said}"
     );
 }
 

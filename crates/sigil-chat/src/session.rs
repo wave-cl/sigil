@@ -424,6 +424,13 @@ pub struct Attached {
     /// The thumbnail the sender put in, if any. Drawn while the blob is
     /// fetched, and the only thing shown at all until it is.
     pub preview: Vec<u8>,
+    /// The exchange was asked for it and would not give it.
+    ///
+    /// **Not the same as "not yet".** A blob past its retention window is gone
+    /// and asking again on every tick will not bring it back, so the fetch is
+    /// not retried — which left a picture that had failed and one that had not
+    /// been reached yet looking identical, and neither of them saying anything.
+    pub missing: bool,
     /// The whole file, once it has been fetched and opened.
     ///
     /// Held here rather than fetched by the view: a view runs sixty times a
@@ -632,6 +639,8 @@ pub enum Cmd {
     OpenDm(PubKey),
     /// Show an existing conversation.
     Show([u8; 32]),
+    /// Ask again for every file the exchange refused.
+    Refetch,
     /// Build another [`PAGE`] of the open conversation's history.
     ///
     /// Asked for by the transcript when somebody reaches the top of it. The
@@ -1880,6 +1889,10 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                             size: a.size,
                             preview: a.preview.clone(),
                             bytes: desk.files.get(&a.blob).cloned(),
+                            // Asked for and refused, as against not reached
+                            // yet. The two look the same on screen otherwise,
+                            // and only one of them is worth waiting for.
+                            missing: desk.unfetchable.contains(&a.blob),
                             id: bs58::encode(a.blob).into_string(),
                         })
                         .collect(),
@@ -2230,6 +2243,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
         },
         Cmd::Show(channel) => open(desk, state, channel),
+        Cmd::Refetch => {
+            // Everything that failed, not one file: a fetch fails for reasons
+            // that are rarely about the one blob — the link was down, the key
+            // had not arrived — and a reader asking again means "try the lot".
+            desk.unfetchable.clear();
+        }
         Cmd::Earlier => {
             if let Some(channel) = desk.open
                 && let Some(known) = desk.channels.get_mut(&channel)

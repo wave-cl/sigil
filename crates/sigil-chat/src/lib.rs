@@ -1894,7 +1894,10 @@ impl ChatApp {
             .frame(
                 egui::Frame::NONE
                     .fill(theme.surface_primary)
-                    .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_SM as i8)),
+                    // Room above it. The last bubble sat against the top of
+                    // the box, so a message and the thing you type the next
+                    // one into read as one block.
+                    .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_LG as i8)),
             )
             .show(ui, |ui| self.composer_ui(at, state, ui, theme));
 
@@ -2111,6 +2114,7 @@ impl ChatApp {
                     described: &a.described,
                     preview: &a.preview,
                     bytes: a.bytes.as_deref(),
+                    missing: a.missing,
                     id: &a.id,
                 })
                 .collect();
@@ -2222,6 +2226,9 @@ impl ChatApp {
             }
             if did.forward {
                 self.pane(at).forwarding = Some(seq);
+            }
+            if did.retry {
+                self.send_as(Some(at), Cmd::Refetch);
             }
             if let Some(index) = did.open {
                 self.pane(at).viewing = Some((seq, index));
