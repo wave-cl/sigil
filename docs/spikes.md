@@ -3,32 +3,43 @@
 The plan named three spikes to run before building anything, on the grounds
 that all three are cheap now and expensive to discover late. Two are done.
 
-## (a) One identity, two connections — PASSES
+## (a) One identity, two connections — PASSED, and is no longer what sigil does
 
-`crates/sigil-net/tests/one_identity_two_connections.rs`.
+`crates/sigil-net/tests/one_identity_one_connection.rs`.
 
-Two identities, each holding a chat connection *and* a voice connection against
-one in-process `sqexd`, with media and messages crossing at the same time. Both
-work. The chat connection kept serving requests while datagrams flowed on the
-other, and the voice connection still carried frames after the chat traffic.
+The spike asked whether one identity could hold a chat connection *and* a voice
+connection at once, against one in-process `sqexd`. It can, and it needed
+proving rather than reading: `sqex-voice`'s README says "One identity, one
+client", while `sqexd/src/server.rs:113-115` says an identity may hold several
+connections at once. Both are true — the README is about two *processes* each
+negotiating their own SIP-12 session with the same peer, where the peer keeps
+one and the other goes deaf. Connections are a separate question, and the
+answer was yes.
 
-This is what the whole design rests on, and it needed proving rather than
-reading: `sqex-voice`'s README says "One identity, one client", while
-`sqexd/src/server.rs:113-115` says an identity may hold several connections at
-once. Both are true — the README is about two *processes* each negotiating
-their own SIP-12 session with the same peer, where the peer keeps one and the
-other goes deaf. Connections are a separate question, and the answer is yes.
+sigil was built on that answer and dialled twice. **It does not any more**, and
+the reason is the second half of the same spike:
 
-**Negative control run.** Connecting the voice side anonymously
-(`Client::connect` rather than `connect_as`) fails the test with
-`403 opening a session requires an advertised Ed25519 identity (SIP-3)`, so the
-test genuinely exercises the identity-keyed path rather than passing vacuously.
+> A relayed datagram is fanned out to *every* live connection the recipient
+> identity holds, so each voice frame is also written to the connection chat is
+> using, where nothing reads it.
 
-**The cost is real and now pinned by a test.** A relayed datagram is fanned out
-to *every* live connection the recipient identity holds, so each voice frame is
-also written to the connection chat is using, where nothing reads it. That is
-the price of the two-connection design; the second test asserts it, so if the
-behaviour ever changes the reasoning changes with it.
+That was recorded as the price of the two-connection design. It is a price with
+nothing bought by it: two handshakes, two sockets, two keep-alive timers, a
+handshake at the moment somebody presses answer, and a duplicate of every audio
+frame for the length of every call. So a call now rides the connection the chat
+client already holds — `sqnr::Client` is a handle that can be cloned,
+`Chat::connection` lends one, `sqex_voice::engine::adopt` takes it, and
+`sigil_net::Dial::On` is how a call is told to use it.
+
+The test file that proved the spike now proves the arrangement that replaced it:
+a call runs to its end on a borrowed connection with the exchange accepting no
+new one (counted in its own `/status`), the chat client that lent it goes on
+sending afterwards, and a frame arrives exactly once — followed, in the same
+test, by the old duplicate appearing the moment a second connection exists,
+because that measurement is the reason and not a detail.
+
+Still true, and still worth knowing: an exchange **allows** the second
+connection. Nothing here depends on it any more.
 
 ## (b) The dependency set — PASSES on macOS
 

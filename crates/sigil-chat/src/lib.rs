@@ -3256,13 +3256,30 @@ impl ChatApp {
         };
         let path = unlocked.path().to_path_buf();
         let signer = unlocked.signer();
-        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
-        if !discovery::any_configured(&layers) {
-            return;
-        }
+        // **On the connection this identity already holds**, when there is one.
+        // Dialling a second costs a handshake at the moment somebody presses
+        // answer, and costs bandwidth for as long as the call lasts: the
+        // exchange writes a relayed datagram to every connection an identity
+        // holds, so each audio frame would also be written to the chat
+        // connection, where nothing reads it.
+        //
+        // Falling back to dialling rather than refusing: the link may be down
+        // and coming back, and a call is worth more than the saving.
+        let held = self.sessions.get(at).and_then(|s| s.connection());
+        let reach: sigil_net::Dial = match held {
+            Some(client) => client.into(),
+            None => {
+                let layers =
+                    discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+                if !discovery::any_configured(&layers) {
+                    return;
+                }
+                layers.into()
+            }
+        };
         let wake = egui_ctx.clone();
         let handle = sigil_net::spawn_room(
-            layers,
+            reach,
             signer,
             sigil_net::RoomId::new(ring.secret),
             Default::default(),

@@ -897,6 +897,13 @@ pub struct ChatHandle {
     state: watch::Receiver<ChatState>,
     cmds: mpsc::UnboundedSender<Cmd>,
     task: JoinHandle<()>,
+    /// The connection this session holds, for a call to ride on.
+    /// See [`ChatHandle::connection`].
+    ///
+    /// Beside the state rather than in it: `ChatState` is cloned on every read
+    /// and compared to decide whether the window needs repainting, and a
+    /// connection is neither cloneable in that sense nor comparable in any.
+    holds: Arc<std::sync::Mutex<Option<sqnr::Client>>>,
 }
 
 /// A session that has been told to stop but may not have finished stopping.
@@ -923,6 +930,21 @@ impl Closing {
 impl ChatHandle {
     pub fn state(&self) -> ChatState {
         self.state.borrow().clone()
+    }
+
+    /// The connection this session holds, for a call to be placed on.
+    ///
+    /// A call used to dial its own, which cost a handshake at the moment
+    /// somebody pressed the button and cost bandwidth for as long as it lasted:
+    /// the exchange writes a relayed datagram to **every** connection an
+    /// identity holds, so every audio frame was also written to this one, where
+    /// nothing reads it.
+    ///
+    /// `None` when the link is not up. What comes back belongs to the
+    /// connection live *now*: a redial makes a new one, and this stops handing
+    /// out the old.
+    pub fn connection(&self) -> Option<sqnr::Client> {
+        self.holds.lock().ok()?.clone()
     }
 
     /// One question about the state, answered without copying the rest of it.
@@ -1021,15 +1043,20 @@ pub fn start_every(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let wake = Arc::new(wake);
     let dial = dial.into();
+    let holds = Arc::new(std::sync::Mutex::new(None));
+    let held = holds.clone();
 
     let task = tokio::spawn(async move {
         if let Err(e) = run(
             dial,
             signer,
             store_at,
-            state_tx.clone(),
-            cmd_rx,
-            wake.clone(),
+            Wires {
+                state: state_tx.clone(),
+                cmds: cmd_rx,
+                wake: wake.clone(),
+                holds: held,
+            },
             every,
         )
         .await
@@ -1043,19 +1070,41 @@ pub fn start_every(
         state: state_rx,
         cmds: cmd_tx,
         task,
+        holds,
     }
+}
+
+/// Everything the session speaks to the outside through.
+///
+/// One parameter rather than four, because they arrive together, are made
+/// together in `start_every`, and none of them means anything without the
+/// others.
+struct Wires {
+    /// What the interface reads.
+    state: watch::Sender<ChatState>,
+    /// What it asks for.
+    cmds: mpsc::UnboundedReceiver<Cmd>,
+    /// How it is told to look again.
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// The connection, for a call to be placed on. See
+    /// [`ChatHandle::connection`].
+    holds: Arc<std::sync::Mutex<Option<sqnr::Client>>>,
 }
 
 async fn run(
     dial: Dial,
     signer: SoftwareSigner,
     store_at: Option<std::path::PathBuf>,
-    state: watch::Sender<ChatState>,
-    mut cmds: mpsc::UnboundedReceiver<Cmd>,
-    wake: Arc<dyn Fn() + Send + Sync>,
+    wires: Wires,
     every: std::time::Duration,
 ) -> Result<(), String> {
     use sqnr_core::Signer;
+    let Wires {
+        state,
+        mut cmds,
+        wake,
+        holds,
+    } = wires;
     let seed = signer.seed();
     let me = PubKey::new(signer.public());
 
@@ -1072,6 +1121,13 @@ async fn run(
         Dial::Discover(layers) => {
             let mut silent = sqex_voice::engine::Silent;
             sqex_voice::engine::resolve(&layers[..], &mut silent).await?
+        }
+        // A session **owns** its connection: it is the thing that dials, holds
+        // and redials it, and lends it to calls (`ChatHandle::connection`).
+        // Handing it one to run on would invert that, and there would be
+        // nothing left to say who redials.
+        Dial::On(_) => {
+            return Err("a chat session opens its own connection".to_string());
         }
     };
     // Held for the life of the session. Two interactive clients on one account
@@ -1101,7 +1157,9 @@ async fn run(
     // is not one, and `name@203.0.113.1` is not a handle.
     let domain = match &dial {
         Dial::Discover(layers) => sigil_net::domain_of(layers),
-        Dial::At(_) => None,
+        // No domain to show: reached by a literal host and key, or — refused
+        // above — on somebody else's connection.
+        Dial::At(_) | Dial::On(_) => None,
     };
     chat.set_domain(domain.clone());
     // So a lost connection can be rebuilt without restarting the session.
@@ -1143,8 +1201,22 @@ async fn run(
     // Where a parked fetch hands back what it found. See [`Parked`].
     let (arrived_tx, mut arrived_rx) = mpsc::unbounded_channel::<Arrived>();
     let mut parked: Option<Parked> = None;
+    // What was last handed out to be called on. See `ChatHandle::connection`.
+    // `Retrying` rather than `Up`, so the first pass writes the connection this
+    // session has just made instead of thinking it already had.
+    let mut lent = Link::Retrying;
 
     loop {
+        // **The connection, for whoever wants to place a call on it.** Written
+        // when the link changes rather than every pass: a redial makes a new
+        // connection, and a call placed on the one before it would be placed on
+        // something closed.
+        if chat.link() != lent {
+            lent = chat.link();
+            if let Ok(mut holds) = holds.lock() {
+                *holds = chat.connection();
+            }
+        }
         // **What is outstanding decides the wait.** A link being redialled
         // advances a slice per pass and would take minutes at the quiet
         // interval; a note has to disappear five seconds after it appeared,

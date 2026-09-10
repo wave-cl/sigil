@@ -174,6 +174,15 @@ async fn run(
             let mut silent = sqex_voice::engine::Silent;
             sqex_voice::engine::resolve(&layers[..], &mut silent).await?
         }
+        // Not yet, and not for want of a connection to borrow: this session
+        // needs the exchange's **key** as well, because SIP-31 binds every
+        // signed command to it and a connection does not carry one. Sharing
+        // here also wants the reconnection this session has never had -- a
+        // borrowed connection is somebody else's to redial, so what would be
+        // shared is the slot rather than the connection.
+        Dial::On(_) => {
+            return Err("an admin session opens its own connection".to_string());
+        }
     };
     let mut client =
         sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;

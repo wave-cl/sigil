@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use sqex_proto::room::RoomId;
 use sqex_voice::engine::{self, CallOpts, Endpoint, Event, PeerStatus, Report};
-use sqnr_core::{PubKey, SoftwareSigner};
+// `Signer` for `public()`: a call placed on a connection somebody else opened
+// still has to refuse being placed to oneself, and that check needs our key.
+use sqnr_core::{PubKey, Signer, SoftwareSigner};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -241,6 +243,26 @@ pub enum Dial {
     /// the identity's SIP-38 handle contributes one only when there is an
     /// identity with a handle.
     Discover(Vec<sqex_discovery::Layer>),
+    /// **Do not dial at all**: this identity is already connected to the
+    /// exchange, and the call goes on the connection it holds.
+    ///
+    /// A chat session has one open for as long as the window is, so pressing
+    /// call need not wait for a handshake — and, for as long as the call lasts,
+    /// the exchange has one connection to fan its datagrams to rather than two.
+    /// It writes a relayed datagram to *every* connection an identity holds, so
+    /// the second one is not idle while a call is up: it carries a duplicate of
+    /// every audio frame, which nothing reads.
+    ///
+    /// Whoever lends the connection gives up reading datagrams on it for the
+    /// duration; a call is the only thing here that reads them, and a chat
+    /// client never does.
+    On(Box<sqnr::Client>),
+}
+
+impl From<sqnr::Client> for Dial {
+    fn from(c: sqnr::Client) -> Self {
+        Dial::On(Box::new(c))
+    }
 }
 
 impl From<Endpoint> for Dial {
@@ -290,11 +312,17 @@ pub fn spawn_call(
             wake,
         };
         let result = async {
-            let endpoint = match dial {
-                Dial::At(e) => e,
-                Dial::Discover(layers) => engine::resolve(&layers[..], &mut bridge).await?,
+            if PubKey::new(signer.public()) == peer {
+                return Err("a session needs two identities".to_string());
+            }
+            let mut client = match dial {
+                Dial::On(client) => engine::adopt(*client, &signer, &mut bridge)?,
+                Dial::At(e) => engine::dial(e, &signer, peer, &mut bridge).await?,
+                Dial::Discover(layers) => {
+                    let e = engine::resolve(&layers[..], &mut bridge).await?;
+                    engine::dial(e, &signer, peer, &mut bridge).await?
+                }
             };
-            let mut client = engine::dial(endpoint, &signer, peer, &mut bridge).await?;
             // Ring before waiting, so the other end has a reason to answer.
             // Best effort on purpose: a ring that does not arrive costs a call
             // that has to be arranged another way, and refusing to place the
@@ -371,11 +399,14 @@ pub fn spawn_room(
             wake,
         };
         let result = async {
-            let endpoint = match dial {
-                Dial::At(e) => e,
-                Dial::Discover(layers) => engine::resolve(&layers[..], &mut bridge).await?,
+            let client = match dial {
+                Dial::On(client) => engine::adopt(*client, &signer, &mut bridge)?,
+                Dial::At(e) => engine::connect(e, &signer, &mut bridge).await?,
+                Dial::Discover(layers) => {
+                    let e = engine::resolve(&layers[..], &mut bridge).await?;
+                    engine::connect(e, &signer, &mut bridge).await?
+                }
             };
-            let client = engine::connect(endpoint, &signer, &mut bridge).await?;
             engine::room_call(client, &signer, room, opts, &mut bridge).await
         }
         .await;

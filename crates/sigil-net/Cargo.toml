@@ -27,3 +27,6 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 sqex-chat = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 hound = "3"
+# For reading the exchange's own `/status`: how many connections a client costs
+# is a question only the far end can answer.
+serde_json = { workspace = true }
