@@ -229,7 +229,8 @@ async fn an_open_conversation_is_quiet_when_nothing_is_said() {
     // twelve-second window each client re-parks at most once, whatever the
     // phase, and nothing else asks anything at all.
     //
-    // It was forty in a three-second window: a read mark and a cursor fetch per
+    // It was forty in a three-second window before any of this: a read mark and
+    // a cursor fetch per
     // tick per client, the events those provoked at the other end, and — the
     // larger half, found by logging every request rather than by reasoning
     // about it — a `/channel/info` and one `/device/list` per member inside
@@ -237,7 +238,7 @@ async fn an_open_conversation_is_quiet_when_nothing_is_said() {
     // eight, on a 700ms tick. Then two, once the timer became a five-second
     // backstop. Then none, once the open conversation stopped being fetched
     // for being open. This is that same nothing, with one standing question
-    // each: 0.08 requests a second, against 13 in April.
+    // each: 0.08 requests a second, against 13 before any of this.
     //
     // The window is twelve seconds rather than three so the arithmetic is a
     // ceiling rather than a probability — and it stays clear of the
