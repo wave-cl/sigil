@@ -1935,6 +1935,63 @@ fn cancel_is_centred_against_the_call_it_would_stop() {
     );
 }
 
+/// Reply and react sit **beside** a message, on both sides of the conversation.
+///
+/// Under it they push everything below them down as the pointer moves along a
+/// conversation, which makes the transcript twitch while it is being read —
+/// the reason the controls are placed beside in the first place.
+///
+/// **Your own messages had it wrong and nobody could have noticed from the
+/// other side.** The right-hand side used `with_layout`, which takes the ui's
+/// whole remaining size, so `Align::Center` centred the controls in the rest of
+/// the transcript rather than against the message: seventy-five pixels below a
+/// one-word bubble, and further the emptier the conversation. The left-hand
+/// side used `ui.horizontal`, which is bounded, and was right.
+///
+/// Asserted as overlap and side rather than as a pixel offset: the question is
+/// whether they are next to the words, and a tolerance would have to be
+/// invented.
+#[test]
+fn the_controls_sit_beside_a_message_and_not_under_it() {
+    for mine in [false, true] {
+        let mut state = a_conversation();
+        state.lines.truncate(1);
+        state.lines[0].text = "ok".into();
+        state.lines[0].mine = mine;
+        let mut h = harness_with(state, true);
+        h.run();
+        h.get_by_label_contains("ok").hover();
+        // `step`, not `run`: the controls appearing is an animation, and `run`
+        // waits for a frame that never settles.
+        h.step();
+        h.step();
+
+        let words = h.get_by_label_contains("ok").rect();
+        let reply = h.get_by_label_contains("Reply").rect();
+        let whose = if mine { "your own" } else { "theirs" };
+        assert!(
+            reply.top() < words.bottom() && reply.bottom() > words.top(),
+            "the controls on {whose} message are not level with it: words \
+             {words:?}, reply {reply:?}"
+        );
+        // And on the side each has room on: to the left of your own, to the
+        // right of somebody else's.
+        if mine {
+            assert!(
+                reply.right() <= words.left(),
+                "your own message's controls should be to its left: words \
+                 {words:?}, reply {reply:?}"
+            );
+        } else {
+            assert!(
+                reply.left() >= words.right(),
+                "their message's controls should be to its right: words \
+                 {words:?}, reply {reply:?}"
+            );
+        }
+    }
+}
+
 /// An account with nothing else linked is told what that costs.
 ///
 /// This is the one warning in the client that is about **permanent** loss. An

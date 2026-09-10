@@ -397,7 +397,27 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
         // `Center`, so the controls sit against the middle of the bubble
         // rather than its top edge. On a bubble of several lines a top-aligned
         // row reads as belonging to the first one.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        //
+        // **Allocated to a row, not to whatever is left.** `with_layout` takes
+        // the ui's whole remaining size, so `Center` centred the controls in
+        // the rest of the transcript rather than against the bubble: on a
+        // one-word message they landed seventy-five pixels below it, drifting
+        // further the more empty space there was. `ui.horizontal` -- which the
+        // other side of the conversation uses, and which is why that side was
+        // right -- starts a row at `interact_size.y` and lets it grow to what
+        // is put in it. This is that, right to left.
+        //
+        // **Allocated as a row, not as whatever is left.** `with_layout` takes
+        // the ui's entire remaining size, so `Center` centred the controls in
+        // the rest of the transcript rather than against the message: on a
+        // one-word bubble they landed **seventy-five pixels below it**, and
+        // further the more empty space there was under the conversation. This
+        // is what `ui.horizontal` does -- the shape the other side of the
+        // conversation uses, and the reason that side was right all along --
+        // written out because the direction has to be right to left.
+        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        let layout = egui::Layout::right_to_left(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, layout, |ui| {
             let bubble = ui
                 .scope_builder(
                     egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Max)),
@@ -484,6 +504,7 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
     if !(over || holding) || b.redacted {
         return;
     }
+
     if crate::icon_button(ui, crate::Icon::Reply).clicked() {
         action.reply = true;
     }
