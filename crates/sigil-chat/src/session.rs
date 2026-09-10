@@ -2488,27 +2488,39 @@ async fn learn_names(chat: &mut Chat, desk: &mut Desk) {
     // whoever has said anything in the conversation on screen. Not every member
     // of every channel -- that is a request per person per rebuild for names
     // nobody is looking at.
-    let mut want: Vec<PubKey> = Vec::new();
-    let mut add = |a: PubKey| {
-        if a != chat.me && !want.contains(&a) {
-            want.push(a);
-        }
-    };
+    let want = wanted_names(desk, chat.me);
+    if !want.is_empty() {
+        let _ = chat.refresh_profiles(&want, now).await;
+    }
+}
+
+/// Whose name is worth asking about.
+///
+/// **A set, not a list searched for every message.** This was a `Vec` with a
+/// `contains` per entry, so the conversation on screen cost a scan of everybody
+/// already found for each of its messages -- five hundred messages against
+/// fifty speakers is twenty-five thousand comparisons, on every pass, to
+/// produce a list of fifty.
+///
+/// A free function over plain data because the rule is the part worth testing:
+/// everybody a view could name -- the other party in each direct message, and
+/// whoever has said anything in the conversation on screen -- and nobody twice.
+/// Not every member of every channel: that is a request per person per rebuild
+/// for names nobody is looking at.
+fn wanted_names(desk: &Desk, me: PubKey) -> Vec<PubKey> {
+    let mut want: HashSet<PubKey> = HashSet::new();
     for known in desk.channels.values() {
         if let Some(peer) = known.peer {
-            add(peer);
+            want.insert(peer);
         }
     }
     if let Some(open) = desk.open
         && let Some(known) = desk.channels.get(&open)
     {
-        for m in known.timeline.messages() {
-            add(m.account);
-        }
+        want.extend(known.timeline.messages().map(|m| m.account));
     }
-    if !want.is_empty() {
-        let _ = chat.refresh_profiles(&want, now).await;
-    }
+    want.remove(&me);
+    want.into_iter().collect()
 }
 
 /// Everything we can say about who somebody is, read back out of the store.
@@ -2529,9 +2541,11 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
     if let Some(open) = desk.open
         && let Some(known) = desk.channels.get(&open)
     {
-        let authors: Vec<PubKey> = known.timeline.messages().map(|m| m.account).collect();
-        for a in authors {
-            look(a, &mut out);
+        // Straight from the fold. This collected every author into a `Vec`
+        // first -- one allocation the length of the conversation, per pass,
+        // for a lookup that already dedupes.
+        for m in known.timeline.messages() {
+            look(m.account, &mut out);
         }
     }
     out
@@ -2588,6 +2602,15 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     let open = desk
         .open
         .and_then(|c| desk.channels.get(&c).map(|k| (c, k)));
+    // **Counted once.** Three places want the length of the open conversation
+    // -- how much is in the window, how much is behind it, and where the
+    // events above it start -- and each walked the fold to find out.
+    // `messages()` iterates the whole map, so that was three passes over five
+    // hundred messages to arrive at one number three times.
+    let counted = open
+        .map(|(_, k)| k.timeline.messages().count())
+        .unwrap_or(0);
+
     let lines: Vec<Line> = open
         .map(|(_, k)| {
             // A stub of what each message says, so a reply can name it. Built
@@ -2618,8 +2641,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
             // read from. Everything before that stays in the fold and in the
             // store; this only bounds how much is turned into something
             // drawable at once. See [`PAGE`].
-            let total = k.timeline.messages().count();
-            let window = total.saturating_sub(k.wanted);
+            let window = counted.saturating_sub(k.wanted);
 
             // A stub of what each message says, so a reply can name it. Only
             // for what a reply in the window actually points at, and looked up
@@ -2702,7 +2724,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
 
     // How many are behind the window, so the reader can be offered them.
     let earlier = open
-        .map(|(_, k)| k.timeline.messages().count().saturating_sub(k.wanted))
+        .map(|(_, k)| counted.saturating_sub(k.wanted))
         .unwrap_or(0);
 
     // What happened *to* the channel, from the exchange's own signed entries.
@@ -2742,7 +2764,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
             // the first message -- which is all of them in a new channel,
             // where the exchange writes the creation and the invitations
             // before anybody has said a word.
-            let behind = k.timeline.messages().count().saturating_sub(k.wanted);
+            let behind = counted.saturating_sub(k.wanted);
             let first = if behind == 0 {
                 0
             } else {
@@ -3934,5 +3956,75 @@ mod holding_tests {
         let on_screen: HashSet<[u8; 32]> = [blob(0)].into_iter().collect();
         let go = to_put_down(&order, |_| 1024, &on_screen, 0);
         assert_eq!(go, vec![blob(1), blob(2)]);
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::{Desk, Known, Trouble, wanted_names};
+    use sqnr_core::PubKey;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    fn dm_with(peer: Option<PubKey>) -> Known {
+        Known {
+            peer,
+            public: Some(false),
+            group: peer.is_none(),
+            label: String::new(),
+            admins: Vec::new(),
+            members: Vec::new(),
+            marks: Vec::new(),
+            timeline: Default::default(),
+            seen: 0,
+            wanted: 0,
+            last_at: 0,
+            unread: 0,
+            told: 0,
+            waiting: false,
+            typing: false,
+            fetched: false,
+            trouble: Trouble::default(),
+        }
+    }
+
+    /// The other party in each direct message, and nobody twice.
+    ///
+    /// Membership used to be a `contains` over a growing `Vec`, once per
+    /// message in the conversation on screen — five hundred messages against
+    /// fifty speakers is twenty-five thousand comparisons to produce a list of
+    /// fifty. What must not change is the answer.
+    #[test]
+    fn every_direct_message_names_its_other_party_once() {
+        let mut desk = Desk::default();
+        desk.channels.insert([1u8; 32], dm_with(Some(key(7))));
+        desk.channels.insert([2u8; 32], dm_with(Some(key(8))));
+        // The same person in a second conversation, which is ordinary: an
+        // identity at two exchanges, or a group and a direct message.
+        desk.channels.insert([3u8; 32], dm_with(Some(key(7))));
+        // A group has no single other party to name from here.
+        desk.channels.insert([4u8; 32], dm_with(None));
+
+        let mut want = wanted_names(&desk, key(1));
+        want.sort_by_key(|k| k.to_string());
+        assert_eq!(want, vec![key(7), key(8)]);
+    }
+
+    /// Never ourselves: we know who we are, and asking the exchange about it
+    /// is a request per rebuild for a name already on screen.
+    #[test]
+    fn we_are_not_somebody_to_look_up() {
+        let mut desk = Desk::default();
+        desk.channels.insert([1u8; 32], dm_with(Some(key(9))));
+        assert_eq!(wanted_names(&desk, key(9)), Vec::new());
+    }
+
+    /// Nothing held is nobody to ask about — and an empty list is what stops
+    /// the round trip being made at all.
+    #[test]
+    fn an_empty_desk_asks_about_nobody() {
+        assert!(wanted_names(&Desk::default(), key(1)).is_empty());
     }
 }
