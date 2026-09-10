@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 #
-# Create the sqex worktree that sigil builds against.
+# Create the sqex worktree, for co-developing against sqex.
 #
 #   scripts/dev-worktree            # create it
 #   scripts/dev-worktree --status   # show where things point
 #   scripts/dev-worktree --remove   # remove it
 #
-# sigil's Cargo.toml names `../sqex-sigil` for its sqex path dependencies. That
-# is a **git worktree** of the sqex repository -- the same repo, a separate
-# branch, a separate working copy, a separate target directory -- and this
-# creates it.
+# sigil's Cargo.toml **pins** the sqex crates to a git tag, so a fresh clone
+# needs none of this. It is for the case a tag cannot serve: a change spanning
+# both repositories, where the sqex side is not written yet, let alone tagged.
+#
+# Two steps, and this is the second:
+#
+#   1. Point the sqex dependencies in Cargo.toml at `../sqex-sigil/crates/*`
+#      (docs/dependencies.md has the block to paste), and put the tag back when
+#      the sqex side has landed and been tagged. Release CI refuses a tag that
+#      still carries a path, so forgetting cannot ship.
+#   2. Run this, which creates `../sqex-sigil` -- a **git worktree** of the sqex
+#      repository, the same repo with a separate branch, working copy and
+#      target directory.
 #
 # Why not just point at ../sqex: a path dependency compiles whatever branch that
 # tree has checked out. Share it with anything else and two things go wrong at

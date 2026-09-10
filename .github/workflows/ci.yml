@@ -11,11 +11,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # sigil depends on the sqex crates by path, so sqex is checked out beside it.
-  # See docs/dependencies.md: a release pins them to a git tag instead, at which
-  # point the second checkout can go. sqex, sqnr and squic are all public, so
-  # none of this needs a secret -- CI runs on a fork with no configuration.
-  SQEX_REF: sigil-voice-engine
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -25,18 +20,12 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
+      # One checkout. sigil pins the sqex crates to a git tag (v0.46.0), so
+      # cargo fetches them like any other dependency -- there was a second
+      # checkout beside this one for as long as they were path dependencies
+      # into a worktree. sqex, sqnr and squic are all public, so CI needs no
+      # secret and runs unchanged on a fork.
       - uses: actions/checkout@v4
-        with:
-          path: sigil
-
-      # sigil's manifest names ../sqex-sigil, so sqex has to land beside it
-      # under that name. A worktree locally, a checkout here; the path is the
-      # contract.
-      - uses: actions/checkout@v4
-        with:
-          repository: wave-cl/sqex
-          ref: ${{ env.SQEX_REF }}
-          path: sqex-sigil
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,29 +54,27 @@ jobs:
             libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sigil
 
       - name: Check
-        working-directory: sigil
         run: cargo check --workspace --all-targets
 
-      # Never `--all` here, and this is the repository that proves why: sigil
-      # consumes five sqex crates by path, and `cargo fmt --all` formats the
-      # workspace *and the path-based dependencies of its members*. Measured
-      # today, `--all` from here writes 868 sites into ../sqex-sigil and zero
-      # into sigil, which is already clean — the entire diff would be
-      # collateral damage to another repository. That is not a thought
-      # experiment: it is how 63 files of sqex were once reformatted by
-      # accident, from this workspace.
+      # Never `--all` here, and this is the repository that proves why.
+      # `cargo fmt --all` formats the workspace *and the path-based
+      # dependencies of its members*, and while the sqex crates were paths into
+      # ../sqex-sigil that meant 868 sites written into another repository and
+      # zero into this one, which was already clean. Not a thought experiment:
+      # it is how 63 files of sqex were once reformatted by accident, from
+      # here. Pinning to a git tag removed the hazard -- a fetched dependency
+      # is not a workspace member -- but it removed it for as long as the pin
+      # lasts, and co-developing against sqex means putting the paths back.
       #
-      # The package list is derived rather than written out, so adding a crate
-      # cannot leave it silently unchecked with the job still green, and is
-      # echoed so a green run shows what it covered. Built as a bash array
-      # because the unquoted `-p a -p b` form depends on word splitting, which
-      # zsh does not do, so it cannot be tested on a dev machine.
+      # The list stays for a reason the pin does not touch: it is *derived*, so
+      # adding a crate cannot leave it silently unchecked with the job still
+      # green, and it is echoed so a green run shows what it covered. Built as
+      # a bash array because the unquoted `-p a -p b` form depends on word
+      # splitting, which zsh does not do, so it cannot be tested on a dev
+      # machine.
       - name: Format
-        working-directory: sigil
         run: |
           args=()
           while read -r n; do args+=(-p "$n"); done \
@@ -97,14 +84,12 @@ jobs:
           cargo fmt "${args[@]}" -- --check
 
       - name: Clippy
-        working-directory: sigil
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # Runs the real audio path: tone in, WAV out, through an in-process sqexd
       # and a real Opus encoder, with no sound hardware anywhere. That is the
       # Linux half of the call actually being exercised rather than assumed.
       - name: Tests
-        working-directory: sigil
         run: scripts/run-tests
 
   # ---------------------------------------------------------------------------
@@ -115,26 +100,15 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: sigil
-      - uses: actions/checkout@v4
-        with:
-          repository: wave-cl/sqex
-          ref: ${{ env.SQEX_REF }}
-          path: sqex-sigil
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sigil
       - name: Tests
-        working-directory: sigil
         run: scripts/run-tests
       # The bundle is not optional on macOS: notifications and the microphone
       # both depend on its Info.plist keys, and both fail silently without
       # them. Building it here catches a broken plist before somebody discovers
       # it as a call with no sound.
       - name: Build sigil.app
-        working-directory: sigil
         run: |
           scripts/macos-app
           plutil -lint target/sigil.app/Contents/Info.plist
@@ -151,13 +125,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: sigil
-      - uses: actions/checkout@v4
-        with:
-          repository: wave-cl/sqex
-          ref: ${{ env.SQEX_REF }}
-          path: sqex-sigil
       - uses: dtolnay/rust-toolchain@stable
       - name: System dependencies
         run: |
@@ -168,10 +135,7 @@ jobs:
             libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev \
             mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sigil
       - name: Snapshots
-        working-directory: sigil
         run: scripts/snapshot-test
 
   # ---------------------------------------------------------------------------
