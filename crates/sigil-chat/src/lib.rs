@@ -85,6 +85,59 @@ fn showing_exchange(me: PubKey, chosen: Option<&String>, live: &[At]) -> String 
         .unwrap_or_default()
 }
 
+thread_local! {
+    /// Bubbles drawn, as against reserved.
+    ///
+    /// **Counted here because the screen cannot say.** egui culls what is
+    /// outside the clip rect from the accessibility tree already, so a
+    /// transcript reports the same sixteen messages whether two hundred were
+    /// laid out or twenty were — and laying them out is the entire cost this
+    /// exists to avoid.
+    ///
+    /// Thread-local rather than a field: the harness owns the app, so a test
+    /// has no handle to read a field through, and kittest runs its tests on a
+    /// thread each — which makes this per-test rather than shared.
+    static DREW: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many bubbles this thread has drawn since [`reset_drawn`].
+#[doc(hidden)]
+pub fn drawn_so_far() -> usize {
+    DREW.with(|n| n.get())
+}
+
+#[doc(hidden)]
+pub fn reset_drawn() {
+    DREW.with(|n| n.set(0));
+}
+
+/// Everything about a message that decides how tall it draws.
+///
+/// A reserved row is a promise that the drawn one would be this tall, so what
+/// this misses is what makes the transcript jump. Cheap on purpose: it runs per
+/// message per frame, and it is a hash of the things a bubble's height is made
+/// of, not of the message.
+///
+/// `grouped` is in it because the author line comes and goes with it; the width
+/// is kept beside it rather than hashed, so a resized pane invalidates every
+/// row at once and obviously.
+fn shape_of(line: &Line, grouped: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    line.text.len().hash(&mut h);
+    line.redacted.hash(&mut h);
+    line.edited.hash(&mut h);
+    grouped.hash(&mut h);
+    line.name.is_some().hash(&mut h);
+    line.reactions.len().hash(&mut h);
+    line.standing.hash(&mut h);
+    line.reply_to
+        .as_ref()
+        .map(|(who, said)| who.len() + said.len())
+        .hash(&mut h);
+    h.finish()
+}
+
 /// The call we placed that has been picked up and not yet joined.
 ///
 /// A free function over plain data, because the rule is the part worth
@@ -408,6 +461,12 @@ struct Pane {
     /// Kept here because the control that asks for earlier messages is drawn
     /// *inside* the scroll area, where neither is known yet.
     scrolled: (f32, f32),
+    /// How tall each message drew, and at what width and shape, so one nobody
+    /// can see can be **reserved** rather than drawn. See `messages_ui`.
+    ///
+    /// Cleared when the conversation changes: a height is about one message in
+    /// one conversation and means nothing in the next.
+    tall: HashMap<u64, (u64, f32, f32)>,
     /// Whether the first look has happened for this identity.
     ///
     /// Opening the newest conversation is something sigil does **once**, on
@@ -440,6 +499,7 @@ impl Default for Pane {
             channel_topic: String::new(),
             asking: false,
             saw: (None, 0),
+            tall: HashMap::new(),
             scrolled: (0.0, 0.0),
             looked: false,
             // The protocol's own default, not zero: a retention field starting
@@ -2464,6 +2524,9 @@ impl ChatApp {
                 // "nearly right" a counting test is for.
                 if self.pane(at).saw.0.is_some() && self.pane(at).saw.0 != state.open {
                     self.pane(at).asking = false;
+                    // A remembered height is about one message in one
+                    // conversation, and `seq` starts again in the next.
+                    self.pane(at).tall.clear();
                 }
                 self.pane(at).saw = (state.open, state.earlier);
                 if !paged {
@@ -2697,6 +2760,47 @@ impl ChatApp {
                 && line.at.saturating_sub(previous_at) < 300
                 && state.divider != Some(line.seq);
 
+            // **Reserved rather than drawn, when nobody can see it.**
+            //
+            // Everything in the window is laid out every frame: 51 µs a
+            // message, measured, which is a 60 Hz frame's whole budget by four
+            // hundred of them. A row well outside the viewport is given the
+            // height it drew to last time and nothing else.
+            //
+            // The promise is the height. If a reserved row would have drawn
+            // taller or shorter, the content above the reader changes size and
+            // the transcript jumps under them -- the exact fault that
+            // `request_discard` and the anchoring above exist to prevent. So a
+            // height is only reused when the **shape** it was measured at is
+            // unchanged (see `shape_of`) and the pane is still the same width.
+            //
+            // **A message carrying a file is never reserved.** A picture's
+            // height moves as it loads -- preview, then full, then a remembered
+            // natural size -- and that is precisely the row whose promise could
+            // not be kept. They are a minority of messages and the whole of the
+            // risk.
+            let shape = shape_of(line, grouped);
+            let width = ui.available_width();
+            let known = (line.attachments.is_empty())
+                .then(|| self.pane(at).tall.get(&line.seq).copied())
+                .flatten()
+                .filter(|(was, at_width, _)| *was == shape && *at_width == width)
+                .map(|(_, _, tall)| tall);
+            // A screen either side, so scrolling always arrives at rows that
+            // have already been drawn rather than at reserved space.
+            let near = ui
+                .clip_rect()
+                .expand2(egui::vec2(0.0, ui.clip_rect().height()));
+            let top = ui.cursor().top();
+            if let Some(tall) = known
+                && (top + tall < near.top() || top > near.bottom())
+            {
+                ui.allocate_space(egui::vec2(width, tall));
+                previous_author = Some(line.who);
+                previous_at = line.at;
+                continue;
+            }
+
             let key = line.who.to_string();
             let title = state.people.get(&line.who).and_then(|p| p.title.as_deref());
             let files: Vec<sigil_ui::Attachment<'_>> = line
@@ -2735,7 +2839,13 @@ impl ChatApp {
                 standing: line.standing.word().zip(line.standing.means()),
                 alarming: line.standing == session::Standing::Fork,
             };
-            let did = sigil_ui::bubble(ui, &bubble);
+            // Measured as it is drawn, so the next frame can reserve it.
+            DREW.with(|n| n.set(n.get() + 1));
+            let drawn = ui.scope(|ui| sigil_ui::bubble(ui, &bubble));
+            let did = drawn.inner;
+            self.pane(at)
+                .tall
+                .insert(line.seq, (shape, width, drawn.response.rect.height()));
             if !did.is_none() {
                 acted = Some((line.seq, line.text.clone(), line.who, did));
             }

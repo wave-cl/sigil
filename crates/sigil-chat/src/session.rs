@@ -179,7 +179,7 @@ pub struct Happened {
 /// can say whose key it is, because no SIP-20 credential could be obtained to
 /// bind the signing device to the account the entry names. A mapping somebody
 /// asserts and evidence somebody can check are different things.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Standing {
     /// Signed by the device it names, following that device's chain.
     #[default]

@@ -2030,6 +2030,119 @@ fn the_receipt_is_under_the_bubble_and_not_on_the_time_row() {
     );
 }
 
+/// A reserved row keeps its promise: nothing moves between frames.
+///
+/// The transcript reserves the height of a message nobody can see rather than
+/// drawing it — 51 µs each, and a 60 Hz frame's whole budget by four hundred.
+/// **The promise is the height.** If a reserved row would have drawn taller or
+/// shorter, the content above the reader changes size and the transcript jumps
+/// under them, which is the exact fault the anchoring in `transcript_ui` exists
+/// to prevent.
+///
+/// No seam and no flag: the first frame has no remembered heights and so draws
+/// everything, and the second reserves. If the two agree on where every visible
+/// message sits, the promise held.
+#[test]
+fn reserving_a_row_does_not_move_anything() {
+    let mut state = a_conversation();
+    let seed = state.lines[0].clone();
+    state.lines = (0..200)
+        .map(|i| {
+            let mut l = seed.clone();
+            l.seq = i as u64 + 1;
+            l.text = format!("message number {i}");
+            l.reactions = Vec::new();
+            l.attachments = Vec::new();
+            l.reply_to = None;
+            l
+        })
+        .collect();
+    let mut h = harness_with(state, true);
+
+    // Everything drawn, and where.
+    h.run();
+    let drew = seen_messages(&h);
+    assert!(
+        drew.len() > 3,
+        "the fixture should put several messages on screen: {drew:?}"
+    );
+
+    // And again, with heights remembered and the far ones reserved.
+    h.step();
+    let reserved = seen_messages(&h);
+
+    for (text, rect) in &drew {
+        if let Some((_, again)) = reserved.iter().find(|(t, _)| t == text) {
+            assert!(
+                (rect.top() - again.top()).abs() < 0.5,
+                "{text:?} moved from {rect:?} to {again:?} when the rows above \
+                 it were reserved rather than drawn"
+            );
+        }
+    }
+}
+
+/// The reserving actually happens — otherwise the test above passes by drawing
+/// everything twice, which is what it is here to rule out.
+///
+/// Counted in the app rather than off the screen: egui culls what is outside
+/// the clip rect from the accessibility tree already, so sixteen messages are
+/// "on screen" whether two hundred were laid out or twenty were.
+#[test]
+fn the_rows_nobody_can_see_stop_being_drawn() {
+    let mut state = a_conversation();
+    let seed = state.lines[0].clone();
+    state.lines = (0..200)
+        .map(|i| {
+            let mut l = seed.clone();
+            l.seq = i as u64 + 1;
+            l.text = format!("message number {i}");
+            l.reactions = Vec::new();
+            l.attachments = Vec::new();
+            l.reply_to = None;
+            l
+        })
+        .collect();
+    let mut h = harness_with(state, true);
+    h.run();
+
+    // The first frame has no remembered heights, so it draws all of them.
+    sigil_chat::reset_drawn();
+    h.step();
+    let with_heights = sigil_chat::drawn_so_far();
+    assert!(
+        with_heights < 60,
+        "{with_heights} of 200 messages were drawn on a frame that had every \
+         height remembered; the far ones are not being reserved"
+    );
+    assert!(
+        with_heights > 0,
+        "nothing was drawn at all, which is not virtualisation but a blank \
+         transcript"
+    );
+}
+
+/// Which messages are on screen, and where. Keyed by their text, which is what
+/// the fixtures make unique.
+fn seen_messages(h: &Harness<'static>) -> Vec<(String, egui::Rect)> {
+    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<(String, egui::Rect)>) {
+        let n = node.accesskit_node();
+        for said in [n.label(), n.value()] {
+            if let Some(said) = said
+                && said.starts_with("message number ")
+            {
+                out.push((said.to_string(), node.rect()));
+            }
+        }
+        for c in node.children() {
+            walk(c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(h.root(), &mut out);
+    out
+}
+
 /// What a long transcript costs to draw, per frame.
 ///
 /// **Ignored, because it is a measurement and not an assertion.** Run it with
@@ -2041,18 +2154,22 @@ fn the_receipt_is_under_the_bubble_and_not_on_the_time_row() {
 /// no replies, which is the cheap case:
 ///
 /// ```text
-///  10 messages:  1.5 ms per frame
-///  50 messages:  3.4 ms
-/// 200 messages: 10.7 ms
-/// 500 messages: 26.7 ms
+///                 laid out in full   reserving what is off screen
+///  10 messages:        1.4 ms                1.4 ms
+///  50 messages:        3.3 ms                1.6 ms
+/// 200 messages:       10.7 ms                2.0 ms
+/// 500 messages:       26.1 ms                3.0 ms
 /// ```
 ///
-/// Linear, about 51 µs a message, and past a 60 Hz frame's whole budget by
-/// four hundred messages — which `general` reaches. Everything in the window is
-/// laid out every frame; `wanted` is only five per cent of it (measured by
-/// stubbing it to a constant: 26.7 ms became 25.3), because egui's galley cache
-/// already covers the text. The rest is the bubbles themselves, so the only
-/// lever is not drawing the ones nobody can see.
+/// The left column is what this cost before rows nobody can see were reserved
+/// rather than drawn: linear, about 51 µs a message, past a 60 Hz frame's whole
+/// budget by four hundred of them — which `general` reaches. `wanted` was only
+/// five per cent of that (measured by stubbing it to a constant: 26.7 ms became
+/// 25.3), because egui's galley cache already covers the text; the rest was the
+/// bubbles themselves.
+///
+/// The right column is now, and what growth is left in it is the reservation
+/// loop itself — a few microseconds a message to decide not to draw one.
 #[test]
 #[ignore]
 fn how_much_does_a_long_transcript_cost() {
