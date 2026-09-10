@@ -246,7 +246,7 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -271,7 +271,7 @@ fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'s
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -302,7 +302,7 @@ fn harness_watching_asks(
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -330,7 +330,7 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -365,7 +365,7 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
                         accounts: &mut accounts,
-                        hidden: false,
+                        unfocused: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };
@@ -1047,7 +1047,7 @@ fn harness_recording_commands(
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -1145,7 +1145,7 @@ fn harness_of(state: std::rc::Rc<std::cell::RefCell<ChatState>>) -> Harness<'sta
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };

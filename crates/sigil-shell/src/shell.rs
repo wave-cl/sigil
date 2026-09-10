@@ -285,7 +285,10 @@ impl Shell {
 
     /// Background work for every opened app. Runs while the window is hidden
     /// too, which is what keeps a call alive in the tray.
-    pub fn update_all(&mut self, egui_ctx: &egui::Context, hidden: bool) {
+    ///
+    /// `unfocused` is the window not being in front — see
+    /// [`AppContext::unfocused`], which says what it is not.
+    pub fn update_all(&mut self, egui_ctx: &egui::Context, unfocused: bool) {
         self.reconcile_accounts();
         for (i, app) in self.apps.iter_mut().enumerate() {
             if !self.opened[i] {
@@ -294,7 +297,7 @@ impl Shell {
             let mut ctx = AppContext {
                 navigator: &mut self.navigator,
                 accounts: &mut self.accounts,
-                hidden,
+                unfocused,
                 notify: self.platform.as_ref(),
                 connections: &self.connections,
             };
@@ -326,7 +329,7 @@ impl Shell {
             let mut ctx = AppContext {
                 navigator: &mut self.navigator,
                 accounts: &mut self.accounts,
-                hidden: true,
+                unfocused: true,
                 notify: self.platform.as_ref(),
                 connections: &self.connections,
             };
@@ -826,7 +829,7 @@ impl Shell {
         let mut ctx = AppContext {
             navigator: &mut self.navigator,
             accounts: &mut self.accounts,
-            hidden: false,
+            unfocused: false,
             // The real notifier, not `Silent`. It used to be `Silent` here, so
             // an app could only ever say something out loud from `update` --
             // and a view that had something worth announcing found a notifier
@@ -888,7 +891,7 @@ impl Shell {
                     let mut ctx = AppContext {
                         navigator: &mut self.navigator,
                         accounts: &mut self.accounts,
-                        hidden: false,
+                        unfocused: false,
                         notify: &sigil::Silent,
                         connections: &self.connections,
                     };

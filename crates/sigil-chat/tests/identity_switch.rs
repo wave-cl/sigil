@@ -39,7 +39,7 @@ fn pass_lending(
     let mut ctx = AppContext {
         navigator: &mut nav,
         accounts,
-        hidden: true,
+        unfocused: true,
         notify: &Silent,
         connections,
     };

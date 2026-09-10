@@ -680,7 +680,7 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -777,7 +777,7 @@ fn platform_harness() -> Harness<'static> {
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
                         accounts: &mut accounts,
-                        hidden: false,
+                        unfocused: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };

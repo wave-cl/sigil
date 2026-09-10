@@ -27,7 +27,7 @@ fn pass(app: &mut ChatApp, accounts: &mut Accounts, egui_ctx: &egui::Context) {
     let mut ctx = AppContext {
         navigator: &mut nav,
         accounts,
-        hidden: true,
+        unfocused: true,
         notify: &Silent,
         connections: &Default::default(),
     };
@@ -142,7 +142,7 @@ async fn a_call_is_shown_even_while_looking_at_another_identity() {
                 let mut app_ctx = AppContext {
                     navigator: &mut nav,
                     accounts: &mut accounts,
-                    hidden: false,
+                    unfocused: false,
                     notify: &Silent,
                     connections: &Default::default(),
                 };

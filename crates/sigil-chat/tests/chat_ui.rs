@@ -66,7 +66,7 @@ fn build(account: Account, state: Option<ChatState>) -> Harness<'static> {
                     let mut app_ctx = AppContext {
                         navigator: &mut nav,
                         accounts: &mut accounts,
-                        hidden: false,
+                        unfocused: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };

@@ -91,10 +91,24 @@ pub struct AppContext<'a> {
     /// **An app draws the active one and keeps sessions for all of them** —
     /// see [`crate::accounts`].
     pub accounts: &'a mut Accounts,
-    /// True while the main window is hidden — closed to the tray. An app
-    /// should keep working and stop doing anything only a viewer would want,
-    /// like animating.
-    pub hidden: bool,
+    /// True while the main window is **not in front** — behind another
+    /// window, or on another desktop. It is still on screen and still being
+    /// drawn.
+    ///
+    /// **It is not "hidden", whatever it was called.** It is
+    /// `!viewport().focused`, and it was documented as "closed to the tray" —
+    /// which is a different state and the one somebody reaching for this
+    /// actually wants: a window nobody can see is a window with no reason to
+    /// animate. Acting on the wrong one of those stops an animation while
+    /// somebody is watching it, or -- worse -- stops the passes that a call
+    /// depends on. This session nearly gated a call's own repaint on it, which
+    /// would have brought back a microphone that outlived its call.
+    ///
+    /// Nothing here can tell the other state yet: sigil never hides its own
+    /// viewport, so there is no flag to read, and eframe's `logic` runs while
+    /// the window is hidden either way. Anything that needs it must get it
+    /// from the viewport, not from this.
+    pub unfocused: bool,
     /// Somewhere to say something out loud when sigil is not in front.
     ///
     /// Returns whether it went out, and a caller with nothing else to fall back
@@ -289,7 +303,7 @@ mod tests {
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
-                hidden: false,
+                unfocused: false,
                 notify: &Silent,
                 connections: &Default::default(),
             };

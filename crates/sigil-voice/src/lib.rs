@@ -487,7 +487,7 @@ mod borrow_tests {
         let ctx = AppContext {
             navigator: &mut nav,
             accounts: &mut accounts,
-            hidden: true,
+            unfocused: true,
             notify: &sigil::Silent,
             connections: &nothing,
         };
@@ -503,7 +503,7 @@ mod borrow_tests {
         let ctx = AppContext {
             navigator: &mut nav,
             accounts: &mut accounts,
-            hidden: true,
+            unfocused: true,
             notify: &sigil::Silent,
             connections: &named,
         };
@@ -526,7 +526,7 @@ mod borrow_tests {
         let ctx = AppContext {
             navigator: &mut nav,
             accounts: &mut accounts,
-            hidden: true,
+            unfocused: true,
             notify: &sigil::Silent,
             connections: &others,
         };

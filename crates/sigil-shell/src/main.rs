@@ -18,8 +18,8 @@ struct Sigil {
 
 impl eframe::App for Sigil {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let hidden = !ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        self.shell.update_all(ctx, hidden);
+        let unfocused = !ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        self.shell.update_all(ctx, unfocused);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
