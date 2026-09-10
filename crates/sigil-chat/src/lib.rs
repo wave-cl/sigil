@@ -2,6 +2,7 @@
 
 pub mod session;
 
+use session::RING_WINDOW;
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Found, Happened, Hit, Line, LinkState, Linked,
     Member, Person, Receipt, Ring, Standing, Summary, Trouble,
@@ -584,6 +585,38 @@ impl ChatApp {
         all
     }
 
+    /// Put a call in this app's hands, as answering one does.
+    ///
+    /// The handle is a real one: a call to an exchange that will never answer
+    /// ends by itself, which is precisely the state that used to be left
+    /// holding the microphone.
+    #[doc(hidden)]
+    pub fn hold_call_for_test(
+        &mut self,
+        me: PubKey,
+        channel: [u8; 32],
+        seq: u64,
+        handle: sigil_net::CallHandle,
+    ) {
+        self.calls.insert(
+            me,
+            Live {
+                channel,
+                seq,
+                handle,
+                since: std::time::Instant::now(),
+            },
+        );
+    }
+
+    /// Which identities this window is carrying audio for.
+    #[doc(hidden)]
+    pub fn calls_for_test(&self) -> Vec<PubKey> {
+        let mut all: Vec<PubKey> = self.calls.keys().copied().collect();
+        all.sort_by_key(|k| k.to_string());
+        all
+    }
+
     /// The account being shown, if it is open.
     fn showing(ctx: &AppContext<'_>) -> Option<PubKey> {
         ctx.account().unlocked().map(|u| u.me())
@@ -796,6 +829,16 @@ impl App for ChatApp {
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
         self.announce_rings(ctx);
+        self.end_calls_nobody_is_in();
+        // **A window carrying audio is not idle.** Everything else here sleeps
+        // until something happens, which is what makes a quiet sigil cost
+        // nothing -- but a call that nobody is in produces no events at all,
+        // and the pass that would notice it is the pass that never runs. This
+        // also keeps the clock on the call bar ticking, which is the same
+        // second-by-second need.
+        if !self.calls.is_empty() {
+            egui_ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
     }
 
     fn accounts_changed(&mut self, _ctx: &mut AppContext<'_>) {
@@ -852,6 +895,12 @@ impl App for ChatApp {
         // of, and it also has several early returns under it.
         self.dialogs_ui(ctx, at, &state, ui, &theme);
         self.picture_ui(at, &state, ui, &theme);
+        // **Here, and not in the conversation view.** A call is a state of the
+        // window: a microphone is open. Drawn from inside a conversation it
+        // vanished whenever the reader went anywhere else -- the list, another
+        // identity, a narrow window showing the other pane -- taking the only
+        // control that ends a call with it.
+        self.in_call_ui(at, ui, &theme);
 
         // Two panes when there is room, one when there is not -- decided at
         // **runtime** from the width actually available, never from the
@@ -2202,7 +2251,6 @@ impl ChatApp {
         if self.ringing_ui(ctx, at, state, ui, theme) {
             ui.add_space(tokens::SPACING_SM);
         }
-        self.in_call_ui(at, ui, theme);
         // A call we placed that nobody has taken yet.
         if let Some(ring) = state.ringing.iter().find(|r| r.mine) {
             let (channel, seq) = (ring.channel, ring.seq);
@@ -3298,6 +3346,64 @@ impl ChatApp {
         );
     }
 
+    /// Put down a call that is over, or that never became one.
+    ///
+    /// **A call holds the microphone, and until this existed the only thing
+    /// that let go of it was a button.** `in_call_ui` draws that button from
+    /// the identity on screen, so answering as one identity and then looking at
+    /// another took the control away and left the call running: audio still
+    /// being captured and sent, and nothing in the window saying so. Quitting
+    /// sigil was the only way out, and the microphone light was the only sign.
+    ///
+    /// Two ways a call stops being one:
+    ///
+    /// - **It ended.** The task is finished — the far end left, the room went,
+    ///   the connection did. The handle is dropped, and the entry written, so
+    ///   the transcript says what happened rather than nothing.
+    /// - **Nobody came.** A room whose only member is us is a call nobody
+    ///   answered, and SIP-36 already fixes how long that is worth waiting:
+    ///   `RING_SECS`, after which every reader derives *missed*. Past that, a
+    ///   call still connecting is a microphone left open for a call that is
+    ///   not going to happen.
+    ///
+    /// From `update` rather than `render`, for the reason `announce_rings` is:
+    /// a call that cannot be seen is exactly the one this has to reach.
+    fn end_calls_nobody_is_in(&mut self) {
+        let over: Vec<PubKey> = self
+            .calls
+            .iter()
+            .filter(|(_, live)| {
+                let phase = live.handle.state().phase;
+                let never = !matches!(phase, sigil_net::Phase::Live);
+                phase == sigil_net::Phase::Ended || (never && live.since.elapsed() > RING_WINDOW)
+            })
+            .map(|(me, _)| *me)
+            .collect();
+        for me in over {
+            // The same act as pressing hang up, and recorded the same way: a
+            // call that ends because nobody came still happened, and a
+            // transcript that says nothing about it is a transcript with a
+            // hole where somebody tried to reach you.
+            if let Some((channel, seq, seconds)) = self.leave_call(me) {
+                let at = self.at_for(me);
+                self.send_as(
+                    at.as_ref(),
+                    Cmd::Hangup {
+                        channel,
+                        seq,
+                        seconds,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Which session a call belongs to. A call is keyed by identity, and a
+    /// command has to go to the session that placed it.
+    fn at_for(&self, me: PubKey) -> Option<At> {
+        self.sessions.keys().find(|at| at.0 == me).cloned()
+    }
+
     /// Stop carrying audio, and say how long it lasted.
     fn leave_call(&mut self, me: PubKey) -> Option<([u8; 32], u64, u32)> {
         let live = self.calls.remove(&me)?;
@@ -3422,13 +3528,38 @@ impl ChatApp {
     }
 
     /// The bar shown while audio is actually flowing.
+    ///
+    /// **Every call, not the shown identity's.** A call is a state of the
+    /// window — a microphone is open — and this used to be drawn from
+    /// `self.calls.get(&at.0)`, so answering as one identity and then looking
+    /// at another took the bar away and with it the only control that ends a
+    /// call. The audio went on being captured and sent with nothing on screen
+    /// admitting it. See `end_calls_nobody_is_in`, which is the other half of
+    /// that: this makes a call visible, and that one stops it being possible
+    /// to leave one running by accident.
     fn in_call_ui(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
-        let me = at.0;
+        for me in self.calls.keys().copied().collect::<Vec<_>>() {
+            self.one_call_ui(me, at, ui, theme);
+        }
+    }
+
+    /// One call's bar, wherever the reader happens to be.
+    fn one_call_ui(&mut self, me: PubKey, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
         let Some(live) = self.calls.get(&me) else {
             return;
         };
         let call = live.handle.state();
         let seconds = live.since.elapsed().as_secs();
+        // Whose call it is, when it is not the identity being looked at. Named
+        // rather than implied: a hang-up button that ends somebody else's call
+        // has to say whose.
+        let elsewhere = (me != at.0).then(|| {
+            self.sessions
+                .iter()
+                .find(|(k, _)| k.0 == me)
+                .map(|(k, s)| s.state().mine.label(&k.0))
+                .unwrap_or_else(|| me.to_string())
+        });
         egui::Frame::NONE
             .fill(theme.surface_elevated)
             .corner_radius(tokens::RADIUS_LG)
@@ -3445,7 +3576,12 @@ impl ChatApp {
                     );
                     ui.colored_label(
                         if up { theme.success } else { theme.warning },
-                        if up { "In a call" } else { "Connecting…" },
+                        match (&elsewhere, up) {
+                            (Some(who), true) => format!("In a call as {who}"),
+                            (Some(who), false) => format!("Connecting… as {who}"),
+                            (None, true) => "In a call".to_string(),
+                            (None, false) => "Connecting…".to_string(),
+                        },
                     );
                     ui.colored_label(
                         theme.text_muted,
@@ -3463,8 +3599,11 @@ impl ChatApp {
                         .clicked()
                             && let Some((channel, seq, seconds)) = self.leave_call(me)
                         {
+                            // To the session whose call it is, which is not
+                            // necessarily the one on screen.
+                            let whose = self.at_for(me);
                             self.send_as(
-                                Some(at),
+                                whose.as_ref(),
                                 Cmd::Hangup {
                                     channel,
                                     seq,

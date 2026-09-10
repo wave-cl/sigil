@@ -52,7 +52,14 @@ use sigil_net::Dial;
 /// call stopped ringing. This is not only how long a phone rings: with no
 /// `CallEnd` entry, **every** reader derives `CALL_MISSED` from it, so two
 /// clients disagreeing here would disagree about what happened.
-const RING_SECS: u16 = 45;
+pub const RING_SECS: u16 = 45;
+
+/// The same, as a duration, for whatever has to outlast a ring.
+///
+/// A call still connecting when this has passed is a call nobody answered:
+/// every reader derives `CALL_MISSED` at this point, so waiting longer means
+/// holding a microphone open for a call the protocol has already given up on.
+pub const RING_WINDOW: std::time::Duration = std::time::Duration::from_secs(RING_SECS as u64);
 
 /// How often the client is driven.
 ///
