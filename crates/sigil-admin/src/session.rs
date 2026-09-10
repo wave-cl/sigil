@@ -168,24 +168,49 @@ async fn run(
     let seed = signer.seed();
     let me = PubKey::new(signer.public());
 
-    let endpoint = match &dial {
-        Dial::At(e) => *e,
-        Dial::Discover(layers) => {
+    // **Borrowed, or its own.** A console for an identity whose chat session is
+    // already connected to the same exchange uses that connection: one
+    // handshake, one socket, one keep-alive timer for the identity rather than
+    // two. It also gains what this session has never had -- a reconnection.
+    // What is lent is a slot rather than a connection (`sigil_net::Held`), so
+    // when the chat session redials, the next thing this asks goes over the new
+    // connection without this session knowing there was a redial.
+    //
+    // The endpoint travels with it because a connection does not carry one:
+    // SIP-31 binds every signed command to the exchange's key, and there is
+    // nothing in a `sqnr::Client` to ask.
+    let borrowed = match &dial {
+        Dial::On(held) => Some(held.clone()),
+        _ => None,
+    };
+    let endpoint = match (&dial, &borrowed) {
+        // **Waited for, not required.** The slot is offered the moment a chat
+        // session is started and filled when its link comes up, which is a
+        // handshake later. A console that gave up in that window would dial its
+        // own connection for the sake of a second, and hold it for the rest of
+        // the session.
+        (_, Some(held)) => {
+            state.send_modify(|s| s.admin = Some(me));
+            (wake)();
+            waited_for(held).await
+        }
+        (Dial::At(e), _) => *e,
+        (Dial::Discover(layers), _) => {
             let mut silent = sqex_voice::engine::Silent;
             sqex_voice::engine::resolve(&layers[..], &mut silent).await?
         }
-        // Not yet, and not for want of a connection to borrow: this session
-        // needs the exchange's **key** as well, because SIP-31 binds every
-        // signed command to it and a connection does not carry one. Sharing
-        // here also wants the reconnection this session has never had -- a
-        // borrowed connection is somebody else's to redial, so what would be
-        // shared is the slot rather than the connection.
-        Dial::On(_) => {
-            return Err("an admin session opens its own connection".to_string());
-        }
+        (Dial::On(_), None) => unreachable!("a borrowed connection was just taken"),
     };
-    let mut client =
-        sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
+    // Its own, when there is nothing to borrow. Held in the same slot so the
+    // rest of this session has one way of asking for a connection rather than
+    // two.
+    let mine = sigil_net::Held::empty();
+    if borrowed.is_none() {
+        let client =
+            sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
+        mine.set(Some((client, endpoint)));
+    }
+    let holds = borrowed.unwrap_or(mine);
     // A software identity only. A YubiKey signs and never releases a seed, so
     // it cannot be a transport key — the card would sign the transaction and
     // there would be no connection to send it over. Supporting one means a
@@ -203,15 +228,54 @@ async fn run(
     loop {
         tokio::select! {
             Some(cmd) = cmds.recv() => {
-                apply(&mut client, &backend, endpoint.server, cmd, &state).await;
+                // **Asked for each time, not held.** A borrowed connection is
+                // somebody else's to redial, so the one that was there when
+                // this session started may be closed. Taking it per request is
+                // what turns their reconnection into ours.
+                match holds.now() {
+                    Some((mut client, _)) => {
+                        apply(&mut client, &backend, endpoint.server, cmd, &state).await;
+                    }
+                    None => offline(&state),
+                }
                 (wake)();
             }
             _ = tick.tick() => {
-                probe(&mut client, &state).await;
+                match holds.now() {
+                    Some((mut client, _)) => probe(&mut client, &state).await,
+                    None => offline(&state),
+                }
                 (wake)();
             }
         }
     }
+}
+
+/// Where the lent connection goes, once there is one.
+///
+/// Polled rather than notified: the slot is a place to look, deliberately —
+/// see [`sigil_net::Held`] — and a console that is a fifth of a second late
+/// starting is a console nobody can tell was late. The session is cancelled
+/// from outside if it is dropped while this waits.
+async fn waited_for(held: &sigil_net::Held) -> sigil_net::Endpoint {
+    loop {
+        if let Some(at) = held.at() {
+            return at;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// There is no connection to ask over.
+///
+/// Said as "not healthy" rather than as trouble: the exchange has not refused
+/// anything and may be perfectly well. What is missing is the connection, and
+/// the session that owns it is already redialling.
+fn offline(state: &watch::Sender<AdminState>) {
+    state.send_modify(|s| {
+        s.healthy = Some(false);
+        s.status = None;
+    });
 }
 
 /// `/health` and `/status`: the two questions that need no signature.

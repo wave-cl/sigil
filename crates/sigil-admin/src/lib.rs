@@ -119,15 +119,34 @@ impl AdminApp {
             let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
                 continue;
             };
-            let layers =
-                discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
-            if !discovery::any_configured(&layers) {
-                continue;
-            }
+            // **The connection this identity's chat session already holds**,
+            // when it has one at the exchange this console would dial anyway:
+            // the default one, which is what `""` names. Dialling a second is a
+            // second handshake, a second socket and a second keep-alive timer
+            // for one identity talking to one exchange -- and it is the
+            // connection the exchange would fan a call's datagrams to as well.
+            //
+            // It also gains the reconnection this session has never had, for
+            // free: the chat session redials and the slot is rewritten.
+            let reach: sigil_net::Dial = match ctx.connections.of(me, "") {
+                // Taken whether or not it is live yet: a slot exists from the
+                // moment a chat session is started, and is filled a handshake
+                // later. The session waits for it rather than dialling its own
+                // over a second's difference.
+                Some(held) => held.into(),
+                None => {
+                    let layers =
+                        discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+                    if !discovery::any_configured(&layers) {
+                        continue;
+                    }
+                    layers.into()
+                }
+            };
             let wake = egui_ctx.clone();
             self.sessions.insert(
                 me,
-                session::start(layers, unlocked.signer(), move || wake.request_repaint()),
+                session::start(reach, unlocked.signer(), move || wake.request_repaint()),
             );
         }
     }

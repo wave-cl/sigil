@@ -13,6 +13,9 @@ serde_json = { workspace = true }
 dirs = { workspace = true }
 sqnr-core = { workspace = true }
 sqnr = { workspace = true }
+# For `Connections`: what an app reaches an exchange through. The dependency is
+# one way -- sigil-net knows nothing about windows.
+sigil-net = { path = "../sigil-net" }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 bs58 = { workspace = true }
 zeroize = "1"

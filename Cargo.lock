@@ -5739,6 +5739,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sigil-net",
  "sqnr",
  "sqnr-core",
  "tempfile",
@@ -5751,18 +5752,23 @@ name = "sigil-admin"
 version = "0.1.0"
 dependencies = [
  "bs58",
+ "ed25519-dalek",
  "egui",
  "egui_kittest",
+ "hex",
  "serde_json",
  "sigil",
  "sigil-net",
  "sigil-ui",
  "sqex-proto",
  "sqex-voice",
+ "sqexd",
  "sqnr",
  "sqnr-core",
+ "squic",
  "tempfile",
  "tokio",
+ "toml 0.8.2",
  "tracing",
 ]
 

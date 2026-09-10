@@ -101,6 +101,19 @@ pub struct AppContext<'a> {
     /// on must not rely on it: notifications can be off at the desktop level
     /// with nothing here able to tell.
     pub notify: &'a dyn Notify,
+    /// The connections this window holds, by identity and exchange.
+    ///
+    /// **One identity, one connection.** The chat session for an identity is
+    /// what dials, holds and redials one; a call and the administrative console
+    /// borrow it rather than dialling their own. That is not tidiness — an
+    /// exchange writes a relayed datagram to every connection an identity
+    /// holds, so a second one carries a duplicate of every audio frame for the
+    /// length of every call, and costs a handshake at the moment somebody
+    /// presses answer.
+    ///
+    /// Shared like `accounts` and for the same reason: voice, chat and the
+    /// console are the same person talking to the same exchange.
+    pub connections: &'a sigil_net::Connections,
 }
 
 impl AppContext<'_> {
@@ -278,6 +291,7 @@ mod tests {
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &Silent,
+                connections: &Default::default(),
             };
             // The point is that this does not panic on a token the app has
             // never seen -- it quietly draws the app instead.

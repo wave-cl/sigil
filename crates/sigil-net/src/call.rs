@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use crate::held::Held;
 use sqex_proto::room::RoomId;
 use sqex_voice::engine::{self, CallOpts, Endpoint, Event, PeerStatus, Report};
 // `Signer` for `public()`: a call placed on a connection somebody else opened
@@ -256,12 +257,18 @@ pub enum Dial {
     /// Whoever lends the connection gives up reading datagrams on it for the
     /// duration; a call is the only thing here that reads them, and a chat
     /// client never does.
-    On(Box<sqnr::Client>),
+    ///
+    /// A [`Held`] rather than a connection, because a connection is not a
+    /// stable thing to be handed: the session that owns it redials. A call
+    /// takes whatever is live when it starts, which is the right reading for a
+    /// call — one that outlived its connection would have nothing to carry
+    /// audio on anyway.
+    On(Held),
 }
 
-impl From<sqnr::Client> for Dial {
-    fn from(c: sqnr::Client) -> Self {
-        Dial::On(Box::new(c))
+impl From<Held> for Dial {
+    fn from(h: Held) -> Self {
+        Dial::On(h)
     }
 }
 
@@ -316,7 +323,10 @@ pub fn spawn_call(
                 return Err("a session needs two identities".to_string());
             }
             let mut client = match dial {
-                Dial::On(client) => engine::adopt(*client, &signer, &mut bridge)?,
+                Dial::On(held) => {
+                    let (client, _) = held.now().ok_or("not connected to the exchange")?;
+                    engine::adopt(client, &signer, &mut bridge)?
+                }
                 Dial::At(e) => engine::dial(e, &signer, peer, &mut bridge).await?,
                 Dial::Discover(layers) => {
                     let e = engine::resolve(&layers[..], &mut bridge).await?;
@@ -400,7 +410,10 @@ pub fn spawn_room(
         };
         let result = async {
             let client = match dial {
-                Dial::On(client) => engine::adopt(*client, &signer, &mut bridge)?,
+                Dial::On(held) => {
+                    let (client, _) = held.now().ok_or("not connected to the exchange")?;
+                    engine::adopt(client, &signer, &mut bridge)?
+                }
                 Dial::At(e) => engine::connect(e, &signer, &mut bridge).await?,
                 Dial::Discover(layers) => {
                     let e = engine::resolve(&layers[..], &mut bridge).await?;

@@ -682,6 +682,7 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             let _ = app.render(&mut app_ctx, ui);
         });
@@ -778,6 +779,7 @@ fn platform_harness() -> Harness<'static> {
                         accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
+                        connections: &Default::default(),
                     };
                     let _ = app.render(&mut app_ctx, ui);
                 });

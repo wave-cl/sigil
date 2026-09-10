@@ -131,6 +131,10 @@ pub struct Shell {
     chrome_visible: bool,
     /// Every identity sigil is holding. See [`sigil::accounts`].
     accounts: Accounts,
+    /// Every exchange connection sigil is holding, so a call or the console
+    /// uses the one the chat session already has rather than dialling its own.
+    /// See [`sigil_net::Connections`].
+    connections: sigil_net::Connections,
     /// The roster generation the apps were last reconciled against.
     ///
     /// Compared rather than diffed: the shell cannot know what any app keeps
@@ -214,6 +218,7 @@ impl Shell {
             opened,
             focus: HashMap::new(),
             previous: 0,
+            connections: sigil_net::Connections::new(),
             navigator: Navigator::default(),
             chrome_visible: true,
             accounts: Accounts::load(),
@@ -291,6 +296,7 @@ impl Shell {
                 accounts: &mut self.accounts,
                 hidden,
                 notify: self.platform.as_ref(),
+                connections: &self.connections,
             };
             app.update(&mut ctx, egui_ctx);
         }
@@ -322,6 +328,7 @@ impl Shell {
                 accounts: &mut self.accounts,
                 hidden: true,
                 notify: self.platform.as_ref(),
+                connections: &self.connections,
             };
             app.accounts_changed(&mut ctx);
         }
@@ -825,6 +832,7 @@ impl Shell {
             // and a view that had something worth announcing found a notifier
             // that reported success and posted nothing.
             notify: self.platform.as_ref(),
+            connections: &self.connections,
         };
         let response = self.apps[active].render_nav(&mut ctx, ui, &entry.token);
         match response.action {
@@ -882,6 +890,7 @@ impl Shell {
                         accounts: &mut self.accounts,
                         hidden: false,
                         notify: &sigil::Silent,
+                        connections: &self.connections,
                     };
                     app.dispose(&mut ctx, &entry.token);
                 }

@@ -22,3 +22,12 @@ sqnr-core = { workspace = true }
 [dev-dependencies]
 egui_kittest = { workspace = true }
 tempfile = "3"
+# A real exchange in-process: a console tested against a mock has tested the
+# mock, and the thing worth proving here is what happens over a real connection.
+sqexd = { workspace = true }
+squic = { workspace = true }
+tokio = { workspace = true }
+toml = "0.8"
+hex = "0.4"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+serde_json = { workspace = true }

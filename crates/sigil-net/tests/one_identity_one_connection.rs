@@ -25,7 +25,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
-use sigil_net::{CallOpts, Phase, spawn_call};
+use sigil_net::{CallOpts, Endpoint, Held, Phase, spawn_call};
 use sqex_chat::client::Chat;
 use sqex_chat::store::Store;
 use sqex_proto::session::{DatagramFrame, Open, OpenAck, OpenState, Session};
@@ -132,10 +132,23 @@ async fn a_call_rides_the_connection_chat_already_holds() {
     let watching = a_chat.connection().expect("a live connection");
     let before = accepted(&watching).await;
 
+    // What a chat *session* lends is a slot holding whatever is live, because
+    // the session redials and a connection handed out a minute ago may be
+    // closed. Here there is no session, so the slot is filled by hand.
+    let at = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let lend = |chat: &Chat| {
+        let held = Held::empty();
+        held.set(Some((chat.connection().expect("a connection to lend"), at)));
+        held
+    };
+
     let a_wav = dir.path().join("a.wav");
     let b_wav = dir.path().join("b.wav");
     let mut a = spawn_call(
-        a_chat.connection().expect("a connection to lend"),
+        lend(&a_chat),
         signer(1),
         b_id,
         20,
@@ -143,7 +156,7 @@ async fn a_call_rides_the_connection_chat_already_holds() {
         || {},
     );
     let b = spawn_call(
-        b_chat.connection().expect("a connection to lend"),
+        lend(&b_chat),
         signer(2),
         a_id,
         20,

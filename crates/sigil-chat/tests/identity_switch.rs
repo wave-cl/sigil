@@ -24,12 +24,23 @@ use sqnr_core::PubKey;
 
 /// Run one `update` pass against this roster.
 fn pass(app: &mut ChatApp, accounts: &mut Accounts, egui_ctx: &egui::Context) {
+    pass_lending(app, accounts, egui_ctx, &Default::default());
+}
+
+/// The same, with somewhere to see what the sessions offered to lend.
+fn pass_lending(
+    app: &mut ChatApp,
+    accounts: &mut Accounts,
+    egui_ctx: &egui::Context,
+    connections: &sigil_net::Connections,
+) {
     let mut nav = Navigator::default();
     let mut ctx = AppContext {
         navigator: &mut nav,
         accounts,
         hidden: true,
         notify: &Silent,
+        connections,
     };
     app.update(&mut ctx, egui_ctx);
 }
@@ -213,5 +224,53 @@ async fn closing_an_identity_stops_all_of_its_exchanges() {
         app.running_at_for_test().is_empty(),
         "every exchange goes with the identity: {:?}",
         app.running_at_for_test()
+    );
+}
+
+/// Every session offers its connection, and takes the offer back with it.
+///
+/// This is what stops a call and the administrative console dialling their own:
+/// one identity reaches one exchange over one connection, and the chat session
+/// is the thing that owns it. The offer is made when the session starts rather
+/// than when it connects — what is lent is a slot, filled when the link comes
+/// up — so a console started in the same second waits a handshake instead of
+/// dialling.
+///
+/// Nothing here connects (the exchange never answers), which is the point: the
+/// offer exists either way, and an empty slot is an honest answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_lends_its_connection_and_takes_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+    let connections = sigil_net::Connections::new();
+
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let two = Account::unlocked_for_test([2u8; 32]);
+    let (a, b) = (key_of(&one), key_of(&two));
+    let mut accounts = Accounts::of(vec![one, two]);
+    pass_lending(&mut app, &mut accounts, &egui_ctx, &connections);
+
+    assert!(
+        connections.of(a, "").is_some() && connections.of(b, "").is_some(),
+        "each identity's session should offer what it holds"
+    );
+    assert!(
+        connections.of(a, "unknown.example").is_none(),
+        "and only for the exchange it is a session for"
+    );
+
+    // Closed: the identity is gone, and so is anything that was to be borrowed
+    // from it. A console left holding the old slot would be asking as somebody
+    // who is no longer here.
+    assert!(accounts.lock(0));
+    pass_lending(&mut app, &mut accounts, &egui_ctx, &connections);
+    assert!(
+        connections.of(a, "").is_none(),
+        "a closed identity should stop offering a connection"
+    );
+    assert!(
+        connections.of(b, "").is_some(),
+        "and the one still open should go on offering one"
     );
 }

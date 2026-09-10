@@ -666,6 +666,10 @@ impl ChatApp {
         for at in live {
             if !held.iter().any(|(k, _)| *k == at) {
                 if let Some(session) = self.sessions.remove(&at) {
+                    // Nothing else may go on borrowing what this session was
+                    // holding: the identity is gone, and so is the connection
+                    // as soon as the task lets go of it.
+                    ctx.connections.forget(at.0, &at.1);
                     self.closing.push((at.clone(), session.close()));
                 }
                 self.panes.remove(&at);
@@ -713,12 +717,17 @@ impl ChatApp {
                 .as_ref()
                 .map(|root| root.join(format!("{me}.db")));
             let wake = egui_ctx.clone();
-            self.sessions.insert(
-                at,
-                session::start(layers, unlocked.signer(), store_at, move || {
-                    wake.request_repaint()
-                }),
-            );
+            let session = session::start(layers, unlocked.signer(), store_at, move || {
+                wake.request_repaint()
+            });
+            // **The connection this session is about to hold, offered to the
+            // rest of the window.** A call and the administrative console
+            // borrow it rather than dialling their own -- see
+            // `sigil_net::Connections`. Offered before it exists: what is lent
+            // is the slot, which this session fills when the link comes up and
+            // rewrites when it redials.
+            ctx.connections.lend(me, &named, session.connection());
+            self.sessions.insert(at, session);
         }
     }
 
@@ -3265,9 +3274,9 @@ impl ChatApp {
         //
         // Falling back to dialling rather than refusing: the link may be down
         // and coming back, and a call is worth more than the saving.
-        let held = self.sessions.get(at).and_then(|s| s.connection());
-        let reach: sigil_net::Dial = match held {
-            Some(client) => client.into(),
+        let held = self.sessions.get(at).map(|s| s.connection());
+        let reach: sigil_net::Dial = match held.filter(|h| h.is_live()) {
+            Some(held) => held.into(),
             None => {
                 let layers =
                     discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));

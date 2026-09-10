@@ -43,6 +43,7 @@ fn harness(account: Account, dark: bool) -> Harness<'static> {
                         accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
+                        connections: &Default::default(),
                     };
                     let _ = app.render(&mut app_ctx, ui);
                 });

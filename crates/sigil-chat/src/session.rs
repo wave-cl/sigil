@@ -897,13 +897,13 @@ pub struct ChatHandle {
     state: watch::Receiver<ChatState>,
     cmds: mpsc::UnboundedSender<Cmd>,
     task: JoinHandle<()>,
-    /// The connection this session holds, for a call to ride on.
+    /// The connection this session holds, for a call or a console to use.
     /// See [`ChatHandle::connection`].
     ///
     /// Beside the state rather than in it: `ChatState` is cloned on every read
     /// and compared to decide whether the window needs repainting, and a
     /// connection is neither cloneable in that sense nor comparable in any.
-    holds: Arc<std::sync::Mutex<Option<sqnr::Client>>>,
+    holds: sigil_net::Held,
 }
 
 /// A session that has been told to stop but may not have finished stopping.
@@ -932,7 +932,7 @@ impl ChatHandle {
         self.state.borrow().clone()
     }
 
-    /// The connection this session holds, for a call to be placed on.
+    /// The connection this session holds, for a call or a console to use.
     ///
     /// A call used to dial its own, which cost a handshake at the moment
     /// somebody pressed the button and cost bandwidth for as long as it lasted:
@@ -940,11 +940,12 @@ impl ChatHandle {
     /// identity holds, so every audio frame was also written to this one, where
     /// nothing reads it.
     ///
-    /// `None` when the link is not up. What comes back belongs to the
-    /// connection live *now*: a redial makes a new one, and this stops handing
-    /// out the old.
-    pub fn connection(&self) -> Option<sqnr::Client> {
-        self.holds.lock().ok()?.clone()
+    /// A slot rather than a connection — see [`sigil_net::Held`]. This session
+    /// owns what is in it: it dials, holds and redials, and rewrites the slot
+    /// as it does, so a borrower always reads the connection that exists rather
+    /// than the one that did. Empty while the link is down.
+    pub fn connection(&self) -> sigil_net::Held {
+        self.holds.clone()
     }
 
     /// One question about the state, answered without copying the rest of it.
@@ -1043,7 +1044,7 @@ pub fn start_every(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let wake = Arc::new(wake);
     let dial = dial.into();
-    let holds = Arc::new(std::sync::Mutex::new(None));
+    let holds = sigil_net::Held::empty();
     let held = holds.clone();
 
     let task = tokio::spawn(async move {
@@ -1086,9 +1087,9 @@ struct Wires {
     cmds: mpsc::UnboundedReceiver<Cmd>,
     /// How it is told to look again.
     wake: Arc<dyn Fn() + Send + Sync>,
-    /// The connection, for a call to be placed on. See
+    /// The connection, for a call or a console to use. See
     /// [`ChatHandle::connection`].
-    holds: Arc<std::sync::Mutex<Option<sqnr::Client>>>,
+    holds: sigil_net::Held,
 }
 
 async fn run(
@@ -1207,15 +1208,13 @@ async fn run(
     let mut lent = Link::Retrying;
 
     loop {
-        // **The connection, for whoever wants to place a call on it.** Written
-        // when the link changes rather than every pass: a redial makes a new
-        // connection, and a call placed on the one before it would be placed on
-        // something closed.
+        // **The connection, for whoever else wants to reach this exchange as
+        // this identity.** Written when the link changes rather than every
+        // pass: a redial makes a new connection, and what was lent before it
+        // is closed.
         if chat.link() != lent {
             lent = chat.link();
-            if let Ok(mut holds) = holds.lock() {
-                *holds = chat.connection();
-            }
+            holds.set(chat.connection().map(|c| (c, endpoint)));
         }
         // **What is outstanding decides the wait.** A link being redialled
         // advances a slice per pass and would take minutes at the quiet

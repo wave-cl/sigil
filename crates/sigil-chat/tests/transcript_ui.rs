@@ -248,6 +248,7 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             let _ = app.render_nav(&mut app_ctx, ui, &token);
         })
@@ -272,6 +273,7 @@ fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'s
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             let _ = app.render(&mut app_ctx, ui);
         })
@@ -302,6 +304,7 @@ fn harness_watching_asks(
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             if let Some(action) = app.render(&mut app_ctx, ui).action {
                 asks.borrow_mut().push(action);
@@ -329,6 +332,7 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             let _ = app.render(&mut app_ctx, ui);
         })
@@ -363,6 +367,7 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
                         accounts: &mut accounts,
                         hidden: false,
                         notify: &sigil::Silent,
+                        connections: &Default::default(),
                     };
                     let _ = app.render(&mut app_ctx, ui);
                 });
@@ -1044,6 +1049,7 @@ fn harness_recording_commands(
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             let _ = app.render(&mut app_ctx, ui);
             *asked.borrow_mut() = app.asked_for_test().to_vec();
@@ -1141,6 +1147,7 @@ fn harness_of(state: std::rc::Rc<std::cell::RefCell<ChatState>>) -> Harness<'sta
                 accounts: &mut accounts,
                 hidden: false,
                 notify: &sigil::Silent,
+                connections: &Default::default(),
             };
             let _ = app.render(&mut app_ctx, ui);
         })
