@@ -1,7 +1,8 @@
 # sigil
 
-A desktop application for [sqex](../sqex): voice calls and end-to-end encrypted
-chat over sQUIC, in one window, on one identity. macOS and Linux.
+A desktop application for [sqex](https://github.com/wave-cl/sqex): voice calls
+and end-to-end encrypted chat over sQUIC, in one window, on one identity. macOS
+and Linux.
 
 It brings together what `sqex-voice` (a CLI) and `sqex-chat` (a terminal UI) do
 separately today, and adds what a terminal could not: rendered avatars and
@@ -11,6 +12,34 @@ images, a call you join by clicking, and a phone that actually rings.
 
 Early. See [docs/spikes.md](docs/spikes.md) for what has been proven so far and
 what has not.
+
+## Install
+
+Built binaries are on the
+[releases page](https://github.com/wave-cl/sigil/releases/latest), for macOS
+and Linux on both aarch64 and x86_64.
+
+**macOS.** Unzip, move `sigil.app` to `/Applications`, and clear the quarantine
+flag — the build is signed ad-hoc rather than notarised, so Gatekeeper refuses
+it and blames the file for what is really the flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/sigil.app
+```
+
+Do that because you trust where you fetched it from, not because a message told
+you to.
+
+**Linux.** A `.deb` or `.rpm`, which register the `sigil://` link handler:
+
+```bash
+sudo apt install ./sigil-vX.Y.Z-x86_64-linux-gnu.deb
+xdg-mime query default x-scheme-handler/sigil     # expects sigil.desktop
+```
+
+Check the second line. A registration nothing has read looks exactly like sigil
+ignoring the link. There is a `.tar.gz` of the bare binary for distributions
+that are neither; it needs a Vulkan driver, and ALSA or PipeWire for a call.
 
 ## Building
 

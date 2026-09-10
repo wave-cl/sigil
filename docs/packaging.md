@@ -93,19 +93,57 @@ xdg-mime query default x-scheme-handler/sigil
 rather than checked in so it cannot drift from the disc the tray draws, and so
 there is no binary blob in the repository that nobody can diff.
 
+## Releasing
+
+`.github/workflows/release.yml`, on a pushed `v*` tag. Four artefacts, and every
+one of them built **natively**:
+
+| | runner |
+|---|---|
+| `x86_64-linux-gnu` | `ubuntu-latest` |
+| `aarch64-linux-gnu` | `ubuntu-24.04-arm` |
+| `aarch64-apple-darwin` | `macos-latest` |
+| `x86_64-apple-darwin` | `macos-15-intel` |
+
+Native rather than cross, because sigil links ALSA, PipeWire, GTK, libxdo and
+libpcsclite: a cross toolchain would need every one of those headers and
+libraries for the other architecture inside the image, and GitHub hands out
+machines of both architectures for nothing. It calls the same
+`scripts/linux-packages` and `scripts/macos-app` somebody builds with by hand —
+a release built by a second recipe is a release nobody has tested.
+
+Three guards, each of which exists because its failure is silent:
+
+- **The manifest must not carry a path dependency.** See
+  `docs/dependencies.md`; a tag that does can only be built here.
+- **The runner must be the architecture it is named for.** A runner label is a
+  promise about a machine and the promise is what names the file, so it asks
+  `uname -m`. Otherwise a label that quietly resolves elsewhere ships two
+  x86_64 binaries, one of them labelled `aarch64`, and nobody finds out until
+  it will not start.
+- **All eight files must be present before anything is published.** `needs`
+  stops a *failed* build publishing. It does not stop a build that succeeded
+  while producing less than it should — a rename that matched nothing, an
+  upload glob that found one file — and that publishes a release which looks
+  complete and is missing an architecture.
+
+### What is not signed
+
+macOS is ad-hoc signed, so Gatekeeper refuses it on first launch and blames the
+file ("damaged and can't be opened") for what is really the quarantine flag.
+The release notes say how to clear it. A Developer ID and notarisation are what
+remove the step; see **Distributing** above.
+
 ## CI
 
 `.github/workflows/ci.yml` is the single source of truth, and `./check` runs its
 steps locally by reading it — so the two cannot drift.
 
-Two things it needs that an ordinary repository does not:
-
-- **A second checkout.** sigil's manifest names `../sqex-sigil`, so the workflow
-  checks `wave-cl/sqex` out beside it under that name. The path is the contract.
-  When the sqex dependencies move to a git tag (see `docs/dependencies.md`) that
-  step can go.
 sqex, sqnr and squic-rust are all public, so CI needs **no secrets** and runs
-unchanged on a fork.
+unchanged on a fork. It used to need one thing an ordinary repository does not
+— a second checkout of `wave-cl/sqex` beside sigil, because the manifest named
+`../sqex-sigil` — and pinning the sqex crates to a tag removed it. See
+`docs/dependencies.md`.
 
 ### Why there is a job called `complete`
 

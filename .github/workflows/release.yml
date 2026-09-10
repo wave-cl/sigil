@@ -1,0 +1,303 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # A tag push is the normal trigger. This is the way back in when it does not
+  # fire -- Actions has more than once created no run at all for a pushed tag,
+  # and re-cutting the tag is a worse remedy than being able to ask.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release, e.g. v0.1.0'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Four builds, every one of them **native**. sigil links ALSA, PipeWire, GTK,
+  # libxdo and libpcsclite on Linux, and a cross toolchain would need every one
+  # of those headers and libraries for the other architecture inside the image.
+  # GitHub gives arm64 Linux and Intel macOS runners, so the whole problem is
+  # avoidable: build each artifact on the machine it is for.
+  # ---------------------------------------------------------------------------
+  build:
+    strategy:
+      # One platform failing should not hide whether the other three work. A
+      # release that publishes nothing is the correct outcome either way --
+      # `release` needs all four -- but the log should say how many are broken.
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: x86_64-linux-gnu
+            os: ubuntu-latest
+            machine: x86_64
+          - artifact: aarch64-linux-gnu
+            os: ubuntu-24.04-arm
+            machine: aarch64
+          - artifact: aarch64-apple-darwin
+            os: macos-latest
+            machine: arm64
+          - artifact: x86_64-apple-darwin
+            os: macos-15-intel
+            machine: x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # A dispatch can name anything, including a branch, and a run that built
+      # `main` would publish a release called `main` with no sign anything was
+      # wrong until somebody downloaded it.
+      - name: Check it is a version tag
+        run: |
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          case "${VERSION}" in
+            v[0-9]*) ;;
+            *) echo "refusing to release '${VERSION}': not a version tag" >&2; exit 1 ;;
+          esac
+
+      # A runner label is a promise about a machine, and the promise is what
+      # names the file. If `ubuntu-24.04-arm` ever resolves to an x86_64 box,
+      # every guard below still passes and the release quietly carries two
+      # x86_64 binaries, one of them labelled aarch64 -- which nobody discovers
+      # until it will not start on their machine. So ask the machine.
+      - name: Check the runner is the architecture it is named for
+        run: |
+          got="$(uname -m)"
+          [ "$got" = "${{ matrix.machine }}" ] || {
+            echo "::error::${{ matrix.os }} reports $got, expected ${{ matrix.machine }}" >&2
+            exit 1
+          }
+          echo "$got, as expected"
+
+      # The tag, whether it came from the push or from the person dispatching.
+      # Dispatching builds the tag rather than whatever branch the run was
+      # started from, so a manual release cannot quietly ship something else.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      # sigil consumes five sqex crates. During co-development those are path
+      # dependencies into a worktree beside this one (docs/dependencies.md),
+      # and a tag carrying those is a tag nobody but this machine can build.
+      # Without the guard the failure arrives as a cargo error about a missing
+      # directory, several minutes in, on four runners at once.
+      - name: Check the sqex dependencies are pinned, not paths
+        run: |
+          if grep -qE '^\s*sqex[a-z-]*\s*=\s*\{[^}]*path\s*=' Cargo.toml; then
+            echo "::error::Cargo.toml still has path dependencies on sqex; a tag must pin them to a git tag" >&2
+            grep -nE '^\s*sqex[a-z-]*\s*=' Cargo.toml >&2
+            exit 1
+          fi
+          grep -nE '^\s*sqex[a-z-]*\s*=' Cargo.toml
+
+      - name: System dependencies (Linux)
+        if: runner.os == 'Linux'
+        # The same list ci.yml installs, and for the same reasons -- see the
+        # comment there. All of them are link-time, so `cargo check` cannot
+        # tell you one is missing; only building can. `rpm` is the exception:
+        # cargo-generate-rpm does not need it (it writes the format itself),
+        # the step that reads the package back does.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libasound2-dev libpipewire-0.3-dev libgtk-3-dev \
+            libpcsclite-dev libxdo-dev \
+            libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev \
+            rpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Packaging tools (Linux)
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      # `scripts/linux-packages` and `scripts/macos-app` are the same scripts
+      # somebody builds with by hand, called here rather than reimplemented.
+      # A release built by a second recipe is a release nobody has tested.
+      - name: Build the Linux packages
+        if: runner.os == 'Linux'
+        run: scripts/linux-packages
+
+      # A package that installs nothing has the shape of every other failure
+      # here: it builds, it uploads, it is a plausible size, and it puts no
+      # binary on the machine. Worth asking directly, because both tools
+      # resolve an asset's `source` against the current directory *and* the
+      # package directory in turn -- so the manifest's `../../target/...` is
+      # right for reasons that are easy to break and impossible to see.
+      - name: Check the packages contain what they say
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          deb=$(ls target/debian/*.deb)
+          rpm_=$(ls target/generate-rpm/*.rpm)
+          for want in ./usr/bin/sigil ./usr/share/applications/sigil.desktop; do
+            dpkg-deb -c "$deb" | grep -q " ${want}$" \
+              || { echo "::error::$deb does not contain $want"; dpkg-deb -c "$deb"; exit 1; }
+          done
+          for want in /usr/bin/sigil /usr/share/applications/sigil.desktop; do
+            rpm -qlp "$rpm_" | grep -qx "$want" \
+              || { echo "::error::$rpm_ does not contain $want"; rpm -qlp "$rpm_"; exit 1; }
+          done
+          echo "deb and rpm both carry the binary and the desktop entry"
+
+      - name: Build sigil.app
+        if: runner.os == 'macOS'
+        run: scripts/macos-app
+
+      # The bundle is the whole reason a macOS build is not just a binary:
+      # without these keys notifications and the microphone both fail in
+      # silence. ci.yml checks this on every push; checking it again here is
+      # not redundant, because this is the copy that goes to people.
+      - name: Check the bundle carries the keys it exists for
+        if: runner.os == 'macOS'
+        run: |
+          plutil -lint target/sigil.app/Contents/Info.plist
+          for key in NSMicrophoneUsageDescription CFBundleIdentifier CFBundleURLTypes; do
+            /usr/libexec/PlistBuddy -c "Print :$key" target/sigil.app/Contents/Info.plist >/dev/null \
+              || { echo "::error::sigil.app is missing $key"; exit 1; }
+          done
+          # And the architecture of the binary that is actually in the bundle,
+          # which is the claim the filename makes.
+          arch="$(lipo -archs target/sigil.app/Contents/MacOS/sigil)"
+          [ "$arch" = "${{ matrix.machine }}" ] || {
+            echo "::error::sigil.app carries $arch, and this artefact is named ${{ matrix.machine }}"
+            exit 1
+          }
+          echo "bundle carries $arch"
+
+      - name: Collect
+        shell: bash
+        run: |
+          set -eu
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          NAME="sigil-${VERSION}-${{ matrix.artifact }}"
+          mkdir -p dist
+
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            # cargo-deb and cargo-generate-rpm each name their output in their
+            # own convention (amd64/arm64, x86_64/aarch64, with a release
+            # number). Renamed to one scheme so a download page reads as one
+            # release rather than three tools' habits.
+            deb=$(ls target/debian/*.deb)
+            rpm=$(ls target/generate-rpm/*.rpm)
+            cp "$deb" "dist/${NAME}.deb"
+            cp "$rpm" "dist/${NAME}.rpm"
+            # And the bare binary, for the distributions that are neither.
+            tar -czf "dist/${NAME}.tar.gz" -C target/release sigil
+          else
+            # `ditto`, not `zip`: a .app is a tree with symlinks and a
+            # _CodeSignature directory, and zip flattens enough of that to
+            # produce a bundle macOS refuses to launch.
+            ditto -c -k --keepParent target/sigil.app "dist/${NAME}.zip"
+          fi
+
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sigil-${{ matrix.artifact }}
+          path: dist/*
+
+  # ---------------------------------------------------------------------------
+  # Publish -- but only if all four platforms actually produced everything.
+  #
+  # `needs` already stops this running when a build fails. What it does not
+  # catch is a build that succeeded while producing less than it should: a
+  # rename that silently matched nothing, an upload glob that found one file,
+  # a matrix entry quietly dropped. Every one of those publishes a release that
+  # looks complete and is missing an architecture.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Every artifact must be present
+        run: |
+          set -eu
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          missing=0
+          for want in \
+            "sigil-${VERSION}-x86_64-linux-gnu.deb" \
+            "sigil-${VERSION}-x86_64-linux-gnu.rpm" \
+            "sigil-${VERSION}-x86_64-linux-gnu.tar.gz" \
+            "sigil-${VERSION}-aarch64-linux-gnu.deb" \
+            "sigil-${VERSION}-aarch64-linux-gnu.rpm" \
+            "sigil-${VERSION}-aarch64-linux-gnu.tar.gz" \
+            "sigil-${VERSION}-aarch64-apple-darwin.zip" \
+            "sigil-${VERSION}-x86_64-apple-darwin.zip" \
+          ; do
+            if [ -s "dist/$want" ]; then
+              printf 'ok      %s\n' "$want"
+            else
+              printf 'MISSING %s\n' "$want"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to publish an incomplete release"
+            ls -lR dist
+            exit 1
+          fi
+
+      - name: Notes
+        run: |
+          cat > notes.md <<'NOTES'
+          Voice calls and end-to-end encrypted chat over sQUIC, in one window.
+
+          ## Which file
+
+          | | |
+          |---|---|
+          | macOS, Apple silicon | `aarch64-apple-darwin.zip` |
+          | macOS, Intel | `x86_64-apple-darwin.zip` |
+          | Linux, x86_64 | `x86_64-linux-gnu.deb` / `.rpm` / `.tar.gz` |
+          | Linux, aarch64 | `aarch64-linux-gnu.deb` / `.rpm` / `.tar.gz` |
+
+          ## macOS: it is signed ad-hoc, not notarised
+
+          Gatekeeper will refuse it on first launch, and the message it gives
+          ("damaged and can't be opened") describes the quarantine flag rather
+          than the file. Clear it deliberately:
+
+          ```
+          xattr -dr com.apple.quarantine /Applications/sigil.app
+          ```
+
+          Do that only because you fetched this from a release you trust. A
+          Developer ID build is what removes the step, and there is not one yet.
+
+          ## Linux
+
+          The `.deb` and `.rpm` register `sigil://` links. Check the handler
+          took, because a registration nothing has read looks exactly like sigil
+          ignoring the link:
+
+          ```
+          xdg-mime query default x-scheme-handler/sigil
+          ```
+
+          The tarball is the bare binary, for distributions that are neither.
+          It needs a Vulkan driver, and ALSA or PipeWire for a call.
+          NOTES
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          # Named explicitly, because a dispatched run's ref is not the tag.
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true
+          files: dist/*
