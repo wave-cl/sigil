@@ -2030,6 +2030,58 @@ fn the_receipt_is_under_the_bubble_and_not_on_the_time_row() {
     );
 }
 
+/// What a long transcript costs to draw, per frame.
+///
+/// **Ignored, because it is a measurement and not an assertion.** Run it with
+/// `cargo test -p sigil-chat --test transcript_ui -- --ignored --nocapture
+/// how_much`. It exists so the number can be taken again rather than
+/// remembered wrongly.
+///
+/// On this machine, headless, with plain messages — no pictures, no reactions,
+/// no replies, which is the cheap case:
+///
+/// ```text
+///  10 messages:  1.5 ms per frame
+///  50 messages:  3.4 ms
+/// 200 messages: 10.7 ms
+/// 500 messages: 26.7 ms
+/// ```
+///
+/// Linear, about 51 µs a message, and past a 60 Hz frame's whole budget by
+/// four hundred messages — which `general` reaches. Everything in the window is
+/// laid out every frame; `wanted` is only five per cent of it (measured by
+/// stubbing it to a constant: 26.7 ms became 25.3), because egui's galley cache
+/// already covers the text. The rest is the bubbles themselves, so the only
+/// lever is not drawing the ones nobody can see.
+#[test]
+#[ignore]
+fn how_much_does_a_long_transcript_cost() {
+    for n in [10usize, 50, 200, 500] {
+        let mut state = a_conversation();
+        let seed = state.lines[0].clone();
+        state.lines = (0..n)
+            .map(|i| {
+                let mut l = seed.clone();
+                l.seq = i as u64 + 1;
+                l.text = format!("message number {i}, of no particular length at all");
+                l.reactions = Vec::new();
+                l.attachments = Vec::new();
+                l.reply_to = None;
+                l
+            })
+            .collect();
+        let mut h = harness_with(state, true);
+        h.run();
+        // Timed after the first frame, so nothing is being warmed up.
+        let began = std::time::Instant::now();
+        const FRAMES: u32 = 20;
+        for _ in 0..FRAMES {
+            h.step();
+        }
+        eprintln!("{n} messages: {:?} per frame", began.elapsed() / FRAMES);
+    }
+}
+
 /// An account with nothing else linked is told what that costs.
 ///
 /// This is the one warning in the client that is about **permanent** loss. An
