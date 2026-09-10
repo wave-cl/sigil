@@ -192,15 +192,51 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/peer/records", NotAClientRoute),
 ];
 
-/// Where sqexd's dispatch lives.
+/// Where sqexd's dispatch lives -- asked of cargo, never assumed.
 ///
-/// Anchored on `CARGO_MANIFEST_DIR` rather than the working directory, which
-/// for an integration test is the crate and not the workspace. The sqex crates
-/// are path dependencies beside this tree, and CI checks the two out as
-/// siblings, so this resolves the same in both places.
+/// This used to be a sibling path, `../../../sqex-sigil/crates/sqexd/...`,
+/// which was true for exactly as long as the sqex crates were path
+/// dependencies into a worktree beside this tree. Pinning them to a git tag
+/// made it false, and it failed in the worst available way: **green on the
+/// machine that happens to have the worktree, red on CI**, which has only what
+/// the manifest says. `./check` cannot catch that -- it was reading a
+/// directory the runner does not have.
+///
+/// So ask cargo where the crate it actually compiled came from. That answers
+/// the same for a path dependency and a git one, which is what this file
+/// needs, because the manifest moves between them whenever somebody
+/// co-develops against sqex (see `docs/dependencies.md`).
 fn server_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../sqex-sigil/crates/sqexd/src/server.rs")
+    let out = std::process::Command::new(env!("CARGO"))
+        // `--locked` so a test can never rewrite Cargo.lock as a side effect
+        // of asking a question.
+        .args(["metadata", "--format-version", "1", "--locked"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo should be runnable from a cargo test");
+    assert!(
+        out.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata speaks json");
+    let manifest = meta["packages"]
+        .as_array()
+        .expect("metadata lists packages")
+        .iter()
+        .find(|p| p["name"] == "sqexd")
+        .and_then(|p| p["manifest_path"].as_str())
+        .expect(
+            "sqexd is a dev-dependency of this crate, so cargo knows where it \
+             is -- if it does not, the dependency has been removed and this \
+             test has nothing left to read",
+        )
+        .to_string();
+    // .../crates/sqexd/Cargo.toml -> .../crates/sqexd/src/server.rs
+    std::path::Path::new(&manifest)
+        .with_file_name("src")
+        .join("server.rs")
 }
 
 /// Every route `sqexd` serves, read out of its dispatch.
