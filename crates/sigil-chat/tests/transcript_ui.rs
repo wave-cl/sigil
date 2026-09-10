@@ -1893,6 +1893,48 @@ fn our_own_call_is_shown_as_ringing_out_not_as_an_incoming_ring() {
     assert!(said.contains("Cancel"), "{said}");
 }
 
+/// Cancel is centred against the words it belongs to, like Decline is.
+///
+/// A call being placed is drawn in the same banner as a call arriving, so this
+/// asks the same thing of it that the incoming ring already gets: the control
+/// sits against the middle of the block it acts on, not against one line of it.
+///
+/// **Measured, because this was wrong by six pixels when it was a bare row.**
+/// `ui.horizontal` starts a row at `interact_size.y` — 18px — and centres each
+/// item against the height known *when that item is placed*, so words added
+/// before a taller button stay where they were put while the button grows the
+/// row past them. Three pixels is the bound here: half a line's leading, and
+/// the same order as the incoming ring's own arrangement, which this is
+/// deliberately a copy of.
+#[test]
+fn cancel_is_centred_against_the_call_it_would_stop() {
+    let mut state = a_conversation();
+    state.ringing = vec![sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: me(),
+        mine: true,
+        secret: [3u8; 32],
+        answered: false,
+        label: "Ada".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+
+    // The two lines the button acts on, taken together: what is being called,
+    // and that it is ringing.
+    let calling = h.get_by_label_contains("Calling").rect();
+    let ringing = h.get_by_label_contains("Ringing").rect();
+    let block = calling.union(ringing);
+    let button = h.get_by_label_contains("Cancel").rect();
+    let apart = (block.center().y - button.center().y).abs();
+    assert!(
+        apart <= 3.0,
+        "the button's centre is {apart:.1}px from the middle of the call it \
+         would stop: block {block:?}, button {button:?}"
+    );
+}
+
 /// An account with nothing else linked is told what that costs.
 ///
 /// This is the one warning in the client that is about **permanent** loss. An

@@ -2268,37 +2268,6 @@ impl ChatApp {
         if self.ringing_ui(ctx, at, state, ui, theme) {
             ui.add_space(tokens::SPACING_SM);
         }
-        // A call we placed that nobody has taken yet.
-        if let Some(ring) = state.ringing.iter().find(|r| r.mine) {
-            let (channel, seq) = (ring.channel, ring.seq);
-            ui.horizontal(|ui| {
-                ui.colored_label(theme.text_secondary, "Ringing…");
-                // **A word, not the struck-through handset.** That mark means
-                // *call ended* everywhere it is used, so beside "Ringing…" it
-                // contradicted the sentence it sat in -- and an icon button
-                // here has no ground until it is hovered, so at rest it read as
-                // a status glyph rather than a control, drawn heavier than
-                // anything else in the row while being the least important
-                // thing in it. It works in the incoming ring, where Answer
-                // stands beside it and makes both read as buttons; alone it
-                // does not.
-                //
-                // The word is "Cancel" rather than "Hang up": giving up on a
-                // call nobody has taken is not the same act as ending one in
-                // progress.
-                if ui.button("Cancel").clicked() {
-                    let seconds = self.leave_call(me).map(|(_, _, s)| s).unwrap_or(0);
-                    self.send_as(
-                        Some(at),
-                        Cmd::Hangup {
-                            channel,
-                            seq,
-                            seconds,
-                        },
-                    );
-                }
-            });
-        }
         self.trouble_ui(&state.trouble_with, ui, theme);
 
         // The composer is laid out first, from the bottom, so the transcript
@@ -3516,6 +3485,75 @@ impl ChatApp {
         }
     }
 
+    /// A call we are placing, drawn where a call arriving is drawn.
+    ///
+    /// **The same banner, because it is the same kind of thing**: a call that
+    /// has not started, and one control to do something about it. It used to
+    /// be a bare row under the banner — the words "Ringing…" and a button —
+    /// while everything else about a call (the ring, Answer, Decline, the
+    /// in-call bar) was in the elevated frame above it. One state of one call
+    /// in a different place from the rest.
+    ///
+    /// "Answer" on a call you are making is nonsense, so this shape has one
+    /// button and not two, and it names the conversation being called rather
+    /// than a caller.
+    fn calling_ui(
+        &mut self,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) -> bool {
+        let Some(ring) = state.ringing.iter().find(|r| r.mine) else {
+            return false;
+        };
+        let (channel, seq) = (ring.channel, ring.seq);
+        // The person being called, when there is one person: a direct message
+        // has a peer, a group has a name and no single face.
+        let peer = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open)
+            .and_then(|c| c.peer);
+        let me = at.0;
+        egui::Frame::NONE
+            .fill(theme.surface_elevated)
+            .corner_radius(tokens::RADIUS_LG)
+            .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(peer) = peer {
+                        sigil_ui::identicon(ui, &peer.to_string(), tokens::AVATAR_MD);
+                        ui.add_space(tokens::SPACING_SM);
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(format!("Calling {}", ring.label)).strong());
+                        ui.colored_label(
+                            theme.text_secondary,
+                            egui::RichText::new("Ringing…").small(),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // "Cancel" and not "Hang up": giving up on a call
+                        // nobody has taken is not the same act as ending one in
+                        // progress.
+                        if ui.button("Cancel").clicked() {
+                            let seconds = self.leave_call(me).map(|(_, _, s)| s).unwrap_or(0);
+                            self.send_as(
+                                Some(at),
+                                Cmd::Hangup {
+                                    channel,
+                                    seq,
+                                    seconds,
+                                },
+                            );
+                        }
+                    });
+                });
+            });
+        true
+    }
+
     /// A call ringing, and the two things to do about it.
     fn ringing_ui(
         &mut self,
@@ -3525,10 +3563,11 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) -> bool {
-        // Ours is not a ring, it is a call being placed. Drawn differently,
-        // because "answer" on a call you are making is nonsense.
+        // **Incoming first.** Answering matters more than cancelling, and the
+        // two cannot both be true of one conversation without somebody having
+        // called somebody who was already calling them.
         let Some(ring) = state.ringing.iter().find(|r| !r.mine && !r.answered) else {
-            return false;
+            return self.calling_ui(at, state, ui, theme);
         };
         let key = ring.from.to_string();
         egui::Frame::NONE
