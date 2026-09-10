@@ -29,7 +29,14 @@ WORKFLOW = REPO / ".github/workflows/ci.yml"
 # Everything else is meant to run here too -- that is the point.
 SKIP_STEP = re.compile(r"apt-get|git config --global url\.", re.I)
 # Jobs that cannot run on this machine.
-PLATFORM_ONLY = {"macos": "darwin", "snapshots": "linux"}
+#
+# **`snapshots` is not one of them, and calling it one cost four red commits.**
+# Its only real step is `scripts/snapshot-test`, which runs here: the machine
+# draws with Metal rather than lavapipe, and `kittest.toml`'s threshold is set
+# to cover exactly that difference. The `apt-get` step above it is skipped like
+# any other, by `SKIP_STEP`. Rendering here caught the same five stale
+# snapshots CI did, in seven seconds, against four commits of not knowing.
+PLATFORM_ONLY = {"macos": "darwin"}
 
 
 def jobs() -> dict[str, list[tuple[str, str]]]:
@@ -98,6 +105,7 @@ def main() -> int:
     listing = "--list" in sys.argv
 
     ran = 0
+    skipped: list[str] = []
     for job, steps in found.items():
         if job == "complete":
             continue  # it asserts about the runner's own jobs
@@ -106,6 +114,7 @@ def main() -> int:
         need = PLATFORM_ONLY.get(job)
         if not wanted and need and need != here:
             print(f"-- skipping {job}: needs {need}, this is {here}")
+            skipped.append(job)
             continue
         for step_name, cmd in steps:
             if not cmd or SKIP_STEP.search(cmd):
@@ -132,7 +141,15 @@ def main() -> int:
     if ran == 0:
         print("\nerror: no steps ran. Nothing was checked.", file=sys.stderr)
         return 1
-    print(f"\nok — {ran} steps")
+    # **What was not checked belongs on the last line.** A job skipped earlier
+    # scrolls away, and `ok` is what stays on the screen -- which is how four
+    # commits went out with CI red on a job this machine had quietly declined
+    # to run. Green here has to mean green there, or say why it cannot.
+    if skipped:
+        print(f"\nok — {ran} steps, but NOT CHECKED: {', '.join(skipped)}")
+        print("   CI runs those. Green here does not mean green there.")
+    else:
+        print(f"\nok — {ran} steps")
     return 0
 
 
