@@ -1992,6 +1992,44 @@ fn the_controls_sit_beside_a_message_and_not_under_it() {
     }
 }
 
+/// The receipt is under the bubble, not inside it.
+///
+/// It used to sit on the metadata row beside the time, within the frame, which
+/// made the bubble taller than the words it holds: everything measured against
+/// the bubble — the hover controls included — then sat against a middle lower
+/// than the middle of the message. A receipt is also not part of what was said,
+/// but what happened to it afterwards.
+///
+/// Measured against the **time**, because that is what it used to share a line
+/// with: on the same row their centres agree, and under the bubble the receipt
+/// is below it entirely.
+#[test]
+fn the_receipt_is_under_the_bubble_and_not_on_the_time_row() {
+    let state = a_conversation();
+    let mut h = harness_with(state, true);
+    h.run();
+
+    // "read", from `Receipt::word` — the fixture's own message carries it.
+    let mark = h.get_by_label("read").rect();
+    // The time on that message's metadata row, which is inside the bubble.
+    let time = h
+        .get_all_by_label_contains(":")
+        .map(|n| n.rect())
+        .filter(|r| (r.center().x - mark.center().x).abs() < 300.0)
+        .min_by(|a, b| {
+            (a.center().y - mark.center().y)
+                .abs()
+                .partial_cmp(&(b.center().y - mark.center().y).abs())
+                .unwrap()
+        })
+        .expect("a time on the message");
+    assert!(
+        mark.top() >= time.bottom(),
+        "the receipt is still on the time's row, which is inside the bubble: \
+         receipt {mark:?}, time {time:?}"
+    );
+}
+
 /// An account with nothing else linked is told what that costs.
 ///
 /// This is the one warning in the client that is about **permanent** loss. An

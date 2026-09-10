@@ -701,15 +701,6 @@ fn body(
                     ui.colored_label(colour, egui::RichText::new(word).small())
                         .on_hover_text(means);
                 }
-                if let Some(r) = b.receipt {
-                    let colour = match r {
-                        Receipt::Failed => theme.destructive,
-                        Receipt::Read if !b.mine => theme.accent,
-                        Receipt::Read => theme.success,
-                        _ => quiet,
-                    };
-                    receipt(ui, r, colour).on_hover_text(r.word());
-                }
             });
         });
     });
@@ -722,6 +713,26 @@ fn body(
                 }
             }
         });
+    }
+
+    // **Under the bubble, not in it.** It used to sit on the metadata row
+    // beside the time, inside the frame, which made the bubble taller than the
+    // words it holds -- and everything measured against the bubble, the hover
+    // controls included, then sat against a middle that was lower than the
+    // middle of the message. A receipt is also not part of what was said: it is
+    // what happened to it afterwards, and the two do not belong in one shape.
+    //
+    // `text_muted` and not `quiet`: out here the ground is the page rather than
+    // the bubble's fill, and `quiet` is mixed *towards that fill* -- see
+    // `faded`. The colours that mean something keep meaning it.
+    if let Some(r) = b.receipt {
+        let colour = match r {
+            Receipt::Failed => theme.destructive,
+            Receipt::Read if !b.mine => theme.accent,
+            Receipt::Read => theme.success,
+            _ => theme.text_muted,
+        };
+        receipt(ui, r, colour).on_hover_text(r.word());
     }
 
     inner.response.rect
