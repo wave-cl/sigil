@@ -38,6 +38,13 @@ sending afterwards, and a frame arrives exactly once — followed, in the same
 test, by the old duplicate appearing the moment a second connection exists,
 because that measurement is the reason and not a detail.
 
+Everything that reaches an exchange now goes through the one connection the
+identity's chat session holds: a call answered from a conversation, a call or a
+room started in the voice tab, and the administrative console — which gained a
+reconnection out of it, having never had one, because what is lent is a slot and
+the session that owns it rewrites it. `sigil_net::Connections` is where a
+session offers what it holds and the rest of the window finds it.
+
 Still true, and still worth knowing: an exchange **allows** the second
 connection. Nothing here depends on it any more.
 

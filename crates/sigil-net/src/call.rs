@@ -272,6 +272,36 @@ impl From<Held> for Dial {
     }
 }
 
+impl Dial {
+    /// The borrowed connection if there is a live one, and where to dial if not.
+    ///
+    /// The rule every part of the window that starts a call follows, in one
+    /// place because it has three callers and the order of its two halves is
+    /// the whole of it:
+    ///
+    /// - **Borrow first.** One identity should reach one exchange over one
+    ///   connection; a second costs a handshake now and a duplicate of every
+    ///   audio frame afterwards. A live connection is enough on its own — an
+    ///   exchange that nothing is configured for is still an exchange this
+    ///   identity is connected to.
+    /// - **Dial only when there is nothing to borrow**, and only when something
+    ///   says where. `None` means neither: no live connection and no exchange
+    ///   configured, which is a call that cannot be placed and an interface
+    ///   that should say so rather than start a task to fail.
+    ///
+    /// A slot that exists but is empty is *not* borrowable here. That is the
+    /// difference between a call and the administrative console, which waits
+    /// for one: a call is placed at the moment somebody asks for it, and asking
+    /// somebody to wait for a handshake we could have made ourselves is worse
+    /// than making it.
+    pub fn borrowed_or(held: Option<Held>, layers: Vec<sqex_discovery::Layer>) -> Option<Dial> {
+        if let Some(held) = held.filter(|h| h.is_live()) {
+            return Some(Dial::On(held));
+        }
+        crate::discovery::any_configured(&layers).then_some(Dial::Discover(layers))
+    }
+}
+
 impl From<Endpoint> for Dial {
     fn from(e: Endpoint) -> Self {
         Dial::At(e)
@@ -444,5 +474,55 @@ pub fn spawn_room(
         task,
         ending: hanging_up,
         wake: hanging_up_wake,
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    fn configured() -> Vec<sqex_discovery::Layer> {
+        vec![sqex_discovery::Layer {
+            server: Some("squic.org".into()),
+            ..Default::default()
+        }]
+    }
+
+    // The case that needs a real connection — a slot with one in it — is in
+    // `tests/one_identity_one_connection.rs`, where there is an exchange to
+    // connect to. A `Held` cannot be filled without one, and a fake that could
+    // be would be testing the fake.
+
+    /// An offered slot that has not filled yet is not a connection.
+    ///
+    /// A chat session offers its slot the moment it starts and fills it a
+    /// handshake later. A call placed in that window has to dial: waiting is
+    /// the console's trade, not a caller's.
+    #[test]
+    fn an_empty_slot_falls_back_to_dialling() {
+        assert!(matches!(
+            Dial::borrowed_or(Some(Held::empty()), configured()),
+            Some(Dial::Discover(_))
+        ));
+    }
+
+    /// Nothing to borrow and nowhere to dial is not a call.
+    #[test]
+    fn nothing_at_all_is_nothing_to_do() {
+        assert!(Dial::borrowed_or(None, Vec::new()).is_none());
+        assert!(Dial::borrowed_or(Some(Held::empty()), Vec::new()).is_none());
+        assert!(
+            Dial::borrowed_or(None, vec![sqex_discovery::Layer::default()]).is_none(),
+            "a layer that names no exchange is not an exchange"
+        );
+    }
+
+    /// With nothing lent, a configured exchange is dialled.
+    #[test]
+    fn no_connection_and_a_configured_exchange_dials() {
+        assert!(matches!(
+            Dial::borrowed_or(None, configured()),
+            Some(Dial::Discover(_))
+        ));
     }
 }

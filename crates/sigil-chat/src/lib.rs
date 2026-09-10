@@ -3275,16 +3275,9 @@ impl ChatApp {
         // Falling back to dialling rather than refusing: the link may be down
         // and coming back, and a call is worth more than the saving.
         let held = self.sessions.get(at).map(|s| s.connection());
-        let reach: sigil_net::Dial = match held.filter(|h| h.is_live()) {
-            Some(held) => held.into(),
-            None => {
-                let layers =
-                    discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
-                if !discovery::any_configured(&layers) {
-                    return;
-                }
-                layers.into()
-            }
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+        let Some(reach) = sigil_net::Dial::borrowed_or(held, layers) else {
+            return;
         };
         let wake = egui_ctx.clone();
         let handle = sigil_net::spawn_room(

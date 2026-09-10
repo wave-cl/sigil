@@ -147,14 +147,26 @@ async fn a_call_rides_the_connection_chat_already_holds() {
 
     let a_wav = dir.path().join("a.wav");
     let b_wav = dir.path().join("b.wav");
-    let mut a = spawn_call(
-        lend(&a_chat),
-        signer(1),
-        b_id,
-        20,
-        tone_to(&a_wav, 1),
-        || {},
+    // The rule every part of the window follows when it starts a call: a live
+    // connection is used rather than dialled past, whatever is configured. The
+    // cases that need no connection are unit tests beside it; this is the one
+    // that does.
+    let lent = lend(&a_chat);
+    assert!(
+        matches!(
+            sigil_net::Dial::borrowed_or(
+                Some(lent.clone()),
+                vec![sigil_net::Layer {
+                    server: Some("squic.org".into()),
+                    ..Default::default()
+                }],
+            ),
+            Some(sigil_net::Dial::On(_))
+        ),
+        "a live connection should be used rather than a configured exchange dialled"
     );
+
+    let mut a = spawn_call(lent, signer(1), b_id, 20, tone_to(&a_wav, 1), || {});
     let b = spawn_call(
         lend(&b_chat),
         signer(2),

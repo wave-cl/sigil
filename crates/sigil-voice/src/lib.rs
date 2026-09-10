@@ -53,6 +53,21 @@ impl Default for VoiceApp {
     }
 }
 
+/// What to say when there is neither a connection to borrow nor an exchange to
+/// dial. One string, because both halves of this tab say it.
+const NOWHERE: &str = "no exchange configured — set SQEX_SERVER or ~/.sqnr/config";
+
+/// The connection this identity's chat session holds, if it holds one.
+///
+/// The **default** exchange — what `""` names — because that is what this tab
+/// dials: both it and a chat session resolve `~/.sqnr/config` through the same
+/// layers for the same identity, so a session keyed on the default is a session
+/// to the exchange this tab would otherwise open a second connection to.
+fn borrowable(ctx: &AppContext<'_>) -> Option<sigil_net::Held> {
+    let me = ctx.account().unlocked()?.me();
+    ctx.connections.of(me, "")
+}
+
 impl VoiceApp {
     pub fn new() -> Self {
         Self {
@@ -101,12 +116,17 @@ impl VoiceApp {
         let identity = account.unlocked().map(|u| u.path());
         let layers = discovery::layers(discovery::nothing_explicit(), &self.config, identity);
         if !discovery::any_configured(&layers) {
-            return Err("no exchange configured — set SQEX_SERVER or ~/.sqnr/config".into());
+            return Err(NOWHERE.into());
         }
         Ok(layers)
     }
 
-    fn place_call(&mut self, account: &Account, egui_ctx: &egui::Context) {
+    fn place_call(
+        &mut self,
+        account: &Account,
+        held: Option<sigil_net::Held>,
+        egui_ctx: &egui::Context,
+    ) {
         self.peer_trouble = None;
         let Some(unlocked) = account.unlocked() else {
             self.peer_trouble = Some("unlock your identity first".into());
@@ -125,17 +145,25 @@ impl VoiceApp {
             self.peer_trouble = Some("that is you — a call needs somebody else".into());
             return;
         }
-        let layers = match self.where_to(account) {
-            Ok(l) => l,
-            Err(e) => {
-                self.peer_trouble = Some(e);
-                return;
-            }
+        // **On the connection this identity already holds**, when there is one.
+        // A chat session for the same identity dials the same exchange — both
+        // resolve `~/.sqnr/config` through the same layers — and a second
+        // connection would cost a handshake now and a duplicate of every audio
+        // frame afterwards. See `Dial::borrowed_or`.
+        //
+        // The exchange is only asked for when there is nothing to borrow, which
+        // is why the trouble message comes second: an identity that is
+        // connected can call without anything being configured here at all.
+        let where_to = self.where_to(account);
+        let Some(reach) = sigil_net::Dial::borrowed_or(held, where_to.clone().unwrap_or_default())
+        else {
+            self.peer_trouble = Some(where_to.err().unwrap_or_else(|| NOWHERE.into()));
+            return;
         };
 
         let wake = egui_ctx.clone();
         self.call = Some(spawn_call(
-            layers,
+            reach,
             unlocked.signer(),
             peer,
             120,
@@ -147,7 +175,12 @@ impl VoiceApp {
         self.log.clear();
     }
 
-    fn join_room(&mut self, account: &Account, egui_ctx: &egui::Context) {
+    fn join_room(
+        &mut self,
+        account: &Account,
+        held: Option<sigil_net::Held>,
+        egui_ctx: &egui::Context,
+    ) {
         self.room_trouble = None;
         let Some(unlocked) = account.unlocked() else {
             self.room_trouble = Some("unlock your identity first".into());
@@ -160,16 +193,17 @@ impl VoiceApp {
                 return;
             }
         };
-        let layers = match self.where_to(account) {
-            Ok(l) => l,
-            Err(e) => {
-                self.room_trouble = Some(e);
-                return;
-            }
+        // The same rule as a call: the connection this identity already holds,
+        // or the exchange it is configured for.
+        let where_to = self.where_to(account);
+        let Some(reach) = sigil_net::Dial::borrowed_or(held, where_to.clone().unwrap_or_default())
+        else {
+            self.room_trouble = Some(where_to.err().unwrap_or_else(|| NOWHERE.into()));
+            return;
         };
         let wake = egui_ctx.clone();
         self.call = Some(spawn_room(
-            layers,
+            reach,
             unlocked.signer(),
             room,
             CallOpts::default(),
@@ -279,7 +313,8 @@ impl VoiceApp {
                     .desired_width(420.0),
             );
             if ui.button("Call").clicked() {
-                self.place_call(ctx.account(), ui.ctx());
+                let held = borrowable(ctx);
+                self.place_call(ctx.account(), held, ui.ctx());
             }
         });
         if let Some(trouble) = &self.peer_trouble {
@@ -306,7 +341,8 @@ impl VoiceApp {
                     .desired_width(420.0),
             );
             if ui.button("Join").clicked() {
-                self.join_room(ctx.account(), ui.ctx());
+                let held = borrowable(ctx);
+                self.join_room(ctx.account(), held, ui.ctx());
             }
             if ui.button("New room").clicked() {
                 self.room_input = RoomId::generate().to_base58();
@@ -422,5 +458,69 @@ impl VoiceApp {
                     ui.colored_label(theme.text_muted, egui::RichText::new(line).monospace());
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod borrow_tests {
+    use super::*;
+    use sigil::accounts::Accounts;
+    use sigil::navigator::Navigator;
+
+    /// The tab asks for the connection its own call would otherwise open.
+    ///
+    /// Two things have to line up for that: the identity on screen, and the
+    /// **default** exchange — what `""` names — because both this tab and a
+    /// chat session resolve `~/.sqnr/config` through the same layers for the
+    /// same identity. Asking under any other name would quietly dial a second
+    /// connection to the exchange the first one is already on.
+    #[test]
+    fn the_tab_asks_for_the_shown_identity_at_the_default_exchange() {
+        let account = sigil::Account::unlocked_for_test([4u8; 32]);
+        let me = account.unlocked().expect("an open account").me();
+        let mut accounts = Accounts::of(vec![account]);
+        let mut nav = Navigator::default();
+        let connections = sigil_net::Connections::new();
+
+        let ctx = AppContext {
+            navigator: &mut nav,
+            accounts: &mut accounts,
+            hidden: true,
+            notify: &sigil::Silent,
+            connections: &connections,
+        };
+        assert!(
+            borrowable(&ctx).is_none(),
+            "nothing is lent, so there is nothing to borrow"
+        );
+
+        // What a chat session offers: a slot, under the default exchange.
+        connections.lend(me, "", sigil_net::Held::empty());
+        assert!(
+            borrowable(&ctx).is_some(),
+            "the tab should find the session's connection for the identity on \
+             screen"
+        );
+
+        // And not somebody else's, nor another exchange's.
+        let connections = sigil_net::Connections::new();
+        connections.lend(me, "elsewhere.example", sigil_net::Held::empty());
+        connections.lend(
+            sqnr_core::PubKey::new([9u8; 32]),
+            "",
+            sigil_net::Held::empty(),
+        );
+        let ctx = AppContext {
+            navigator: &mut nav,
+            accounts: &mut accounts,
+            hidden: true,
+            notify: &sigil::Silent,
+            connections: &connections,
+        };
+        assert!(
+            borrowable(&ctx).is_none(),
+            "a connection to another exchange, or another identity's, is not \
+             this call's to use"
+        );
     }
 }
