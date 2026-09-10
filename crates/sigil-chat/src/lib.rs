@@ -2273,11 +2273,20 @@ impl ChatApp {
             let (channel, seq) = (ring.channel, ring.seq);
             ui.horizontal(|ui| {
                 ui.colored_label(theme.text_secondary, "Ringing…");
-                // Named for what it does here: giving up on a call nobody has
-                // taken is not the same act as ending one in progress.
-                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::HangUp, "Cancel the call")
-                    .clicked()
-                {
+                // **A word, not the struck-through handset.** That mark means
+                // *call ended* everywhere it is used, so beside "Ringing…" it
+                // contradicted the sentence it sat in -- and an icon button
+                // here has no ground until it is hovered, so at rest it read as
+                // a status glyph rather than a control, drawn heavier than
+                // anything else in the row while being the least important
+                // thing in it. It works in the incoming ring, where Answer
+                // stands beside it and makes both read as buttons; alone it
+                // does not.
+                //
+                // The word is "Cancel" rather than "Hang up": giving up on a
+                // call nobody has taken is not the same act as ending one in
+                // progress.
+                if ui.button("Cancel").clicked() {
                     let seconds = self.leave_call(me).map(|(_, _, s)| s).unwrap_or(0);
                     self.send_as(
                         Some(at),
