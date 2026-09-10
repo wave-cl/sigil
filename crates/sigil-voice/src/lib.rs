@@ -59,13 +59,15 @@ const NOWHERE: &str = "no exchange configured — set SQEX_SERVER or ~/.sqnr/con
 
 /// The connection this identity's chat session holds, if it holds one.
 ///
-/// The **default** exchange — what `""` names — because that is what this tab
-/// dials: both it and a chat session resolve `~/.sqnr/config` through the same
-/// layers for the same identity, so a session keyed on the default is a session
-/// to the exchange this tab would otherwise open a second connection to.
+/// This asked for the **default** exchange by name and got it wrong: an
+/// identity whose exchange is named explicitly in its account settings has no
+/// default session, so the tab found nothing and dialled a second connection to
+/// an exchange the identity was already on. `one_of` knows the rule — the
+/// default when there is one, the only one when there is not, and nothing when
+/// there are several to choose between.
 fn borrowable(ctx: &AppContext<'_>) -> Option<sigil_net::Held> {
     let me = ctx.account().unlocked()?.me();
-    ctx.connections.of(me, "")
+    ctx.connections.one_of(me)
 }
 
 impl VoiceApp {
@@ -467,60 +469,71 @@ mod borrow_tests {
     use sigil::accounts::Accounts;
     use sigil::navigator::Navigator;
 
-    /// The tab asks for the connection its own call would otherwise open.
+    /// The tab asks for a connection this identity is holding, whatever
+    /// exchange it is at.
     ///
-    /// Two things have to line up for that: the identity on screen, and the
-    /// **default** exchange — what `""` names — because both this tab and a
-    /// chat session resolve `~/.sqnr/config` through the same layers for the
-    /// same identity. Asking under any other name would quietly dial a second
-    /// connection to the exchange the first one is already on.
+    /// It used to ask for the **default** one by name, and that was wrong for
+    /// a real configuration: an identity whose exchange is named in its
+    /// account settings has no default session, so the tab found nothing and
+    /// dialled a second connection to an exchange the identity was already on.
     #[test]
-    fn the_tab_asks_for_the_shown_identity_at_the_default_exchange() {
+    fn the_tab_asks_for_a_connection_the_shown_identity_holds() {
         let account = sigil::Account::unlocked_for_test([4u8; 32]);
         let me = account.unlocked().expect("an open account").me();
         let mut accounts = Accounts::of(vec![account]);
         let mut nav = Navigator::default();
-        let connections = sigil_net::Connections::new();
 
+        let nothing = sigil_net::Connections::new();
         let ctx = AppContext {
             navigator: &mut nav,
             accounts: &mut accounts,
             hidden: true,
             notify: &sigil::Silent,
-            connections: &connections,
+            connections: &nothing,
         };
         assert!(
             borrowable(&ctx).is_none(),
             "nothing is lent, so there is nothing to borrow"
         );
 
-        // What a chat session offers: a slot, under the default exchange.
-        connections.lend(me, "", sigil_net::Held::empty());
-        assert!(
-            borrowable(&ctx).is_some(),
-            "the tab should find the session's connection for the identity on \
-             screen"
-        );
-
-        // And not somebody else's, nor another exchange's.
-        let connections = sigil_net::Connections::new();
-        connections.lend(me, "elsewhere.example", sigil_net::Held::empty());
-        connections.lend(
-            sqnr_core::PubKey::new([9u8; 32]),
-            "",
-            sigil_net::Held::empty(),
-        );
+        // An exchange named in the account settings, which is what several of
+        // these identities actually have. No default session exists.
+        let named = sigil_net::Connections::new();
+        named.lend(me, "squic.org", sigil_net::Held::empty());
         let ctx = AppContext {
             navigator: &mut nav,
             accounts: &mut accounts,
             hidden: true,
             notify: &sigil::Silent,
-            connections: &connections,
+            connections: &named,
+        };
+        assert!(
+            borrowable(&ctx).is_some(),
+            "the tab should borrow the one connection this identity holds, \
+             whatever the exchange is called"
+        );
+
+        // Somebody else's is not ours, and two of ours with nothing to say
+        // which is not a choice to make on the reader's behalf.
+        let others = sigil_net::Connections::new();
+        others.lend(
+            sqnr_core::PubKey::new([9u8; 32]),
+            "",
+            sigil_net::Held::empty(),
+        );
+        others.lend(me, "squic.org", sigil_net::Held::empty());
+        others.lend(me, "indra.org", sigil_net::Held::empty());
+        let ctx = AppContext {
+            navigator: &mut nav,
+            accounts: &mut accounts,
+            hidden: true,
+            notify: &sigil::Silent,
+            connections: &others,
         };
         assert!(
             borrowable(&ctx).is_none(),
-            "a connection to another exchange, or another identity's, is not \
-             this call's to use"
+            "with two exchanges and no default, the tab should dial what it is \
+             configured for rather than pick one"
         );
     }
 }

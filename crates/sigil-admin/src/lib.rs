@@ -119,16 +119,21 @@ impl AdminApp {
             let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
                 continue;
             };
-            // **The connection this identity's chat session already holds**,
-            // when it has one at the exchange this console would dial anyway:
-            // the default one, which is what `""` names. Dialling a second is a
-            // second handshake, a second socket and a second keep-alive timer
-            // for one identity talking to one exchange -- and it is the
-            // connection the exchange would fan a call's datagrams to as well.
+            // **The connection this identity's chat session already holds.**
+            // Dialling a second is a second handshake, a second socket and a
+            // second keep-alive timer for one identity talking to one exchange
+            // -- and it is the connection the exchange would fan a call's
+            // datagrams to as well.
+            //
+            // Which exchange, when the identity is on more than one, is
+            // `Connections::one_of`'s to answer: this console acts on whichever
+            // one the identity is actually connected to, and the endpoint comes
+            // back with the connection because a signed command is bound to the
+            // exchange's key.
             //
             // It also gains the reconnection this session has never had, for
             // free: the chat session redials and the slot is rewritten.
-            let reach: sigil_net::Dial = match ctx.connections.of(me, "") {
+            let reach: sigil_net::Dial = match ctx.connections.one_of(me) {
                 // Taken whether or not it is live yet: a slot exists from the
                 // moment a chat session is started, and is filled a handshake
                 // later. The session waits for it rather than dialling its own

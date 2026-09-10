@@ -106,10 +106,92 @@ impl Connections {
             .cloned()
     }
 
+    /// The connection this identity holds, when there is no question which.
+    ///
+    /// For a borrower with no exchange in mind: the voice tab, dialling a key
+    /// somebody pasted, and the administrative console, which acts on whatever
+    /// exchange this identity is on. Both used to ask for the **default**
+    /// exchange by name -- `""` -- and that was wrong for a real
+    /// configuration: an identity whose exchange is named explicitly in its
+    /// account settings has no default session at all, so both quietly went
+    /// back to dialling a second connection to an exchange the identity was
+    /// already connected to.
+    ///
+    /// See [`to_borrow`] for the rule and why it declines to guess.
+    pub fn one_of(&self, identity: PubKey) -> Option<Held> {
+        let all = self.0.lock().ok()?;
+        let names: Vec<&str> = all
+            .keys()
+            .filter(|(who, _)| *who == identity)
+            .map(|(_, at)| at.as_str())
+            .collect();
+        let chosen = to_borrow(&names)?.to_string();
+        all.get(&(identity, chosen)).cloned()
+    }
+
     /// The session is over; stop offering what it held.
     pub fn forget(&self, identity: PubKey, exchange: &str) {
         if let Ok(mut all) = self.0.lock() {
             all.remove(&(identity, exchange.to_string()));
         }
+    }
+}
+
+/// Which of an identity's exchanges to borrow a connection at, given that the
+/// borrower has not said.
+///
+/// - **The default one** — what `""` names — when there is one. It is the
+///   exchange everything else resolves to from `~/.sqnr/config` and the
+///   identity's own handle, so it is what the borrower would have dialled.
+/// - **The only one**, when there is no default. An identity with a single
+///   named exchange is connected to exactly one place, and dialling a second
+///   connection to it is the thing this exists to stop.
+/// - **Nothing**, when there are several and no default. Picking one would be
+///   choosing an exchange on somebody's behalf, and the caller falls back to
+///   dialling, which at least does what it is configured to do.
+///
+/// A free function over plain data because the rule is the part worth testing:
+/// a slot cannot be filled without a real connection, so a test of
+/// [`Connections::one_of`] alone could not tell which of two it had picked.
+fn to_borrow<'a>(names: &[&'a str]) -> Option<&'a str> {
+    if names.iter().any(|n| n.is_empty()) {
+        return Some("");
+    }
+    match names {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod borrow_tests {
+    use super::to_borrow;
+
+    /// The default is what the borrower would have dialled, so it wins.
+    #[test]
+    fn the_default_exchange_is_taken_when_there_is_one() {
+        assert_eq!(to_borrow(&["", "indra.org"]), Some(""));
+        assert_eq!(to_borrow(&["indra.org", ""]), Some(""));
+        assert_eq!(to_borrow(&[""]), Some(""));
+    }
+
+    /// The case that sent this back to the drawing board: an identity whose
+    /// exchange is named in its account settings has no default session, and
+    /// asking for one by name found nothing.
+    #[test]
+    fn a_single_named_exchange_is_the_one_to_borrow() {
+        assert_eq!(to_borrow(&["squic.org"]), Some("squic.org"));
+    }
+
+    /// Several, and nothing to say which: dialling is better than guessing.
+    #[test]
+    fn several_named_exchanges_are_not_chosen_between() {
+        assert_eq!(to_borrow(&["squic.org", "indra.org"]), None);
+    }
+
+    /// Nothing held is nothing to borrow.
+    #[test]
+    fn no_sessions_is_nothing() {
+        assert_eq!(to_borrow(&[]), None);
     }
 }
