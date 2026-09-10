@@ -3,7 +3,7 @@ name = "sigil-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The connection actor: owns a sqnr::Client, demultiplexes datagrams by session id, carries the ring listener."
+description = "The seam between the sqex protocol and something with a window: calls and rooms on a task, discovery layers, and the connections a window lends between its apps."
 
 [dependencies]
 tokio = { workspace = true }

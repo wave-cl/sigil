@@ -165,6 +165,10 @@ pub struct Bubble<'a> {
     pub reply_to: Option<(&'a str, &'a str)>,
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: &'a [(String, usize, bool)],
+    /// What happened to the message after it was said. Drawn **under** the
+    /// bubble rather than inside it: it is not part of what was said, and
+    /// having it in there made the bubble taller than its own contents, which
+    /// everything measuring against the bubble then inherited.
     pub receipt: Option<Receipt>,
     /// Files it carries.
     pub attachments: &'a [crate::Attachment<'a>],
@@ -573,7 +577,11 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
     } else {
         measure(b.text, egui::TextStyle::Body)
     };
-    // The furniture under the text: a time, possibly "edited", and a receipt.
+    // The furniture under the text: a time, and possibly "edited" or a word
+    // about how the entry stands. **Not the receipt** -- that moved out from
+    // under the bubble's roof and is drawn below it, so it asks for no width in
+    // here. The trailing `SPACING_XL` is what used to leave room for it and is
+    // now the gap between the time and the bubble's right edge.
     let mut meta = measure(b.at, egui::TextStyle::Small) + tokens::SPACING_XL;
     if b.edited {
         meta += measure("edited", egui::TextStyle::Small) + tokens::SPACING_SM;

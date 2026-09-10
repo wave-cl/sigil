@@ -9,8 +9,10 @@
 //! is the failure a desktop client exists to prevent.
 //!
 //! So **every unlocked account stays live**: its own connection, its own store,
-//! its own lock, its own ring listener. [`Accounts::active`] decides only what
-//! is *drawn*. Badges and notifications come from all of them and say which.
+//! its own lock, its own event stream -- which is what a ring arrives on, and
+//! why one reaches somebody looking at another identity. [`Accounts::active`]
+//! decides only what is *drawn*. Badges and notifications come from all of them
+//! and say which.
 //!
 //! # The generation counter
 //!

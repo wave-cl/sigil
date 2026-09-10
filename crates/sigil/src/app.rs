@@ -12,7 +12,8 @@
 //!
 //! eframe 0.36 has the same split one layer down — `App::logic` runs even while
 //! the window is hidden, with no egui pass at all — which is what lets sigil
-//! keep a call alive and a ring listener running when it is closed to the tray.
+//! keep a call alive, and its sessions listening, when it is closed to the
+//! tray.
 //! The host maps one onto the other.
 
 use std::any::Any;
