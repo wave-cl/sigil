@@ -281,6 +281,13 @@ async fn an_open_conversation_is_quiet_when_nothing_is_said() {
 /// **Measured against the tick, not against a number I chose.** Anything at or
 /// past 700ms is what the old behaviour did; the assertion is that it beats
 /// that, with room for a slow machine.
+///
+/// **Bob does not open the conversation, and that is what keeps this about the
+/// knock.** A conversation on screen has a fetch parked on it, which answers
+/// the moment anything is said — so with the conversation open this passed
+/// with the knock taken out, testing the long poll under the name of the
+/// event stream. Where nobody is looking there is no parked fetch and the
+/// event is the only thing that can be quick.
 #[tokio::test]
 async fn a_message_arrives_without_waiting_for_the_tick() {
     let dir = tempfile::tempdir().unwrap();
@@ -313,16 +320,27 @@ async fn a_message_arrives_without_waiting_for_the_tick() {
         "both sessions should come up: {:?}",
         alice.state().trouble
     );
-    bob.send(Cmd::OpenDm(a_id));
     alice.send(Cmd::OpenDm(b_id));
     assert!(
+        until(|| alice.state().open.is_some(), 15).await,
+        "the sender should have the conversation open"
+    );
+    // Bob has to know the conversation exists before he can be told it moved,
+    // but he does not look at it: see the note above about the parked fetch.
+    assert!(
         until(
-            || alice.state().open.is_some() && bob.state().open.is_some(),
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id)),
             15
         )
         .await,
-        "both should have the conversation open"
+        "the conversation should reach the list: {:?}",
+        bob.state().conversations
     );
+    assert_eq!(bob.state().open, None, "and nobody is looking at it");
     // Everything that was going to happen, before the clock starts.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -330,7 +348,11 @@ async fn a_message_arrives_without_waiting_for_the_tick() {
     alice.send(Cmd::Send("no waiting".into()));
     assert!(
         until(
-            || bob.state().lines.iter().any(|l| l.text == "no waiting"),
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(a_id) && c.unread > 0),
             20
         )
         .await,
