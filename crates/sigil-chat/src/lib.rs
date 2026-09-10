@@ -85,6 +85,22 @@ fn showing_exchange(me: PubKey, chosen: Option<&String>, live: &[At]) -> String 
         .unwrap_or_default()
 }
 
+/// The call we placed that has been picked up and not yet joined.
+///
+/// A free function over plain data, because the rule is the part worth
+/// testing and the rest is a room being joined: **ours** (a ring that is not
+/// ours is answered by pressing Answer, not by this), **answered** (there is
+/// somebody in the room to talk to), and **not already in a call** (one
+/// microphone, one room).
+///
+/// `in_a_call` rather than the map, so the test says what it means.
+fn to_join(rings: &[Ring], in_a_call: bool) -> Option<&Ring> {
+    if in_a_call {
+        return None;
+    }
+    rings.iter().find(|r| r.mine && r.answered)
+}
+
 /// The words for a ringing call.
 ///
 /// A free function over plain data for the same reason as [`duplicate_of`]:
@@ -829,6 +845,7 @@ impl App for ChatApp {
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
         self.announce_rings(ctx);
+        self.join_answered_calls(ctx, egui_ctx);
         self.end_calls_nobody_is_in();
         // **A window carrying audio is not idle.** Everything else here sleeps
         // until something happens, which is what makes a quiet sigil cost
@@ -3346,6 +3363,44 @@ impl ChatApp {
         );
     }
 
+    /// Join the call we placed, once somebody has picked it up.
+    ///
+    /// **Placing a call did not join one.** `join_call` — the only thing that
+    /// carries audio — was reached from the Answer button and from nowhere
+    /// else, so pressing Call posted an invitation and stopped there. The
+    /// person who answered sat alone in a room with their microphone open,
+    /// sending to nobody, and the caller had no audio task at all. Nothing
+    /// crossed, in either direction, and the interface said "Ringing…" and
+    /// then "Connecting…" as though it were working.
+    ///
+    /// Found by making a call by hand and watching the exchange: a room with
+    /// one member in it.
+    ///
+    /// **On answered, not on placed.** Joining when the call is placed would
+    /// be simpler and would open the microphone while it rings — for as long
+    /// as it rings, and for a call that is never picked up at all. `answered`
+    /// arrives from SIP-36's accept signal, which is a moment later than the
+    /// other end's button and is the first instant there is anybody to talk
+    /// to.
+    ///
+    /// From `update` rather than `render`, like `announce_rings`: a caller
+    /// who has gone to another conversation, another identity, or another tab
+    /// while it rings must still join when it is answered.
+    fn join_answered_calls(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
+        // Collected first: joining borrows `self` mutably, and this is reading
+        // the sessions it would be borrowing.
+        let mut joining: Vec<(At, Ring)> = Vec::new();
+        for (at, session) in &self.sessions {
+            let rings = session.ringing();
+            if let Some(ring) = to_join(&rings, self.calls.contains_key(&at.0)) {
+                joining.push((at.clone(), ring.clone()));
+            }
+        }
+        for (at, ring) in joining {
+            self.join_call(ctx, &at, &ring, egui_ctx);
+        }
+    }
+
     /// Put down a call that is over, or that never became one.
     ///
     /// **A call holds the microphone, and until this existed the only thing
@@ -4133,5 +4188,60 @@ mod look_tests {
             pan: vec2(120.0, -90.0),
         };
         assert_eq!(close.zoomed(1.0, VIEW, VIEW).pan, egui::Vec2::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod joining_tests {
+    use super::{Ring, to_join};
+    use sqnr_core::PubKey;
+
+    fn ring(mine: bool, answered: bool) -> Ring {
+        Ring {
+            channel: [1u8; 32],
+            seq: 4,
+            from: PubKey::new([2u8; 32]),
+            mine,
+            secret: [3u8; 32],
+            answered,
+            label: "somebody".into(),
+        }
+    }
+
+    /// The one case that joins: our call, picked up, and we are not in one.
+    #[test]
+    fn our_own_call_being_answered_is_the_one_to_join() {
+        let rings = vec![ring(true, true)];
+        assert!(to_join(&rings, false).is_some());
+    }
+
+    /// Still ringing is not yet a call. Joining here would open the
+    /// microphone for as long as it rings, and for calls nobody ever answers.
+    #[test]
+    fn a_call_still_ringing_is_not_joined() {
+        assert!(to_join(&[ring(true, false)], false).is_none());
+    }
+
+    /// Somebody else's ring is answered by pressing Answer. Joining it here
+    /// would pick up every incoming call by itself.
+    #[test]
+    fn somebody_elses_ring_is_not_ours_to_join() {
+        assert!(to_join(&[ring(false, true)], false).is_none());
+        assert!(to_join(&[ring(false, false)], false).is_none());
+    }
+
+    /// One microphone, one room: already being in a call ends the question,
+    /// which is also what stops this joining the same call on every pass.
+    #[test]
+    fn a_call_already_being_carried_is_not_joined_again() {
+        assert!(to_join(&[ring(true, true)], true).is_none());
+    }
+
+    /// Ours among others.
+    #[test]
+    fn the_answered_one_is_found_among_several() {
+        let rings = vec![ring(false, true), ring(true, false), ring(true, true)];
+        let found = to_join(&rings, false).expect("ours, answered");
+        assert!(found.mine && found.answered);
     }
 }
