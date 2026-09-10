@@ -1140,6 +1140,9 @@ async fn run(
     // fetch, chiefly -- so the next pass comes round at once rather than in
     // five seconds' time.
     let mut more = false;
+    // Where a parked fetch hands back what it found. See [`Parked`].
+    let (arrived_tx, mut arrived_rx) = mpsc::unbounded_channel::<Arrived>();
+    let mut parked: Option<Parked> = None;
 
     loop {
         // **What is outstanding decides the wait.** A link being redialled
@@ -1157,6 +1160,35 @@ async fn run(
             || state.borrow().note.is_some();
         let want = if quick { busy } else { every };
         let until = want.saturating_sub(ticked.elapsed());
+
+        // **A fetch left waiting on the conversation being read.** See
+        // [`Parked`]: it costs one request, answers in one trip the moment
+        // anything is said, and is dropped the instant this loop has something
+        // else to do -- including somebody typing, whose *stopping* only a
+        // second ask can find.
+        let wanted = (chat.link() == Link::Up && !quick)
+            .then_some(desk.open)
+            .flatten();
+        if parked.as_ref().map(|p| p.channel) != wanted {
+            unpark(&mut parked);
+        }
+        if let Some(channel) = wanted
+            && parked.is_none()
+            && let Some(watch) = chat.watch(&channel, sqex_proto::channel::MAX_WAIT)
+        {
+            let answer = arrived_tx.clone();
+            let task = tokio::spawn(async move {
+                let _ = match watch.arrived().await {
+                    Ok(got) => answer.send(Arrived::Entries(Box::new(got))),
+                    // Not acted on here: this task has no client to lower a
+                    // link on. The loop asks the ordinary way instead, which
+                    // does.
+                    Err(_) => answer.send(Arrived::Trouble(channel)),
+                };
+            });
+            parked = Some(Parked { channel, task });
+        }
+
         tokio::select! {
             // Commands first and unconditionally. Typing must never wait behind
             // the network, which is the discipline `sqex-chat`'s own loop keeps
@@ -1164,6 +1196,24 @@ async fn run(
             Some(cmd) = cmds.recv() => {
                 apply(&mut chat, cmd, &state, &mut desk).await;
                 (wake)();
+            }
+            // **What was already being waited for.** A parked fetch is a
+            // question asked before there was an answer, so this is the whole
+            // round trip: the entry is in what came back, not a hint that one
+            // exists.
+            Some(arrived) = arrived_rx.recv() => {
+                // Answered, so the task is over whatever it said.
+                parked = None;
+                match arrived {
+                    Arrived::Entries(got) => {
+                        if absorb(&mut chat, &state, &mut desk, me, *got).await {
+                            (wake)();
+                        }
+                    }
+                    Arrived::Trouble(channel) => {
+                        desk.dirty.insert(channel);
+                    }
+                }
             }
             // **What the exchange has to say, the moment it says it.**
             //
@@ -1899,6 +1949,149 @@ async fn attend(
     }
 }
 
+/// A fetch left waiting at the exchange for the conversation on screen.
+///
+/// # Why one is worth holding
+///
+/// `/channel/fetch` takes a wait: the exchange holds the request open and
+/// answers the moment an entry or a signal arrives. Everything else here is
+/// event-driven, and an event is a *hint* -- "this conversation moved" -- which
+/// costs a fetch to act on. This is that fetch, sent before there was anything
+/// to fetch, so a message reaches the screen in one trip instead of two. On a
+/// real exchange that is a round trip saved on the one conversation somebody is
+/// actually looking at.
+///
+/// # When one is held
+///
+/// Only while the loop has nothing else to do, and only on the open
+/// conversation. Anything outstanding -- a channel an event named, a
+/// reconnection, a picture still to fetch, somebody typing -- drops it, because
+/// all of those are about to fetch anyway and a second answer is a wasted
+/// request. It is dropped on switching conversations for the same reason.
+///
+/// **Nothing is lost by dropping one.** The cursor only ever moves forward
+/// (`Store::set_since` takes a `MAX`), and SIP-17's counters refuse a second
+/// decryption of an entry already read, so an answer that arrives late is
+/// absorbed harmlessly or not at all.
+struct Parked {
+    channel: [u8; 32],
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// What a [`Parked`] fetch came back with.
+enum Arrived {
+    /// Entries, signals, or both. Boxed because everything else in this enum is
+    /// two words and a fetch's answer is a buffer off the wire.
+    Entries(Box<sqex_chat::Fetched>),
+    /// It could not be asked, or the exchange refused. The channel is asked
+    /// about the ordinary way, which is the path that knows what to do about a
+    /// link that has gone.
+    Trouble([u8; 32]),
+}
+
+/// Stop waiting for an answer nobody wants any more.
+fn unpark(parked: &mut Option<Parked>) {
+    if let Some(p) = parked.take() {
+        p.task.abort();
+    }
+}
+
+/// Fold what a parked fetch brought back, exactly as the sweep would have.
+///
+/// The opening, the counters and the store are all `Chat`'s, and this is where
+/// they happen -- the parked half never touched them.
+async fn absorb(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    me: PubKey,
+    got: sqex_chat::Fetched,
+) -> bool {
+    let channel = got.channel();
+    let Some(known) = desk.channels.get_mut(&channel) else {
+        return false;
+    };
+    let mut timeline = std::mem::take(&mut known.timeline);
+    let absorbed = chat.absorb(&mut timeline, got).await;
+    let open = desk.open;
+    let Some(known) = desk.channels.get_mut(&channel) else {
+        return false;
+    };
+    let accepted = match absorbed {
+        Ok(conversation) => took(chat.store(), known, channel, open, conversation),
+        Err(_) => {
+            known.timeline = timeline;
+            // Whatever went wrong, the ordinary path reports it and decides
+            // what it means for the connection.
+            desk.dirty.insert(channel);
+            return false;
+        }
+    };
+    if let Some(seq) = accepted {
+        desk.answered.insert((channel, seq));
+    }
+    publish(chat, state, desk, me)
+}
+
+/// Take everything a fetch turned up into what the interface reads.
+///
+/// One copy, because there are two ways in: the sweep, which fetches what an
+/// event named, and a parked fetch that was already waiting when it happened
+/// (see [`Parked`]). Both hand back the same `Conversation`, and a second copy
+/// of this is a second place for the unread count or the trouble flags to be
+/// got subtly differently.
+///
+/// Returns the sequence number of a call somebody has taken, which the caller
+/// records: `desk` is borrowed for the conversation being written.
+fn took(
+    store: &sqex_chat::Store,
+    known: &mut Known,
+    channel: [u8; 32],
+    open: Option<[u8; 32]>,
+    conversation: sqex_chat::Conversation,
+) -> Option<u64> {
+    known.timeline = conversation.timeline;
+    known.typing = conversation.typing;
+    known.waiting = false;
+    // Answered for. Until this, what is on screen came off the disc and the
+    // interface says it is still asking.
+    known.fetched = true;
+    known.trouble = Trouble {
+        unreadable: conversation.unreadable.len(),
+        gap: conversation.gap,
+        restarted: conversation.restarted,
+        no_key: conversation.no_key,
+        lost: conversation.lost,
+        forged: known.timeline.forged().len(),
+    };
+    if !conversation.admins.is_empty() {
+        known.admins = conversation.admins;
+    }
+    let after = known.timeline.messages().count();
+    // Counted against what we had rather than against a read mark, so a
+    // message arriving in a conversation nobody is looking at is counted once,
+    // when it arrives.
+    if after > known.seen && open != Some(channel) {
+        known.unread += after - known.seen;
+    }
+    known.seen = after;
+    if let Some(newest) = known.timeline.messages().last().map(|m| m.posted) {
+        known.last_at = known.last_at.max(newest);
+    }
+    // A group's name lives in a sealed entry, so it is only known once the log
+    // has been read -- and it changes when an admin renames it.
+    let named = known.timeline.name.clone();
+    if known.peer.is_none() && !named.is_empty() && named != known.label {
+        known.label = named.clone();
+        let _ = store.set_label(&channel, &named);
+    }
+    // Somebody said they are taking a call. The only way to learn it:
+    // answering posts no entry, so without this the caller goes on showing
+    // "ringing" and then derives *missed* of a call that is up and being
+    // spoken on.
+    conversation.accepted
+}
+
 /// Fetch what has changed and publish the result.
 async fn refresh(
     chat: &mut Chat,
@@ -1924,8 +2117,9 @@ async fn refresh(
     desk.dirty.extend(later);
 
     // Collected rather than written straight into `desk`, which is borrowed
-    // mutably for the channel being polled.
+    // mutably for the channel being polled. Same for what is open.
     let mut accepted: Vec<([u8; 32], u64)> = Vec::new();
+    let open = desk.open;
 
     for channel in to_poll {
         attend(chat, state, desk, cmds).await;
@@ -1939,48 +2133,8 @@ async fn refresh(
         };
         match polled {
             Ok(conversation) => {
-                known.timeline = conversation.timeline;
-                known.typing = conversation.typing;
-                // Somebody said they are taking a call. The only way to learn
-                // it: answering posts no entry, so without this the caller
-                // goes on showing "ringing" and then derives *missed* of a
-                // call that is up and being spoken on.
-                if let Some(seq) = conversation.accepted {
+                if let Some(seq) = took(chat.store(), known, channel, open, conversation) {
                     accepted.push((channel, seq));
-                }
-                known.waiting = false;
-                // Answered for. Until this, what is on screen came off the
-                // disc and the interface says it is still asking.
-                known.fetched = true;
-                known.trouble = Trouble {
-                    unreadable: conversation.unreadable.len(),
-                    gap: conversation.gap,
-                    restarted: conversation.restarted,
-                    no_key: conversation.no_key,
-                    lost: conversation.lost,
-                    forged: known.timeline.forged().len(),
-                };
-                if !conversation.admins.is_empty() {
-                    known.admins = conversation.admins;
-                }
-                let after = known.timeline.messages().count();
-                // Counted against what we had rather than against a read mark,
-                // so a message arriving in a conversation nobody is looking at
-                // is counted once, when it arrives.
-                if after > known.seen && desk.open != Some(channel) {
-                    known.unread += after - known.seen;
-                }
-                known.seen = after;
-                if let Some(newest) = known.timeline.messages().last().map(|m| m.posted) {
-                    known.last_at = known.last_at.max(newest);
-                }
-                // A group's name lives in a sealed entry, so it is only known
-                // once the log has been read -- and it changes when an admin
-                // renames it.
-                let named = known.timeline.name.clone();
-                if known.peer.is_none() && !named.is_empty() && named != known.label {
-                    known.label = named.clone();
-                    let _ = chat.store().set_label(&channel, &named);
                 }
             }
             Err(_) => {

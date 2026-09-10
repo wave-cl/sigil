@@ -32,8 +32,8 @@ sqex-chat = { path = "../sqex-sigil/crates/sqex-chat" }
 # Only ever a dev-dependency: tests drive a real exchange in-process, because a
 # client that was only tested against a mock has tested the mock.
 sqexd = { path = "../sqex-sigil/crates/sqexd" }
-sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.7" }
-sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.7" }
+sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.8" }
+sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.8" }
 squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.27.0" }
 
 # --- gui ------------------------------------------------------------------

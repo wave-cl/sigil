@@ -219,30 +219,51 @@ async fn an_open_conversation_is_quiet_when_nothing_is_said() {
     };
 
     let before = asked().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(12)).await;
     let after = asked().await;
 
-    // **Nothing.** Not a smaller number: two clients with a conversation open
-    // and nobody saying anything have nothing to ask about, and the exchange
-    // has a stream open to each of them for the moment that changes.
+    // **Two, and they are both a fetch being left waiting.** Nothing is polled
+    // any more: each client holds one parked `/channel/fetch` on the
+    // conversation it has open, which the exchange answers when something
+    // happens and otherwise lets expire at `MAX_WAIT` — 25 seconds. So in a
+    // twelve-second window each client re-parks at most once, whatever the
+    // phase, and nothing else asks anything at all.
     //
-    // It was forty: a read mark and a cursor fetch per tick per client, the
-    // events those provoked at the other end, and — the larger half, found by
-    // logging every request rather than by reasoning about it — a
-    // `/channel/info` and one `/device/list` per member inside every poll,
-    // asked whether or not anything had arrived to attribute. Then eight, on a
-    // 700ms tick. Then two, once the timer became a five-second backstop. The
-    // last two were the open conversation being fetched on every pass because
-    // it was open, which is what the events already say.
+    // It was forty in a three-second window: a read mark and a cursor fetch per
+    // tick per client, the events those provoked at the other end, and — the
+    // larger half, found by logging every request rather than by reasoning
+    // about it — a `/channel/info` and one `/device/list` per member inside
+    // every poll, asked whether or not anything had arrived to attribute. Then
+    // eight, on a 700ms tick. Then two, once the timer became a five-second
+    // backstop. Then none, once the open conversation stopped being fetched
+    // for being open. This is that same nothing, with one standing question
+    // each: 0.08 requests a second, against 13 in April.
     //
-    // The floor is nought and the ceiling is one, because the backstop rebuild
-    // is 28 seconds away and a three-second window may land on the far side of
-    // one — see `BACKSTOP`.
+    // The window is twelve seconds rather than three so the arithmetic is a
+    // ceiling rather than a probability — and it stays clear of the
+    // 28-second rebuild, which would add its own.
     let spent = after - before - 1; // the probe's own /status
     assert!(
-        spent <= 1,
-        "two idle clients made {spent} requests in three seconds with nobody \
-         saying anything; there is nothing for them to ask"
+        spent <= 2,
+        "two idle clients made {spent} requests in twelve seconds with nobody \
+         saying anything; the only thing either should send is one parked fetch"
+    );
+
+    // **And at least one, once the window is longer than a wait.** The ceiling
+    // above is satisfied by a client that asks nothing at all, which is not
+    // what this is: a parked fetch is a standing question, and one that expires
+    // is asked again. Past `MAX_WAIT` both clients must therefore have spoken.
+    //
+    // Neither half means much alone — the ceiling rules out polling, the floor
+    // rules out silence, and only together do they say "one question each,
+    // left standing".
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    let later = asked().await;
+    let standing = later - after - 1;
+    assert!(
+        standing >= 2,
+        "in fifteen seconds past a twelve-second window neither client renewed \
+         a parked fetch ({standing} requests); nothing is waiting at the exchange"
     );
 
     alice.stop();
