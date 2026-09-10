@@ -14,6 +14,7 @@
 //! throughout the whole time the bug existed.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use sigil::accounts::Accounts;
 use sigil::app::{App, AppContext};
@@ -272,5 +273,58 @@ async fn a_session_lends_its_connection_and_takes_it_back() {
     assert!(
         connections.of(b, "").is_some(),
         "and the one still open should go on offering one"
+    );
+}
+
+/// A session that dies is started again.
+///
+/// **Found by restarting sigil a second after quitting it.** The store's lock
+/// is released when the old process exits, and the new one raced it: four
+/// sessions were refused their stores, failed, and stayed failed — `reconcile`
+/// starts a session for any identity that has none, and a dead session is
+/// still one. The window sat there with four identities holding nothing and no
+/// way back but closing and opening each of them.
+///
+/// The exchange here never answers, which is what makes the test possible: a
+/// session that cannot publish its prekeys ends with an error, exactly as one
+/// refused its store does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_died_is_started_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let mut accounts = Accounts::of(vec![one]);
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(app.starts_for_test(), 1, "the session should have started");
+
+    // It cannot reach anything, so it ends. Waited for rather than assumed:
+    // what is being tested is what happens *after* it dies.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline && !app.stopped_for_test() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        app.stopped_for_test(),
+        "the session should have failed against an exchange that is not there"
+    );
+
+    // Nothing happens for a moment: a store locked for good must not become a
+    // restart on every frame.
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(
+        app.starts_for_test(),
+        1,
+        "a session that has just died should not be restarted immediately"
+    );
+
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(
+        app.starts_for_test(),
+        2,
+        "a dead session was never started again; the identity holds nothing \
+         and nothing will change that"
     );
 }

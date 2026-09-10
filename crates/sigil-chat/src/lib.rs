@@ -101,6 +101,20 @@ fn to_join(rings: &[Ring], in_a_call: bool) -> Option<&Ring> {
     rings.iter().find(|r| r.mine && r.answered)
 }
 
+/// How long to leave a session that died before starting it again.
+///
+/// A session ends by failing — a store still locked by the sigil that just
+/// quit, an exchange that could not be reached to publish prekeys — and until
+/// this existed it stayed dead for the life of the window: `reconcile` starts a
+/// session only for an identity that has none, and a dead one is still one.
+/// Restarting sigil a second after quitting it was enough to come up with four
+/// identities holding nothing, with no way back but closing and opening each of
+/// them.
+///
+/// Long enough that a store lock or a handshake has time to come good, short
+/// enough that somebody watching does not conclude it is broken.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The words for a ringing call.
 ///
 /// A free function over plain data for the same reason as [`duplicate_of`]:
@@ -444,6 +458,11 @@ pub struct ChatApp {
     /// for whichever is being looked at. A message arriving somewhere you are
     /// not currently showing is still a message you want to be told about.
     sessions: HashMap<At, ChatHandle>,
+    /// When each session was last started, so one that dies is tried again —
+    /// and not faster than [`RETRY`].
+    started: HashMap<At, std::time::Instant>,
+    /// How many sessions this app has started, for tests to count.
+    starts: usize,
     /// Sessions told to stop that still hold their store lock. One of these
     /// must not be reopened yet; see [`Closing`].
     closing: Vec<(At, Closing)>,
@@ -525,6 +544,8 @@ impl ChatApp {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            started: HashMap::new(),
+            starts: 0,
             closing: Vec::new(),
             panes: HashMap::new(),
             showing: HashMap::new(),
@@ -588,6 +609,21 @@ impl ChatApp {
         keys.sort_by_key(|k| k.to_string());
         keys.dedup();
         keys
+    }
+
+    /// Whether every session this app holds has ended.
+    #[doc(hidden)]
+    pub fn stopped_for_test(&self) -> bool {
+        !self.sessions.is_empty() && self.sessions.values().all(|s| s.stopped())
+    }
+
+    /// How many times a session has been started for each identity.
+    ///
+    /// The negative control for the retry: a session that dies and is never
+    /// started again counts one, for ever.
+    #[doc(hidden)]
+    pub fn starts_for_test(&self) -> usize {
+        self.starts
     }
 
     /// Which identity-and-exchange pairs have a live session.
@@ -725,6 +761,30 @@ impl ChatApp {
             }
         }
 
+        // **A session that died is not a session.** It ends by failing, and
+        // the handle stays in hand looking exactly like a working one, so the
+        // loop below -- which starts a session for any identity that has none
+        // -- skipped it for ever. Dropped here, and started again by that same
+        // loop, no sooner than `RETRY` after the last attempt so a store that
+        // is locked for good does not become a restart every frame.
+        let dead: Vec<At> = self
+            .sessions
+            .iter()
+            .filter(|(at, session)| {
+                session.stopped()
+                    && self
+                        .started
+                        .get(*at)
+                        .is_none_or(|when| when.elapsed() >= RETRY)
+            })
+            .map(|(at, _)| at.clone())
+            .collect();
+        for at in dead {
+            self.sessions.remove(&at);
+            // Nothing may go on borrowing what a dead session was holding.
+            ctx.connections.forget(at.0, &at.1);
+        }
+
         for (at, path) in held {
             if self.sessions.contains_key(&at) {
                 continue;
@@ -776,6 +836,8 @@ impl ChatApp {
             // is the slot, which this session fills when the link comes up and
             // rewrites when it redials.
             ctx.connections.lend(me, &named, session.connection());
+            self.started.insert(at.clone(), std::time::Instant::now());
+            self.starts += 1;
             self.sessions.insert(at, session);
         }
     }

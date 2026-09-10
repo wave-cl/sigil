@@ -994,6 +994,17 @@ impl ChatHandle {
         self.task.abort();
     }
 
+    /// Whether this session is over.
+    ///
+    /// A session ends by returning an error — a store that could not be
+    /// opened, prekeys that could not be published — and the task then stops.
+    /// Nothing about the handle says so, and the interface went on holding it
+    /// as though an identity were connected. See `ChatApp::reconcile`, which
+    /// starts it again.
+    pub fn stopped(&self) -> bool {
+        self.task.is_finished()
+    }
+
     /// Stop, and hand back something that says when the store lock is free.
     ///
     /// Prefer this to [`stop`](Self::stop) anywhere the account might be
