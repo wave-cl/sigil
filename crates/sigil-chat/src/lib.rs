@@ -428,9 +428,11 @@ struct Pane {
     inviting: String,
     /// The SIP-38 name being claimed.
     naming: String,
-    /// The channel settings fields.
+    /// The channel settings fields, and the channel they were filled from.
+    /// `None` until the pane has been drawn; see `fill_settings`.
     channel_name: String,
     channel_topic: String,
+    settings_for: Option<[u8; 32]>,
     retention_days: u32,
     /// Destroying a channel is asked twice, because it cannot be undone.
     confirming_destroy: bool,
@@ -497,6 +499,7 @@ impl Default for Pane {
             naming: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
+            settings_for: None,
             asking: false,
             saw: (None, 0),
             tall: HashMap::new(),
@@ -1430,10 +1433,24 @@ impl ChatApp {
             egui::vec2(width, tokens::AVATAR_MD),
             egui::Layout::top_down(egui::Align::Max),
             |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(state.mine.label(&me)).strong())
-                        .truncate(),
-                );
+                // **A control, not a caption.** What is drawn here is your
+                // name, or -- with no name published -- the first characters
+                // of your key, and in both cases the thing somebody wants on
+                // seeing it is to set the name. It was a label, and the only
+                // way in was a menu item two clicks behind a chevron.
+                let name = ui
+                    .add(
+                        egui::Label::new(egui::RichText::new(&label).strong())
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Set your name and title");
+                if name.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if name.clicked() {
+                    self.open_profile(at, state);
+                }
                 match &state.mine.handle {
                     Some(handle) => {
                         ui.add(
@@ -1526,17 +1543,7 @@ impl ChatApp {
         }
 
         if ui.button("Edit your profile").clicked() {
-            let (name, title) = (
-                state.mine.name.clone().unwrap_or_default(),
-                state.mine.title.clone().unwrap_or_default(),
-            );
-            let pane = self.panes.entry(at.clone()).or_default();
-            // Seeded from what is published, so the dialog opens on what is
-            // true rather than on an empty box that would read as "you have no
-            // name".
-            pane.name = name;
-            pane.title = title;
-            pane.dialog = Some(Dialog::Profile);
+            self.open_profile(at, state);
             ui.close();
         }
 
@@ -1930,6 +1937,58 @@ impl ChatApp {
         );
     }
 
+    /// Fill the channel settings fields from what the channel actually is.
+    ///
+    /// **They were never filled.** Both boxes opened empty over a channel that
+    /// had a name and a topic -- which reads as "this has no name" -- and
+    /// pressing Set beside an empty box publishes the empty string, so the
+    /// pane offered to erase the name of every channel somebody opened it on.
+    ///
+    /// Done **when the view is drawn for a channel it has not been drawn for**
+    /// rather than by whatever opened it. A route is reached more ways than
+    /// there are controls that push it -- back, forward, a restored stack --
+    /// and seeding at the call sites leaves every other way in showing empty
+    /// boxes, which is the same bug with a smaller footprint. This way the
+    /// pane cannot be on screen unseeded.
+    ///
+    /// Typing is kept: the channel is what it keys on, so a half-typed name
+    /// survives going to Members and back and only a *different* channel
+    /// replaces it.
+    fn fill_settings(&mut self, at: &At, state: &ChatState) {
+        let Some(channel) = state.open else { return };
+        if self.panes.entry(at.clone()).or_default().settings_for == Some(channel) {
+            return;
+        }
+        let name = state
+            .conversations
+            .iter()
+            .find(|c| c.channel == channel)
+            .map(|c| c.label.clone())
+            .unwrap_or_default();
+        let topic = state.topic.clone();
+        let pane = self.panes.entry(at.clone()).or_default();
+        pane.channel_name = name;
+        pane.channel_topic = topic;
+        pane.settings_for = Some(channel);
+    }
+
+    /// Open "Your profile", seeded from what is actually published.
+    ///
+    /// One path, reached from the menu item and from clicking your own name.
+    /// Two would seed it two ways, and one of them would eventually open an
+    /// empty box over a name that exists -- which reads as "you have no name"
+    /// and *publishes* that the moment somebody presses the button.
+    fn open_profile(&mut self, at: &At, state: &ChatState) {
+        let (name, title) = (
+            state.mine.name.clone().unwrap_or_default(),
+            state.mine.title.clone().unwrap_or_default(),
+        );
+        let pane = self.panes.entry(at.clone()).or_default();
+        pane.name = name;
+        pane.title = title;
+        pane.dialog = Some(Dialog::Profile);
+    }
+
     /// Your own SIP-21 profile: self-declared, attested by nobody.
     fn profile_dialog(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.heading("Your profile");
@@ -2189,6 +2248,13 @@ impl ChatApp {
                 .show(ui, |ui| {
                     for hit in &state.hits {
                         let response = ui.vertical(|ui| {
+                            // Nothing here is selectable text, or the labels
+                            // take the press and the row below them never
+                            // hears it -- and a search result is *entirely*
+                            // words, so there is no ground beside them to hit.
+                            // The same hole the conversation list had; see
+                            // `sigil_ui::conversation_row`.
+                            ui.style_mut().interaction.selectable_labels = false;
                             ui.label(egui::RichText::new(&hit.label).strong().small());
                             ui.colored_label(
                                 theme.text_secondary,
@@ -2259,12 +2325,10 @@ impl ChatApp {
                 ui.set_max_width((ui.available_width() - bar).max(0.0));
                 for convo in &state.conversations {
                     let id = bs58::encode(convo.channel).into_string();
-                    let key = convo.peer.map(|p| p.to_string());
                     let selected = state.open == Some(convo.channel);
                     let row = sigil_ui::ConversationRow {
                         id: &id,
                         label: &convo.label,
-                        key: key.as_deref(),
                         preview: convo.preview.as_deref().unwrap_or(""),
                         at: &convo
                             .at
@@ -2339,6 +2403,9 @@ impl ChatApp {
             // the store knows a group from a direct message but not a public
             // channel from a private one.
             let callable = open.is_some_and(|c| c.public == Some(false));
+            // Only for the word in the tooltip: a public channel and a private
+            // group are renamed by the same route.
+            let public = open.is_some_and(|c| c.public == Some(true));
 
             // **The controls are laid out first, from the right.** Given the
             // name first, a long one takes the row and the controls wrap onto
@@ -2375,7 +2442,56 @@ impl ChatApp {
                 // Whatever is left is the name's, and it truncates rather than
                 // pushing anything off the row.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(egui::Label::new(egui::RichText::new(label).heading()).truncate());
+                    // **The name is the way to change the name**, for somebody
+                    // who may change it. It was a caption, and renaming lived
+                    // behind the settings icon at the other end of the row --
+                    // which is a long way from the thing being renamed.
+                    //
+                    // Not in a direct message: its "name" is a person, and a
+                    // direct message's two members are *both* admins of the
+                    // channel that carries it, so `i_am_admin` alone would
+                    // offer to rename somebody.
+                    let may_rename = state.i_am_admin && !dm;
+                    let named = ui.scope_builder(
+                        egui::UiBuilder::new().sense(if may_rename {
+                            egui::Sense::click()
+                        } else {
+                            egui::Sense::hover()
+                        }),
+                        |ui| {
+                            // Or the label takes the press for its own text
+                            // selection and the scope never hears it; see
+                            // `sigil_ui::conversation_row`.
+                            ui.style_mut().interaction.selectable_labels = false;
+                            let hovered = may_rename && ui.response().hovered();
+                            let text = egui::RichText::new(&label).heading();
+                            // Said in the name itself, because a tooltip only
+                            // answers somebody who already waited to ask. The
+                            // accent is what everything pressable here is.
+                            let text = if hovered {
+                                text.color(theme.accent)
+                            } else {
+                                text
+                            };
+                            ui.add(egui::Label::new(text).truncate());
+                        },
+                    );
+                    if may_rename {
+                        let named = named.response;
+                        if named.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if named
+                            .on_hover_text(if public {
+                                "Rename this channel"
+                            } else {
+                                "Rename this group"
+                            })
+                            .clicked()
+                        {
+                            ctx.navigator.push_here(Route::Settings);
+                        }
+                    }
                     if !state.topic.is_empty() {
                         ui.add(
                             egui::Label::new(
@@ -3230,7 +3346,14 @@ impl ChatApp {
                         ui.add_space(tokens::SPACING_SM);
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(person.label(&member.account));
+                                // Only when there is one to show. `label`
+                                // falls back to the first characters of the
+                                // key, and the whole key is on the very next
+                                // line -- so an unnamed member would read as a
+                                // prefix of themselves, above themselves.
+                                if let Some(named) = person.named() {
+                                    ui.label(named);
+                                }
                                 if member.admin {
                                     // The exchange attests this one, so it may
                                     // be drawn as a role. A SIP-21 title may
@@ -3319,6 +3442,7 @@ impl ChatApp {
         };
         let at = &at;
         let state = self.state_of(Some(at));
+        self.fill_settings(at, &state);
 
         ui.horizontal(|ui| {
             if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
@@ -3833,7 +3957,11 @@ impl ChatApp {
                 .iter()
                 .find(|(k, _)| k.0 == me)
                 .map(|(k, s)| s.state().mine.label(&k.0))
-                .unwrap_or_else(|| me.to_string())
+                // No session to ask, which is a moment rather than a state --
+                // the same short key their own header shows, and not the
+                // whole one, which would make the banner the one place a
+                // forty-four character key still turned up.
+                .unwrap_or_else(|| sigil_ui::short(&me.to_string()))
         });
         egui::Frame::NONE
             .fill(theme.surface_elevated)
@@ -4259,9 +4387,12 @@ mod label_tests {
     fn without_a_domain_the_key_stands_in() {
         let said = default_label(Some(at(None, Some(3))));
         assert_ne!(said, "default");
+        // Both ends of the key, in the form every key on screen takes.
+        let whole = PubKey::new([3u8; 32]).to_string();
+        let (head, tail) = said.split_once("...").expect("a short key: {said}");
         assert!(
-            said.starts_with(&PubKey::new([3u8; 32]).to_string()[..8]),
-            "{said}"
+            whole.starts_with(head) && whole.ends_with(tail),
+            "{said} is not the two ends of {whole}"
         );
     }
 

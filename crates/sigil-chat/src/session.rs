@@ -564,12 +564,29 @@ pub struct Person {
 }
 
 impl Person {
+    /// What they are called, when anything calls them anything.
+    ///
+    /// `None` is **not** "they have no name". A withheld profile, an absent
+    /// one and a blocked one answer identically by design, so this says only
+    /// that we cannot name them.
+    pub fn named(&self) -> Option<String> {
+        self.name.clone().or_else(|| self.handle.clone())
+    }
+
     /// What to call them, falling back to the key, which is never wrong.
+    ///
+    /// **Shortened**, which it did not used to be. A whole base58 key is 41 to
+    /// 44 characters, and where a name goes that is a row of noise wide enough
+    /// to push the time and the unread count off the end of it -- which is
+    /// what the conversation list, the ring banner and the identity header all
+    /// did for anybody who had not published a name.
+    ///
+    /// A short key rather than "unknown", because it is *true* and because two
+    /// people nobody can name still have to be told apart. It is not enough to
+    /// identify somebody on its own: the whole key is a click away in Members,
+    /// which every conversation's header opens.
     pub fn label(&self, key: &PubKey) -> String {
-        self.name
-            .clone()
-            .or_else(|| self.handle.clone())
-            .unwrap_or_else(|| key.to_string())
+        self.named().unwrap_or_else(|| short(key))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1701,7 +1718,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             .iter()
             .find(|c| chat.dm_with(&c.account) == m.channel)
             .map(|c| (c.account, c.label.clone()));
-        let remembered = known.iter().find(|k| k.0 == m.channel);
+        let remembered = known.iter().find(|k| k.channel == m.channel);
         let public = m.visibility == Visibility::Public;
 
         // The exchange is authoritative about who administers a channel; the
@@ -1725,7 +1742,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                     .collect::<Vec<_>>(),
             ),
             Err(_) => (
-                remembered.map(|k| k.3.clone()).unwrap_or_default(),
+                remembered.map(|k| k.admins.clone()).unwrap_or_default(),
                 String::new(),
                 Vec::new(),
             ),
@@ -1737,32 +1754,45 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
         // other member and checking the derivation.
         let peer = peer.or_else(|| {
             let other = members.iter().find(|a| **a != me)?;
-            (chat.dm_with(other) == m.channel).then(|| (*other, other.to_string()))
+            // Nothing for a label: they are not a contact, so nobody here has
+            // ever said what to call them.
+            (chat.dm_with(other) == m.channel).then(|| (*other, String::new()))
         });
 
         let label = match &peer {
-            Some((account, l)) if !l.is_empty() => {
-                if l == &account.to_string() {
-                    // An unnamed contact's label is only its key repeated.
-                    account.to_string()
-                } else {
-                    l.clone()
-                }
-            }
-            Some((account, _)) => account.to_string(),
+            // A direct message: whatever this machine was told to call them,
+            // and **nothing** when it was told nothing.
+            //
+            // Both arms used to answer with the key, under a comment saying
+            // exactly that -- "an unnamed contact's label is only its key
+            // repeated". That is a placeholder wearing the clothes of a real
+            // value: nothing downstream can tell "they are called 3Kj9…" from
+            // "we have nothing to call them", so the conversation list drew
+            // forty-four characters of base58 where a name goes, and so did
+            // the ring banner and the search results.
+            //
+            // What to show instead is decided in `publish`, which is the only
+            // place that knows whether a profile has arrived since.
+            Some((account, l)) if !l.is_empty() && l != &account.to_string() => l.clone(),
+            Some(_) => String::new(),
             // A public channel's name is held by the exchange in the clear --
             // that is what the directory searches -- so it is known before a
             // single entry is read. A group's is a sealed entry and is not, so
             // until the log is read it goes by its identifier.
             None if public && !given_name.is_empty() => given_name,
             None => remembered
-                .map(|k| k.2.clone())
+                .map(|k| k.label.clone())
                 .filter(|l| !l.is_empty())
                 .unwrap_or_else(|| format!("group {}", hex8(&m.channel))),
         };
 
         let group = peer.is_none();
-        let _ = chat.store().put_channel(&m.channel, group, &label, &admins);
+        // The exchange has just said which kind it is, so it is written down:
+        // the next start draws the right mark without asking anybody. This is
+        // also what settles a row from before the store recorded it.
+        let _ = chat
+            .store()
+            .put_channel(&m.channel, group, Some(public), &label, &admins);
 
         let entry = desk.channels.entry(m.channel).or_insert_with(|| {
             // Folded from the store, so history is on screen before the
@@ -1815,11 +1845,9 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             peer: Some(c.account),
             public: Some(false),
             group: false,
-            label: if c.label.is_empty() {
-                c.account.to_string()
-            } else {
-                c.label.clone()
-            },
+            // Empty when nobody has said what to call them; see the match in
+            // `sync_channels` for why that is not their key.
+            label: c.label.clone(),
             admins: vec![me, c.account],
             members: Vec::new(),
             marks: Vec::new(),
@@ -1902,17 +1930,32 @@ fn ask_about_unfetched(desk: &mut Desk) {
 /// one of those words. A public channel with a few hundred messages therefore
 /// "took a long time to load" while its whole history sat in a file.
 ///
-/// What the store cannot say is which of its groups are **public**: it keeps
-/// `kind` as group-or-not, and nothing else. That is why `public` is an
-/// `Option` and stays `None` here -- see [`Summary::public`]. A direct message
-/// is the exception, being never public and derivable: its identifier is
-/// derived from the two accounts, so the other member of a two-member channel
-/// that derives back to itself is the peer.
+/// The store now also says which of its groups are **public** (sqex-chat
+/// v0.47), so the mark on a row is right from the first frame. It did not: it
+/// kept `kind` as group-or-not, so every group came back with `public: None`
+/// and was drawn with no mark at all until the exchange answered -- a wait,
+/// on every start, for a fact that never changes.
+///
+/// `None` has not gone away and must not: a row written before v0.47 recorded
+/// no answer, and reading it as private would tell somebody their words are
+/// sealed when anybody may read them. Those rows stay unmarked for one sweep,
+/// which is what writes the answer down. See [`Summary::public`].
+///
+/// A direct message is derivable as well as never public: its identifier comes
+/// from the two accounts, so the other member of a two-member channel that
+/// derives back to itself is the peer.
 fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
     let Ok(channels) = chat.store().channels() else {
         return;
     };
-    for (channel, group, label, admins) in channels {
+    for known in channels {
+        let sqex_chat::Channel {
+            channel,
+            group,
+            public,
+            label,
+            admins,
+        } = known;
         let timeline = chat.history(&channel, &admins).unwrap_or_default();
         let last_at = timeline.messages().last().map(|m| m.posted).unwrap_or(0);
         let seen = timeline.messages().count();
@@ -1922,11 +1965,12 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
             .filter(|other| chat.dm_with(other) == channel);
         desk.channels.entry(channel).or_insert(Known {
             peer,
-            // Not `false`. Drawing a public channel as private claims its
-            // contents are sealed, and drawing a private group as public
-            // claims the opposite; neither is a guess to make on somebody's
-            // behalf, and the answer is one round trip away.
-            public: if group { None } else { Some(false) },
+            // Whatever the store recorded, and `None` when it recorded
+            // nothing. Never `false` as a stand-in: drawing a public channel
+            // as private claims its contents are sealed, and drawing a private
+            // group as public claims the opposite. Neither is a guess to make
+            // on somebody's behalf.
+            public,
             group,
             label,
             // Remembered from the last time the exchange said so, which is
@@ -2580,13 +2624,12 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         .iter()
         .map(|(c, k)| {
             let mut summary = k.summary(*c, &me);
-            // A direct message's row names a *person*, so a published name
-            // wins over the local label -- which is only what we happened to
-            // call them, and is often just their key repeated back.
-            if let Some(peer) = k.peer
-                && let Some(named) = people.get(&peer).and_then(|p| p.name.clone())
-            {
-                summary.label = named;
+            // A direct message's row names a *person*, and `name_for` is the
+            // order that decides which name. It used to set the label only
+            // when a profile had arrived, and leave the key sitting there
+            // when one had not.
+            if let Some(peer) = k.peer {
+                summary.label = name_for(&people, &peer, &k.label);
             }
             summary
         })
@@ -2935,7 +2978,10 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                 mine: call.account == me,
                 secret: call.secret,
                 answered: desk.answered.contains(&(*channel, call.seq)),
-                label: known.label.clone(),
+                label: match known.peer {
+                    Some(peer) => name_for(&people, &peer, &known.label),
+                    None => known.label.clone(),
+                },
             });
         }
     }
@@ -3031,9 +3077,165 @@ fn stub(text: &str) -> String {
     }
 }
 
-/// The first characters of a key, where a whole one will not fit.
+/// A key where a whole one will not fit: its first four characters, three
+/// dots, and its last four. See [`sigil_ui::short`] for why both ends.
+///
+/// The **same** shortening the transcript uses on an author line, borrowed
+/// rather than written again. Two of them put `3Kj9mNpQ` in one column and
+/// `3Kj9...VfeR` in another, and a reader comparing the two has to work out
+/// whether they are looking at one person or at two.
 fn short(key: &PubKey) -> String {
-    key.to_string().chars().take(8).collect()
+    sigil_ui::short(&key.to_string())
+}
+
+/// What to call the person on the other end of a direct message.
+///
+/// Four answers, in this order, and the order is the whole of it:
+///
+/// 1. **What they publish about themselves** (SIP-21). It wins because a row
+///    names a person and this is the person speaking. The list has always
+///    preferred it.
+/// 2. **What this machine was told to call them** when they were added. Above
+///    the handle because somebody here chose it, and a chosen name is more use
+///    to the person reading than a correct one.
+/// 3. **The handle the exchange bound** (SIP-38). Not offered here before, so
+///    somebody reachable as `alice@squic.org` and named nowhere was drawn as
+///    their key.
+/// 4. **A short key**, which is never wrong and always fits.
+///
+/// The local label is skipped when empty, and empty is what it now is when
+/// nobody chose one -- it used to be the key repeated back, which no step of
+/// this could tell from a name.
+///
+/// A free function over plain data, because the order is the part that can be
+/// got wrong and this way it is testable without a session or an exchange.
+fn name_for(people: &HashMap<PubKey, Person>, peer: &PubKey, local: &str) -> String {
+    let person = people.get(peer);
+    person
+        .and_then(|p| p.name.clone())
+        .or_else(|| (!local.is_empty()).then(|| local.to_string()))
+        .or_else(|| person.and_then(|p| p.handle.clone()))
+        .unwrap_or_else(|| short(peer))
+}
+
+/// What to call somebody. [`naming_tests`] below is the neighbouring
+/// question -- *whose* names are worth asking the exchange for -- and
+/// `crate::label_tests` is a third, about naming exchanges.
+#[cfg(test)]
+mod display_name_tests {
+    use super::*;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    fn person(name: Option<&str>, handle: Option<&str>) -> Person {
+        Person {
+            name: name.map(str::to_string),
+            title: None,
+            handle: handle.map(str::to_string),
+        }
+    }
+
+    fn just(k: PubKey, p: Person) -> HashMap<PubKey, Person> {
+        HashMap::from([(k, p)])
+    }
+
+    /// The regression this module exists for.
+    ///
+    /// `label` answered with the **whole** key, so anybody who had not
+    /// published a name was drawn as forty-odd characters of base58 -- in the
+    /// conversation list, in the ring banner and in the identity header at
+    /// once, each of them a row with a name-shaped hole in it.
+    #[test]
+    fn an_unnamed_person_is_a_short_key_and_not_a_whole_one() {
+        let k = key(7);
+        let whole = k.to_string();
+        let shown = Person::default().label(&k);
+
+        assert_ne!(
+            shown, whole,
+            "the whole key is exactly what this used to be"
+        );
+        assert!(shown.chars().count() < whole.chars().count());
+        let (head, tail) = shown
+            .split_once("...")
+            .expect("it has to say it was cut, or it reads as a whole key");
+        assert!(
+            whole.starts_with(head) && whole.ends_with(tail),
+            "and it has to be both ends of the real one: {shown} against {whole}"
+        );
+    }
+
+    /// One shortening, not two.
+    ///
+    /// The session had its own eight-character cut while the transcript used
+    /// a different one, so the same person could appear as `3Kj9mNpQ` in a
+    /// banner and something else in a bubble.
+    #[test]
+    fn a_key_is_shortened_the_same_way_everywhere() {
+        let k = key(9);
+        assert_eq!(short(&k), sigil_ui::short(&k.to_string()));
+        assert_eq!(Person::default().label(&k), short(&k));
+    }
+
+    /// What somebody publishes beats what this machine happens to call them.
+    #[test]
+    fn what_they_publish_wins_over_what_we_call_them() {
+        let k = key(1);
+        let people = just(k, person(Some("Alice"), Some("alice@squic.org")));
+        assert_eq!(name_for(&people, &k, "the plumber"), "Alice");
+    }
+
+    /// A chosen name beats a bound one: somebody here typed "the plumber".
+    #[test]
+    fn a_local_label_beats_a_handle_and_a_key() {
+        let k = key(2);
+        let people = just(k, person(None, Some("alice@squic.org")));
+        assert_eq!(name_for(&people, &k, "the plumber"), "the plumber");
+        assert_eq!(name_for(&HashMap::new(), &k, "the plumber"), "the plumber");
+    }
+
+    /// A handle names somebody when nothing else does.
+    #[test]
+    fn a_handle_names_somebody_when_nothing_else_will() {
+        let k = key(3);
+        let people = just(k, person(None, Some("alice@squic.org")));
+        assert_eq!(name_for(&people, &k, ""), "alice@squic.org");
+    }
+
+    /// With none of them, a short key -- and **never** the empty string, which
+    /// would draw a nameless row nobody could tell from another nameless row.
+    #[test]
+    fn with_nothing_at_all_it_is_a_short_key() {
+        let k = key(4);
+        assert_eq!(name_for(&HashMap::new(), &k, ""), short(&k));
+        assert_ne!(
+            name_for(&HashMap::new(), &k, ""),
+            k.to_string(),
+            "a whole key is what the list used to draw"
+        );
+        // An empty profile is not a name. A withheld one, an absent one and a
+        // blocked one all arrive looking exactly like this.
+        assert_eq!(name_for(&just(k, Person::default()), &k, ""), short(&k));
+    }
+
+    /// `named` is the question "can we name them at all", and its answer is
+    /// what decides whether a view draws a name or falls back.
+    #[test]
+    fn named_is_none_only_when_there_is_nothing_to_show() {
+        assert_eq!(Person::default().named(), None);
+        assert_eq!(
+            person(None, Some("alice@squic.org")).named().as_deref(),
+            Some("alice@squic.org")
+        );
+        assert_eq!(
+            person(Some("Alice"), Some("alice@squic.org"))
+                .named()
+                .as_deref(),
+            Some("Alice")
+        );
+    }
 }
 
 /// The first eight hex characters of an identifier, for a channel with no name.
@@ -3060,7 +3262,8 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     // A direct message, and a direct message is never public.
                     public: Some(false),
                     group: false,
-                    label: peer.to_string(),
+                    // Not their key: `publish` says what to call them.
+                    label: String::new(),
                     admins: vec![chat.me, peer],
                     members: Vec::new(),
                     marks: Vec::new(),
@@ -3347,6 +3550,11 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             let needle = query.trim().to_lowercase();
             let mut hits = Vec::new();
             if !needle.is_empty() {
+                // A hit names the conversation it was found in, and a direct
+                // message's name is a person's -- so it is resolved the same
+                // way the list resolves it, or a search would be the one place
+                // still showing a whole key.
+                let people = people_of(chat, desk);
                 for (channel, known) in &desk.channels {
                     for m in known.timeline.messages() {
                         let text = m.post.body_text().unwrap_or_default();
@@ -3356,7 +3564,10 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                         hits.push(Hit {
                             channel: *channel,
                             seq: m.seq,
-                            label: known.label.clone(),
+                            label: match known.peer {
+                                Some(peer) => name_for(&people, &peer, &known.label),
+                                None => known.label.clone(),
+                            },
                             text: text.to_string(),
                             at: m.posted,
                         });

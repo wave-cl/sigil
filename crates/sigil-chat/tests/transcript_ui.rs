@@ -11,7 +11,7 @@ use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
-    Attached, ChatApp, ChatState, Happened, Line, LinkState, Member, Person, Receipt, Summary,
+    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Receipt, Summary,
 };
 use sqnr_core::PubKey;
 
@@ -276,6 +276,53 @@ fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'s
                 connections: &Default::default(),
             };
             let _ = app.render(&mut app_ctx, ui);
+        })
+}
+
+/// A harness that keeps what the app asked the *navigator* for.
+///
+/// Every other harness here builds a fresh `Navigator` inside the closure, so
+/// a route the app pushes is thrown away with it -- which makes "pressing this
+/// goes there" untestable, and is why the header's controls had no test
+/// covering where they lead.
+fn harness_watching_routes(
+    state: ChatState,
+    routes: std::rc::Rc<std::cell::RefCell<Vec<sigil_chat::Route>>>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+            // Drained here rather than by a shell: the token is opaque by
+            // design, so it is downcast back to this app's own route type,
+            // which is exactly what the shell hands back to `render_nav`.
+            for request in nav.take() {
+                let token = match request {
+                    sigil::navigator::NavRequest::PushActive(e)
+                    | sigil::navigator::NavRequest::ReplaceActive(e) => e.token,
+                    sigil::navigator::NavRequest::Push(e)
+                    | sigil::navigator::NavRequest::Replace(e) => e.token,
+                    _ => continue,
+                };
+                if let Some(route) = token.downcast_ref::<sigil_chat::Route>() {
+                    routes.borrow_mut().push(route.clone());
+                }
+            }
         })
 }
 
@@ -751,9 +798,13 @@ fn a_conversation_is_chosen_by_pressing_anywhere_on_its_row() {
     });
     h.step();
 
+    // The row that was pressed, not any `Show` at all: the app opens a
+    // conversation by itself when none is open, and a looser assertion here
+    // passes on that instead of on the press.
+    let wanted = format!("Show({:?})", [8u8; 32]);
     assert!(
-        asked.borrow().iter().any(|c| c.starts_with("Show")),
-        "pressing the row beside the name did nothing: {:?}",
+        asked.borrow().contains(&wanted),
+        "pressing the row beside the name did not open it: {:?}",
         asked.borrow()
     );
 }
@@ -1385,9 +1436,11 @@ fn a_title_is_never_rendered_beside_the_name() {
 fn a_name_never_appears_without_its_key_reachable() {
     let mut h = harness(true);
     h.run();
-    // The hover text carries the key; what matters here is that the interface
-    // never *replaces* the key with a name it was handed. A name is an
-    // assertion (SIP-21) and the key is the only identity.
+    // What matters here is that the interface never *replaces* the key with a
+    // name it was handed: a name is an assertion (SIP-21) and the key is the
+    // only identity. It is no longer on the hover -- see
+    // `a_peers_key_is_in_full_in_members` for where it went, and
+    // `hovering_a_conversation_offers_no_key` for why.
     let said = text_of(&h);
     assert!(said.contains("Ada"));
     // Our own key in full, one gesture from the name it sits under.
@@ -2335,5 +2388,534 @@ fn hovering_a_message_offers_replying_and_reacting() {
     assert!(
         said.contains("More"),
         "and the rest, behind one more control: {said}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Names: what is drawn where one goes, and what it does when pressed.
+// ---------------------------------------------------------------------------
+
+/// A key as a reader should see it where a whole one will not fit: its first
+/// four characters, three dots, and its last four.
+///
+/// Deliberately **not** `sigil_ui::short`: a test that shortens the key with
+/// the same function the app does asserts that one function agrees with
+/// itself. This is the rule stated on its own, and the tests below hold the
+/// app to it.
+fn short_form(key: &PubKey) -> String {
+    let chars: Vec<char> = key.to_string().chars().collect();
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}...{tail}")
+}
+
+/// Your own name is a control, because setting it is the thing to do about it.
+///
+/// The only way in was a menu item two clicks behind a chevron, which is a
+/// long way for the one control that fixes what the header is saying.
+#[test]
+fn clicking_your_own_name_opens_your_profile() {
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+    assert!(
+        !text_of(&h).contains("Your profile"),
+        "the profile is open before anybody asked for it"
+    );
+
+    h.get_by_label("me").click();
+    h.run();
+    assert!(
+        text_of(&h).contains("Your profile"),
+        "pressing your own name did nothing: {}",
+        text_of(&h)
+    );
+}
+
+/// It opens on what is published, not on an empty box.
+///
+/// An empty box over a name that exists reads as "you have no name", and
+/// **publishes** that the moment somebody presses the button -- which is why
+/// there is one path in rather than two that seed it two ways.
+#[test]
+fn your_profile_opens_on_the_name_you_have() {
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+    h.get_by_label("me").click();
+    h.run();
+    // The field carries the published name as its value, so the name appears
+    // twice on screen: once in the header, once in the box.
+    let said = text_of(&h);
+    assert!(
+        said.matches("me").count() > 1,
+        "the profile opened without the name it is meant to be editing: {said}"
+    );
+}
+
+/// With no name at all, the header shows the start of your key -- and that is
+/// a control too, which is the whole point of it.
+///
+/// It used to be the **whole** key: forty-four characters of base58 in a
+/// block clamped to 220 pixels, truncated into something that said nothing and
+/// did nothing.
+#[test]
+fn with_no_name_the_header_is_a_short_key_that_opens_the_profile() {
+    let mut state = a_conversation();
+    state.mine = Person::default();
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let said = text_of(&h);
+    assert!(
+        said.contains(&short_form(&me())),
+        "nothing on screen names this identity at all: {said}"
+    );
+    assert!(
+        !said.contains(&me().to_string()),
+        "the whole key is drawn where a name goes: {said}"
+    );
+
+    h.get_by_label_contains(&short_form(&me())).click();
+    h.run();
+    assert!(
+        text_of(&h).contains("Your profile"),
+        "pressing the key that stands in for your name did nothing: {}",
+        text_of(&h)
+    );
+}
+
+/// Running the pointer down the conversation list offers no keys.
+///
+/// Every row used to answer a hover with the other person's whole key, and a
+/// pointer crosses rows on its way anywhere -- so the list popped forty-four
+/// characters of base58 over the row below, once per row, for a question
+/// nobody had asked. The key is still reachable, by a gesture somebody chooses:
+/// open the conversation and press Members.
+#[test]
+fn hovering_a_conversation_offers_no_key() {
+    // Nothing open, so "Ada" is the row and not also the author of every
+    // message in the transcript -- `get_by_label_contains` refuses an
+    // ambiguous match, and a hover on the wrong one of two would test the
+    // bubble rather than the row.
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines = Vec::new();
+    let mut h = harness_with(state, true);
+    h.run();
+    h.get_by_label_contains("Ada").hover();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains(&them().to_string()),
+        "hovering a conversation put the other person's key on screen: {said}"
+    );
+    // The row is genuinely under the pointer, or this asserts nothing at all:
+    // a hover that missed would pass with the tooltip fully restored.
+    assert!(
+        said.contains("Ada"),
+        "the row being hovered is not on screen: {said}"
+    );
+}
+
+/// Taking the keys off the hovers did not put a key out of reach.
+///
+/// This is the other half of `hovering_a_conversation_offers_no_key`: a key
+/// stopped being something a pointer trips over on its way somewhere, and it
+/// has to still be somewhere a person can *choose* to go. That place is
+/// Members, off the conversation's own header, where it is in full, in
+/// monospace and selectable -- because it is the only thing that identifies
+/// somebody, and everything drawn above it is a claim.
+#[test]
+fn a_peers_key_is_in_full_in_members() {
+    let mut h = harness_at(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains(&them().to_string()),
+        "the one place a peer's whole key is offered does not have it: {said}"
+    );
+}
+
+/// A member nobody can name is their key, once -- not a prefix of themselves
+/// above themselves.
+///
+/// `Person::label` falls back to the start of the key, and in this view the
+/// whole key is on the very next line, so drawing the label unconditionally
+/// puts `3Kj9mNpQ…` directly over `3Kj9mNpQrs…`.
+#[test]
+fn an_unnamed_member_is_not_drawn_twice() {
+    let mut state = a_conversation();
+    state.people.clear();
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    let said = text_of(&h);
+    let whole = them().to_string();
+    assert!(
+        said.contains(&whole),
+        "the key is still shown in full: {said}"
+    );
+    // The short form has three dots in it and the whole key has none, so the
+    // one cannot be found inside the other: if the short form is on screen at
+    // all, it was drawn as its own label.
+    assert!(
+        !said.contains(&short_form(&them())),
+        "an unnamed member is drawn as a short form of themselves, above \
+         themselves in full: {said}"
+    );
+}
+
+/// And pressing the **words** chooses it too.
+///
+/// `a_conversation_is_chosen_by_pressing_anywhere_on_its_row` presses the
+/// empty ground beside the name, which is the half that always worked. The
+/// name itself did not: egui makes labels selectable text by default, so every
+/// word in the row -- the name, the time, the preview, the unread pill --
+/// handled the press for its own text selection and the row underneath never
+/// heard it. The row is the largest and most obvious target in the column and
+/// most of it was dead.
+#[test]
+fn a_conversation_is_chosen_by_pressing_its_name() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(a_conversation(), asked.clone());
+    h.run();
+
+    // On the name of the other conversation, not beside it.
+    let on = h.get_by_label_contains("release check").rect().center();
+    h.event(egui::Event::PointerButton {
+        pos: on,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: on,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+
+    let wanted = format!("Show({:?})", [8u8; 32]);
+    assert!(
+        asked.borrow().contains(&wanted),
+        "pressing the conversation's own name did not open it: {:?}",
+        asked.borrow()
+    );
+}
+
+/// A search result is chosen by pressing it, words included.
+///
+/// The same defect as `a_conversation_is_chosen_by_pressing_its_name`, one
+/// list over: selectable labels take the press for their own text selection
+/// and the row underneath never hears it. A search result is **entirely**
+/// words, so there was no ground beside them to hit and the whole row was
+/// dead, with a pointing hand over it saying otherwise.
+///
+/// It does not matter that this row claims its rectangle with
+/// `Response::interact` *after* its children while the conversation row
+/// declares its sense *before* them. That difference was my first explanation
+/// for why this one looked fine, and it was wrong -- what actually made it
+/// look fine was the assertion below.
+#[test]
+fn a_search_result_is_chosen_by_pressing_its_words() {
+    let mut state = a_conversation();
+    // Nothing open, so the search box is the only field on screen -- with a
+    // conversation open the composer is a second one and the query is
+    // ambiguous.
+    state.open = None;
+    state.lines = Vec::new();
+    state.searched_messages = true;
+    state.hits = vec![Hit {
+        channel: [8u8; 32],
+        seq: 3,
+        label: "release check".into(),
+        text: "the thing that was said".into(),
+        at: NOW - 60,
+    }];
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+
+    // Results replace the list only while there is something in the box.
+    let field = h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    );
+    field.focus();
+    field.type_text("said");
+    h.run();
+
+    let on = h
+        .get_by_label_contains("the thing that was said")
+        .rect()
+        .center();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: on,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.step();
+
+    // **The hit's own channel, not any `Show` at all.** With nothing open the
+    // app opens the latest conversation by itself on the first pass, so
+    // `starts_with("Show")` passed with the click six hundred pixels off the
+    // row -- a test of the fixture rather than of the press.
+    let wanted = format!("Show({:?})", [8u8; 32]);
+    assert!(
+        asked.borrow().contains(&wanted),
+        "pressing a search result did not open it: {:?}",
+        asked.borrow()
+    );
+}
+
+/// And a direct message's row, which is the one somebody presses most.
+///
+/// `a_conversation_is_chosen_by_pressing_its_name` presses a public channel.
+/// A direct message's row is drawn by the same function with one fewer marker
+/// in it, so this should not be able to differ -- which is exactly the reason
+/// to check rather than reason about it, since the row somebody actually uses
+/// all day is the one it would be worst to get wrong.
+#[test]
+fn a_direct_message_is_chosen_by_pressing_the_persons_name() {
+    let mut state = a_conversation();
+    // The *other* conversation is open, so "Ada" is the row in the list and
+    // not also the author of every message in the transcript.
+    state.open = Some([8u8; 32]);
+    state.lines = Vec::new();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+
+    // Two nodes carry the name: the row itself, whose accessible name is
+    // built from what is inside it, and the label drawing it. The **label**
+    // is the one to press -- pressing the row would test that the row senses
+    // a click, which nobody doubted, rather than that the words do.
+    let on = h
+        .get_all_by_label_contains("Ada")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("the name is drawn somewhere")
+        .center();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: on,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.step();
+
+    let wanted = format!("Show({:?})", [9u8; 32]);
+    assert!(
+        asked.borrow().contains(&wanted),
+        "pressing somebody's name did not open the conversation with them: {:?}",
+        asked.borrow()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Renaming a group from its own name.
+// ---------------------------------------------------------------------------
+
+/// A group's name is the way to change its name.
+///
+/// It was a caption, and renaming lived behind the settings icon at the far
+/// end of the header -- a long way from the thing being renamed, and nothing
+/// said it was there.
+#[test]
+fn an_admin_opens_settings_by_pressing_the_group_name() {
+    let mut state = a_conversation();
+    // The public channel, so the header names a channel rather than a person.
+    state.open = Some([8u8; 32]);
+    state.lines = Vec::new();
+    state.i_am_admin = true;
+    let routes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_watching_routes(state, routes.clone());
+    h.run();
+    routes.borrow_mut().clear();
+
+    press_the_heading(&mut h, "release check");
+
+    assert!(
+        routes.borrow().contains(&sigil_chat::Route::Settings),
+        "pressing the name did not offer to change it: {:?}",
+        routes.borrow()
+    );
+}
+
+/// Press the largest node carrying this text -- the header's heading, rather
+/// than the row in the list, which carries the same name in a smaller one.
+fn press_the_heading(h: &mut Harness<'static>, text: &str) {
+    let on = h
+        .get_all_by_label_contains(text)
+        .map(|n| n.rect())
+        .max_by(|a, b| a.height().total_cmp(&b.height()))
+        .expect("the name is drawn somewhere");
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: on.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run();
+}
+
+/// And it opens on the name it has, not on an empty box.
+///
+/// **The dangerous half.** Neither field was ever seeded, so the pane opened
+/// two empty boxes over a channel that had a name and a topic -- which reads
+/// as "this has no name" -- and `Set` beside an empty box publishes the empty
+/// string. The way in offered to erase what it was showing.
+#[test]
+fn channel_settings_open_on_the_name_it_already_has() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    state.lines = Vec::new();
+    state.i_am_admin = true;
+    state.topic = "what it is for".into();
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+
+    let said = text_of(&h);
+    assert!(
+        said.contains("Channel settings"),
+        "the settings pane is not open: {said}"
+    );
+    assert!(
+        said.contains("release check"),
+        "the name box is empty over a channel that has a name, and Set would \
+         publish that: {said}"
+    );
+    assert!(
+        said.contains("what it is for"),
+        "and the topic box with it: {said}"
+    );
+}
+
+/// Somebody who may not rename it is not invited to try.
+#[test]
+fn a_member_who_is_not_an_admin_is_not_offered_the_rename() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    state.lines = Vec::new();
+    state.i_am_admin = false;
+    let routes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_watching_routes(state, routes.clone());
+    h.run();
+    routes.borrow_mut().clear();
+
+    press_the_heading(&mut h, "release check");
+
+    assert!(
+        !routes.borrow().contains(&sigil_chat::Route::Settings),
+        "pressing the name opened settings for somebody who cannot change \
+         anything in them: {:?}",
+        routes.borrow()
+    );
+}
+
+/// And neither is a direct message, whose "name" is a person.
+///
+/// Both members of a direct message are admins of the channel that carries it
+/// -- that is how the store records it -- so an `i_am_admin` check on its own
+/// offers to rename somebody.
+#[test]
+fn a_direct_message_is_not_offered_a_rename() {
+    let mut state = a_conversation();
+    state.open = Some([9u8; 32]);
+    state.lines = Vec::new();
+    state.i_am_admin = true;
+    let routes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_watching_routes(state, routes.clone());
+    h.run();
+    routes.borrow_mut().clear();
+
+    press_the_heading(&mut h, "Ada");
+
+    assert!(
+        !routes.borrow().contains(&sigil_chat::Route::Settings),
+        "pressing somebody's name offered to rename them: {:?}",
+        routes.borrow()
+    );
+}
+
+/// A long conversation name does not run over the time beside it.
+///
+/// From a real list: a group called "Right? Wrrrrooooonggggg!" was drawn
+/// straight through its own timestamp, so both were unreadable where they
+/// crossed. The name was laid out first and given no width to fit into, so it
+/// took the whole row and the right-hand block -- the time and the unread
+/// count -- was drawn on top of it.
+///
+/// The same lesson the conversation *header* already learned: lay the fixed
+/// things out from the right first, and give the name what is left.
+#[test]
+fn a_long_name_does_not_run_over_the_time() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines = Vec::new();
+    state.conversations[0].label =
+        "Right? Wrrrrooooonggggg! And rather longer than that, even".into();
+    state.conversations[0].at = Some(NOW - 60);
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let name = h
+        .get_all_by_label_contains("Wrrrrooooonggggg")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("the name is drawn");
+    // 12:59 in the fixture's fixed clock.
+    let time = h.get_by_label_contains("12:59").rect();
+
+    assert!(
+        name.right() <= time.left() + 0.5,
+        "the name is drawn over the time: name ends at {}, time starts at {}",
+        name.right(),
+        time.left()
+    );
+}
+
+/// And a long preview stays on one line.
+///
+/// Not the same fault as the name's, which is why it is worth asking rather
+/// than assuming. The preview does not run *over* anything -- it **wraps**,
+/// and the row grows a second line, so one long message makes one row taller
+/// than every other row in the column. `one_line` already flattens newlines
+/// out of it; what it does not do is make it short.
+///
+/// Measured against the height of the time beside it, which is set in the same
+/// small style: one line of it is a row that fits, two is the fault.
+#[test]
+fn a_long_preview_stays_on_one_line() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines = Vec::new();
+    state.conversations[0].preview = Some(
+        "a preview considerably longer than the column it has to sit in, going on \
+         and on well past the point where anybody would still be reading it"
+            .into(),
+    );
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let preview = h
+        .get_all_by_label_contains("considerably longer")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("the preview is drawn");
+    // A line of the same small style, from the same row.
+    let line = h.get_by_label_contains("12:59").rect().height();
+
+    assert!(
+        preview.height() < line * 1.5,
+        "the preview wrapped, so this row is taller than the rest of the \
+         column: {} against a line of {line}",
+        preview.height()
     );
 }

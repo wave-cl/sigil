@@ -635,7 +635,7 @@ async fn a_conversation_that_was_left_does_not_come_back() {
         .channels()
         .unwrap()
         .into_iter()
-        .map(|(_, _, label, _)| label)
+        .map(|c| c.label)
         .collect();
     assert!(
         !left.iter().any(|l| l == "a room to leave"),
@@ -2050,4 +2050,107 @@ async fn something_that_is_not_a_credential_is_refused_in_words() {
     )
     .await;
     assert!(said, "refused silently: {:?}", alice.state().trouble);
+}
+
+/// What kind of channel it is gets written down, so the next start knows.
+///
+/// # What this is for
+///
+/// A row says which kind of conversation it is -- a public channel anybody may
+/// join and where nothing is encrypted, against a private group where the
+/// opposite holds. That came only from the exchange, because the store
+/// recorded group-or-not and nothing else, so **neither mark was drawn for the
+/// first sweep of every start**: a wait, every time, for a fact that never
+/// changes. sqex-chat v0.47 records it, and this is the half sigil owns --
+/// putting the answer on the disc the moment the exchange gives one.
+///
+/// # Why it asks the disc rather than a second session
+///
+/// A second session would answer with whatever it had at the moment it was
+/// asked, and the sweep fills the same field in within a second of connecting
+/// -- so the test would pass whether or not anything had been written down. A
+/// second path to the outcome steals the first path's test.
+///
+/// Restarting *without* the exchange would settle it, and cannot be done: a
+/// session is built around a live connection (`Chat::new` takes one), so it
+/// does not start at all while the exchange is unreachable, and nothing is
+/// restored from the disc to look at.
+#[tokio::test]
+async fn what_kind_of_channel_it_is_is_written_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let store_path = dir.path().join("a.db");
+
+    let (a_signer, a_id) = signer(9);
+    let seed = a_signer.seed();
+    let alice = start_at(endpoint, a_signer, &store_path);
+    assert!(
+        until(|| alice.state().me == Some(a_id), 15).await,
+        "the session should come up: {:?}",
+        alice.state().trouble
+    );
+
+    alice.send(Cmd::NewPublic {
+        name: "the square".into(),
+        topic: "anybody at all".into(),
+    });
+    alice.send(Cmd::NewGroup("the back room".into()));
+    let named = |label: &'static str, public: Option<bool>| {
+        alice
+            .state()
+            .conversations
+            .iter()
+            .any(|c| c.label == label && c.public == public && c.group)
+    };
+    assert!(
+        until(
+            || named("the square", Some(true)) && named("the back room", Some(false)),
+            20
+        )
+        .await,
+        "both channels should exist and the exchange should have said which is \
+         which: {:?}",
+        alice.state().conversations
+    );
+    alice.stop();
+
+    // The flock goes when the session's task actually finishes, which is not
+    // the instant `stop` returns.
+    let mut store = None;
+    for _ in 0..50 {
+        match sqex_chat::store::Store::open(&seed, Some(&store_path)) {
+            Ok(open) => {
+                store = Some(open);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let mut store = store.expect("the store, once the session has let go of it");
+    store.scope_to(&PubKey::new(server_pub)).unwrap();
+    let on_disc = store.channels().unwrap();
+    let of = |label: &str| {
+        on_disc
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("{label} is not on the disc at all: {on_disc:?}"))
+            .clone()
+    };
+
+    assert_eq!(
+        of("the square").public,
+        Some(true),
+        "the disc does not know the square is public, so the next start draws \
+         no mark on it and somebody cannot tell a room anybody may read from \
+         an encrypted group"
+    );
+    assert_eq!(
+        of("the back room").public,
+        Some(false),
+        "nor that the back room is not"
+    );
 }

@@ -27,13 +27,13 @@ license = "MIT"
 # tagging a release. `.github/workflows/release.yml` refuses a tag that still
 # carries a path dependency, so forgetting fails loudly rather than shipping
 # something nobody else can build. See docs/dependencies.md.
-sqex-proto = { git = "https://github.com/wave-cl/sqex", tag = "v0.46.0" }
-sqex-discovery = { git = "https://github.com/wave-cl/sqex", tag = "v0.46.0" }
-sqex-voice = { git = "https://github.com/wave-cl/sqex", tag = "v0.46.0" }
-sqex-chat = { git = "https://github.com/wave-cl/sqex", tag = "v0.46.0" }
+sqex-proto = { git = "https://github.com/wave-cl/sqex", tag = "v0.47.0" }
+sqex-discovery = { git = "https://github.com/wave-cl/sqex", tag = "v0.47.0" }
+sqex-voice = { git = "https://github.com/wave-cl/sqex", tag = "v0.47.0" }
+sqex-chat = { git = "https://github.com/wave-cl/sqex", tag = "v0.47.0" }
 # Only ever a dev-dependency: tests drive a real exchange in-process, because a
 # client that was only tested against a mock has tested the mock.
-sqexd = { git = "https://github.com/wave-cl/sqex", tag = "v0.46.0" }
+sqexd = { git = "https://github.com/wave-cl/sqex", tag = "v0.47.0" }
 sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.9" }
 sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.9" }
 squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.27.0" }

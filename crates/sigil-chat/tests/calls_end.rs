@@ -113,6 +113,7 @@ async fn a_call_is_shown_even_while_looking_at_another_identity() {
     // Two identities, and the call belongs to the one *not* being shown.
     let shown = Account::unlocked_for_test([1u8; 32]);
     let other = Account::unlocked_for_test([2u8; 32]);
+    let looking_at = shown.unlocked().expect("an open account").me();
     let elsewhere = other.unlocked().expect("an open account").me();
     let mut accounts = Accounts::of(vec![shown, other]);
     pass(&mut app, &mut accounts, &egui_ctx);
@@ -168,10 +169,35 @@ async fn a_call_is_shown_even_while_looking_at_another_identity() {
     );
     // And it says whose, because a hang-up that ends somebody else's call has
     // to name them.
-    let whose = elsewhere.to_string();
+    //
+    // Neither identity has published a profile, so what names one is the
+    // short form of its key: the first four characters, three dots, the last
+    // four. Built here from that rule rather than by calling `short`, so this
+    // tests that the **right** identity is named and not that two functions
+    // agree with each other.
+    let short_form = |k: &PubKey| -> String {
+        let chars: Vec<char> = k.to_string().chars().collect();
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}...{tail}")
+    };
+    let banner = said
+        .iter()
+        .find(|l| l.contains("In a call") || l.contains("Connecting"))
+        .expect("the banner was found above");
     assert!(
-        said.iter().any(|l| l.contains(&whose)),
-        "the call does not say which identity is in it: {said:?}"
+        banner.contains(&short_form(&elsewhere)),
+        "the call does not say which identity is in it: {banner:?}"
+    );
+    // The negative half, and the one that matters: the identity on screen is
+    // *not* the one in the call, and a banner naming it would be worse than
+    // one naming nobody. Asserted on the banner rather than on the screen,
+    // because the identity being looked at has its own short key in its own
+    // header, exactly as it should.
+    assert!(
+        !banner.contains(&short_form(&looking_at)),
+        "the banner names the identity on screen, which is not the one in the \
+         call: {banner:?}"
     );
 }
 

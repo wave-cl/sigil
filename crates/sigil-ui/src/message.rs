@@ -768,30 +768,38 @@ pub fn faded(text: egui::Color32, over: egui::Color32) -> egui::Color32 {
     )
 }
 
-/// Who said it: the name if there is one, and the key always reachable.
+/// Who said it: the name if there is one, and the first of the key if not.
+///
+/// # Why the key is not on hover any more
+///
+/// It was, and hovering a transcript is not a question anybody is asking: the
+/// pointer crosses author lines on its way to the scrollbar, to a reaction, to
+/// the composer, and each crossing popped forty-four characters of base58 over
+/// the message underneath. A tooltip that fires on the way past is noise, and
+/// noise is what gets ignored -- including on the occasion somebody did want
+/// the key.
+///
+/// So the key is a deliberate gesture rather than an accidental one: Members,
+/// from the conversation's own header, has every key in full and selectable.
+/// What stays on hover is the **title**, because it is not visible anywhere
+/// else and SIP-21 requires the caveat travel with it.
 fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
-    // Whatever is shown, the key is what it leads to.
-    let behind = match b.title {
-        Some(title) => format!("{}\n{title} — self-declared, verified by nobody", b.key),
-        None => b.key.to_string(),
+    let text = match b.name {
+        // A profile name is self-declared and nobody attests it, so it is
+        // drawn as ordinary text. It must never be styled as though the
+        // exchange vouched for it.
+        Some(name) => egui::RichText::new(name).strong().color(theme.accent),
+        // Nobody can name them. The first characters of the key, in monospace
+        // because that is what it is -- and never enough to identify somebody
+        // on its own, which is why it is not offered as though it were.
+        None => egui::RichText::new(short(b.key))
+            .strong()
+            .monospace()
+            .color(theme.accent),
     };
-    match b.name {
-        Some(name) => {
-            // A profile name is self-declared and nobody attests it, so it is
-            // drawn as ordinary text and the key is one hover away. It must
-            // never be styled as though the exchange vouched for it.
-            ui.label(egui::RichText::new(name).strong().color(theme.accent))
-                .on_hover_text(behind);
-        }
-        None => {
-            ui.label(
-                egui::RichText::new(short(b.key))
-                    .strong()
-                    .monospace()
-                    .color(theme.accent),
-            )
-            .on_hover_text(behind);
-        }
+    let line = ui.label(text);
+    if let Some(title) = b.title {
+        line.on_hover_text(format!("{title} — self-declared, verified by nobody"));
     }
 }
 
@@ -860,29 +868,45 @@ pub fn reaction_chip(ui: &mut egui::Ui, emoji: &str, count: usize, ours: bool) -
     })
 }
 
-/// The first characters of a key, for where the whole one will not fit.
+/// A key, for where the whole one will not fit: its first four characters,
+/// three dots, and its last four.
+///
+/// # Both ends, not one
+///
+/// This was the first eight characters and an ellipsis, and a prefix is the
+/// one part of a key that can be *chosen*: grinding a key whose first eight
+/// characters match somebody else's is expensive but not out of reach, and it
+/// got easier the moment the whole key stopped being one hover away. Showing
+/// both ends means an impostor has to match both, which is a different order
+/// of work -- and it is what people are used to reading a key as.
+///
+/// Three ASCII dots rather than `…`, so the form is the same in a monospace
+/// label, a tooltip, a log line and a terminal, and so it cannot go missing
+/// from a font the way a glyph can.
 ///
 /// Only ever beside something that leads back to the full key.
 ///
 /// # Characters, not bytes
 ///
-/// This cut `&key[..8]` and **panicked** on any string whose eighth byte falls
-/// inside a character — an em dash, an accent, an emoji, which is to say most
-/// messages anybody writes. A key is base58 and would never have found it; two
-/// callers passed message text, and searching your conversations or replying
-/// to a message with a dash in it took the whole application down.
-///
-/// A public function that slices a `&str` by byte index is a crash waiting for
-/// somebody to type a character.
+/// This once cut `&key[..8]` and **panicked** on any string whose eighth byte
+/// fell inside a character -- an em dash, an accent, an emoji. A key is base58
+/// and would never have found it; two callers passed message text, and
+/// searching your conversations or replying to a message with a dash in it
+/// took the whole application down. A public function that slices a `&str`
+/// by byte index is a crash waiting for somebody to type a character.
 pub fn short(text: &str) -> String {
-    let cut: String = text.chars().take(8).collect();
-    // Elided only when something was actually cut. Appending `…` to a string
-    // that is already whole says there is more, and there is not.
-    if cut.chars().count() == text.chars().count() {
-        cut
-    } else {
-        format!("{cut}…")
+    const END: usize = 4;
+    const DOTS: &str = "...";
+    let chars: Vec<char> = text.chars().collect();
+    // Elided only when it saves something. A string of eleven characters is
+    // exactly as long as `abcd...wxyz`, and one shorter would come out longer
+    // than it went in, claiming there was more when there was less.
+    if chars.len() <= END * 2 + DOTS.len() {
+        return text.to_string();
     }
+    let head: String = chars[..END].iter().collect();
+    let tail: String = chars[chars.len() - END..].iter().collect();
+    format!("{head}{DOTS}{tail}")
 }
 
 /// A line of somebody's message, for a preview.
@@ -982,23 +1006,28 @@ mod tests {
         ] {
             let out = short(text);
             assert!(
-                out.chars().count() <= 9,
+                out.chars().count() <= 11,
                 "{text:?} shortened to {out:?}, which is longer than it should be"
             );
-            assert!(
-                text.starts_with(out.trim_end_matches('…')),
-                "{out:?} is not the start of {text:?}"
-            );
+            match out.split_once("...") {
+                Some((head, tail)) => assert!(
+                    text.starts_with(head) && text.ends_with(tail),
+                    "{out:?} is not the two ends of {text:?}"
+                ),
+                // Short enough to come back whole.
+                None => assert_eq!(out, text),
+            }
             let _ = preview(text, 48);
         }
     }
 
     /// Nothing was cut, so nothing says there is more.
     #[test]
-    fn a_short_string_is_not_given_an_ellipsis_it_did_not_earn() {
+    fn a_short_string_is_not_given_dots_it_did_not_earn() {
         assert_eq!(short("abc"), "abc");
         assert_eq!(preview("abc", 48), "abc");
-        assert!(short("abcdefghij").ends_with('…'));
+        assert!(!short("abcdefghij").contains("..."));
+        assert!(short("abcdefghijklmnop").contains("..."));
     }
 
     /// A preview goes on one row, whatever is in the message.
@@ -1118,17 +1147,28 @@ mod tests {
     #[test]
     fn a_short_key_still_leads_somewhere() {
         let s = short("2vXsQ9pC3nR7bK1mW8dF");
-        assert!(s.ends_with('…'), "must not look like a whole key: {s}");
+        assert!(s.contains("..."), "must not look like a whole key: {s}");
         assert!(s.len() < 12);
     }
 
     #[test]
     fn short_never_panics_on_a_string_shorter_than_the_window() {
-        // The ellipsis went with the byte slicing: it was appended whether or
+        // The elision went with the byte slicing: it was appended whether or
         // not anything had been cut, so a two-character string claimed to have
         // more after it. What this test is actually for -- that a string
         // shorter than the window does not panic -- is unchanged.
         assert_eq!(short(""), "");
         assert_eq!(short("ab"), "ab");
+        // Eleven characters is the length of the short form itself: nothing
+        // is saved by cutting it, so it is not cut.
+        assert_eq!(short("abcdefghijk"), "abcdefghijk");
+        assert_eq!(short("abcdefghijkl"), "abcd...ijkl");
+    }
+
+    /// The form itself, on a real key: four, three dots, four.
+    #[test]
+    fn a_key_is_shown_by_both_its_ends() {
+        let key = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
+        assert_eq!(short(key), "8qbH...VfeR");
     }
 }

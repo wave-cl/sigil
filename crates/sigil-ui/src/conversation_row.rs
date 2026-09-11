@@ -15,12 +15,10 @@ pub struct ConversationRow<'a> {
     /// different conversation the moment somebody writes to another one.
     pub id: &'a str,
     /// The name to show. For a group, its name; for a direct message, the
-    /// other person's profile name or their key.
+    /// other person's profile name, or what this machine was told to call
+    /// them, or the first characters of their key -- decided by the caller,
+    /// because only the caller knows whether a profile has arrived.
     pub label: &'a str,
-    /// The full key, when this conversation is with one person. Reachable from
-    /// the row, because a name is an assertion (SIP-21) and this is often the
-    /// only place the key could appear.
-    pub key: Option<&'a str>,
     /// The last thing said, one line.
     pub preview: &'a str,
     /// A short time, already formatted.
@@ -63,6 +61,26 @@ pub fn conversation_row(
     // everything drawn inside it is inside the thing that answers.
     let inner = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
         ui.set_min_width(ui.available_width());
+        // **Nothing in the row is selectable text.**
+        //
+        // egui makes labels selectable by default, and a selectable label
+        // handles the press itself -- to put a cursor in its text -- so the
+        // row underneath never hears it. Which meant the row's own sense,
+        // added precisely so the whole thing could be pressed, only answered
+        // on the ground *between* the words: beside a short name, under a
+        // one-line preview, at the narrow end of the row. Every part of it
+        // somebody would actually aim at was dead.
+        //
+        // Set on the scope rather than on each label, because it is a property
+        // of *this row* and not of six widgets that happen to be in it -- a
+        // seventh added later inherits it instead of quietly reintroducing the
+        // hole.
+        //
+        // Nothing is lost: there is no text here worth selecting. A name, a
+        // time and a truncated preview are all shown in full somewhere the
+        // pointer can reach, and the key that used to be worth copying was
+        // never selectable anyway.
+        ui.style_mut().interaction.selectable_labels = false;
         // Reserved now and painted at the end: the background has to go
         // *under* the contents, and its size is not known until they have
         // been laid out.
@@ -129,16 +147,69 @@ fn row_body(
                                     "public — anybody may join, and nothing here is encrypted",
                                 );
                         } else if row.group && row.public == Some(false) {
-                            ui.colored_label(theme.text_muted, "◇")
-                                .on_hover_text("group");
+                            // **Painted, not typed.** This was `◇`
+                            // (U+25C7 WHITE DIAMOND) and egui's fonts do not
+                            // have it -- `has_glyph` says so plainly -- so
+                            // every private group was marked with nothing at
+                            // all, while the public channel beside it kept its
+                            // `#` because `#` is ASCII. The same trap as `↳`
+                            // in `message.rs`, which is drawn as a painted bar
+                            // for exactly this reason.
+                            //
+                            // Two heads: what a private group *is* from this
+                            // row's point of view is more than two people, and
+                            // not public.
+                            let size = ui.text_style_height(&egui::TextStyle::Body);
+                            let (rect, mark) = ui
+                                .allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+                            if ui.is_rect_visible(rect) {
+                                sigil::icon::draw(
+                                    ui.painter(),
+                                    rect,
+                                    sigil::Icon::People,
+                                    theme.text_muted,
+                                );
+                            }
+                            mark.on_hover_text("group — more than two people, and not public");
                         }
-                        let label = ui.label(egui::RichText::new(row.label).strong());
-                        if let Some(key) = row.key {
-                            label.on_hover_text(key.to_string());
-                        }
+                        // **No key on hover.** This row used to answer with
+                        // the whole base58 key, so running the pointer down a
+                        // conversation list -- which is what a pointer does on
+                        // its way anywhere -- popped a tooltip of forty-four
+                        // characters over the next row down, on every row in
+                        // turn. A key is not what somebody is reaching for
+                        // here; the conversation is.
+                        //
+                        // The key is still one gesture away, and now a
+                        // deliberate one: open the conversation and press
+                        // Members, where every key is in full, in monospace,
+                        // and selectable.
+                        //
+                        // **The time and the count are laid out first, from
+                        // the right.** Given the name first it takes the whole
+                        // row -- a `Label` has no width to fit into and does
+                        // not truncate on its own -- and the right-hand block
+                        // is then drawn *on top of it*, so a long name and its
+                        // timestamp cross and neither can be read. Seen on a
+                        // real list, with a group called "Right?
+                        // Wrrrrooooonggggg!" straight through its own 21:48.
+                        //
+                        // The conversation header above the transcript learned
+                        // this first, and its comment says the same thing.
+                        // Whatever is left over is the name's, and it
+                        // truncates rather than pushing anything off the row.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             crate::unread_pill(ui, row.unread);
                             ui.colored_label(theme.text_muted, egui::RichText::new(row.at).small());
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(row.label).strong())
+                                            .truncate(),
+                                    );
+                                },
+                            );
                         });
                     });
                     let (colour, text) = if row.waiting {
@@ -151,7 +222,15 @@ fn row_body(
                     } else {
                         (theme.text_secondary, one_line(row.preview))
                     };
-                    ui.colored_label(colour, egui::RichText::new(text).small());
+                    // Truncated for the same reason the name is: a label with
+                    // no width to fit into keeps drawing, and this one ran
+                    // past the end of the column into the transcript.
+                    // `one_line` already flattens it to a single line; what it
+                    // does not do is make it short.
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).color(colour).small())
+                            .truncate(),
+                    );
                 });
             });
         });
@@ -200,5 +279,70 @@ mod tests {
         let long = "é".repeat(500);
         let out = one_line(&long);
         assert!(out.chars().count() <= 80);
+    }
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    /// Every character this crate *draws* must be in the font egui has.
+    ///
+    /// # Why this test exists
+    ///
+    /// A private group was marked with `◇` (U+25C7 WHITE DIAMOND), and egui's
+    /// bundled fonts do not contain it. There is no error and no warning: the
+    /// character simply does not appear, so a private group had no mark while
+    /// the public channel on the row above kept its `#` -- because `#` is
+    /// ASCII. Nothing in a test or a snapshot said anything, because the
+    /// accessibility tree carries the character whether or not a glyph exists
+    /// for it, and a missing mark looks exactly like a mark nobody added.
+    ///
+    /// It is the second time: `message.rs` draws a painted bar rather than
+    /// `↳` for the same reason, discovered the same way -- by looking.
+    ///
+    /// So the rule is: **a mark is painted** ([`sigil::icon::draw`]), and any
+    /// character that is typed has to be one the font has. This checks the
+    /// second half. `has_glyph` is asked of a real `Context`, so it answers
+    /// about the fonts sigil actually runs with rather than a list somebody
+    /// kept by hand.
+    #[test]
+    fn the_characters_we_type_are_in_the_font() {
+        // Drawn by this crate and by the chat app's own rows. Add to this
+        // when a literal is added, and if it fails, paint it instead.
+        const TYPED: &[char] = &[
+            '#', // a public channel, in the conversation row
+            '…', // a shortened key, a cut preview, a truncated line
+            '—', // an em dash, in most of the sentences on screen
+            '·', // a separator between small facts
+        ];
+        // Not in the font, and each one cost somebody a look to find out.
+        // Kept as the negative control: if these ever became available the
+        // test would stop proving anything, and it would say so.
+        const MISSING: &[char] = &['◇', '◆', '●', '↳', '🔒'];
+
+        let ctx = egui::Context::default();
+        // The pass's output has to be taken and cleared: dropping a
+        // `TexturesDelta` with the font atlas in it panics on the way out,
+        // which reads as a failure of whatever the test was doing.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let id = egui::FontId::proportional(14.0);
+            for c in TYPED {
+                assert!(
+                    ui.ctx().fonts_mut(|f| f.has_glyph(&id, *c)),
+                    "U+{:04X} {c:?} is drawn and the font does not have it, so \
+                     it is drawn as nothing at all -- paint it instead",
+                    *c as u32
+                );
+            }
+            for c in MISSING {
+                assert!(
+                    !ui.ctx().fonts_mut(|f| f.has_glyph(&id, *c)),
+                    "U+{:04X} {c:?} is in the font now. Good news, and this \
+                     test's negative control is gone: check the rest of the \
+                     list still means something.",
+                    *c as u32
+                );
+            }
+        });
+        out.textures_delta.clear();
     }
 }
