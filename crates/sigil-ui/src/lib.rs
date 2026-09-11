@@ -7,7 +7,7 @@ pub mod attachment;
 pub mod clock;
 pub mod conversation_row;
 pub mod dot;
-
+pub mod gif;
 pub mod identicon;
 pub mod message;
 pub mod roster;
@@ -36,6 +36,12 @@ pub use identicon::{avatar, identicon, identicon_of};
 /// Call it once per `Context`, beside `theme::install`. Idempotent.
 pub fn install_loaders(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
+    // After, so it is tried first: egui asks the most recently added loader
+    // before the rest, and `egui_extras`'s gif loader decodes on the thread
+    // that asks. See `gif`.
+    if !ctx.is_loader_installed(gif::GifLoader::ID) {
+        ctx.add_image_loader(std::sync::Arc::new(gif::GifLoader::default()));
+    }
 }
 
 /// sigil's own mark: a disc in the accent.

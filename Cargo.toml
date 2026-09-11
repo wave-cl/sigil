@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 
@@ -27,13 +27,13 @@ license = "MIT"
 # tagging a release. `.github/workflows/release.yml` refuses a tag that still
 # carries a path dependency, so forgetting fails loudly rather than shipping
 # something nobody else can build. See docs/dependencies.md.
-sqex-proto = { git = "https://github.com/wave-cl/sqex", tag = "v0.51.0" }
-sqex-discovery = { git = "https://github.com/wave-cl/sqex", tag = "v0.51.0" }
-sqex-voice = { git = "https://github.com/wave-cl/sqex", tag = "v0.51.0" }
-sqex-chat = { git = "https://github.com/wave-cl/sqex", tag = "v0.51.0" }
+sqex-proto = { git = "https://github.com/wave-cl/sqex", tag = "v0.54.0" }
+sqex-discovery = { git = "https://github.com/wave-cl/sqex", tag = "v0.54.0" }
+sqex-voice = { git = "https://github.com/wave-cl/sqex", tag = "v0.54.0" }
+sqex-chat = { git = "https://github.com/wave-cl/sqex", tag = "v0.54.0" }
 # Only ever a dev-dependency: tests drive a real exchange in-process, because a
 # client that was only tested against a mock has tested the mock.
-sqexd = { git = "https://github.com/wave-cl/sqex", tag = "v0.51.0" }
+sqexd = { git = "https://github.com/wave-cl/sqex", tag = "v0.54.0" }
 sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.9" }
 sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.9" }
 squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.27.0" }
@@ -60,6 +60,7 @@ auto-launch = "0.6"
 
 # --- runtime --------------------------------------------------------------
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
@@ -67,7 +68,7 @@ serde_json = "1"
 thiserror = "2"
 dirs = "6"
 bs58 = "0.5"
-image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 
 [workspace.dependencies.egui_kittest]

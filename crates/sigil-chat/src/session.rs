@@ -1286,6 +1286,20 @@ async fn run(
             lent = chat.link();
             holds.set(chat.connection().map(|c| (c, endpoint)));
         }
+        // **Pictures still waiting come first, and at once.** The fetch just
+        // done was the pacing; a wait here on top of it -- seven hundred
+        // milliseconds a picture, and a refresh round trip with each -- was
+        // most of what a reader waited for on the second sight of a
+        // conversation. Commands are still answered between them: the fetch
+        // attends to them before it asks the exchange for anything.
+        if more {
+            let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+            more = did.more;
+            if did.landed && publish(&chat, &state, &desk, me) {
+                (wake)();
+            }
+            continue;
+        }
         // **What is outstanding decides the wait.** A link being redialled
         // advances a slice per pass and would take minutes at the quiet
         // interval; a note has to disappear five seconds after it appeared,
@@ -1293,8 +1307,7 @@ async fn run(
         // and "typing..." has to go out when somebody stops, which is the one
         // thing only asking can find (see `still_live`) -- at the quiet
         // interval it would linger five seconds after they had gone.
-        let quick = more
-            || chat.link() != Link::Up
+        let quick = chat.link() != Link::Up
             || !desk.dirty.is_empty()
             || desk.restructure
             || still_live(&desk).is_some()
@@ -1337,6 +1350,16 @@ async fn run(
             Some(cmd) = cmds.recv() => {
                 apply(&mut chat, cmd, &state, &mut desk).await;
                 (wake)();
+                // A picture just asked for, or just sent, is fetched now and
+                // not on the next backstop: that was five seconds of
+                // thumbnail after pressing Fetch, and after sending one.
+                {
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    more = did.more;
+                    if did.landed && publish(&chat, &state, &desk, me) {
+                        (wake)();
+                    }
+                }
             }
             // **What was already being waited for.** A parked fetch is a
             // question asked before there was an answer, so this is the whole
@@ -1350,6 +1373,18 @@ async fn run(
                         if absorb(&mut chat, &state, &mut desk, me, *got).await {
                             (wake)();
                         }
+                        // The same as the knock: a message with a picture
+                        // in it is one round trip, and the picture is the
+                        // next -- not the next backstop. Measured at eight
+                        // to ten seconds from message to picture before
+                        // this, of which the fetch itself was under two.
+                        {
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    more = did.more;
+                    if did.landed && publish(&chat, &state, &desk, me) {
+                        (wake)();
+                    }
+                }
                     }
                     Arrived::Trouble(channel) => {
                         desk.dirty.insert(channel);
@@ -1380,7 +1415,13 @@ async fn run(
                 // A message with pictures in it arrives as one event; without
                 // this they would come in one per backstop, five seconds
                 // apart, however fast the exchange was.
-                more = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                {
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    more = did.more;
+                    if did.landed && publish(&chat, &state, &desk, me) {
+                        (wake)();
+                    }
+                }
             }
             _ = tokio::time::sleep(until) => {
                 ticked = tokio::time::Instant::now();
@@ -1455,7 +1496,13 @@ async fn run(
                 // tick spent two and a half seconds on pictures before asking
                 // whether anything had been said.
                 moved |= refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
-                more = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                {
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    more = did.more;
+                    if did.landed && publish(&chat, &state, &desk, me) {
+                        (wake)();
+                    }
+                }
                 // **Only when something moved.** eframe is reactive: with
                 // nothing asking for a repaint it sleeps. This wake used to
                 // fire on every tick regardless, which held the window at 1.4
@@ -2618,54 +2665,91 @@ fn to_put_down(
 /// runs on a tick. `download` verifies the blob's name against the ciphertext
 /// **before decrypting**, so what arrives is what was named or nothing.
 /// Fetch one picture, and say whether more are waiting.
+/// What a pass of [`fetch_files`] did.
+struct Fetching {
+    /// Pictures still waiting, so the next pass should come round at once.
+    more: bool,
+    /// A picture arrived, so the state wants publishing **now**. It used to
+    /// wait for the next refresh to notice -- five seconds, on the backstop,
+    /// for the last picture in a pass -- after a fetch of a third of one.
+    landed: bool,
+}
+
 async fn fetch_files(
     chat: &mut Chat,
     state: &watch::Sender<ChatState>,
     desk: &mut Desk,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
-) -> bool {
-    let Some(open) = desk.open else { return false };
-    let Some(known) = desk.channels.get(&open) else {
-        return false;
+) -> Fetching {
+    let none = Fetching {
+        more: false,
+        landed: false,
     };
-    let wanted: Vec<sqex_proto::blob::Attachment> = known
+    let Some(open) = desk.open else { return none };
+    let Some(known) = desk.channels.get(&open) else {
+        return none;
+    };
+    // Each with whether it is already on the disc, which decides both
+    // whether it is fetched unasked and how many of them one pass takes.
+    let wanted: Vec<(sqex_proto::blob::Attachment, bool)> = known
         .timeline
         .messages()
         .flat_map(|m| m.post.attachments())
         .filter(|a| a.effective_kind() == sqex_proto::blob::KIND_IMAGE)
         .filter(|a| !desk.files.contains_key(&a.blob) && !desk.unfetchable.contains(&a.blob))
-        .filter(|a| {
-            fetch_unasked(
-                a.size,
-                desk.wanted.contains(&a.blob),
-                chat.store().has_blob(&a.blob).unwrap_or(false),
-            )
-        })
-        .cloned()
+        .map(|a| (a, chat.store().has_blob(&a.blob).unwrap_or(false)))
+        .filter(|(a, on_disc)| fetch_unasked(a.size, desk.wanted.contains(&a.blob), *on_disc))
+        .map(|(a, on_disc)| (a.clone(), on_disc))
         .collect();
+    if wanted.is_empty() {
+        return none;
+    }
 
-    // **One a pass.** A picture takes as long as it takes -- one of them was
-    // measured at two and a half seconds -- and the whole of that is time the
-    // task cannot answer anybody in. The caller comes straight back round for
-    // the next one, so ten pictures is ten passes and not ten backstops.
-    let waiting = wanted.len();
-    let Some(a) = wanted.into_iter().next() else {
-        return false;
+    // **Everything on the disc, then one from the exchange.**
+    //
+    // A picture already here costs a read and an open -- milliseconds --
+    // and there is nothing to wait behind, so a conversation opened for the
+    // second time gets all of its pictures in one pass rather than one per
+    // pass with a wait between. One from the network a pass, because that
+    // one takes as long as it takes -- one was measured at two and a half
+    // seconds -- and the whole of that is time the task cannot answer
+    // anybody in; the caller comes straight back round for the next.
+    let mut landed = false;
+    let mut land = |desk: &mut Desk, blob: [u8; 32], bytes: Vec<u8>| {
+        if desk.files.insert(blob, bytes.into()).is_none() {
+            desk.fetched.push(blob);
+        }
+        put_down_what_is_not_wanted(desk);
+        landed = true;
+    };
+    let mut from_the_exchange = Vec::new();
+    for (a, on_disc) in wanted {
+        if !on_disc {
+            from_the_exchange.push(a);
+            continue;
+        }
+        // Named as on the disc and not readable after all: the store has
+        // already put it down, so the next pass asks the exchange.
+        if let Ok(bytes) = chat.download(&a).await {
+            land(desk, a.blob, bytes);
+        }
+    }
+    let waiting = from_the_exchange.len();
+    let Some(a) = from_the_exchange.into_iter().next() else {
+        return Fetching {
+            more: false,
+            landed,
+        };
     };
     // And not at all while somebody is waiting for something. A reader who has
     // moved on should not be behind a picture for a conversation that is
     // already on the disc.
     attend(chat, state, desk, cmds).await;
     if !cmds.is_empty() {
-        return true;
+        return Fetching { more: true, landed };
     }
     match chat.download(&a).await {
-        Ok(bytes) => {
-            if desk.files.insert(a.blob, bytes.into()).is_none() {
-                desk.fetched.push(a.blob);
-            }
-            put_down_what_is_not_wanted(desk);
-        }
+        Ok(bytes) => land(desk, a.blob, bytes),
         // Remembered as a failure rather than retried every pass. A blob that
         // has passed its retention window is gone, and asking again four times
         // a second will not bring it back.
@@ -2673,7 +2757,10 @@ async fn fetch_files(
             desk.unfetchable.insert(a.blob);
         }
     }
-    waiting > 1
+    Fetching {
+        more: waiting > 1,
+        landed,
+    }
 }
 
 /// Keep the held files inside [`HOLD_BYTES`], sparing the conversation on

@@ -19,6 +19,7 @@ sqex-proto = { workspace = true }
 sqex-voice = { workspace = true }
 sigil-net = { path = "../sigil-net" }
 tokio = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
@@ -31,3 +32,10 @@ serde_json = "1"
 toml = "0.8"
 hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+# For `examples/quic_stats`, which reads quinn's path statistics off a raw
+# connection: the one place the transport's window, loss and RTT are visible.
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+quinn = "0.11"
+http = "1"
+bytes = "1"

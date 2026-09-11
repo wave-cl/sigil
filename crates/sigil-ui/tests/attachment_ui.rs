@@ -554,3 +554,85 @@ fn sizes_are_said_in_round_units() {
     assert_eq!(human(28 * 1024), "28 KiB");
     assert_eq!(human(4_300_000), "4.1 MiB");
 }
+
+/// A gif of two frames, each one colour, `delay` centiseconds apart.
+fn gif_of(delay: u16) -> Vec<u8> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, RgbaImage};
+    let mut out = Vec::new();
+    {
+        let mut enc = GifEncoder::new(&mut out);
+        enc.set_repeat(Repeat::Infinite).unwrap();
+        for colour in [[255u8, 0, 0, 255], [0, 0, 255, 255]] {
+            let img = RgbaImage::from_pixel(8, 8, image::Rgba(colour));
+            enc.encode_frame(Frame::from_parts(
+                img,
+                0,
+                0,
+                Delay::from_numer_denom_ms(delay as u32 * 10, 1),
+            ))
+            .unwrap();
+        }
+    }
+    out
+}
+
+/// A gif is decoded off the thread that asked for it, and plays once it is.
+///
+/// `egui_extras`'s loader decodes every frame on the calling thread while
+/// holding its cache lock, and that is a window frozen for as long as a
+/// multi-megabyte gif takes -- once per launch. sigil's answers "pending"
+/// from the first ask and fills in on a thread; that first answer is what
+/// tells the two loaders apart, so it is what is asserted, along with the
+/// frames actually arriving and differing.
+#[test]
+fn a_gif_is_decoded_off_the_interface_thread_and_then_plays() {
+    let bytes: std::sync::Arc<[u8]> = gif_of(10).into();
+    let h = Harness::builder()
+        .with_size(egui::vec2(200.0, 200.0))
+        .build_ui(|ui| {
+            sigil_ui::install_loaders(ui.ctx());
+        });
+    let ctx = h.ctx.clone();
+    ctx.include_bytes("bytes://two-frames", egui::load::Bytes::Shared(bytes));
+    let hint = egui::load::SizeHint::default();
+
+    // The first ask does not decode: it hands the bytes to a thread and says
+    // so. The loader that ships with egui_extras would say Ready here.
+    let first = ctx.try_load_image("bytes://two-frames#0", hint);
+    let pending = match &first {
+        Ok(egui::load::ImagePoll::Pending { .. }) => "pending",
+        Ok(egui::load::ImagePoll::Ready { .. }) => "ready",
+        Err(e) => panic!("the first ask failed: {e}"),
+    };
+    assert_eq!(
+        pending, "pending",
+        "the first ask should be answered pending, not decoded on this thread"
+    );
+
+    // Then the frames come, and they are different frames.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let frame = |i: usize| loop {
+        match ctx.try_load_image(&format!("bytes://two-frames#{i}"), hint) {
+            Ok(egui::load::ImagePoll::Ready { image }) => break image,
+            Ok(egui::load::ImagePoll::Pending { .. }) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(_) => panic!("frame {i} never arrived"),
+            Err(e) => panic!("frame {i} failed: {e}"),
+        }
+    };
+    let (red, blue) = (frame(0), frame(1));
+    assert_eq!(red.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+    assert_eq!(blue.pixels[0], egui::Color32::from_rgb(0, 0, 255));
+
+    // And the timing the widget animates by was put where it reads it.
+    let durations: Option<egui::FrameDurations> =
+        ctx.data(|d| d.get_temp(egui::Id::new("bytes://two-frames")));
+    let all: Vec<_> = durations
+        .expect("no frame durations")
+        .all()
+        .copied()
+        .collect();
+    assert_eq!(all, vec![std::time::Duration::from_millis(100); 2]);
+}
