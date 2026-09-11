@@ -3465,7 +3465,8 @@ fn the_unreadable_notice_offers_to_delete_what_is_yours() {
          key, which no public channel has: {said}"
     );
     // Two of three are mine, so the offer says so.
-    h.get_by_label("Delete the 2 of them that are yours").click();
+    h.get_by_label("Delete the 2 of them that are yours")
+        .click();
     h.step();
 
     let wanted: Vec<String> = [41u64, 43].iter().map(|s| format!("Redact({s})")).collect();

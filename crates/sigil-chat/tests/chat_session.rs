@@ -2312,7 +2312,11 @@ async fn an_unreadable_message_can_be_deleted_from_the_notice() {
     });
     assert!(
         until(
-            || alice.state().conversations.iter().any(|c| c.label == "pictures"),
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.label == "pictures"),
             15
         )
         .await
@@ -2344,16 +2348,17 @@ async fn an_unreadable_message_can_be_deleted_from_the_notice() {
         .expect("the channel is in the directory");
     bob.join(&channel, instance).await.unwrap();
     let mut post = SipPost::text("look at this");
-    post.parts.push(Part::Attachment(sqex_proto::blob::Attachment {
-        kind: sqex_proto::blob::KIND_IMAGE,
-        blob: [1u8; 32],
-        key: [2u8; 32],
-        size: 10,
-        chunks: 1,
-        mime: "image/png".into(),
-        meta: Vec::new(),
-        preview: vec![7u8; sqex_proto::blob::MAX_PREVIEW + 1],
-    }));
+    post.parts
+        .push(Part::Attachment(sqex_proto::blob::Attachment {
+            kind: sqex_proto::blob::KIND_IMAGE,
+            blob: [1u8; 32],
+            key: [2u8; 32],
+            size: 10,
+            chunks: 1,
+            mime: "image/png".into(),
+            meta: Vec::new(),
+            preview: vec![7u8; sqex_proto::blob::MAX_PREVIEW + 1],
+        }));
     let seq = bob.send_post(&channel, post).await.unwrap().seq;
 
     // Alice's session reports it, and offers it.
