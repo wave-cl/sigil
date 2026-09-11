@@ -2633,7 +2633,14 @@ impl ChatApp {
         if self.ringing_ui(ctx, at, state, ui, theme) {
             ui.add_space(tokens::SPACING_SM);
         }
-        self.trouble_ui(&state.trouble_with, ui, theme);
+        let public = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open)
+            .is_some_and(|c| c.public == Some(true));
+        for seq in self.trouble_ui(&state.trouble_with, public, ui, theme) {
+            self.send_as(Some(at), Cmd::Redact(seq));
+        }
 
         // The composer is laid out first, from the bottom, so the transcript
         // gets the remaining height rather than pushing it off the screen.
@@ -2785,18 +2792,31 @@ impl ChatApp {
     /// that matters most: an unreadable entry is one whose key may still
     /// arrive, so waiting is right; a lost one is under a superseded epoch and
     /// is gone, so waiting is forever.
-    fn trouble_ui(&self, trouble: &Trouble, ui: &mut egui::Ui, theme: &ColorTheme) {
+    ///
+    /// Returns the unreadable messages somebody asked to delete, if they did:
+    /// this draws with `&self`, and the deleting is the caller's.
+    fn trouble_ui(
+        &self,
+        trouble: &Trouble,
+        public: bool,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) -> Vec<u64> {
+        let mut delete = Vec::new();
         if trouble.is_clear() {
-            return;
+            return delete;
         }
-        let mut say = |colour: egui::Color32, text: String| {
+        // A function rather than a closure over `ui`, so the button below can
+        // borrow `ui` too.
+        fn say(ui: &mut egui::Ui, colour: egui::Color32, text: String) {
             ui.colored_label(colour, text);
-        };
+        }
         if let Some(epoch) = trouble.no_key {
             // SIP-17's stranded member: every entry fetches and none of them
             // open. Without this the conversation simply reads as empty, which
             // is indistinguishable from nobody having written.
             say(
+                ui,
                 theme.destructive,
                 format!(
                     "You hold no key for this conversation (epoch {epoch}). \
@@ -2805,19 +2825,70 @@ impl ChatApp {
             );
         }
         if trouble.unreadable > 0 {
+            // **Which kind of unreadable.** The fold says "well formed and not
+            // understood, or sealed under a key we lack -- either way it
+            // happened", and the two need different words. In a private
+            // channel it is nearly always the key, and waiting is right. In a
+            // public channel nothing is ever sealed and no key will ever
+            // arrive: the entry is one this version could not make sense of,
+            // and telling somebody to wait for a key would have them waiting
+            // for ever. Found by exactly that: two pictures posted with a
+            // preview over the protocol's limit, reported as "their key may
+            // still arrive" in a channel that has no keys.
             say(
+                ui,
                 theme.warning,
-                match trouble.unreadable {
-                    1 => "1 message here has not been opened yet — its key may still arrive."
-                        .to_string(),
-                    n => format!(
+                match (public, trouble.unreadable) {
+                    (false, 1) => {
+                        "1 message here has not been opened yet — its key may still arrive."
+                            .to_string()
+                    }
+                    (false, n) => format!(
                         "{n} messages here have not been opened yet — their key may still arrive."
                     ),
+                    (true, 1) => {
+                        "1 message here could not be read by this version of sigil.".to_string()
+                    }
+                    (true, n) => {
+                        format!("{n} messages here could not be read by this version of sigil.")
+                    }
                 },
             );
+            // **The way to take them down**, for whoever may. A message that
+            // will never open is not always waiting for a key -- two pictures
+            // with previews over SIP-18's cap sat in a public channel as two
+            // unreadable messages for everybody -- and the one thing to do
+            // with one is delete it. Nothing draws it as a bubble, so nothing
+            // else offers the control; it goes on the notice, which is the
+            // one place its author is looking.
+            if !trouble.redactable.is_empty() {
+                let n = trouble.redactable.len();
+                let label = if n == trouble.unreadable {
+                    if n == 1 {
+                        "Delete it".to_string()
+                    } else {
+                        "Delete them".to_string()
+                    }
+                } else {
+                    format!("Delete the {n} of them that are yours")
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text(
+                        "Remove them from the conversation for everybody. Anything they \
+                         carried that this client never opened cannot be detached with \
+                         them, and stays at the exchange until its retention window \
+                         closes.",
+                    )
+                    .clicked()
+                {
+                    delete = trouble.redactable.clone();
+                }
+            }
         }
         if trouble.lost > 0 {
             say(
+                ui,
                 theme.destructive,
                 match trouble.lost {
                     1 => "1 message here can never be read: its key is gone.".to_string(),
@@ -2827,6 +2898,7 @@ impl ChatApp {
         }
         if trouble.gap {
             say(
+                ui,
                 theme.text_secondary,
                 "Older messages have passed this channel's retention window and are gone."
                     .to_string(),
@@ -2834,6 +2906,7 @@ impl ChatApp {
         }
         if trouble.restarted {
             say(
+                ui,
                 theme.warning,
                 "This conversation was destroyed and started again under the same name. \
                  Nothing above is related to what follows."
@@ -2847,6 +2920,7 @@ impl ChatApp {
             // client that silently dropped them would leave the only party
             // who could notice unable to.
             say(
+                ui,
                 theme.destructive,
                 match trouble.forged {
                     1 => "1 entry claimed to be from somebody here and was not signed by \
@@ -2859,6 +2933,7 @@ impl ChatApp {
                 },
             );
         }
+        delete
     }
 
     /// One membership or metadata change, centred in the transcript.

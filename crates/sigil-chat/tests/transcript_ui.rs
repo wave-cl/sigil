@@ -12,7 +12,7 @@ use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
     Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Quoted, Receipt,
-    Summary,
+    Summary, Trouble,
 };
 use sqnr_core::PubKey;
 
@@ -3429,5 +3429,98 @@ fn editing_your_profile_is_beside_switching_identity_and_shaped_like_it() {
     assert!(
         edit.bottom() <= switch.top() && switch.top() - edit.bottom() < 12.0,
         "the two are not beside each other: edit {edit:?}, switch {switch:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Taking down what will never open.
+// ---------------------------------------------------------------------------
+
+/// The notice about unreadable messages offers to delete the ones that are
+/// yours, and pressing it asks for each.
+///
+/// A message that will never open is not always waiting for a key: two
+/// pictures with previews over SIP-18's cap sat in a public channel as two
+/// unreadable messages for everybody, and the only thing to do with one is
+/// take it down. Nothing draws it as a bubble, so nothing else can offer the
+/// control.
+#[test]
+fn the_unreadable_notice_offers_to_delete_what_is_yours() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    state.lines = Vec::new();
+    state.trouble_with = Trouble {
+        unreadable: 3,
+        redactable: vec![41, 43],
+        ..Default::default()
+    };
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+
+    let said = text_of(&h);
+    assert!(
+        said.contains("could not be read by this version"),
+        "a public channel's unreadable messages are described as waiting for a \
+         key, which no public channel has: {said}"
+    );
+    // Two of three are mine, so the offer says so.
+    h.get_by_label("Delete the 2 of them that are yours").click();
+    h.step();
+
+    let wanted: Vec<String> = [41u64, 43].iter().map(|s| format!("Redact({s})")).collect();
+    for w in &wanted {
+        assert!(
+            asked.borrow().contains(w),
+            "pressing delete did not ask for {w}: {:?}",
+            asked.borrow()
+        );
+    }
+    assert!(
+        !asked.borrow().iter().any(|c| c == "Redact(42)"),
+        "somebody else's message was asked to be deleted: {:?}",
+        asked.borrow()
+    );
+}
+
+/// With nothing of yours among them, nothing is offered.
+#[test]
+fn the_unreadable_notice_offers_nothing_when_none_are_yours() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    state.lines = Vec::new();
+    state.trouble_with = Trouble {
+        unreadable: 2,
+        redactable: Vec::new(),
+        ..Default::default()
+    };
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("2 messages here"), "{said}");
+    assert!(
+        !said.contains("Delete"),
+        "a delete control is offered for messages that are not yours: {said}"
+    );
+}
+
+/// In a private channel the words are about the key, because that is
+/// usually what it is.
+#[test]
+fn a_private_channels_unreadable_notice_still_speaks_of_the_key() {
+    let mut state = a_conversation();
+    // The direct message, which is private.
+    state.open = Some([9u8; 32]);
+    state.lines = Vec::new();
+    state.trouble_with = Trouble {
+        unreadable: 1,
+        ..Default::default()
+    };
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(
+        text_of(&h).contains("its key may still arrive"),
+        "{}",
+        text_of(&h)
     );
 }

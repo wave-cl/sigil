@@ -625,6 +625,17 @@ impl Person {
 pub struct Trouble {
     /// Entries held and not opened. A key for them may still come.
     pub unreadable: usize,
+    /// Those of the unreadable this identity may delete: its own, and all of
+    /// them if it administers the channel -- which is the exchange's rule for
+    /// a redaction, so an offer here is one the exchange will honour.
+    ///
+    /// **Why an unreadable message needs deleting at all.** One that will
+    /// never open is not always waiting for a key. Two pictures were posted
+    /// to a public channel with previews over SIP-18's cap, and every client
+    /// refused them, for ever, as "not opened yet". The one thing to do with
+    /// such a message is take it down, and the only party who can is its
+    /// author -- who is exactly who is looking at the notice.
+    pub redactable: Vec<u64>,
     /// Entries under an epoch we will never hold a key for. Gone.
     pub lost: usize,
     /// We were away longer than the retention window; there is history that
@@ -2164,7 +2175,7 @@ async fn absorb(
         return false;
     };
     let accepted = match absorbed {
-        Ok(conversation) => took(chat.store(), known, channel, open, conversation),
+        Ok(conversation) => took(chat.store(), chat.me, known, channel, open, conversation),
         Err(_) => {
             known.timeline = timeline;
             // Whatever went wrong, the ordinary path reports it and decides
@@ -2191,6 +2202,7 @@ async fn absorb(
 /// records: `desk` is borrowed for the conversation being written.
 fn took(
     store: &sqex_chat::Store,
+    me: PubKey,
     known: &mut Known,
     channel: [u8; 32],
     open: Option<[u8; 32]>,
@@ -2202,8 +2214,34 @@ fn took(
     // Answered for. Until this, what is on screen came off the disc and the
     // interface says it is still asking.
     known.fetched = true;
+    // Which of the unreadable this identity may take down. The fold says
+    // which entries; the store says who wrote each, which the fold does not
+    // carry for an entry it could not make sense of. Only when there are any,
+    // because it is a walk over the channel's rows.
+    //
+    // **By the fold's list, not by what the store could open.** An entry is
+    // unreadable in two ways: sealed under a key we lack, which the store
+    // holds unopened; or well formed at the transport and not understood by
+    // `Body::decode`, which the store holds *opened* -- a public channel's
+    // entry is plaintext and goes in as it came. The first version of this
+    // looked only for the former, and offered nothing for exactly the case
+    // this exists for.
+    let redactable = if conversation.unreadable.is_empty() {
+        Vec::new()
+    } else {
+        let admin = known.admins.contains(&me);
+        let unopened: Vec<(u64, PubKey)> = store
+            .messages(&channel)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(seq, ..)| conversation.unreadable.contains(seq))
+            .map(|(seq, account, ..)| (seq, account))
+            .collect();
+        redactable(&unopened, me, admin)
+    };
     known.trouble = Trouble {
         unreadable: conversation.unreadable.len(),
+        redactable,
         gap: conversation.gap,
         restarted: conversation.restarted,
         no_key: conversation.no_key,
@@ -2279,7 +2317,7 @@ async fn refresh(
         };
         match polled {
             Ok(conversation) => {
-                if let Some(seq) = took(chat.store(), known, channel, open, conversation) {
+                if let Some(seq) = took(chat.store(), chat.me, known, channel, open, conversation) {
                     accepted.push((channel, seq));
                 }
             }
@@ -2376,15 +2414,118 @@ const THUMBNAIL_EDGE: u32 = 96;
 /// `None` for anything that will not decode. A missing thumbnail is ordinary —
 /// SIP-18 makes the field optional and every reader has to cope with an empty
 /// one — so a file that cannot be previewed is still sent.
+///
+/// # Sized to the limit, and what happened before it was
+///
+/// SIP-18 caps a preview at [`MAX_PREVIEW`] and says, in so many words, that
+/// **a client sizes previews to what it is actually sending**. This did not:
+/// it made a 96-pixel PNG and sent whatever that came to. For a photograph
+/// that is a few kilobytes; for a busy picture -- a dithered GIF frame, a
+/// screenshot full of text -- a lossless PNG of 96×96 is twelve. Every reader
+/// refused the whole post, and reported it as "not opened yet, its key may
+/// still arrive" -- in a public channel, where nothing has a key. Two
+/// pictures sat in `general` as two unreadable messages for everybody.
+///
+/// So it is tried at falling cost until one fits: PNG first, because it keeps
+/// transparency and a smooth picture is small anyway; then JPEG, which is what
+/// a busy picture compresses under; then smaller. A picture that fits none of
+/// them goes without, which the protocol allows and a reader survives.
 fn thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
     let image = image::ImageReader::open(path).ok()?.decode().ok()?;
-    let small = image.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
-    let mut out = std::io::Cursor::new(Vec::new());
-    // PNG rather than the source format: a thumbnail of a JPEG is small enough
-    // that the difference does not matter, and one encoder is one thing that
-    // can go wrong.
-    small.write_to(&mut out, image::ImageFormat::Png).ok()?;
-    Some(out.into_inner())
+    thumbnail_of(&image)
+}
+
+/// [`thumbnail`] from a decoded image, so it can be tested on one built in
+/// memory rather than on a file.
+fn thumbnail_of(image: &image::DynamicImage) -> Option<Vec<u8>> {
+    use image::ImageFormat;
+    // Lossless and with alpha first; then lossy, then smaller and lossy. A
+    // JPEG has no alpha, so it is encoded from the colour channels alone --
+    // the encoder refuses RGBA outright rather than dropping the channel.
+    let attempts: [(u32, ImageFormat, Option<u8>); 4] = [
+        (THUMBNAIL_EDGE, ImageFormat::Png, None),
+        (THUMBNAIL_EDGE, ImageFormat::Jpeg, Some(80)),
+        (THUMBNAIL_EDGE * 2 / 3, ImageFormat::Jpeg, Some(70)),
+        (THUMBNAIL_EDGE / 2, ImageFormat::Jpeg, Some(60)),
+    ];
+    for (edge, format, quality) in attempts {
+        let small = image.thumbnail(edge, edge);
+        let mut out = std::io::Cursor::new(Vec::new());
+        let written = match (format, quality) {
+            (ImageFormat::Jpeg, Some(q)) => {
+                let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q);
+                small.to_rgb8().write_with_encoder(encoder).is_ok()
+            }
+            _ => small.write_to(&mut out, format).is_ok(),
+        };
+        let bytes = out.into_inner();
+        if written && bytes.len() <= MAX_PREVIEW {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// SIP-18's cap on a preview, re-said here so the sender and the reader agree
+/// by construction: the reader refuses anything over it.
+const MAX_PREVIEW: usize = sqex_proto::blob::MAX_PREVIEW;
+
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::{MAX_PREVIEW, thumbnail_of};
+
+    /// A picture that does not compress: every pixel different, no runs.
+    /// A lossless 96×96 of this is well over the cap, which is what the two
+    /// pictures in `general` were.
+    fn noise() -> image::DynamicImage {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(400, 300, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let b = seed.to_le_bytes();
+            image::Rgba([b[0], b[1], b[2], 255])
+        }))
+    }
+
+    /// The preview of a busy picture fits the protocol's cap.
+    #[test]
+    fn a_busy_picture_gets_a_preview_that_fits() {
+        let preview = thumbnail_of(&noise()).expect("some preview of it");
+        assert!(
+            preview.len() <= MAX_PREVIEW,
+            "the preview is {} bytes against a cap of {MAX_PREVIEW}, and every \
+             reader will refuse the whole message",
+            preview.len()
+        );
+    }
+
+    /// And the PNG alone would not have: this is the case that was shipped.
+    #[test]
+    fn the_png_alone_is_over_the_cap_for_a_busy_picture() {
+        let small = noise().thumbnail(super::THUMBNAIL_EDGE, super::THUMBNAIL_EDGE);
+        let mut out = std::io::Cursor::new(Vec::new());
+        small.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        assert!(
+            out.into_inner().len() > MAX_PREVIEW,
+            "the fixture is not busy enough to reproduce the fault"
+        );
+    }
+
+    /// A smooth picture keeps its lossless preview, transparency and all.
+    #[test]
+    fn a_smooth_picture_keeps_a_png_preview() {
+        let smooth =
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(400, 300, |x, _| {
+                image::Rgba([x as u8, 40, 90, 128])
+            }));
+        let preview = thumbnail_of(&smooth).expect("a preview");
+        assert!(preview.len() <= MAX_PREVIEW);
+        assert!(
+            preview.starts_with(&[0x89, b'P', b'N', b'G']),
+            "a smooth picture should not have needed to give up PNG"
+        );
+    }
 }
 
 /// The largest file fetched without being asked for.
@@ -3142,6 +3283,45 @@ mod stub_tests {
 /// whether they are looking at one person or at two.
 fn short(key: &PubKey) -> String {
     sigil_ui::short(&key.to_string())
+}
+
+/// Which unreadable entries this identity may take down.
+///
+/// The exchange's own rule for a redaction: the author may, and an admin may
+/// for anybody. Offering more would be offering a button the exchange refuses;
+/// offering less would leave somebody looking at their own message with no
+/// way to remove it.
+fn redactable(unopened: &[(u64, PubKey)], me: PubKey, admin: bool) -> Vec<u64> {
+    unopened
+        .iter()
+        .filter(|(_, author)| admin || *author == me)
+        .map(|(seq, _)| *seq)
+        .collect()
+}
+
+#[cfg(test)]
+mod redactable_tests {
+    use super::redactable;
+    use sqnr_core::PubKey;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    /// Mine, and only mine, when I am nobody in particular.
+    #[test]
+    fn a_member_may_take_down_their_own_and_nobody_elses() {
+        let held = [(7, key(1)), (8, key(2)), (9, key(1))];
+        assert_eq!(redactable(&held, key(1), false), vec![7, 9]);
+        assert_eq!(redactable(&held, key(3), false), Vec::<u64>::new());
+    }
+
+    /// Everything, when I administer the channel.
+    #[test]
+    fn an_admin_may_take_down_any_of_them() {
+        let held = [(7, key(1)), (8, key(2))];
+        assert_eq!(redactable(&held, key(3), true), vec![7, 8]);
+    }
 }
 
 /// What to call the person on the other end of a direct message.

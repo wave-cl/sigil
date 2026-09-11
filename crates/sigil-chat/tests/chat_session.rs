@@ -2154,3 +2154,230 @@ async fn what_kind_of_channel_it_is_is_written_down() {
         "nor that the back room is not"
     );
 }
+
+/// A picture sent into a public channel is fetched and published like any
+/// other.
+///
+/// Reported from the desktop: an image sent to a public channel never
+/// displayed. The library does this fine end to end, so whatever is wrong is
+/// in this session -- and this is the session, driven the way the interface
+/// drives it: create the channel, send the file, wait for bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_sent_to_a_public_channel_is_fetched_and_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(23);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| alice.state().me == Some(a_id), 15).await,
+        "the session should come up: {:?}",
+        alice.state().trouble
+    );
+
+    alice.send(Cmd::NewPublic {
+        name: "pictures".into(),
+        topic: String::new(),
+    });
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.label == "pictures" && c.public == Some(true)),
+            15
+        )
+        .await,
+        "the public channel should exist: {:?}",
+        alice.state().conversations
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.label == "pictures")
+        .map(|c| c.channel)
+        .unwrap();
+    alice.send(Cmd::Show(channel));
+    assert!(
+        until(|| alice.state().open == Some(channel), 10).await,
+        "the channel should be open"
+    );
+
+    // A **real, busy** picture. A real one gets a thumbnail made of it and
+    // carried inside the message, and a run of bytes that will not decode
+    // does not -- the first version of this test sent the latter and passed.
+    // And a *busy* one, because a smooth gradient's thumbnail is a few
+    // kilobytes and passed too, while the pictures that failed in `general`
+    // were a dithered GIF frame and a screenshot: their lossless previews were
+    // over SIP-18's cap, and every reader refused the whole message.
+    let picture = dir.path().join("a-picture.png");
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    image::RgbImage::from_fn(400, 300, |_, _| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let b = seed.to_le_bytes();
+        image::Rgb([b[0], b[1], b[2]])
+    })
+    .save(&picture)
+    .unwrap();
+    alice.send(Cmd::SendFile(picture));
+
+    // First the message with the attachment on it at all...
+    let posted = until(
+        || {
+            alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| !l.attachments.is_empty())
+        },
+        20,
+    )
+    .await;
+    assert!(
+        posted,
+        "the message carrying the picture never appeared in the public channel: \
+         lines {:?}, trouble {:?}",
+        alice.state().lines.len(),
+        alice.state().trouble
+    );
+    // ...and then its bytes, which is what draws it.
+    let shown = until(
+        || {
+            alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.attachments.iter().any(|a| a.bytes.is_some()))
+        },
+        30,
+    )
+    .await;
+    assert!(
+        shown,
+        "the picture is on the message and its bytes never arrived, so it is \
+         drawn as nothing: {:?}",
+        alice.state().trouble
+    );
+    // And nothing in the channel is being called sealed: "not opened yet --
+    // their key may still arrive" is what the report said, of a channel in
+    // which nothing is ever sealed.
+    let trouble = alice.state().trouble_with;
+    assert_eq!(
+        trouble.unreadable, 0,
+        "a public channel says {} of its messages are waiting for a key",
+        trouble.unreadable
+    );
+    alice.stop();
+}
+
+/// A message that will never open can be taken down from the notice, and the
+/// notice then goes.
+///
+/// The whole loop through the real fold: somebody posts a message every
+/// reader refuses -- a preview over SIP-18's cap, which is what happened in
+/// `general` -- the session reports it as unreadable *and* as something this
+/// identity may delete, and deleting it clears the count. The poster is a
+/// plain library client, because sigil's own sender now sizes its previews
+/// and cannot produce the fault.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_message_can_be_deleted_from_the_notice() {
+    use sqex_chat::Chat;
+    use sqex_chat::store::Store;
+    use sqex_proto::message::{Part, Post as SipPost};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    // Alice runs sigil and founds the channel, so she administers it.
+    let (a_signer, a_id) = signer(24);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| alice.state().me == Some(a_id), 15).await,
+        "the session should come up: {:?}",
+        alice.state().trouble
+    );
+    alice.send(Cmd::NewPublic {
+        name: "pictures".into(),
+        topic: String::new(),
+    });
+    assert!(
+        until(
+            || alice.state().conversations.iter().any(|c| c.label == "pictures"),
+            15
+        )
+        .await
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.label == "pictures")
+        .map(|c| c.channel)
+        .unwrap();
+    alice.send(Cmd::Show(channel));
+    assert!(until(|| alice.state().open == Some(channel), 10).await);
+
+    // Bob is a library client, joins, and posts what no reader will open.
+    let sk = SigningKey::from_bytes(&[25u8; 32]);
+    let (b_seed, b_id) = (sk.to_bytes(), PubKey::new(sk.verifying_key().to_bytes()));
+    let client = sqnr::Client::connect_as(addr, &server_pub, &b_seed)
+        .await
+        .expect("bob connects");
+    let store = Store::open(&b_seed, Some(&dir.path().join("b.db"))).unwrap();
+    let mut bob = Chat::new(client, b_seed, b_id, PubKey::new(server_pub), store);
+    let listing = bob.find("", 0).await.unwrap();
+    let instance = listing
+        .channels
+        .iter()
+        .find(|c| c.channel == channel)
+        .map(|c| c.instance)
+        .expect("the channel is in the directory");
+    bob.join(&channel, instance).await.unwrap();
+    let mut post = SipPost::text("look at this");
+    post.parts.push(Part::Attachment(sqex_proto::blob::Attachment {
+        kind: sqex_proto::blob::KIND_IMAGE,
+        blob: [1u8; 32],
+        key: [2u8; 32],
+        size: 10,
+        chunks: 1,
+        mime: "image/png".into(),
+        meta: Vec::new(),
+        preview: vec![7u8; sqex_proto::blob::MAX_PREVIEW + 1],
+    }));
+    let seq = bob.send_post(&channel, post).await.unwrap().seq;
+
+    // Alice's session reports it, and offers it.
+    let offered = until(
+        || {
+            let t = alice.state().trouble_with;
+            t.unreadable == 1 && t.redactable == vec![seq]
+        },
+        20,
+    )
+    .await;
+    assert!(
+        offered,
+        "the unreadable message was not reported as something the admin may \
+         delete: {:?}",
+        alice.state().trouble_with
+    );
+
+    alice.send(Cmd::Redact(seq));
+    let cleared = until(|| alice.state().trouble_with.unreadable == 0, 20).await;
+    assert!(
+        cleared,
+        "deleting the unreadable message did not clear the notice: {:?}",
+        alice.state().trouble_with
+    );
+    alice.stop();
+}
