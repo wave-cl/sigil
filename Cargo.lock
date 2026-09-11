@@ -6137,8 +6137,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-chat"
-version = "0.47.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.47.0#d4996bf4af9bee31f72fcdecc08ff7725e592ab3"
+version = "0.49.0"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.49.0#89292e2d745d6aa788b3c533e0b841ce1a3e7255"
 dependencies = [
  "bs58",
  "chacha20poly1305",
@@ -6165,8 +6165,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-discovery"
-version = "0.47.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.47.0#d4996bf4af9bee31f72fcdecc08ff7725e592ab3"
+version = "0.49.0"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.49.0#89292e2d745d6aa788b3c533e0b841ce1a3e7255"
 dependencies = [
  "bs58",
  "dirs",
@@ -6178,8 +6178,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-proto"
-version = "0.47.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.47.0#d4996bf4af9bee31f72fcdecc08ff7725e592ab3"
+version = "0.49.0"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.49.0#89292e2d745d6aa788b3c533e0b841ce1a3e7255"
 dependencies = [
  "bs58",
  "bytes",
@@ -6200,8 +6200,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-voice"
-version = "0.47.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.47.0#d4996bf4af9bee31f72fcdecc08ff7725e592ab3"
+version = "0.49.0"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.49.0#89292e2d745d6aa788b3c533e0b841ce1a3e7255"
 dependencies = [
  "clap",
  "cpal",
@@ -6220,8 +6220,8 @@ dependencies = [
 
 [[package]]
 name = "sqexd"
-version = "0.47.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.47.0#d4996bf4af9bee31f72fcdecc08ff7725e592ab3"
+version = "0.49.0"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.49.0#89292e2d745d6aa788b3c533e0b841ce1a3e7255"
 dependencies = [
  "bs58",
  "bytes",
