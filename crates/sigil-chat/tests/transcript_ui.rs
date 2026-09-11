@@ -364,6 +364,13 @@ fn harness_watching_asks(
         })
 }
 
+/// The strip the window's own buttons sit in, as the shell draws it.
+///
+/// Where the exchange control lives now, so this harness draws it: a top
+/// panel one small control tall, the app's corner of it laid out from the
+/// right. What the shell does is the contract; see `Shell::ui`.
+const STRIP: f32 = sigil::tokens::BUTTON_SM;
+
 fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
@@ -378,6 +385,30 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
             let ctx = ui.ctx().clone();
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(egui::Theme::Dark);
+            egui::Panel::top("chrome")
+                .exact_size(STRIP)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    let corner = ui
+                        .max_rect()
+                        .shrink2(egui::vec2(sigil::tokens::SPACING_SM, 0.0));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(corner)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| {
+                            let mut nav = Navigator::default();
+                            let mut app_ctx = AppContext {
+                                navigator: &mut nav,
+                                accounts: &mut accounts,
+                                unfocused: false,
+                                notify: &sigil::Silent,
+                                connections: &Default::default(),
+                            };
+                            app.chrome_ui(&mut app_ctx, ui);
+                        },
+                    );
+                });
             let mut nav = Navigator::default();
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
@@ -388,6 +419,12 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
             };
             let _ = app.render(&mut app_ctx, ui);
         })
+}
+
+/// Open the exchange control in the title strip.
+fn open_exchanges(h: &mut Harness<'static>) {
+    h.get_by_label("Exchange").click();
+    h.run();
 }
 
 fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
@@ -1615,12 +1652,12 @@ fn having_no_name_offers_the_way_to_claim_one() {
 fn an_added_exchange_can_be_removed_again() {
     let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
     h.run();
-    open_identity(&mut h);
+    open_exchanges(&mut h);
     assert!(text_of(&h).contains("indra.org"), "{}", text_of(&h));
 
     h.get_by_label("Remove").click();
     h.run();
-    open_identity(&mut h);
+    open_exchanges(&mut h);
     assert!(
         !text_of(&h).contains("indra.org"),
         "the exchange is still there: {}",
@@ -2444,29 +2481,110 @@ fn the_exchange_this_list_belongs_to_is_shown_in_full() {
     );
 }
 
-/// One exchange is not a choice, so there is nothing to switch between.
+/// The control is there with one exchange too: it says which, and it is the
+/// way to add another.
 #[test]
-fn a_single_exchange_offers_no_switcher() {
+fn a_single_exchange_is_still_named_and_offers_to_add_one() {
     let mut h = harness_at_exchanges(a_conversation(), &[]);
     h.run();
-    open_identity(&mut h);
+    open_exchanges(&mut h);
     let said = text_of(&h);
     assert!(!said.contains("indra.org"), "{said}");
-    // But adding one is always offered.
-    assert!(said.contains("Add an exchange"), "{said}");
+    assert!(
+        said.contains("Add a domain…"),
+        "adding one is always offered: {said}"
+    );
 }
 
-/// A second exchange is offered as somewhere to switch to.
+/// A second exchange is offered as somewhere to switch to, and choosing it
+/// switches.
 #[test]
 fn a_second_exchange_appears_as_somewhere_to_switch_to() {
     let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
     h.run();
-    open_identity(&mut h);
+    open_exchanges(&mut h);
     let said = text_of(&h);
     assert!(
         said.contains("indra.org"),
         "the added exchange is offered: {said}"
     );
+
+    h.get_by_label("indra.org").click();
+    h.run();
+    h.run();
+    // The control itself now says so: what it names is what is being looked
+    // at, read back from the app rather than from a fixture.
+    let control = h.get_by_label("Exchange").rect();
+    let named = h
+        .get_all_by_label_contains("indra.org")
+        .map(|n| n.rect())
+        .any(|r| control.contains(r.center()));
+    assert!(
+        named,
+        "choosing an exchange did not switch to it: {}",
+        text_of(&h)
+    );
+}
+
+/// The exchange control sits in the window's title strip, against its right
+/// edge -- the band the close, minimise and zoom buttons live in.
+///
+/// It was a list in the identity menu, two clicks behind a chevron. Which
+/// exchange an identity is looking at changes the whole conversation list, so
+/// it belongs where it can be seen at all times.
+#[test]
+fn the_exchange_control_is_in_the_title_strip_at_the_right() {
+    let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
+    h.run();
+    let control = h.get_by_label("Exchange").rect();
+    // Above everything the app draws for itself: the identity block is the
+    // top-right of the app's own header, and the strip is above that.
+    let header = h.get_by_label("Your identity").rect();
+    assert!(
+        control.bottom() <= header.top(),
+        "the control is not in the strip above the app: {control:?} against the \
+         header at {header:?}"
+    );
+    assert!(
+        control.height() <= STRIP + 1.0,
+        "the control is taller than the strip: {control:?}, strip {STRIP} tall"
+    );
+    // Against the right edge, allowing the harness's own margin round the
+    // window and the strip's inset from the edge.
+    assert!(
+        control.right() >= 1000.0 - 3.0 * sigil::tokens::SPACING_SM,
+        "the control is not against the right edge: {control:?} in 1000"
+    );
+}
+
+/// "Add a domain…" in the control opens the dialog that adds one.
+#[test]
+fn the_exchange_control_offers_to_add_a_domain() {
+    let mut h = harness_at_exchanges(a_conversation(), &[]);
+    h.run();
+    open_exchanges(&mut h);
+    h.get_by_label("Add a domain…").click();
+    h.run();
+    assert!(
+        text_of(&h).contains("Add an exchange"),
+        "the dialog did not open: {}",
+        text_of(&h)
+    );
+}
+
+/// And the identity menu no longer lists them: one place, not two.
+#[test]
+fn the_identity_menu_no_longer_lists_exchanges() {
+    let mut h = harness_at_exchanges(a_conversation(), &["indra.org"]);
+    h.run();
+    open_identity(&mut h);
+    let said = text_of(&h);
+    assert!(
+        !said.contains("indra.org") && !said.contains("Add an exchange"),
+        "the identity menu still offers the exchange switcher: {said}"
+    );
+    // The key of the one being talked to stays, labelled.
+    assert!(said.contains("at"), "{said}");
 }
 
 /// Replying to a message with a dash in it must not take the application down.
@@ -3287,5 +3405,29 @@ fn a_kept_ask_is_answered_when_the_page_arrives() {
         on_screen,
         "the page arrived and the transcript did not go to the message: {}",
         text_of(&h)
+    );
+}
+
+/// "Edit your profile" sits beside "Switch identity", in the same shape.
+///
+/// It was a plain button on its own, between your key and the exchange --
+/// among the facts about the identity rather than the things done to it.
+/// Now it is the row above the other action, and drawn the same way: full
+/// width, with an icon.
+#[test]
+fn editing_your_profile_is_beside_switching_identity_and_shaped_like_it() {
+    let mut h = harness(true);
+    h.run();
+    open_identity(&mut h);
+
+    let edit = h.get_by_label("Edit your profile").rect();
+    let switch = h.get_by_label("Switch identity").rect();
+    assert!(
+        (edit.left() - switch.left()).abs() < 1.0 && (edit.width() - switch.width()).abs() < 1.0,
+        "the two are not the same shape: edit {edit:?}, switch {switch:?}"
+    );
+    assert!(
+        edit.bottom() <= switch.top() && switch.top() - edit.bottom() < 12.0,
+        "the two are not beside each other: edit {edit:?}, switch {switch:?}"
     );
 }

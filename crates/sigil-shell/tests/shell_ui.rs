@@ -38,6 +38,11 @@ impl App for Stub {
         }
         AppResponse::default()
     }
+    /// Something in the title strip, named after the app so a test can tell
+    /// whose corner was drawn.
+    fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+        let _ = ui.button(format!("{} corner", self.title));
+    }
     fn title(&self) -> &str {
         self.title
     }
@@ -391,9 +396,15 @@ fn the_windows_own_buttons_leave_the_rail_alone() {
     below.run();
     let with = below.get_by_label("Chat (3)").rect().top();
 
+    // The strip is always at least one control tall -- it has the app's
+    // corner in it whether or not there are buttons to clear -- so with no
+    // inset the rail already starts that far down. What the buttons need is
+    // the rest.
+    let already = sigil::tokens::BUTTON_SM;
     assert!(
-        with >= without + inset,
-        "the rail moved down by {}, and the buttons need {inset}",
+        with >= without + (inset - already),
+        "the rail moved down by {}, and the buttons need {inset} of which the \
+         strip already gave {already}",
         with - without
     );
 }
@@ -819,6 +830,54 @@ fn the_rail_does_not_offer_identities() {
     assert!(
         !said(&h).contains(&key[..10]),
         "the rail is offering identities: {}",
+        said(&h)
+    );
+}
+
+/// The app on screen gets the right-hand end of the title strip.
+///
+/// The strip is the drag region under the window's own buttons and was empty
+/// on purpose. An app may now put one small control at its far right -- the
+/// chat app says which exchange an identity is looking at there -- and it is
+/// the **active** app's corner only: two apps drawing into one strip would be
+/// two things in the one place a title bar has room for.
+#[test]
+fn the_active_app_draws_its_corner_of_the_title_strip() {
+    let mut h = harness(true);
+    h.run();
+
+    // Calls is the app on screen.
+    let corner = h.get_by_label("Calls corner").rect();
+    // The app's own heading -- the widest "Calls", the rail's icon being the
+    // other and square.
+    let heading = h
+        .get_all_by_label("Calls")
+        .map(|n| n.rect())
+        .max_by(|a, b| a.width().total_cmp(&b.width()))
+        .expect("the app draws its heading");
+    assert!(
+        corner.bottom() <= heading.top(),
+        "the corner is not in the strip above the app: {corner:?} against {heading:?}"
+    );
+    assert!(
+        corner.right() >= 900.0 - 3.0 * sigil::tokens::SPACING_SM,
+        "the corner is not against the right edge: {corner:?} in 900"
+    );
+    assert!(
+        h.query_by_label("Chat corner").is_none(),
+        "an app that is not on screen drew into the strip: {}",
+        said(&h)
+    );
+}
+
+/// And nothing sealed gets one: the strip above the opening screen is empty.
+#[test]
+fn a_sealed_identity_has_no_app_corner() {
+    let mut h = sealed(true);
+    h.run();
+    assert!(
+        h.query_by_label("Calls corner").is_none() && h.query_by_label("Chat corner").is_none(),
+        "an app drew into the strip with nothing unlocked: {}",
         said(&h)
     );
 }

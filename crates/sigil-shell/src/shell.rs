@@ -352,36 +352,67 @@ impl Shell {
         let theme = ColorTheme::current(ui.ctx());
 
         // The window's own buttons sit over the content, so the content
-        // starts below them. Empty on purpose: this strip is the title bar's
-        // drag region, and a widget in it is a widget somebody would have to
+        // starts below them. This strip is the title bar's drag region, and
+        // almost empty on purpose: a widget in it is a widget somebody has to
         // avoid to move their window. Painted in the application's colour,
         // which is the point of drawing behind the bar at all -- the bar has
         // no colour of its own to be wrong.
         //
+        // **Almost.** The app on screen may put one small control at the far
+        // right -- see `App::chrome_ui` -- which is where a title bar has
+        // always had room, and where the chat app says which exchange an
+        // identity is looking at. So the strip exists everywhere, one control
+        // tall at least: on macOS that is the buttons' own height anyway, and
+        // on Linux, where the desktop draws its title bar above the window,
+        // it is a band of sigil's own.
+        //
         // First, and outside the sealed-identity branch below, so the opening
         // screen is not under the buttons either.
-        if self.top_inset > 0.0 {
-            egui::Panel::top("sigil_window_chrome")
-                .resizable(false)
-                .exact_size(self.top_inset)
-                .frame(egui::Frame::NONE.fill(theme.surface_primary))
-                .show(ui, |ui| {
-                    // Double-click to fill the screen, and again to go back:
-                    // what a title bar has done on every desktop for thirty
-                    // years, and this strip is the title bar.
-                    //
-                    // Only reached when the system did not handle it first --
-                    // a click in that region goes to one place, so if egui was
-                    // given it, macOS's own zoom was not.
-                    let bar = ui.allocate_rect(ui.max_rect(), egui::Sense::click());
-                    if bar.double_clicked() {
-                        let full = ui.ctx().input(|i| i.viewport().maximized);
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
-                            !full.unwrap_or(false),
-                        ));
-                    }
-                });
-        }
+        let strip = self.top_inset.max(tokens::BUTTON_SM);
+        let app_on_screen = self.accounts.active().is_unlocked() && self.choosing.is_none();
+        egui::Panel::top("sigil_window_chrome")
+            .resizable(false)
+            .exact_size(strip)
+            .frame(egui::Frame::NONE.fill(theme.surface_primary))
+            .show(ui, |ui| {
+                // Double-click to fill the screen, and again to go back:
+                // what a title bar has done on every desktop for thirty
+                // years, and this strip is the title bar.
+                //
+                // Only reached when the system did not handle it first --
+                // a click in that region goes to one place, so if egui was
+                // given it, macOS's own zoom was not.
+                let whole = ui.max_rect();
+                let bar = ui.allocate_rect(whole, egui::Sense::click());
+                if bar.double_clicked() {
+                    let full = ui.ctx().input(|i| i.viewport().maximized);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                        !full.unwrap_or(false),
+                    ));
+                }
+                // The app's corner of it, drawn **over** the drag region --
+                // a later widget wins the press -- from the right edge in, and
+                // inset from it the way the buttons are inset from the left.
+                if app_on_screen {
+                    let corner = whole.shrink2(egui::vec2(tokens::SPACING_SM, 0.0));
+                    let active = self.active();
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(corner)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| {
+                            let mut ctx = AppContext {
+                                navigator: &mut self.navigator,
+                                accounts: &mut self.accounts,
+                                unfocused: false,
+                                notify: self.platform.as_ref(),
+                                connections: &self.connections,
+                            };
+                            self.apps[active].chrome_ui(&mut ctx, ui);
+                        },
+                    );
+                }
+            });
         // Nothing sealed gets a rail. Every app behind it would be a tab onto
         // an identity that cannot do anything, and offering four of those is
         // offering a choice that does not exist yet.

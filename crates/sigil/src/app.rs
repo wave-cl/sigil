@@ -184,6 +184,16 @@ pub trait App {
     /// Draw. Called only for the app the user is looking at.
     fn render(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse;
 
+    /// Draw into the window's title strip -- the band the close, minimise and
+    /// zoom buttons sit in -- at its **right-hand end**.
+    ///
+    /// Called only for the app on screen, in a right-to-left layout, so the
+    /// first thing drawn lands against the window's right edge. The strip is
+    /// one small control tall and is the window's drag region, so what goes
+    /// here should be small and rare: the thing an identity is looking *at*,
+    /// not the things it can do. The default draws nothing.
+    fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) {}
+
     /// Draw one entry of the shell's global history.
     ///
     /// `token` is exactly the `Rc<dyn Any>` this app pushed. Downcast it back

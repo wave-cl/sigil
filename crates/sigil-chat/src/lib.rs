@@ -44,6 +44,78 @@ pub enum Route {
 /// discovered at is the answer when there is one; the key is the fallback,
 /// because a connection made to an address has no domain to report and a key
 /// is still better than a word that names nothing.
+/// One exchange in the title strip's menu: a row the width of the menu, and
+/// the way to remove it, on the same centre line.
+///
+/// Not a `selectable_label`, which highlights the words and nothing else --
+/// a pill in the corner of a row rather than a row -- and beside which the
+/// remove control sat a full button's height lower, because a `horizontal`
+/// centres each thing against the height it knew when that thing was placed.
+/// One rectangle, allocated first at the height of the taller of the two, and
+/// both drawn into it.
+///
+/// Returns (chosen, removed).
+fn exchange_row(
+    ui: &mut egui::Ui,
+    theme: &ColorTheme,
+    label: &str,
+    selected: bool,
+    removable: bool,
+) -> (bool, bool) {
+    let height = tokens::BUTTON_MD;
+    let (rect, row) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    row.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label));
+    if ui.is_rect_visible(rect) {
+        if selected {
+            ui.painter()
+                .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
+        } else if row.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                tokens::RADIUS_SM,
+                theme.interactive_hover.gamma_multiply(0.5),
+            );
+        }
+        let colour = if selected {
+            theme.accent
+        } else {
+            theme.text_primary
+        };
+        ui.painter().text(
+            egui::pos2(rect.left() + tokens::SPACING_SM, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            colour,
+        );
+    }
+    if row.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let mut removed = false;
+    if removable {
+        // Drawn **into** the row's rectangle, at its right, after the row --
+        // so it is on top and wins the press over the row underneath it, and
+        // so its centre is the row's centre rather than a centre of its own.
+        let square = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - height / 2.0, rect.center().y),
+            egui::vec2(height, height),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(square), |ui| {
+            removed = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Remove")
+                .on_hover_text(
+                    "Stop connecting to this exchange. Nothing said there is deleted -- the \
+                     conversations stay in this store and come back if it is added again.",
+                )
+                .clicked();
+        });
+    }
+    (row.clicked() && !removed, removed)
+}
+
 fn default_label(its: Option<ChatState>) -> String {
     match its {
         Some(s) => match (s.domain, s.exchange) {
@@ -749,6 +821,23 @@ impl ChatApp {
     ///
     /// Both, because a conversation list belongs to a pair: the identity is
     /// the same key at every exchange and its conversations are not.
+    /// What to call one of this identity's exchanges.
+    ///
+    /// A named one is its name. The default has no name in the roster, so it
+    /// is labelled with what it turned out to be: the domain it was discovered
+    /// at, and only failing that the key. A truncated key is unreadable and
+    /// says nothing about *where* it is, which is the whole question a
+    /// switcher answers. Read from the default's **own** session rather than
+    /// from whichever one is on screen: the row is about the default whether
+    /// or not the default is what is being shown.
+    fn exchange_label(&self, me: PubKey, name: &str) -> String {
+        if name.is_empty() {
+            default_label(self.sessions.get(&(me, String::new())).map(|s| s.state()))
+        } else {
+            name.to_string()
+        }
+    }
+
     fn showing_at(&self, ctx: &AppContext<'_>) -> Option<At> {
         let me = Self::showing(ctx)?;
         let live: Vec<At> = self.sessions.keys().cloned().collect();
@@ -1136,6 +1225,110 @@ impl App for ChatApp {
     ///
     /// The badge is what tells somebody to come back, and an account they are
     /// not currently looking at is exactly the one they would otherwise miss.
+    /// Which exchange this identity is looking at, in the window's title
+    /// strip, and the way to look at another or add one.
+    ///
+    /// It was a list in the identity menu, two clicks behind a chevron, with
+    /// the "add" button beside the exchange's key. But it is not a fact about
+    /// the identity so much as about **what is on screen**: switching it
+    /// changes the whole conversation list, so it belongs where a reader can
+    /// see it at all times, which is the strip the window's own buttons live
+    /// in.
+    fn chrome_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return;
+        };
+        let me = at.0;
+        let named = ctx.accounts.active_held().exchanges();
+        let shown = self.exchange_label(me, &at.1);
+
+        // One control: the name and a chevron, pressed as one thing. The
+        // chevron is painted, not typed -- `▾` is in the same block of the
+        // font as the diamond that drew as nothing, and the rule since is that
+        // a mark is painted. The layout here is right to left, so the chevron
+        // is placed first and lands against the window's edge, with the name
+        // to its left.
+        let control = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+            // Or the label takes the press for its own text selection.
+            ui.style_mut().interaction.selectable_labels = false;
+            let side = ui.text_style_height(&egui::TextStyle::Small);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                sigil::icon::draw(
+                    ui.painter(),
+                    rect,
+                    sigil::Icon::Chevron,
+                    theme.text_secondary,
+                );
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&shown)
+                        .small()
+                        .color(theme.text_secondary),
+                )
+                .truncate(),
+            );
+        });
+        let button = control.response;
+        if button.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // Named for the tree: a painted chevron and a domain say nothing to a
+        // screen reader about what pressing them does.
+        button
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Exchange"));
+        let button = button.on_hover_text("The exchange this identity is looking at");
+
+        // Hung from the control's right-hand end, because the control is at
+        // the window's: opened from its left edge the menu ran across the
+        // pane. And **no wider than it needs**: the Remove control on each
+        // row is laid out from the right, and "the right" of a menu with no
+        // maximum is wherever the window ends.
+        egui::Popup::menu(&button)
+            .align(egui::RectAlign::BOTTOM_END)
+            .show(|ui| {
+                ui.set_min_width(200.0);
+                ui.set_max_width(260.0);
+                let which = ctx.accounts.active_index();
+                for name in &named {
+                    let selected = *name == at.1;
+                    let label = self.exchange_label(me, name);
+                    // **A way out, beside the way in.** There was a control to
+                    // add an exchange and none to remove one, so a name added
+                    // by mistake -- or one that turned out to be the default
+                    // under another spelling -- could only be taken back by
+                    // editing the roster file by hand.
+                    //
+                    // The default is not one of these: it is not a name in the
+                    // roster, it is whatever this identity resolves to, and
+                    // there would be nothing to remove.
+                    let (chosen, removed) =
+                        exchange_row(ui, &theme, &label, selected, !name.is_empty());
+                    if chosen && !selected {
+                        self.showing.insert(me, name.clone());
+                        ui.close();
+                    }
+                    if removed {
+                        ctx.accounts.drop_exchange(which, name);
+                        // Back to the default, or the interface would be
+                        // showing a conversation list for an exchange it is
+                        // no longer connected to.
+                        self.showing.remove(&me);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                // The same shape as the rows above it, or it reads as a
+                // caption under them rather than as one more thing to press.
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Plus, "Add a domain…").clicked() {
+                    self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
+                    ui.close();
+                }
+            });
+    }
+
     fn tab_notifications(&self) -> TabNotifications {
         TabNotifications::count(self.sessions.values().map(|s| s.unread() as u32).sum())
     }
@@ -1283,7 +1476,7 @@ impl ChatApp {
             };
             let up = state.link == LinkState::Up;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.me_ui(ctx, at, state, ui, theme);
+                self.me_ui(at, state, ui, theme);
                 ui.add_space(tokens::SPACING_SM);
                 // **The word appears when it is worth reading.** A link that
                 // is up is the ordinary case and a green dot says it. A link
@@ -1390,14 +1583,7 @@ impl ChatApp {
     /// is the part that is not negotiable: a name is an assertion attested by
     /// nobody (SIP-21), and the key is what actually identifies you to
     /// somebody who wants to write to you.
-    fn me_ui(
-        &mut self,
-        ctx: &mut AppContext<'_>,
-        at: &At,
-        state: &ChatState,
-        ui: &mut egui::Ui,
-        theme: &ColorTheme,
-    ) {
+    fn me_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         let me = at.0;
         let key = me.to_string();
 
@@ -1496,19 +1682,12 @@ impl ChatApp {
 
         egui::Popup::menu(&chevron).show(|ui| {
             ui.set_min_width(320.0);
-            self.identity_menu(ctx, at, state, ui, theme);
+            self.identity_menu(at, state, ui, theme);
         });
     }
 
     /// What used to be the top of the column, behind the chevron.
-    fn identity_menu(
-        &mut self,
-        ctx: &mut AppContext<'_>,
-        at: &At,
-        state: &ChatState,
-        ui: &mut egui::Ui,
-        theme: &ColorTheme,
-    ) {
+    fn identity_menu(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         let me = at.0;
 
         // In full, selectable, and wrapped rather than clipped. A name is an
@@ -1550,13 +1729,8 @@ impl ChatApp {
             ui.separator();
         }
 
-        if ui.button("Edit your profile").clicked() {
-            self.open_profile(at, state);
-            ui.close();
-        }
-
         ui.separator();
-        self.exchanges_ui(ctx, at, state, ui, theme);
+        self.exchanges_ui(state, ui, theme);
 
         // **One way out, not a roster.** This menu used to list every
         // identity in the roster, which put a second and shorter list of them
@@ -1566,6 +1740,16 @@ impl ChatApp {
         // that lists them all, draws the mark, says what is wrong with a file
         // and can ask for a passphrase. This goes back to it.
         ui.separator();
+        // Beside the other thing done *to* this identity rather than seen
+        // about it, and in the same shape: it was a plain button on its own
+        // between the key and the exchange, which is where the facts are.
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
+            .on_hover_text("Your name and title, as others see them")
+            .clicked()
+        {
+            self.open_profile(at, state);
+            ui.close();
+        }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Switch, "Switch identity")
             .on_hover_text(
                 "Choose another identity. This one stays open — its messages keep arriving \
@@ -1579,9 +1763,16 @@ impl ChatApp {
         let _ = me;
     }
 
-    /// Which exchange this identity is talking to, and how to add another.
+    /// The key of the exchange this identity is talking to.
     ///
-    /// # Why this is not a setting
+    /// **Only the key.** Which exchange, and the way to another or a new one,
+    /// moved to the window's title strip -- see [`ChatApp::chrome_ui`] -- where
+    /// it can be seen without opening anything. What stays here is the full
+    /// key of whatever is being talked to, always reachable and **labelled**:
+    /// unlabelled beside the account's own key it was a second string of
+    /// base58 with nothing saying which was which.
+    ///
+    /// # Why an exchange is not a setting
     ///
     /// The identity is the same key at every exchange, and **nothing else
     /// is**. Conversations, channel keys and SIP-17 counters belong to one
@@ -1589,77 +1780,7 @@ impl ChatApp {
     /// signature so that they cannot. Adding one is therefore much closer to
     /// adding an account than to changing a preference, and switching between
     /// them changes the whole conversation list.
-    fn exchanges_ui(
-        &mut self,
-        ctx: &mut AppContext<'_>,
-        at: &At,
-        state: &ChatState,
-        ui: &mut egui::Ui,
-        theme: &ColorTheme,
-    ) {
-        let me = at.0;
-        let named = ctx.accounts.active_held().exchanges();
-
-        // Only when there is a choice. A switcher over one exchange is a
-        // control that cannot do anything.
-        if named.len() > 1 {
-            let which = ctx.accounts.active_index();
-            for name in &named {
-                ui.horizontal(|ui| {
-                    let selected = *name == at.1;
-                    let label = if name.is_empty() {
-                        // The default has no name in the roster, so it is
-                        // labelled with what it turned out to be: the domain
-                        // it was discovered at, and only failing that the key.
-                        // A truncated key is unreadable and says nothing about
-                        // *where* it is, which is the whole question a
-                        // switcher answers.
-                        //
-                        // Read from the default's **own** session rather than
-                        // from whichever one is on screen: this row is about
-                        // the default whether or not the default is what is
-                        // being shown.
-                        default_label(self.sessions.get(&(me, String::new())).map(|s| s.state()))
-                    } else {
-                        name.clone()
-                    };
-                    if ui.selectable_label(selected, label).clicked() && !selected {
-                        self.showing.insert(me, name.clone());
-                    }
-                    // **A way out, beside the way in.** There was a control to
-                    // add an exchange and none to remove one, so a name added
-                    // by mistake -- or one that turned out to be the default
-                    // under another spelling -- could only be taken back by
-                    // editing the roster file by hand.
-                    //
-                    // The default is not one of these: it is not a name in the
-                    // roster, it is whatever this identity resolves to, and
-                    // there would be nothing to remove.
-                    if name.is_empty() {
-                        return;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Remove")
-                            .on_hover_text(
-                                "Stop connecting to this exchange. Nothing said there is \
-                                 deleted -- the conversations stay in this store and come \
-                                 back if it is added again.",
-                            )
-                            .clicked()
-                        {
-                            ctx.accounts.drop_exchange(which, name);
-                            // Back to the default, or the interface would be
-                            // showing a conversation list for an exchange it
-                            // is no longer connected to.
-                            self.showing.remove(&me);
-                        }
-                    });
-                });
-            }
-        }
-        // The full key of whatever is being talked to, always reachable, and
-        // **labelled** -- unlabelled beside the account's own key it was just
-        // a second string of base58 with nothing saying which was which.
+    fn exchanges_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_muted, egui::RichText::new("at").small());
             match state.exchange {
@@ -1675,14 +1796,6 @@ impl ChatApp {
                     ui.colored_label(theme.text_muted, egui::RichText::new("connecting…").small());
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Plus, "Add an exchange")
-                    .on_hover_text("Connect this identity to another exchange")
-                    .clicked()
-                {
-                    self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
-                }
-            });
         });
     }
 

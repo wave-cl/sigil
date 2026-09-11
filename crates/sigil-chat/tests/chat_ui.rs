@@ -55,6 +55,32 @@ fn build(account: Account, state: Option<ChatState>) -> Harness<'static> {
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(egui::Theme::Dark);
             let t = sigil::ColorTheme::current(&ctx);
+            // The window's title strip, as the shell draws it: the app's
+            // corner of it, from the right. The exchange control lives there.
+            egui::Panel::top("chrome")
+                .exact_size(sigil::tokens::BUTTON_SM)
+                .frame(egui::Frame::NONE.fill(t.surface_primary))
+                .show(ui, |ui| {
+                    let corner = ui
+                        .max_rect()
+                        .shrink2(egui::vec2(sigil::tokens::SPACING_SM, 0.0));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(corner)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| {
+                            let mut nav = Navigator::default();
+                            let mut app_ctx = AppContext {
+                                navigator: &mut nav,
+                                accounts: &mut accounts,
+                                unfocused: false,
+                                notify: &sigil::Silent,
+                                connections: &Default::default(),
+                            };
+                            app.chrome_ui(&mut app_ctx, ui);
+                        },
+                    );
+                });
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::NONE
@@ -289,9 +315,9 @@ fn an_exchange_can_be_added_from_the_pane_that_offers_it() {
     h.run();
     h.run();
 
-    // The pane itself does not list exchanges, so this asks the identity
-    // menu, which does — and which is on this screen because the bar is.
-    h.get_by_label("Your identity").click();
+    // The pane itself does not list exchanges, so this asks the exchange
+    // control in the title strip, which does.
+    h.get_by_label("Exchange").click();
     h.run();
     let said = text_of(&h);
     assert!(
