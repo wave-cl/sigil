@@ -18,9 +18,6 @@ use sigil::app::{App, AppAction, AppContext};
 use sigil::navigator::{AppId, NavEntry, NavRequest, Navigator};
 use sigil::{ColorTheme, NavStack, tokens};
 
-/// Wide enough that an app name and its unread count sit on one line. Icons
-/// will make this narrower; until there are icons, a wrapped label reads worse
-/// than a wide rail.
 /// Wide enough for one icon and its hit target, and no wider.
 ///
 /// It was 104px, which was right for a column of words and is most of an inch
@@ -772,7 +769,7 @@ impl Shell {
         });
     }
 
-    /// The app rail: one icon per app, with its unread badge.
+    /// The app rail: one icon per app.
     ///
     /// **No account switcher.** It was pinned to the bottom of this, which
     /// meant identities were chosen in one place and everything else about
@@ -792,9 +789,12 @@ impl Shell {
                 let badge = self.apps[i].tab_notifications();
                 let selected = i == active;
                 let theme = ColorTheme::current(ui.ctx());
-                // The count stays a **number**, beside the icon rather than
-                // inside it: a dot says "something" and a number says how
-                // much, and only one of them can be read out.
+                // The count reaches the accessibility tree and the tray, and
+                // is not drawn in the rail. It used to hang under the icon as
+                // a small accent number, which is a poor place for it: it is
+                // not attached to anything, it moves the icons below it as it
+                // appears and goes, and it repeats what the conversation list
+                // says properly one column over.
                 let said = if badge.is_empty() {
                     title.clone()
                 } else {
@@ -809,12 +809,6 @@ impl Shell {
                 );
                 if response.clicked() && !selected {
                     self.navigator.switch_to(AppId(i));
-                }
-                if !badge.is_empty() {
-                    ui.colored_label(
-                        theme.accent,
-                        egui::RichText::new(badge.count.to_string()).small(),
-                    );
                 }
                 ui.add_space(tokens::SPACING_XS);
             }

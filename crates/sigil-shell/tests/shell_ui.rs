@@ -639,11 +639,19 @@ fn the_passphrase_box_has_the_keyboard_from_launch() {
     );
 }
 
-/// The rail must show an unread count, because that badge is the only thing
-/// telling you a message arrived while you were on a call. Checked through the
-/// accessibility tree, so it needs no renderer and runs in ordinary CI.
+/// Every app is in the rail, and the unread count travels with the one that
+/// has it.
+///
+/// It is **not drawn** there -- it used to hang under the icon as a small
+/// accent number, unattached to anything and moving the icons below it as it
+/// came and went. What it must not do is stop existing: this is the name the
+/// accessibility tree reads out, and the same count is what badges the tray,
+/// which is what tells somebody a message arrived while they were on a call.
+///
+/// Checked through the accessibility tree, so it needs no renderer and runs in
+/// ordinary CI.
 #[test]
-fn the_rail_shows_each_app_and_badges_the_unread_one() {
+fn the_rail_names_each_app_and_carries_the_unread_count() {
     let mut h = harness(true);
     h.run();
     let joined = said(&h);
@@ -653,7 +661,8 @@ fn the_rail_shows_each_app_and_badges_the_unread_one() {
     );
     assert!(
         joined.contains("Chat (3)"),
-        "an app with unread messages is badged in the rail: {joined}"
+        "the unread count no longer reaches anything that can read it out, so \
+         nothing says a message arrived: {joined}"
     );
 }
 
