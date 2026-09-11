@@ -76,10 +76,7 @@ impl Receipt {
 pub fn receipt(ui: &mut egui::Ui, receipt: Receipt, colour: egui::Color32) -> egui::Response {
     let h = ui.text_style_height(&egui::TextStyle::Small);
     let tick = h * 0.5;
-    let width = match receipt {
-        Receipt::Delivered | Receipt::Read => tick * 1.6,
-        _ => tick,
-    };
+    let width = receipt_width(ui, receipt);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
     // The word, for anything that cannot see the paint.
     response
@@ -387,13 +384,17 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
     // Room for the controls beside the bubble, always — so a message does not
     // move sideways when the pointer arrives.
     let aside = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 3.0;
-    let limit = ((ui.available_width() - aside) * 0.72).max(160.0);
+    // **Three quarters of the pane, and never so wide the controls fall off.**
+    // The first is the rule; the second is what the rule has to give way to
+    // on a pane narrow enough that a quarter of it is less than three buttons.
+    let available = ui.available_width();
+    let limit = (available * WIDEST).min(available - aside).max(160.0);
     if b.mine {
         // Measured, not filled. A frame in a top-down layout takes the width
         // it is given, so capping at the limit made every message the same
         // width as the longest one it was allowed to be — a wall of identical
         // blocks rather than a conversation.
-        let width = wanted(ui, b).clamp(120.0, limit);
+        let Fit { width, one_line } = fit(ui, b, limit);
         // **Right to left**: the bubble is placed first and lands against the
         // right edge, and the controls go to its left. The previous shape was
         // `top_down(Align::Max)` with the frame as a direct child, which
@@ -427,7 +428,7 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                     egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Max)),
                     |ui| {
                         ui.set_max_width(width);
-                        body(ui, b, &theme, &mut action)
+                        body(ui, b, one_line, &theme, &mut action)
                     },
                 )
                 .inner;
@@ -446,13 +447,13 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
             } else {
                 crate::identicon(ui, b.key, size);
             }
-            let width = wanted(ui, b).clamp(120.0, limit);
+            let Fit { width, one_line } = fit(ui, b, limit);
             let bubble = ui
                 .scope_builder(
                     egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)),
                     |ui| {
                         ui.set_max_width(width);
-                        body(ui, b, &theme, &mut action)
+                        body(ui, b, one_line, &theme, &mut action)
                     },
                 )
                 .inner;
@@ -559,12 +560,30 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
     });
 }
 
-/// How wide this bubble would like to be, before any cap.
+/// The widest a bubble may be, as a share of the pane it is in.
 ///
-/// The widest line it holds, laid out without wrapping, plus the frame's own
-/// margins. Anything with a picture in it asks for everything, because an
-/// image is sized by the space it is given rather than by its text.
-fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
+/// Three quarters. It was 0.72 of the pane *less* the controls' room, which on
+/// an ordinary window came to about two thirds, and a short message still
+/// took two lines because the time was always drawn under the text.
+const WIDEST: f32 = 0.75;
+
+/// How wide a bubble wants to be, and whether one line is enough.
+struct Fit {
+    width: f32,
+    /// The text and everything after it -- the time, the receipt, a word
+    /// about the entry -- fit on one row within the limit, so they are drawn
+    /// on one row. A message like "Give it a week." is a single line the way
+    /// it is in any other messenger, rather than a line of words over a line
+    /// of furniture.
+    one_line: bool,
+}
+
+/// Measured, so a short message is a short bubble.
+///
+/// A frame in a top-down layout takes the width it is given, so capping at
+/// the limit alone made every message the same width as the longest one it
+/// was allowed to be -- a wall of identical blocks rather than a conversation.
+fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     let measure = |text: &str, style: egui::TextStyle| {
         let font = style.resolve(ui.style());
         ui.ctx()
@@ -572,22 +591,26 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
             .rect
             .width()
     };
+    let gap = ui.spacing().item_spacing.x;
     let body = if b.redacted {
         measure("Deleted", egui::TextStyle::Body)
     } else {
         measure(b.text, egui::TextStyle::Body)
     };
-    // The furniture under the text: a time, and possibly "edited" or a word
-    // about how the entry stands. **Not the receipt** -- that moved out from
-    // under the bubble's roof and is drawn below it, so it asks for no width in
-    // here. The trailing `SPACING_XL` is what used to leave room for it and is
-    // now the gap between the time and the bubble's right edge.
-    let mut meta = measure(b.at, egui::TextStyle::Small) + tokens::SPACING_XL;
+    // The furniture after the text, with the gap before each piece: the
+    // time, then "edited", a word about how the entry stands, and the
+    // receipt. Every one of them is drawn on the row `meta_row` draws, so
+    // every one of them is counted here -- a row measured narrower than it
+    // draws is a frame that grows past the width it was given.
+    let mut meta = measure(b.at, egui::TextStyle::Small);
     if b.edited {
-        meta += measure("edited", egui::TextStyle::Small) + tokens::SPACING_SM;
+        meta += gap + measure("edited", egui::TextStyle::Small);
     }
     if let Some((word, _)) = b.standing {
-        meta += measure(word, egui::TextStyle::Small) + tokens::SPACING_SM;
+        meta += gap + measure(word, egui::TextStyle::Small);
+    }
+    if let Some(r) = b.receipt {
+        meta += gap + receipt_width(ui, r);
     }
     let author = match (b.grouped, b.mine, b.name) {
         (false, false, Some(name)) => measure(name, egui::TextStyle::Body),
@@ -604,7 +627,7 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
             measure(&format!("{who}: {stub}"), egui::TextStyle::Small)
                 + tokens::STROKE_THICK
                 + tokens::SPACING_XXS
-                + ui.spacing().item_spacing.x * 2.0
+                + gap * 2.0
         })
         .unwrap_or(0.0);
     // A picture asks for the size it will be drawn at, not for everything.
@@ -615,13 +638,37 @@ fn wanted(ui: &egui::Ui, b: &Bubble<'_>) -> f32 {
     } else {
         crate::attachment::PICTURE
     };
-    body.max(meta).max(author).max(reply).max(files) + PAD_X * 2.0
+
+    // One line when the words and their furniture sit side by side inside the
+    // limit. A picture always gets its own rows; so does a tombstone, whose
+    // one word is not the message.
+    let together = body + gap * 2.0 + meta;
+    let one_line = b.attachments.is_empty() && !b.redacted && together + PAD_X * 2.0 <= limit;
+    let content = if one_line { together } else { body.max(meta) };
+    let width = content.max(author).max(reply).max(files) + PAD_X * 2.0;
+    Fit {
+        width: width.clamp(120.0f32.min(limit), limit),
+        one_line,
+    }
+}
+
+/// How wide a receipt mark is drawn, so a row can be measured to fit one.
+///
+/// The same arithmetic as [`receipt`], which is the point: a mark measured
+/// one width and drawn another is a row that overflows its bubble.
+fn receipt_width(ui: &egui::Ui, receipt: Receipt) -> f32 {
+    let tick = ui.text_style_height(&egui::TextStyle::Small) * 0.5;
+    match receipt {
+        Receipt::Delivered | Receipt::Read => tick * 1.6,
+        _ => tick,
+    }
 }
 
 /// The bubble itself: the frame, what is in it, and the reactions under it.
 fn body(
     ui: &mut egui::Ui,
     b: &Bubble<'_>,
+    one_line: bool,
     theme: &ColorTheme,
     action: &mut BubbleAction,
 ) -> egui::Rect {
@@ -692,24 +739,37 @@ fn body(
                         .italics()
                         .color(theme.text_muted),
                 );
-            } else if !b.text.is_empty() {
-                ui.add(egui::Label::new(b.text).wrap().selectable(true));
+                ui.horizontal(|ui| meta_row(ui, b, theme, quiet));
+            } else if one_line {
+                // **One row.** The words, then the time and the receipt after
+                // them, sitting on the baseline the way they do in every other
+                // messenger -- and not, as they were, on a second line under
+                // a message that only needed one. `fit` has already found that
+                // it all fits, so the label is not asked to wrap.
+                //
+                // Bottom-aligned, and allocated the height of one line of
+                // body text so that alignment has something to be relative
+                // to: a `with_layout` here would take the rest of the pane.
+                let row = egui::vec2(
+                    ui.available_width(),
+                    ui.text_style_height(&egui::TextStyle::Body),
+                );
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::left_to_right(egui::Align::Max),
+                    |ui| {
+                        ui.add(egui::Label::new(b.text).selectable(true));
+                        ui.add_space(ui.spacing().item_spacing.x);
+                        meta_row(ui, b, theme, quiet);
+                    },
+                );
+            } else {
+                if !b.text.is_empty() {
+                    ui.add(egui::Label::new(b.text).wrap().selectable(true));
+                }
+                // A row, or the pieces stack: this ui is top-down.
+                ui.horizontal(|ui| meta_row(ui, b, theme, quiet));
             }
-
-            ui.horizontal(|ui| {
-                ui.colored_label(quiet, egui::RichText::new(b.at).small());
-                if b.edited {
-                    ui.colored_label(quiet, egui::RichText::new("edited").small());
-                }
-                // SIP-31 **requires** a fork be surfaced, so this is a word in
-                // the message and not a line in a diagnostics pane somebody
-                // would have to go and look at.
-                if let Some((word, means)) = b.standing {
-                    let colour = if b.alarming { theme.destructive } else { quiet };
-                    ui.colored_label(colour, egui::RichText::new(word).small())
-                        .on_hover_text(means);
-                }
-            });
         });
     });
 
@@ -723,27 +783,45 @@ fn body(
         });
     }
 
-    // **Under the bubble, not in it.** It used to sit on the metadata row
-    // beside the time, inside the frame, which made the bubble taller than the
-    // words it holds -- and everything measured against the bubble, the hover
-    // controls included, then sat against a middle that was lower than the
-    // middle of the message. A receipt is also not part of what was said: it is
-    // what happened to it afterwards, and the two do not belong in one shape.
-    //
-    // `text_muted` and not `quiet`: out here the ground is the page rather than
-    // the bubble's fill, and `quiet` is mixed *towards that fill* -- see
-    // `faded`. The colours that mean something keep meaning it.
+    inner.response.rect
+}
+
+/// The time, and what else there is to say about the entry: "edited", a word
+/// about how it stands, and the receipt.
+///
+/// **In the bubble**, on the same row as the time. It went under the bubble
+/// for a while, on the argument that a receipt is what happened to a message
+/// rather than part of it -- which is true, and cost every message a second
+/// row of its own height plus a mark floating below it with nothing to belong
+/// to. Where it sits now is where a reader of any other messenger looks for
+/// it, and on a short message it is on the *same* line as the words.
+///
+/// `quiet` rather than `text_muted`, because the ground here is the bubble's
+/// fill and `quiet` is mixed towards it -- see [`faded`]. Failed is still the
+/// destructive colour and read is still the accent or the success colour: the
+/// ones that mean something keep meaning it.
+fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
+    ui.colored_label(quiet, egui::RichText::new(b.at).small());
+    if b.edited {
+        ui.colored_label(quiet, egui::RichText::new("edited").small());
+    }
+    // SIP-31 **requires** a fork be surfaced, so this is a word in the
+    // message and not a line in a diagnostics pane somebody would have to go
+    // and look at.
+    if let Some((word, means)) = b.standing {
+        let colour = if b.alarming { theme.destructive } else { quiet };
+        ui.colored_label(colour, egui::RichText::new(word).small())
+            .on_hover_text(means);
+    }
     if let Some(r) = b.receipt {
         let colour = match r {
             Receipt::Failed => theme.destructive,
             Receipt::Read if !b.mine => theme.accent,
             Receipt::Read => theme.success,
-            _ => theme.text_muted,
+            _ => quiet,
         };
         receipt(ui, r, colour).on_hover_text(r.word());
     }
-
-    inner.response.rect
 }
 
 /// Text that is quieter than the body but still legible on `over`.
@@ -1076,7 +1154,9 @@ mod tests {
                 missing: false,
                 id: "abc123",
             };
-            let asked = wanted(ui, &plain("", std::slice::from_ref(&file)));
+            // A limit wide enough that nothing here is clamped by it: what
+            // is being measured is what the bubble *asks for*.
+            let asked = fit(ui, &plain("", std::slice::from_ref(&file)), 10_000.0).width;
             assert!(asked.is_finite(), "a file asks for infinite width: {asked}");
             assert!(
                 asked <= crate::attachment::PICTURE + PAD_X * 2.0,
@@ -1085,7 +1165,7 @@ mod tests {
             // And the text still wins when there is more of it than that.
             let long = "x".repeat(400);
             assert!(
-                wanted(ui, &plain(&long, std::slice::from_ref(&file))) > asked,
+                fit(ui, &plain(&long, std::slice::from_ref(&file)), 10_000.0).width > asked,
                 "a long message with a file is measured by the file"
             );
         });

@@ -550,11 +550,14 @@ fn a_marker_that_belongs_to_nobody_is_centred() {
     // and none of the other. One of ours is right-aligned and one of theirs
     // is left-aligned, so between them they span it.
     //
-    // The rightmost match, because our own text appears twice -- once as the
-    // bubble and once quoted inside the reply below it.
+    // The rightmost thing in our bubble, which is no longer the words: the
+    // time and the receipt follow them on the same row now, so the receipt is
+    // the bubble's right-hand end. (Our text also appears twice -- once as
+    // the bubble and once quoted in the reply below -- hence the fold.)
     let mine = h
         .get_all_by_label_contains("mine, on the other side")
         .map(|n| n.rect())
+        .chain(std::iter::once(h.get_by_label("read").rect()))
         .fold(f32::MIN, |right, r| right.max(r.right()));
     let theirs = h.get_by_label_contains("yesterday's message").rect().left();
     let pane = egui::Rect::from_x_y_ranges(theirs..=mine, 0.0..=1.0);
@@ -1637,12 +1640,21 @@ fn the_controls_are_beside_the_message_and_on_its_free_side() {
         "somebody else's message keeps its controls on the right: \
          {reply:?} against {bubble:?}"
     );
-    // And beside it, not under it: the two share vertical space. Overlap
-    // rather than containment, because the controls are aligned to the top of
-    // the bubble and this measures one line of its text.
+    // And beside it, not under it: the controls are centred on the **bubble**,
+    // and the bubble is the author line above the words as well as the words.
+    // Measured against that whole span, because measuring against the words
+    // alone held only while the bubble had a third row under them -- the time
+    // -- to push its middle down onto the text.
+    let author = h
+        .get_all_by_label("Ada")
+        .map(|n| n.rect())
+        .filter(|r| (r.left() - bubble.left()).abs() < 4.0)
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the author line over the words");
+    let span = author.union(bubble);
     assert!(
-        reply.bottom() > bubble.top() && reply.top() < bubble.bottom(),
-        "the controls are below the message: {reply:?} against {bubble:?}"
+        reply.center().y > span.top() && reply.center().y < span.bottom(),
+        "the controls are not beside the message: {reply:?} against {span:?}"
     );
 }
 
@@ -2045,26 +2057,24 @@ fn the_controls_sit_beside_a_message_and_not_under_it() {
     }
 }
 
-/// The receipt is under the bubble, not inside it.
+/// The receipt is in the bubble, on the time's row.
 ///
-/// It used to sit on the metadata row beside the time, within the frame, which
-/// made the bubble taller than the words it holds: everything measured against
-/// the bubble — the hover controls included — then sat against a middle lower
-/// than the middle of the message. A receipt is also not part of what was said,
-/// but what happened to it afterwards.
+/// It was under the bubble for a while, on the argument that a receipt is
+/// what happened to a message rather than part of it. True, and it cost every
+/// message a row of its own height plus a mark floating below with nothing to
+/// belong to. Where it sits now is where a reader of any other messenger looks
+/// for it.
 ///
-/// Measured against the **time**, because that is what it used to share a line
-/// with: on the same row their centres agree, and under the bubble the receipt
-/// is below it entirely.
+/// Measured against the **time**: on the same row their centres agree.
 #[test]
-fn the_receipt_is_under_the_bubble_and_not_on_the_time_row() {
+fn the_receipt_is_on_the_time_row_inside_the_bubble() {
     let state = a_conversation();
     let mut h = harness_with(state, true);
     h.run();
 
     // "read", from `Receipt::word` — the fixture's own message carries it.
     let mark = h.get_by_label("read").rect();
-    // The time on that message's metadata row, which is inside the bubble.
+    // The nearest time to it, which is the one on its row.
     let time = h
         .get_all_by_label_contains(":")
         .map(|n| n.rect())
@@ -2077,12 +2087,123 @@ fn the_receipt_is_under_the_bubble_and_not_on_the_time_row() {
         })
         .expect("a time on the message");
     assert!(
-        mark.top() >= time.bottom(),
-        "the receipt is still on the time's row, which is inside the bubble: \
-         receipt {mark:?}, time {time:?}"
+        (mark.center().y - time.center().y).abs() < 4.0,
+        "the receipt is not on the time's row: receipt {mark:?}, time {time:?}"
+    );
+    // And after it, not before: words, time, receipt is the order everywhere.
+    assert!(
+        mark.left() >= time.right(),
+        "the receipt is before the time: receipt {mark:?}, time {time:?}"
     );
 }
 
+/// A short message is one line: the words, the time and the receipt together.
+///
+/// From a real transcript: "Give it a week." took a bubble two rows tall, the
+/// words on one and "13:30" on the other, with the receipt floating under the
+/// whole thing. Three rows of screen for four words. Every other messenger
+/// puts the time after the words when they fit, and now so does this.
+#[test]
+fn a_short_message_is_one_line_with_its_time_and_receipt() {
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+
+    // Our own text appears twice: as the bubble, and quoted in the reply
+    // below it. The bubble is the one in body text, so it is the taller.
+    let words = h
+        .get_all_by_label_contains("mine, on the other side")
+        .map(|n| n.rect())
+        .max_by(|a, b| a.height().total_cmp(&b.height()))
+        .expect("the message is drawn");
+    let mark = h.get_by_label("read").rect();
+    let time = h
+        .get_all_by_label_contains(":")
+        .map(|n| n.rect())
+        .min_by(|a, b| {
+            (a.center().y - words.center().y)
+                .abs()
+                .partial_cmp(&(b.center().y - words.center().y).abs())
+                .unwrap()
+        })
+        .expect("a time near the words");
+
+    for (what, r) in [("time", time), ("receipt", mark)] {
+        assert!(
+            r.top() >= words.top() - 2.0 && r.bottom() <= words.bottom() + 2.0,
+            "the {what} is not on the words' line: {what} {r:?}, words {words:?}"
+        );
+        assert!(
+            r.left() >= words.right(),
+            "the {what} is not after the words: {what} {r:?}, words {words:?}"
+        );
+    }
+}
+
+/// A long message wraps, and its furniture goes on one row beneath.
+///
+/// The other half of the rule. `meta_row` draws into a top-down ui and stacked
+/// its pieces vertically the first time round: the receipt sat under the time
+/// under the text, which is three rows of furniture for one message.
+#[test]
+fn a_long_message_keeps_its_time_and_receipt_on_one_row_beneath() {
+    let mut state = a_conversation();
+    state.lines[1].text = "a message long enough that it has to wrap onto a second \
+                           line and then a third, so that the time cannot possibly \
+                           sit beside it and has to go underneath instead"
+        .into();
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let words = h.get_by_label_contains("a message long enough").rect();
+    let mark = h.get_by_label("read").rect();
+    let time = h
+        .get_all_by_label_contains(":")
+        .map(|n| n.rect())
+        .filter(|r| (r.center().x - mark.center().x).abs() < 300.0)
+        .min_by(|a, b| {
+            (a.center().y - mark.center().y)
+                .abs()
+                .partial_cmp(&(b.center().y - mark.center().y).abs())
+                .unwrap()
+        })
+        .expect("a time on the message");
+
+    assert!(
+        time.top() >= words.bottom() - 2.0,
+        "the time is not beneath the words: time {time:?}, words {words:?}"
+    );
+    assert!(
+        (mark.center().y - time.center().y).abs() < 4.0,
+        "the receipt is not on the time's row: receipt {mark:?}, time {time:?}"
+    );
+}
+
+/// A bubble is never wider than three quarters of its pane.
+///
+/// Measured on the words rather than the frame, because a frame is not a node
+/// in the tree; a long message's words wrap to the frame's inner width, so
+/// they are the frame less its padding, and a rule about the frame holds for
+/// them a fortiori.
+#[test]
+fn a_bubble_is_at_most_three_quarters_of_the_pane() {
+    let mut state = a_conversation();
+    state.lines[1].text = "x ".repeat(400);
+    let mut h = harness_with(state, true);
+    h.run();
+    hide_column(&mut h);
+
+    let words = h.get_by_label_contains("x x x").rect();
+    // The pane, with the column hidden: the window less the margin either
+    // side. Wider than the transcript actually is, so this is the generous
+    // bound -- a bubble over three quarters of the window is over three
+    // quarters of anything inside it.
+    let pane = 1000.0 - 2.0 * sigil::tokens::SPACING_LG;
+    assert!(
+        words.width() <= pane * 0.75,
+        "the bubble is {} wide in a pane of {pane}: more than three quarters",
+        words.width()
+    );
+}
 /// A reserved row keeps its promise: nothing moves between frames.
 ///
 /// The transcript reserves the height of a message nobody can see rather than
