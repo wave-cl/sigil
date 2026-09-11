@@ -2277,6 +2277,140 @@ async fn a_picture_sent_to_a_public_channel_is_fetched_and_shown() {
     alice.stop();
 }
 
+/// A picture too big to fetch unasked is held as its thumbnail until the
+/// reader asks; the sender, who has it on the disc already, sees it whole.
+///
+/// **A gif** is how this was found: an ordinary one is over the old cap, so
+/// every reader's client kept its thumbnail under a caption that said
+/// "fetching", and the sender's own client did the same with the whole file
+/// sitting in its store. The reader's side is what `held` is for; the
+/// sender's side is the store being asked before the cap is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_over_the_cap_is_held_until_asked_for_and_the_sender_sees_it_anyway() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(31);
+    let (b_signer, b_id) = signer(32);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+
+    // Noise, so it will not compress: 3000 by 3000 of it is twenty-six
+    // megabytes as a PNG, which is over the cap and under what the store
+    // keeps.
+    let picture = dir.path().join("big.png");
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    image::RgbImage::from_fn(3000, 3000, |_, _| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let b = seed.to_le_bytes();
+        image::Rgb([b[0], b[1], b[2]])
+    })
+    .save(&picture)
+    .unwrap();
+    let size = std::fs::metadata(&picture).unwrap().len();
+    assert!(
+        size > 25 * 1024 * 1024 && size < 32 * 1024 * 1024,
+        "the fixture must be over the fetch cap and under the keep cap: {size}"
+    );
+    alice.send(Cmd::SendFile(picture));
+
+    // Alice sees her own picture whole: the store kept it on the way up.
+    let hers = until(
+        || {
+            alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.attachments.iter().any(|a| a.bytes.is_some()))
+        },
+        60,
+    )
+    .await;
+    assert!(
+        hers,
+        "the sender should see the picture she sent: {:?}",
+        alice.state().trouble
+    );
+
+    // Bob sees the thumbnail, marked as held, and nothing more arrives.
+    let held = until(
+        || {
+            bob.state().lines.iter().any(|l| {
+                l.attachments
+                    .iter()
+                    .any(|a| a.held && !a.preview.is_empty())
+            })
+        },
+        30,
+    )
+    .await;
+    assert!(
+        held,
+        "the reader should have the thumbnail and be told the rest is held: {:?}",
+        bob.state().lines
+    );
+    let fetched = || {
+        bob.state()
+            .lines
+            .iter()
+            .any(|l| l.attachments.iter().any(|a| a.bytes.is_some()))
+    };
+    assert!(
+        !until(fetched, 3).await,
+        "a picture over the cap was fetched without being asked for"
+    );
+
+    // Then he asks, and it comes.
+    let seq = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| !l.attachments.is_empty())
+        .map(|l| l.seq)
+        .unwrap();
+    bob.send(Cmd::Fetch { seq, index: 0 });
+    assert!(
+        until(fetched, 60).await,
+        "asked for, the picture should arrive: {:?}",
+        bob.state().trouble
+    );
+    assert!(
+        bob.state()
+            .lines
+            .iter()
+            .flat_map(|l| l.attachments.iter())
+            .all(|a| !a.held),
+        "a fetched picture is no longer held"
+    );
+    alice.stop();
+    bob.stop();
+}
+
 /// A message that will never open can be taken down from the notice, and the
 /// notice then goes.
 ///

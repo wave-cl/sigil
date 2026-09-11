@@ -490,6 +490,11 @@ pub struct Attached {
     /// not retried — which left a picture that had failed and one that had not
     /// been reached yet looking identical, and neither of them saying anything.
     pub missing: bool,
+    /// Too big to fetch unasked, and nobody has asked. What is on screen is
+    /// the thumbnail, and it stays the thumbnail until somebody presses Fetch
+    /// -- which the picture had better say, because "fetching" over a fetch
+    /// that will never start is a lie a reader waits on.
+    pub held: bool,
     /// The whole file, once it has been fetched and opened. Shared for the
     /// reason `preview` is.
     ///
@@ -729,6 +734,12 @@ pub enum Cmd {
     Show([u8; 32]),
     /// Ask again for every file the exchange refused.
     Refetch,
+    /// Fetch one file that was too big to fetch unasked: the one at `index`
+    /// on the message at `seq` in the open conversation.
+    Fetch {
+        seq: u64,
+        index: usize,
+    },
     /// Build another [`PAGE`] of the open conversation's history.
     ///
     /// Asked for by the transcript when somebody reaches the top of it. The
@@ -1599,6 +1610,11 @@ struct Desk {
     /// Blobs we tried and could not get, so a broken one is not retried on
     /// every pass for as long as the conversation is open.
     unfetchable: HashSet<[u8; 32]>,
+    /// Files over [`AUTO_FETCH_MAX`] the reader pressed Fetch on. A file
+    /// that is already on the disc -- this session's own upload, or one
+    /// fetched last time -- needs no entry here: the store is asked directly,
+    /// because what the cap guards is the *network*.
+    wanted: HashSet<[u8; 32]>,
     /// When the list was last rebuilt. See [`BACKSTOP`].
     ///
     /// A backstop, not the mechanism. Events are what make this responsive,
@@ -1625,6 +1641,7 @@ impl Default for Desk {
             files: HashMap::new(),
             fetched: Vec::new(),
             unfetchable: HashSet::new(),
+            wanted: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
             synced: false,
@@ -2532,9 +2549,24 @@ mod thumbnail_tests {
 ///
 /// An image is worth pulling so a conversation reads as a conversation; a
 /// video is not, and neither is a large photograph on a metered connection.
-/// Everything above this waits to be asked for, which is what the Save control
-/// is.
-const AUTO_FETCH_MAX: u64 = 4 * 1024 * 1024;
+/// Everything above this waits to be asked for -- the picture offers Fetch,
+/// and Save always fetches.
+///
+/// **Twenty-five, not four.** A gif is a picture that moves, and an ordinary
+/// one is four to eight megabytes; at four the thumbnail of every one of them
+/// sat under a caption that said "fetching" for ever. Twenty-five is the
+/// user's number, and is under what the store keeps (`BLOB_KEEP_MAX`), so a
+/// picture fetched unasked is a picture fetched once.
+///
+/// The cap is about the network, so it does not apply to a file that is
+/// already on the disc: this session's own upload, or one fetched last time.
+const AUTO_FETCH_MAX: u64 = 25 * 1024 * 1024;
+
+/// Whether a picture is worth fetching without being asked: small enough, or
+/// wanted anyway, or already here.
+fn fetch_unasked(size: u64, wanted: bool, on_disc: bool) -> bool {
+    size <= AUTO_FETCH_MAX || wanted || on_disc
+}
 
 /// How much of somebody's pictures this session keeps in hand.
 ///
@@ -2601,8 +2633,14 @@ async fn fetch_files(
         .messages()
         .flat_map(|m| m.post.attachments())
         .filter(|a| a.effective_kind() == sqex_proto::blob::KIND_IMAGE)
-        .filter(|a| a.size <= AUTO_FETCH_MAX)
         .filter(|a| !desk.files.contains_key(&a.blob) && !desk.unfetchable.contains(&a.blob))
+        .filter(|a| {
+            fetch_unasked(
+                a.size,
+                desk.wanted.contains(&a.blob),
+                chat.store().has_blob(&a.blob).unwrap_or(false),
+            )
+        })
         .cloned()
         .collect();
 
@@ -2906,6 +2944,11 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                             // yet. The two look the same on screen otherwise,
                             // and only one of them is worth waiting for.
                             missing: desk.unfetchable.contains(&a.blob),
+                            held: !fetch_unasked(
+                                a.size,
+                                desk.wanted.contains(&a.blob),
+                                chat.store().has_blob(&a.blob).unwrap_or(false),
+                            ),
                             id: bs58::encode(a.blob).into_string(),
                         })
                         .collect(),
@@ -3537,6 +3580,20 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             // that are rarely about the one blob — the link was down, the key
             // had not arrived — and a reader asking again means "try the lot".
             desk.unfetchable.clear();
+        }
+        Cmd::Fetch { seq, index } => {
+            // Only remembered as wanted; `fetch_files` does the fetching, on
+            // the same pass and with the same bounds as every other picture.
+            if let Some(blob) = desk.open.and_then(|c| desk.channels.get(&c)).and_then(|k| {
+                k.timeline
+                    .messages()
+                    .find(|m| m.seq == seq)
+                    .and_then(|m| m.post.attachments().nth(index))
+                    .map(|a| a.blob)
+            }) {
+                desk.wanted.insert(blob);
+                desk.unfetchable.remove(&blob);
+            }
         }
         Cmd::Earlier => {
             if let Some(channel) = desk.open

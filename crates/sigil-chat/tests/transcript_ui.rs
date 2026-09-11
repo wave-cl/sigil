@@ -126,6 +126,7 @@ fn a_conversation() -> ChatState {
                     preview: sigil_ui::attachment::no_preview().clone(),
                     bytes: None,
                     missing: false,
+                    held: false,
                     id: "abc123".into(),
                 }],
                 standing: Default::default(),
@@ -898,6 +899,7 @@ fn a_picture_the_session_has_put_down_is_forgotten_by_the_interface() {
             preview: sigil_ui::attachment::no_preview().clone(),
             bytes: Some(picture.clone()),
             missing: false,
+            held: false,
             id: "putdown".into(),
         }];
         state
@@ -1443,6 +1445,7 @@ fn mine_dark() {
         preview: sigil_ui::attachment::no_preview().clone(),
         bytes: None,
         missing: false,
+        held: false,
         id: "mine123".into(),
     }];
     let mut h = harness_with(state, true);
@@ -3261,6 +3264,7 @@ fn a_picture_is_not_captioned_with_its_own_size() {
         preview: sigil_ui::attachment::no_preview().clone(),
         bytes: Some(picture),
         missing: false,
+        held: false,
         id: "captioned".into(),
     }];
     let mut h = harness_with(state, true);

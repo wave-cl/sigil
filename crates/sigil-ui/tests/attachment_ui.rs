@@ -1,7 +1,7 @@
 //! What a message's file looks like when it will not open.
 
 use egui_kittest::Harness;
-use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sigil::theme;
 
 fn said(h: &Harness<'static>) -> String {
@@ -49,6 +49,8 @@ fn tall(bytes: Option<std::sync::Arc<[u8]>>, height: Option<f32>) -> f32 {
                             preview: sigil_ui::attachment::no_preview(),
                             bytes: bytes.as_ref(),
                             missing: false,
+                            held: false,
+                            size: 0,
                             id: "sized",
                         },
                         sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -80,6 +82,8 @@ fn drawn(bytes: std::sync::Arc<[u8]>) -> Harness<'static> {
                     preview: sigil_ui::attachment::no_preview(),
                     bytes: Some(&bytes),
                     missing: false,
+                    held: false,
+                    size: 0,
                     id: "notapicture",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -369,6 +373,8 @@ fn a_picture_reserves_what_it_took_last_time() {
                             preview: sigil_ui::attachment::no_preview(),
                             bytes: state.borrow().as_ref(),
                             missing: false,
+                            held: false,
+                            size: 0,
                             id: "remembered",
                         },
                         sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -437,6 +443,8 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
                     preview: &preview,
                     bytes: shown.borrow().as_ref(),
                     missing: false,
+                    held: false,
+                    size: 0,
                     id: "swapping",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -457,4 +465,92 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
         "the thumbnail was replaced by words while the picture decoded: {}",
         said(&h)
     );
+}
+
+/// What the caption under a thumbnail says, and what its button does, for
+/// each reason the picture itself is not here.
+fn captioned(
+    missing: bool,
+    held: bool,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::Cell<sigil_ui::AttachmentAction>>,
+) {
+    let preview: std::sync::Arc<[u8]> = png_of(40, 10).into();
+    let did = std::rc::Rc::new(std::cell::Cell::new(sigil_ui::AttachmentAction::default()));
+    let seen = did.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(500.0, 400.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            let action = sigil_ui::attachment(
+                ui,
+                &sigil_ui::Attachment {
+                    kind: sigil_ui::attachment::IMAGE,
+                    described: "[image, 4.1 MiB]",
+                    preview: &preview,
+                    bytes: None,
+                    missing,
+                    held,
+                    size: 4_300_000,
+                    id: "captioned",
+                },
+                sigil::ColorTheme::current(&ctx).surface_elevated,
+            );
+            if action != sigil_ui::AttachmentAction::default() {
+                seen.set(action);
+            }
+        });
+    h.run();
+    h.run();
+    (h, did)
+}
+
+/// A thumbnail under a picture too big to fetch unasked says how big, and
+/// offers to fetch it; one whose fetch failed says so and offers to try
+/// again. Neither says "fetching".
+///
+/// Both did: the caption was one string for every reason the picture was
+/// not there, and "fetching the full image" over a fetch that would never
+/// start is what a reader waited on for a gif.
+#[test]
+fn the_caption_under_a_thumbnail_says_why_the_picture_is_not_here() {
+    let (mut h, did) = captioned(false, true);
+    let words = said(&h);
+    assert!(
+        words.contains("4.1 MiB") && !words.contains("fetching"),
+        "a held picture should say its size and not promise a fetch: {words}"
+    );
+    h.get_by_label("Fetch").click();
+    h.run();
+    assert!(did.get().fetch, "Fetch should ask for the picture");
+    assert!(!did.get().retry);
+
+    let (mut h, did) = captioned(true, false);
+    let words = said(&h);
+    assert!(
+        words.contains("could not be fetched") && !words.contains("fetching"),
+        "a failed fetch should say so: {words}"
+    );
+    h.get_by_label("Try again").click();
+    h.run();
+    assert!(did.get().retry, "Try again should ask again");
+    assert!(!did.get().fetch);
+
+    let (h, _) = captioned(false, false);
+    assert!(
+        said(&h).contains("fetching the full image"),
+        "one on its way still says so: {}",
+        said(&h)
+    );
+}
+
+#[test]
+fn sizes_are_said_in_round_units() {
+    use sigil_ui::attachment::human;
+    assert_eq!(human(900), "900 B");
+    assert_eq!(human(28 * 1024), "28 KiB");
+    assert_eq!(human(4_300_000), "4.1 MiB");
 }

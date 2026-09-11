@@ -205,6 +205,8 @@ pub struct BubbleAction {
     pub open: Option<usize>,
     /// Ask the exchange for a file it refused, again.
     pub retry: bool,
+    /// Fetch the file at this index, which was too big to fetch unasked.
+    pub fetch: Option<usize>,
     /// Forward the file it carries somewhere else.
     pub forward: bool,
     /// Go to the message this one replies to, by its place in the channel.
@@ -741,6 +743,9 @@ fn body(
                     if did.retry {
                         action.retry = true;
                     }
+                    if did.fetch {
+                        action.fetch = Some(i);
+                    }
                 }
             }
             if b.redacted {
@@ -1212,6 +1217,8 @@ mod tests {
                 preview: crate::attachment::no_preview(),
                 bytes: None,
                 missing: false,
+                held: false,
+                size: 2100,
                 id: "abc123",
             };
             // A limit wide enough that nothing here is clamped by it: what

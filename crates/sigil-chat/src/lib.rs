@@ -3143,6 +3143,8 @@ impl ChatApp {
                     preview: &a.preview,
                     bytes: a.bytes.as_ref(),
                     missing: a.missing,
+                    held: a.held,
+                    size: a.size,
                     id: &a.id,
                 })
                 .collect();
@@ -3299,6 +3301,9 @@ impl ChatApp {
             }
             if did.retry {
                 self.send_as(Some(at), Cmd::Refetch);
+            }
+            if let Some(index) = did.fetch {
+                self.send_as(Some(at), Cmd::Fetch { seq, index });
             }
             if let Some(index) = did.open {
                 self.pane(at).viewing = Some((seq, index));

@@ -42,6 +42,12 @@ pub struct Attachment<'a> {
     /// that had not been reached yet looking identical, and neither of them
     /// said anything at all.
     pub missing: bool,
+    /// Too big to fetch unasked, and nobody has asked. The thumbnail is all
+    /// there will be until somebody presses Fetch, and the caption says so
+    /// rather than promising a fetch that is not coming.
+    pub held: bool,
+    /// How big the file is, for the caption that offers to fetch it.
+    pub size: u64,
 }
 
 /// How large a picture is drawn in a transcript.
@@ -93,13 +99,25 @@ pub fn no_preview() -> &'static std::sync::Arc<[u8]> {
 }
 
 /// What the reader did to a file.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentAction {
     pub save: bool,
     /// Look at it full size.
     pub open: bool,
     /// Ask the exchange for it again.
     pub retry: bool,
+    /// Fetch one that was too big to fetch unasked.
+    pub fetch: bool,
+}
+
+/// `4.1 MiB`, for a caption.
+pub fn human(bytes: u64) -> String {
+    const K: u64 = 1024;
+    match bytes {
+        b if b < K => format!("{b} B"),
+        b if b < K * K => format!("{:.0} KiB", b as f64 / K as f64),
+        b => format!("{:.1} MiB", b as f64 / (K * K) as f64),
+    }
 }
 
 /// Draw the thumbnail into `rect`, if it is ready. Says whether it drew.
@@ -300,11 +318,35 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     if !whole {
                         // A thumbnail is not the picture, and saying so stops
                         // somebody reading a blurry preview as the whole of
-                        // what was sent.
-                        ui.colored_label(
-                            quiet,
-                            egui::RichText::new("preview — fetching the full image").small(),
-                        );
+                        // what was sent. **Saying why** matters more: this
+                        // line read "fetching" over a fetch that had failed,
+                        // and over one that was never going to start.
+                        ui.horizontal(|ui| {
+                            if a.missing {
+                                ui.colored_label(
+                                    theme.warning,
+                                    egui::RichText::new("preview — could not be fetched").small(),
+                                );
+                                if ui.small_button("Try again").clicked() {
+                                    action.retry = true;
+                                }
+                            } else if a.held {
+                                ui.colored_label(
+                                    quiet,
+                                    egui::RichText::new(format!("preview — {}", human(a.size)))
+                                        .small(),
+                                );
+                                if ui.small_button("Fetch").clicked() {
+                                    action.fetch = true;
+                                }
+                            } else {
+                                ui.colored_label(
+                                    quiet,
+                                    egui::RichText::new("preview — fetching the full image")
+                                        .small(),
+                                );
+                            }
+                        });
                     }
                 }
                 Ok(egui::load::TexturePoll::Pending { .. }) => {
