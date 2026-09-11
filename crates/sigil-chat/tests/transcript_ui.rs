@@ -3118,8 +3118,12 @@ fn a_long_name_does_not_run_over_the_time() {
         .map(|n| n.rect())
         .min_by(|a, b| a.area().total_cmp(&b.area()))
         .expect("the name is drawn");
-    // 12:59 in the fixture's fixed clock.
-    let time = h.get_by_label_contains("12:59").rect();
+    // The row's time, as the row draws it: through `brief` rather than as a
+    // literal, because a literal is the fixed clock in *one* time zone -- this
+    // read "12:59" on a machine an hour east of the runner that saw "11:59".
+    let time = h
+        .get_by_label_contains(&sigil_ui::brief(NOW - 60, NOW))
+        .rect();
 
     assert!(
         name.right() <= time.left() + 0.5,
@@ -3157,8 +3161,12 @@ fn a_long_preview_stays_on_one_line() {
         .map(|n| n.rect())
         .min_by(|a, b| a.area().total_cmp(&b.area()))
         .expect("the preview is drawn");
-    // A line of the same small style, from the same row.
-    let line = h.get_by_label_contains("12:59").rect().height();
+    // A line of the same small style, from the same row. Through `brief`, not
+    // a literal: see `a_long_name_does_not_run_over_the_time`.
+    let line = h
+        .get_by_label_contains(&sigil_ui::brief(NOW - 60, NOW))
+        .rect()
+        .height();
 
     assert!(
         preview.height() < line * 1.5,
