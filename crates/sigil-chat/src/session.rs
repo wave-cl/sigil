@@ -126,11 +126,8 @@ pub struct Line {
     pub edited: bool,
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: Vec<(String, usize, bool)>,
-    /// What this replies to: who said it and a stub of what they said.
-    ///
-    /// The author and the words, not the sequence number — "↳ 57" names a
-    /// number nobody has memorised.
-    pub reply_to: Option<(String, String)>,
+    /// What this replies to.
+    pub reply_to: Option<Quoted>,
     /// How far one of ours is known to have got. `None` on anybody else's.
     pub receipt: Option<Receipt>,
     /// Files this message carries.
@@ -161,6 +158,22 @@ pub struct Happened {
     /// Anything a reader would otherwise have to know. `None` for the events
     /// that mean exactly what they say.
     pub caveat: Option<&'static str>,
+}
+
+/// What a message replies to, as the reply shows it.
+///
+/// The author and the words are what is *drawn* -- "↳ 57" names a number
+/// nobody has memorised. The sequence number is what a **click** goes to: the
+/// quote is the way back to the message it quotes, and the transcript needs
+/// its place in the channel to get there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quoted {
+    /// The quoted message's place in the channel.
+    pub seq: u64,
+    /// Who said it, named.
+    pub who: String,
+    /// A line of what they said.
+    pub said: String,
 }
 
 /// What SIP-31 verification concluded about one message.
@@ -2724,12 +2737,13 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         .map(|(emoji, who)| (emoji.clone(), who.len(), who.contains(&me)))
                         .collect(),
                     reply_to: m.post.reply_to().and_then(|target| {
-                        stubs.get(&target).map(|(account, said)| {
-                            let named = people
+                        stubs.get(&target).map(|(account, said)| Quoted {
+                            seq: target,
+                            who: people
                                 .get(account)
                                 .and_then(|p| p.name.clone())
-                                .unwrap_or_else(|| short(account));
-                            (named, said.clone())
+                                .unwrap_or_else(|| short(account)),
+                            said: said.clone(),
                         })
                     }),
                     // Only ever on our own. On somebody else's it would be a
@@ -3062,18 +3076,60 @@ fn receipt_for(known: &Known, seq: u64, me: &PubKey) -> Receipt {
     }
 }
 
-/// A few words of a message, to name it in a reply.
+/// A message flattened to one line, to name it in a reply.
+///
+/// Cut generously. It was forty-eight characters, and that cut landed
+/// *before* the bubble's width had any say -- a quote in a bubble three
+/// quarters of the pane wide still ended at "any of us have ever …" with half
+/// the row empty after it. The bubble truncates the line to the width it
+/// actually has, so this only needs to be longer than any width a bubble can
+/// be; past that a longer stub costs a little measuring and shows nothing.
 fn stub(text: &str) -> String {
     let flat: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 48 {
-        let cut: String = flat.chars().take(47).collect();
+    if flat.chars().count() > STUB_CHARS {
+        let cut: String = flat.chars().take(STUB_CHARS - 1).collect();
         format!("{cut}…")
     } else {
         flat
+    }
+}
+
+/// More small-text characters than fit across three quarters of a wide pane.
+const STUB_CHARS: usize = 200;
+
+#[cfg(test)]
+mod stub_tests {
+    use super::{STUB_CHARS, stub};
+
+    /// A quote shows what the bubble has room for, not what a constant had.
+    ///
+    /// The cut was forty-eight characters, and a reply's quote in a bubble
+    /// three quarters of the pane wide still ended at "any of us have ever …"
+    /// with half the row empty after it. The bubble truncates to its width;
+    /// this only has to be longer than any width a bubble can be.
+    #[test]
+    fn a_long_message_is_quoted_past_the_old_cut() {
+        let long = "word ".repeat(60);
+        let quoted = stub(&long);
+        assert!(
+            quoted.chars().count() > 100,
+            "the quote was cut short of what a wide bubble can show: {} chars",
+            quoted.chars().count()
+        );
+        assert!(quoted.ends_with('…'), "and it says it was cut");
+        assert_eq!(quoted.chars().count(), STUB_CHARS, "cut to exactly the cap");
+    }
+
+    /// Short enough is left alone, and newlines are flattened out of it.
+    #[test]
+    fn a_short_message_is_quoted_whole_and_on_one_line() {
+        assert_eq!(stub("two\nlines"), "two lines");
+        assert_eq!(stub("  spaced   out  "), "spaced out");
+        assert!(!stub("short").ends_with('…'));
     }
 }
 

@@ -122,7 +122,7 @@ fn field_as(
     )
 }
 pub use message::{
-    Bubble, BubbleAction, Receipt, bubble, day_separator, reaction_chip, short, system_line,
+    Bubble, BubbleAction, Quote, Receipt, bubble, day_separator, reaction_chip, short, system_line,
     unread_divider, unread_pill,
 };
 pub use roster::{Row, roster};

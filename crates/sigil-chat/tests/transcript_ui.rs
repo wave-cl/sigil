@@ -11,7 +11,8 @@ use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
-    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Receipt, Summary,
+    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Quoted, Receipt,
+    Summary,
 };
 use sqnr_core::PubKey;
 
@@ -139,7 +140,11 @@ fn a_conversation() -> ChatState {
                 redacted: false,
                 edited: false,
                 reactions: Vec::new(),
-                reply_to: Some(("me".into(), "mine, on the other side".into())),
+                reply_to: Some(Quoted {
+                    seq: 2,
+                    who: "me".into(),
+                    said: "mine, on the other side".into(),
+                }),
                 receipt: None,
                 attachments: Vec::new(),
                 standing: Default::default(),
@@ -1389,7 +1394,11 @@ fn mine_dark() {
     state.lines[n - 1].name = None;
     state.lines[n - 1].who = me();
     state.lines[n - 1].text = "sent by me, with something attached".into();
-    state.lines[n - 1].reply_to = Some(("Ada".into(), "the second one, then".into()));
+    state.lines[n - 1].reply_to = Some(Quoted {
+        seq: 1,
+        who: "Ada".into(),
+        said: "the second one, then".into(),
+    });
     state.lines[n - 1].attachments = vec![Attached {
         kind: 0x04,
         described: "[notes.txt, 2.1 kB]".into(),
@@ -3038,5 +3047,245 @@ fn a_long_preview_stays_on_one_line() {
         "the preview wrapped, so this row is taller than the rest of the \
          column: {} against a line of {line}",
         preview.height()
+    );
+}
+
+/// The time and the receipt sit against the bubble's right edge, always.
+///
+/// They were drawn straight after the words, which is flush right only when
+/// the bubble is exactly as wide as the words -- and a bubble has a minimum
+/// width, and a quoted reply above the words is usually wider than they are.
+/// "ok" had its time in the middle of the bubble with fill to the right of it,
+/// and a reply's time ended where the words did, short of the quote above.
+///
+/// Two of our own bubbles, one short and one long: both sit against the pane's
+/// right edge, so if the furniture is against each bubble's right edge the two
+/// receipts end at the same x. No proxy for the frame needed.
+#[test]
+fn the_time_and_receipt_are_against_the_bubble_edge() {
+    let mut state = a_conversation();
+    state.lines.push(Line {
+        seq: 9,
+        who: me(),
+        name: None,
+        mine: true,
+        at: NOW - 60,
+        text: "ok".into(),
+        redacted: false,
+        edited: false,
+        reactions: vec![],
+        reply_to: None,
+        receipt: Some(Receipt::Read),
+        attachments: Vec::new(),
+        standing: Default::default(),
+    });
+    state.lines.push(Line {
+        seq: 10,
+        who: me(),
+        name: None,
+        mine: true,
+        at: NOW - 30,
+        text: "a message long enough that it has to wrap onto a second line and \
+               then a third, so the time has to go underneath it"
+            .into(),
+        redacted: false,
+        edited: false,
+        reactions: vec![],
+        reply_to: None,
+        receipt: Some(Receipt::Read),
+        attachments: Vec::new(),
+        standing: Default::default(),
+    });
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let marks: Vec<egui::Rect> = h.get_all_by_label("read").map(|n| n.rect()).collect();
+    assert!(
+        marks.len() >= 3,
+        "three of our messages carry a receipt: {marks:?}"
+    );
+    let rightmost = marks.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+    for m in &marks {
+        assert!(
+            (m.right() - rightmost).abs() < 1.0,
+            "a receipt is short of the bubble's right edge: {m:?}, against \
+             {rightmost} for the others"
+        );
+    }
+}
+
+/// A picture carries no caption saying it is a picture.
+///
+/// "[image, 262 KiB]" under every photograph is a line nobody reads, and the
+/// size is what a save dialog is for. The words still exist -- on the picture
+/// itself, in the accessibility tree, for anything that reads rather than
+/// looks -- so this asks that the description belongs to the **image** and to
+/// nothing else. A caption drawn as text would be a second node with the same
+/// words, and the query below refuses two.
+#[test]
+fn a_picture_is_not_captioned_with_its_own_size() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    let picture: std::sync::Arc<[u8]> = vec![3u8; 4096].into();
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: sigil_ui::attachment::IMAGE,
+        described: "[image, 4 KiB]".into(),
+        size: picture.len() as u64,
+        preview: sigil_ui::attachment::no_preview().clone(),
+        bytes: Some(picture),
+        missing: false,
+        id: "captioned".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+
+    let only = h.get_by_label_contains("[image, 4 KiB]");
+    let role = format!("{:?}", only.accesskit_node().role());
+    assert_eq!(
+        role, "Image",
+        "the description is on something other than the picture"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Going to the message a reply quotes.
+// ---------------------------------------------------------------------------
+
+/// Pressing a quote goes to the message it quotes.
+///
+/// A quote was a caption. What anybody wants from it is to see the message
+/// in full and in context, and that message can be anywhere above -- so the
+/// quote is a control, and pressing it scrolls the transcript until the
+/// quoted message is in view.
+///
+/// Sixty messages, the last of which replies to the fifth: far enough up that
+/// it is not on screen and, with the transcript reserving rows it cannot see,
+/// not even laid out as a node until something scrolls to it.
+#[test]
+fn pressing_a_quote_scrolls_to_the_message_it_quotes() {
+    let mut state = a_page(0, 60);
+    let n = state.lines.len();
+    state.lines[n - 1].reply_to = Some(Quoted {
+        seq: 5,
+        who: "Ada".into(),
+        said: "message 4".into(),
+    });
+    let mut h = harness_with(state, true);
+    h.run();
+    hide_column(&mut h);
+    // Settle: the first frame draws everything to learn heights, the next
+    // reserves what is off screen.
+    h.run();
+    h.run();
+
+    // The bubble's own words, by exact label: the quote says "Ada: message 4"
+    // and is on screen from the start, so a `contains` would find that.
+    let on_screen = |h: &Harness<'static>| {
+        h.query_all_by_label("message 4")
+            .map(|n| n.rect())
+            .any(|r| r.top() >= 0.0 && r.bottom() <= 620.0)
+    };
+    assert!(
+        !on_screen(&h),
+        "the quoted message is already on screen, so this tests nothing"
+    );
+
+    // The quote, which reads "Ada: message 4".
+    h.get_by_label_contains("Ada: message 4").click();
+    for _ in 0..6 {
+        h.run();
+    }
+
+    assert!(
+        on_screen(&h),
+        "pressing the quote did not bring the quoted message on screen: {}",
+        text_of(&h)
+    );
+}
+
+/// A quote of a message on a page not yet fetched asks for the page, and
+/// goes there when it arrives.
+///
+/// A conversation opens on its last page, and a reply can point at anything
+/// before it. So the ask is not answered on the pass it is made: the previous
+/// page is asked for, the ask is kept, and when the page lands the message is
+/// laid out and scrolled to. The state is replaced by hand here, the way the
+/// session republishes it when a page arrives.
+#[test]
+fn a_quote_of_an_unfetched_message_fetches_its_page_and_then_goes_there() {
+    // Messages 30..60 loaded, thirty earlier ones not, and the last replies
+    // to the fifth.
+    let mut state = a_page(30, 60);
+    let n = state.lines.len();
+    state.lines[n - 1].reply_to = Some(Quoted {
+        seq: 5,
+        who: "Ada".into(),
+        said: "message 4".into(),
+    });
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    hide_column(&mut h);
+    h.run();
+    asked.borrow_mut().clear();
+
+    h.get_by_label_contains("Ada: message 4").click();
+    h.run();
+    h.run();
+
+    assert!(
+        asked.borrow().iter().any(|c| c == "Earlier"),
+        "the quoted message is on a page nobody has fetched, and pressing the \
+         quote did not ask for it: {:?}",
+        asked.borrow()
+    );
+}
+
+/// The second half: the page lands, and the transcript goes to the message.
+#[test]
+fn a_kept_ask_is_answered_when_the_page_arrives() {
+    let mut state = a_page(30, 60);
+    let n = state.lines.len();
+    state.lines[n - 1].reply_to = Some(Quoted {
+        seq: 5,
+        who: "Ada".into(),
+        said: "message 4".into(),
+    });
+    let shown = std::rc::Rc::new(std::cell::RefCell::new(state));
+    let mut h = harness_of(shown.clone());
+    h.run();
+    hide_column(&mut h);
+    h.run();
+
+    h.get_by_label_contains("Ada: message 4").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_all_by_label("message 4").next().is_none(),
+        "the quoted message cannot be here yet: its page has not arrived"
+    );
+
+    // The page arrives, as the session would publish it.
+    let mut whole = a_page(0, 60);
+    let n = whole.lines.len();
+    whole.lines[n - 1].reply_to = Some(Quoted {
+        seq: 5,
+        who: "Ada".into(),
+        said: "message 4".into(),
+    });
+    *shown.borrow_mut() = whole;
+    for _ in 0..8 {
+        h.run();
+    }
+
+    let on_screen = h
+        .query_all_by_label("message 4")
+        .map(|n| n.rect())
+        .any(|r| r.top() >= 0.0 && r.bottom() <= 620.0);
+    assert!(
+        on_screen,
+        "the page arrived and the transcript did not go to the message: {}",
+        text_of(&h)
     );
 }

@@ -184,6 +184,12 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             .unwrap_or(PICTURE_GUESS);
         let box_size = egui::vec2(side, tall);
         let (rect, response) = ui.allocate_exact_size(box_size, egui::Sense::click());
+        // The description goes to the accessibility tree rather than under
+        // the picture: "[image, 262 KiB]" beneath every photograph is a
+        // caption nobody reads, and the size is what a save dialog is for.
+        // Something that cannot see the picture still gets the words.
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, a.described));
         // The ground the picture sits on, so a letterboxed one reads as a
         // picture in a frame rather than as a hole in the bubble.
         ui.painter()
@@ -357,11 +363,11 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             });
         }
 
-        // What it is, quietly, and no button. Saving is on the message's own
-        // controls beside it, where every other thing done to a message is — a
-        // Save button on the picture put the one action nobody takes often in
-        // the loudest place on the bubble.
-        ui.colored_label(quiet, egui::RichText::new(a.described).small());
+        // No caption, and no button. Saving is on the message's own controls
+        // beside it, where every other thing done to a message is -- a Save
+        // button on the picture put the one action nobody takes often in the
+        // loudest place on the bubble. The description is on the picture
+        // itself, for anything that reads rather than looks.
         return action;
     }
 

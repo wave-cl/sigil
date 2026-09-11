@@ -131,6 +131,17 @@ pub fn receipt(ui: &mut egui::Ui, receipt: Receipt, colour: egui::Color32) -> eg
 
 /// One message, as the interface needs it.
 #[derive(Default)]
+/// What a message replies to, as the reply shows it.
+///
+/// The author and the words are what is drawn: "↳ 57: llll" names a number
+/// nobody has memorised. The sequence number is what a **click** goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quote<'a> {
+    pub seq: u64,
+    pub who: &'a str,
+    pub said: &'a str,
+}
+
 pub struct Bubble<'a> {
     /// The author's key, in full.
     pub key: &'a str,
@@ -155,11 +166,8 @@ pub struct Bubble<'a> {
     pub edited: bool,
     /// The body was removed. Draws a tombstone; see the module note.
     pub redacted: bool,
-    /// Author and a stub of what is being replied to.
-    ///
-    /// The author, not the sequence number: "↳ 57: llll" names a number nobody
-    /// has memorised.
-    pub reply_to: Option<(&'a str, &'a str)>,
+    /// What is being replied to, if anything.
+    pub reply_to: Option<Quote<'a>>,
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: &'a [(String, usize, bool)],
     /// What happened to the message after it was said. Drawn **under** the
@@ -199,6 +207,8 @@ pub struct BubbleAction {
     pub retry: bool,
     /// Forward the file it carries somewhere else.
     pub forward: bool,
+    /// Go to the message this one replies to, by its place in the channel.
+    pub jump: Option<u64>,
 }
 
 impl BubbleAction {
@@ -623,8 +633,8 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     // been given and ran off the edge of the pane.
     let reply = b
         .reply_to
-        .map(|(who, stub)| {
-            measure(&format!("{who}: {stub}"), egui::TextStyle::Small)
+        .map(|q| {
+            measure(&format!("{}: {}", q.who, q.said), egui::TextStyle::Small)
                 + tokens::STROKE_THICK
                 + tokens::SPACING_XXS
                 + gap * 2.0
@@ -712,8 +722,10 @@ fn body(
             if !b.grouped && !b.mine {
                 author_line(ui, b, theme);
             }
-            if let Some((who, stub)) = b.reply_to {
-                reply_stub(ui, who, stub, quiet, rule);
+            if let Some(q) = b.reply_to
+                && reply_stub(ui, q, quiet, rule)
+            {
+                action.jump = Some(q.seq);
             }
             // Before the text: a message is usually a picture *with* a caption
             // rather than a caption with a picture attached.
@@ -739,7 +751,7 @@ fn body(
                         .italics()
                         .color(theme.text_muted),
                 );
-                ui.horizontal(|ui| meta_row(ui, b, theme, quiet));
+                meta_row_beneath(ui, b, theme, quiet);
             } else if one_line {
                 // **One row.** The words, then the time and the receipt after
                 // them, sitting on the baseline the way they do in every other
@@ -759,16 +771,23 @@ fn body(
                     egui::Layout::left_to_right(egui::Align::Max),
                     |ui| {
                         ui.add(egui::Label::new(b.text).selectable(true));
-                        ui.add_space(ui.spacing().item_spacing.x);
-                        meta_row(ui, b, theme, quiet);
+                        // **Against the right edge**, whatever the bubble's
+                        // width came out as. A bubble has a minimum width, and
+                        // "ok" does not reach it, so drawn straight after the
+                        // words the time sat in the middle of the bubble with
+                        // empty fill to its right. Safe as a `with_layout`
+                        // here: the row was allocated a size, so "the rest"
+                        // is the rest of the row and not the rest of the pane.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                            meta_row(ui, b, theme, quiet)
+                        });
                     },
                 );
             } else {
                 if !b.text.is_empty() {
                     ui.add(egui::Label::new(b.text).wrap().selectable(true));
                 }
-                // A row, or the pieces stack: this ui is top-down.
-                ui.horizontal(|ui| meta_row(ui, b, theme, quiet));
+                meta_row_beneath(ui, b, theme, quiet);
             }
         });
     });
@@ -800,19 +819,14 @@ fn body(
 /// fill and `quiet` is mixed towards it -- see [`faded`]. Failed is still the
 /// destructive colour and read is still the accent or the success colour: the
 /// ones that mean something keep meaning it.
+///
+/// **Always against the bubble's right edge.** Laid out from the right, so
+/// the pieces are placed in reverse -- the receipt first, then the word about
+/// the entry, then "edited", then the time -- and read left to right as time,
+/// edited, standing, receipt. The caller supplies a right-to-left layout that
+/// has been given a bounded row: see the two call sites for why it must be
+/// bounded.
 fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
-    ui.colored_label(quiet, egui::RichText::new(b.at).small());
-    if b.edited {
-        ui.colored_label(quiet, egui::RichText::new("edited").small());
-    }
-    // SIP-31 **requires** a fork be surfaced, so this is a word in the
-    // message and not a line in a diagnostics pane somebody would have to go
-    // and look at.
-    if let Some((word, means)) = b.standing {
-        let colour = if b.alarming { theme.destructive } else { quiet };
-        ui.colored_label(colour, egui::RichText::new(word).small())
-            .on_hover_text(means);
-    }
     if let Some(r) = b.receipt {
         let colour = match r {
             Receipt::Failed => theme.destructive,
@@ -822,6 +836,35 @@ fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::
         };
         receipt(ui, r, colour).on_hover_text(r.word());
     }
+    // SIP-31 **requires** a fork be surfaced, so this is a word in the
+    // message and not a line in a diagnostics pane somebody would have to go
+    // and look at.
+    if let Some((word, means)) = b.standing {
+        let colour = if b.alarming { theme.destructive } else { quiet };
+        ui.colored_label(colour, egui::RichText::new(word).small())
+            .on_hover_text(means);
+    }
+    if b.edited {
+        ui.colored_label(quiet, egui::RichText::new("edited").small());
+    }
+    ui.colored_label(quiet, egui::RichText::new(b.at).small());
+}
+
+/// The same row, on a line of its own under the words, against the right.
+///
+/// Allocated the height of one small line rather than laid out with
+/// `with_layout`, which would take the rest of the pane -- the bubble is a
+/// frame in a top-down ui, and a frame takes whatever it is given.
+fn meta_row_beneath(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
+    let row = egui::vec2(
+        ui.available_width(),
+        ui.text_style_height(&egui::TextStyle::Small),
+    );
+    ui.allocate_ui_with_layout(
+        row,
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| meta_row(ui, b, theme, quiet),
+    );
 }
 
 /// Text that is quieter than the body but still legible on `over`.
@@ -881,40 +924,57 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
     }
 }
 
-/// What a message is replying to: a bar, a name, and a few of the words.
+/// What a message is replying to: a bar, a name, and a line of the words.
 ///
-/// **A painted bar rather than an arrow.** `↳` is not in the fonts egui
-/// bundles and came out as `□`. It is also the better shape — a rule down the
-/// left is what every messenger uses, and it does not have to be understood.
-fn reply_stub(ui: &mut egui::Ui, who: &str, stub: &str, quiet: egui::Color32, rule: egui::Color32) {
+/// **A control.** Pressing the quote goes to the message it quotes -- that is
+/// what a quote is for, and it was a caption. The whole row answers, rule and
+/// words alike, with the pointing hand and a tooltip saying where it leads.
+///
+/// **A painted bar rather than an arrow.** `↳` is not in the fonts egui ships
+/// with, and drew as nothing.
+///
+/// Returns whether it was pressed.
+fn reply_stub(ui: &mut egui::Ui, q: Quote<'_>, quiet: egui::Color32, rule: egui::Color32) -> bool {
     // Room of its own, on all four sides. The bubble's padding came down and
     // this went with it: the quote ended up jammed against the name above and
     // the words below, reading as a first line of the message rather than as
     // something being quoted.
     ui.add_space(tokens::SPACING_XS);
-    ui.horizontal(|ui| {
-        // Taller than its text, so the rule reads as a rule. At exactly the
-        // line height it is a dash the length of one word.
-        let h = ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS;
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(tokens::STROKE_THICK, h), egui::Sense::hover());
-        ui.painter().rect_filled(rect, tokens::RADIUS_SM, rule);
-        ui.add_space(tokens::SPACING_XXS);
-        // **Truncated, not extended.** A `horizontal` layout does not wrap, so
-        // a label long enough grows the frame around it — past the width the
-        // bubble was given, and off the side of the pane. `stub` already cuts
-        // this to 48 characters; 48 characters is still wider than a narrow
-        // bubble.
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(format!("{who}: {stub}"))
-                    .small()
-                    .color(quiet),
-            )
-            .truncate(),
-        );
+    let row = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        // Or the words take the press for their own selection and the row
+        // never hears it; see `conversation_row`.
+        ui.style_mut().interaction.selectable_labels = false;
+        ui.horizontal(|ui| {
+            // Taller than its text, so the rule reads as a rule. At exactly the
+            // line height it is a dash the length of one word.
+            let h = ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS;
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(tokens::STROKE_THICK, h), egui::Sense::hover());
+            ui.painter().rect_filled(rect, tokens::RADIUS_SM, rule);
+            ui.add_space(tokens::SPACING_XXS);
+            // **Truncated, not extended.** A `horizontal` layout does not wrap, so
+            // a label long enough grows the frame around it — past the width the
+            // bubble was given, and off the side of the pane. This is what cuts
+            // the quote to the bubble: the session hands over a couple of hundred
+            // characters, and what shows is whatever the width allows.
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{}: {}", q.who, q.said))
+                        .small()
+                        .color(quiet),
+                )
+                .truncate(),
+            );
+        });
     });
     ui.add_space(tokens::SPACING_XS);
+    let response = row.response;
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+        .on_hover_text("Go to the message this replies to")
+        .clicked()
 }
 
 /// One emoji and how many people sent it. Ours is outlined.

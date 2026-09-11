@@ -5,7 +5,7 @@ pub mod session;
 use session::RING_WINDOW;
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Found, Happened, Hit, Line, LinkState, Linked,
-    Member, Person, Receipt, Ring, Standing, Summary, Trouble,
+    Member, Person, Quoted, Receipt, Ring, Standing, Summary, Trouble,
 };
 
 use std::collections::HashMap;
@@ -133,7 +133,7 @@ fn shape_of(line: &Line, grouped: bool) -> u64 {
     line.standing.hash(&mut h);
     line.reply_to
         .as_ref()
-        .map(|(who, said)| who.len() + said.len())
+        .map(|q| q.who.len() + q.said.len())
         .hash(&mut h);
     h.finish()
 }
@@ -469,6 +469,13 @@ struct Pane {
     /// Cleared when the conversation changes: a height is about one message in
     /// one conversation and means nothing in the next.
     tall: HashMap<u64, (u64, f32, f32)>,
+    /// A message to scroll to -- a quote was pressed, or a search result
+    /// chosen -- by the channel it is in and its place there. Held until the
+    /// message is on screen, which may take a page or two arriving first; see
+    /// `messages_ui`. The channel is carried because a sequence number is only
+    /// meaningful in one, and the conversation on screen can change before
+    /// the message is found.
+    jump: Option<([u8; 32], u64)>,
     /// Whether the first look has happened for this identity.
     ///
     /// Opening the newest conversation is something sigil does **once**, on
@@ -503,6 +510,7 @@ impl Default for Pane {
             asking: false,
             saw: (None, 0),
             tall: HashMap::new(),
+            jump: None,
             scrolled: (0.0, 0.0),
             looked: false,
             // The protocol's own default, not zero: a retention field starting
@@ -2271,6 +2279,12 @@ impl ChatApp {
                         });
                         if response.response.interact(egui::Sense::click()).clicked() {
                             self.send_as(Some(at), Cmd::Show(hit.channel));
+                            // And to the message itself, once the conversation
+                            // is open. A hit carried its sequence number and
+                            // nothing used it: the result opened the
+                            // conversation at the bottom, and the message that
+                            // matched was somewhere above.
+                            self.pane(at).jump = Some((hit.channel, hit.seq));
                         }
                         ui.separator();
                     }
@@ -2829,6 +2843,16 @@ impl ChatApp {
         }
 
         let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
+        // Where the message somebody asked to go to landed this pass, drawn or
+        // reserved. See the end of the loop. Only when it is in *this*
+        // conversation: the same number names a different message anywhere
+        // else.
+        let jump = self
+            .pane(at)
+            .jump
+            .filter(|(channel, _)| Some(*channel) == state.open)
+            .map(|(_, seq)| seq);
+        let mut landed: Option<egui::Rect> = None;
         let mut previous_day: Option<String> = None;
         let mut previous_author: Option<PubKey> = None;
         let mut previous_at: u64 = 0;
@@ -2911,7 +2935,10 @@ impl ChatApp {
             if let Some(tall) = known
                 && (top + tall < near.top() || top > near.bottom())
             {
-                ui.allocate_space(egui::vec2(width, tall));
+                let (_, rect) = ui.allocate_space(egui::vec2(width, tall));
+                if jump == Some(line.seq) {
+                    landed = Some(rect);
+                }
                 previous_author = Some(line.who);
                 previous_at = line.at;
                 continue;
@@ -2941,10 +2968,11 @@ impl ChatApp {
                 grouped,
                 edited: line.edited,
                 redacted: line.redacted,
-                reply_to: line
-                    .reply_to
-                    .as_ref()
-                    .map(|(who, said)| (who.as_str(), said.as_str())),
+                reply_to: line.reply_to.as_ref().map(|q| sigil_ui::Quote {
+                    seq: q.seq,
+                    who: &q.who,
+                    said: &q.said,
+                }),
                 reactions: &line.reactions,
                 receipt: line.receipt.map(|r| match r {
                     Receipt::Sent => sigil_ui::Receipt::Sent,
@@ -2959,6 +2987,9 @@ impl ChatApp {
             DREW.with(|n| n.set(n.get() + 1));
             let drawn = ui.scope(|ui| sigil_ui::bubble(ui, &bubble));
             let did = drawn.inner;
+            if jump == Some(line.seq) {
+                landed = Some(drawn.response.rect);
+            }
             self.pane(at)
                 .tall
                 .insert(line.seq, (shape, width, drawn.response.rect.height()));
@@ -2974,6 +3005,35 @@ impl ChatApp {
         // channel would otherwise leave no trace at all.
         for event in events {
             self.event_ui(event, ui);
+        }
+
+        // **Going to a message somebody asked for.**
+        //
+        // A quote was pressed. If the message it quotes was laid out this pass
+        // -- drawn, or reserved at the height it drew to last time, either is
+        // a rectangle -- the transcript scrolls to it and the ask is done. If
+        // it was not, it is on a page that has not been fetched: the window
+        // opens on the last page, and a reply can point anywhere before it.
+        // So the previous page is asked for, the ask is kept, and the next
+        // pass looks again. `asking` is the same guard the top-of-transcript
+        // control uses, so this cannot ask twice for one page.
+        //
+        // A message that is not here and has no page to arrive on is let go
+        // of: nothing more can be done, and an ask that never resolves would
+        // fetch every page of the channel.
+        if let Some(target) = jump {
+            if let Some(rect) = landed {
+                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                ui.ctx().request_repaint();
+                self.pane(at).jump = None;
+            } else if state.lines.first().is_some_and(|l| l.seq > target) && state.earlier > 0 {
+                if !self.pane(at).asking {
+                    self.pane(at).asking = true;
+                    self.send_as(Some(at), Cmd::Earlier);
+                }
+            } else {
+                self.pane(at).jump = None;
+            }
         }
 
         if state.typing {
@@ -3045,6 +3105,9 @@ impl ChatApp {
             }
             if did.forward {
                 self.pane(at).forwarding = Some(seq);
+            }
+            if let (Some(target), Some(channel)) = (did.jump, state.open) {
+                self.pane(at).jump = Some((channel, target));
             }
             if did.retry {
                 self.send_as(Some(at), Cmd::Refetch);
