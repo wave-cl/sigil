@@ -134,6 +134,24 @@ file ("damaged and can't be opened") for what is really the quarantine flag.
 The release notes say how to clear it. A Developer ID and notarisation are what
 remove the step; see **Distributing** above.
 
+## What the video player links
+
+`sigil-video` plays an MP4 attachment -- H.264 pictures, AAC sound -- in the
+transcript. The H.264 decoder is Cisco's openh264, and the `openh264` crate
+**builds it from its own C++ source** in `build.rs`: no system package on any
+platform, nothing to add to the apt line above or to a runner, and the same
+decoder on all four release builds. It uses `nasm` for its assembly when one
+is on the path and compiles the C fallback when not, so a machine without
+`nasm` builds a slower decoder rather than no decoder (this laptop has none
+and decodes 720p at 347 frames a second). The container reader (`mp4`) and
+the AAC decoder (`symphonia`) are Rust. Sound goes out through `cpal`, which
+sigil already links for calls.
+
+What it does not play: HEVC (an iPhone's "High Efficiency" default), VP9 and
+AV1. Those show as a file with Save, and the box says why. Playing them means
+a second decoder, and every candidate for HEVC is a native library with a
+system package on each platform -- a packaging decision, not a code one.
+
 ## CI
 
 `.github/workflows/ci.yml` is the single source of truth, and `./check` runs its

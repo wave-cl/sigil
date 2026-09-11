@@ -77,6 +77,16 @@ pub enum Icon {
     More,
     /// Be somebody else: back to the opening screen to choose an identity.
     Switch,
+    /// Play a video, or carry on with one.
+    Play,
+    /// Hold a video where it is.
+    Pause,
+    /// The sound is on; press to mute it.
+    Sound,
+    /// The sound is off; press to hear it.
+    Muted,
+    /// See it as large as the window allows.
+    Enlarge,
 }
 
 impl Icon {
@@ -104,6 +114,11 @@ impl Icon {
             Icon::React => "React",
             Icon::More => "More",
             Icon::Switch => "Switch identity",
+            Icon::Play => "Play",
+            Icon::Pause => "Pause",
+            Icon::Sound => "Mute",
+            Icon::Muted => "Unmute",
+            Icon::Enlarge => "See it full size",
         }
     }
 }
@@ -354,6 +369,60 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 painter.circle_filled(p(x, 0.5), s * 0.075, colour);
             }
         }
+        Icon::Play => {
+            // The triangle everybody knows, filled, and set a little right
+            // of centre because a right-pointing triangle's visual centre
+            // is left of its box's.
+            painter.add(egui::Shape::convex_polygon(
+                vec![p(0.30, 0.20), p(0.30, 0.80), p(0.80, 0.50)],
+                colour,
+                egui::Stroke::NONE,
+            ));
+        }
+        Icon::Pause => {
+            for x in [0.32f32, 0.60] {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(p(x, 0.22), p(x + 0.12, 0.78)),
+                    0.0,
+                    colour,
+                );
+            }
+        }
+        Icon::Sound | Icon::Muted => {
+            // A speaker: a small box and the cone out of it. With sound, a
+            // wave in front; muted, a stroke through it.
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.18, 0.40), p(0.32, 0.60)),
+                0.0,
+                colour,
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![p(0.32, 0.40), p(0.50, 0.24), p(0.50, 0.76), p(0.32, 0.60)],
+                colour,
+                egui::Stroke::NONE,
+            ));
+            if icon == Icon::Sound {
+                let c = p(0.50, 0.50);
+                let mut wave = Vec::new();
+                for step in 0..=10 {
+                    let a = -0.9 + 1.8 * step as f32 / 10.0;
+                    wave.push(c + egui::vec2(a.cos() * s * 0.22, a.sin() * s * 0.22));
+                }
+                path(wave);
+            } else {
+                line(p(0.58, 0.38), p(0.80, 0.62));
+                line(p(0.80, 0.38), p(0.58, 0.62));
+            }
+        }
+        Icon::Enlarge => {
+            // Two corners pulling apart.
+            line(p(0.22, 0.42), p(0.22, 0.22));
+            line(p(0.22, 0.22), p(0.42, 0.22));
+            line(p(0.78, 0.58), p(0.78, 0.78));
+            line(p(0.78, 0.78), p(0.58, 0.78));
+            line(p(0.24, 0.24), p(0.42, 0.42));
+            line(p(0.76, 0.76), p(0.58, 0.58));
+        }
         Icon::Public => {
             // A globe: a circle with a meridian and an equator.
             let r = s * 0.30;
@@ -547,6 +616,12 @@ mod tests {
             Icon::Reply,
             Icon::React,
             Icon::More,
+            Icon::Switch,
+            Icon::Play,
+            Icon::Pause,
+            Icon::Sound,
+            Icon::Muted,
+            Icon::Enlarge,
         ] {
             let word = icon.word();
             assert!(word.len() > 2, "{icon:?} has no word");

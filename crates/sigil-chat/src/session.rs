@@ -475,6 +475,10 @@ pub struct Attached {
     /// What it is, in words: `[image 1920x1080, 2.1 MB]`.
     pub described: String,
     pub size: u64,
+    /// How long, for a video or a voice note; what the sender said.
+    pub duration_ms: Option<u64>,
+    /// Width and height, for a picture or a video; what the sender said.
+    pub shape: Option<(u32, u32)>,
     /// The thumbnail the sender put in, if any. Drawn while the blob is
     /// fetched, and the only thing shown at all until it is.
     ///
@@ -3025,6 +3029,8 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                             kind: a.effective_kind(),
                             described: sqex_chat::attach::describe(a),
                             size: a.size,
+                            duration_ms: a.duration_ms().map(u64::from),
+                            shape: a.dimensions().map(|(w, h)| (u32::from(w), u32::from(h))),
                             preview: a.preview.as_slice().into(),
                             bytes: desk.files.get(&a.blob).cloned(),
                             // Asked for and refused, as against not reached

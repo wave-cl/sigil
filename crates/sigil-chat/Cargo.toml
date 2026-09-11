@@ -12,6 +12,7 @@ image = { workspace = true }
 rfd = { workspace = true }
 sigil = { path = "../sigil" }
 sigil-ui = { path = "../sigil-ui" }
+sigil-video = { path = "../sigil-video" }
 sqex-chat = { workspace = true }
 sqnr-core = { workspace = true }
 sqnr = { workspace = true }

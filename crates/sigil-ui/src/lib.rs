@@ -11,12 +11,14 @@ pub mod gif;
 pub mod identicon;
 pub mod message;
 pub mod roster;
+pub mod video;
 pub mod working;
 
 pub use attachment::{Attachment, AttachmentAction, attachment};
 pub use clock::{brief, clock, day_label, day_of, stamp};
 pub use conversation_row::{ConversationRow, conversation_row};
 pub use dot::dot;
+pub use video::{Standing, Video, VideoAction, video};
 pub use working::working;
 // Re-exported from the host crate, where the `App` trait names one -- see
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.

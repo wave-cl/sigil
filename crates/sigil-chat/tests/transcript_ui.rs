@@ -127,6 +127,8 @@ fn a_conversation() -> ChatState {
                     bytes: None,
                     missing: false,
                     held: false,
+                    duration_ms: None,
+                    shape: None,
                     id: "abc123".into(),
                 }],
                 standing: Default::default(),
@@ -900,6 +902,8 @@ fn a_picture_the_session_has_put_down_is_forgotten_by_the_interface() {
             bytes: Some(picture.clone()),
             missing: false,
             held: false,
+            duration_ms: None,
+            shape: None,
             id: "putdown".into(),
         }];
         state
@@ -1446,6 +1450,8 @@ fn mine_dark() {
         bytes: None,
         missing: false,
         held: false,
+        duration_ms: None,
+        shape: None,
         id: "mine123".into(),
     }];
     let mut h = harness_with(state, true);
@@ -3265,6 +3271,8 @@ fn a_picture_is_not_captioned_with_its_own_size() {
         bytes: Some(picture),
         missing: false,
         held: false,
+        duration_ms: None,
+        shape: None,
         id: "captioned".into(),
     }];
     let mut h = harness_with(state, true);
@@ -3535,5 +3543,58 @@ fn a_private_channels_unreadable_notice_still_speaks_of_the_key() {
         text_of(&h).contains("its key may still arrive"),
         "{}",
         text_of(&h)
+    );
+}
+
+/// A video in the transcript is its thumbnail with the length on it, and
+/// pressing it asks the session for the file so that it can be played.
+///
+/// The fixture's video has not been fetched -- a forty-megabyte file is over
+/// what is fetched unasked -- so the press is the fetch. What happens when
+/// the bytes arrive is the player's business, covered in `sigil-video`.
+#[test]
+fn a_video_is_fetched_when_its_play_mark_is_pressed() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    // Not the tombstone: a redacted message draws no attachments.
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: sigil_ui::attachment::VIDEO,
+        described: "[video 449s, 46.1 MiB]".into(),
+        size: 48_308_476,
+        preview: sigil_ui::attachment::no_preview().clone(),
+        bytes: None,
+        missing: false,
+        held: true,
+        duration_ms: Some(449_344),
+        shape: Some((1280, 720)),
+        id: "clip".into(),
+    }];
+    let seq = state.lines[n - 1].seq;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    let video = h.get_by_label("[video 449s, 46.1 MiB]");
+    let rect = video.rect();
+    // Sixteen by nine at the bubble's width: a video is drawn in its own
+    // shape, not as a file row.
+    assert!(
+        (rect.width() / rect.height() - 16.0 / 9.0).abs() < 0.05,
+        "drawn {}x{}",
+        rect.width(),
+        rect.height()
+    );
+    assert!(
+        !asked.borrow().iter().any(|c| c.starts_with("Fetch")),
+        "fetched before anybody asked: {:?}",
+        asked.borrow()
+    );
+    video.click();
+    h.run();
+    let wanted = format!("Fetch {{ seq: {seq}, index: 0 }}");
+    assert!(
+        asked.borrow().contains(&wanted),
+        "pressing the video should ask for it: {:?}",
+        asked.borrow()
     );
 }

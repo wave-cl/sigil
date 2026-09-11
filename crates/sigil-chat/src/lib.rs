@@ -8,7 +8,7 @@ pub use session::{
     Member, Person, Quoted, Receipt, Ring, Standing, Summary, Trouble,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sigil::app::{App, AppContext, AppResponse, TabNotifications};
 use sigil::{ColorTheme, tokens};
@@ -460,7 +460,85 @@ type At = (PubKey, String);
 /// still be in the box after switching to another: the next Return would send
 /// it as somebody else, which is a mistake the interface would have made on
 /// your behalf and not mentioned.
+/// What the bubble is told about a video, from the pane's player for it if
+/// there is one and the message's own word otherwise.
+fn video_view<'a>(pane: &'a Pane, a: &'a session::Attached) -> sigil_ui::Video<'a> {
+    let playing = pane.players.get(&a.id);
+    let standing = if playing.is_some() {
+        sigil_ui::Standing::Ready
+    } else if pane.play_when_fetched.contains(&a.id) {
+        sigil_ui::Standing::Fetching
+    } else {
+        sigil_ui::Standing::Held
+    };
+    sigil_ui::Video {
+        frame: playing.and_then(|p| p.texture.as_ref()),
+        preview: &a.preview,
+        id: &a.id,
+        standing,
+        position_ms: playing.map(|p| p.player.position_ms()).unwrap_or(0),
+        duration_ms: playing
+            .map(|p| p.player.duration_ms())
+            .or(a.duration_ms)
+            .unwrap_or(0),
+        playing: playing.is_some_and(|p| p.player.playing()),
+        ended: playing.is_some_and(|p| p.player.ended()),
+        volume: playing.map(|p| p.player.volume()).unwrap_or(1.0),
+        trouble: pane.unplayable.get(&a.id).map(String::as_str),
+        shape: playing
+            .map(|p| {
+                let d = p.player.description();
+                (d.width, d.height)
+            })
+            .or(a.shape),
+        described: &a.described,
+    }
+}
+
+/// A video being played in this pane: the player, and the texture the
+/// picture due now is uploaded into.
+struct Playing {
+    player: sigil_video::Player,
+    texture: Option<egui::TextureHandle>,
+    /// The time of the picture in the texture, so a pass that finds the
+    /// same one uploads nothing.
+    shown: Option<u64>,
+}
+
+impl Playing {
+    /// Upload the picture due now, if it is a new one.
+    fn refresh(&mut self, ctx: &egui::Context, id: &str) {
+        let Some((at, image)) = self.player.frame() else {
+            return;
+        };
+        if self.shown == Some(at) {
+            return;
+        }
+        let data = egui::ImageData::Color(image);
+        match &mut self.texture {
+            Some(t) => t.set(data, egui::TextureOptions::LINEAR),
+            None => {
+                self.texture = Some(ctx.load_texture(
+                    format!("video-{id}"),
+                    data,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+        self.shown = Some(at);
+    }
+}
+
 struct Pane {
+    /// Videos with a player, by blob id. A player is made when play is
+    /// pressed and dropped when its message leaves the conversation on
+    /// screen; a conversation switched away from stops its videos.
+    players: HashMap<String, Playing>,
+    /// Videos play was pressed on before their bytes had arrived: they
+    /// start the moment they do.
+    play_when_fetched: HashSet<String>,
+    /// Why a video will not play, by blob id.
+    unplayable: HashMap<String, String>,
     /// Kept out of the session so that a failed send leaves it on screen:
     /// retyping a message the program lost is the worst thing a chat client can
     /// do to somebody.
@@ -559,6 +637,9 @@ struct Pane {
 impl Default for Pane {
     fn default() -> Self {
         Pane {
+            players: HashMap::new(),
+            play_when_fetched: HashSet::new(),
+            unplayable: HashMap::new(),
             composing: String::new(),
             adding: String::new(),
             add_trouble: None,
@@ -876,6 +957,31 @@ impl ChatApp {
 
     fn pane(&mut self, at: &At) -> &mut Pane {
         self.panes.entry(at.clone()).or_default()
+    }
+
+    /// Start playing a video whose bytes are in hand.
+    fn start_video(&mut self, at: &At, ctx: &egui::Context, id: &str, bytes: std::sync::Arc<[u8]>) {
+        let pane = self.pane(at);
+        pane.play_when_fetched.remove(id);
+        if pane.players.contains_key(id) {
+            return;
+        }
+        match sigil_video::Player::open(bytes, ctx.clone()) {
+            Ok(player) => {
+                player.play();
+                pane.players.insert(
+                    id.to_owned(),
+                    Playing {
+                        player,
+                        texture: None,
+                        shown: None,
+                    },
+                );
+            }
+            Err(why) => {
+                pane.unplayable.insert(id.to_owned(), why.to_string());
+            }
+        }
     }
 
     /// Bring the live sessions into line with the roster.
@@ -1826,6 +1932,10 @@ impl ChatApp {
             return;
         };
 
+        if file.kind == sigil_ui::attachment::VIDEO {
+            return self.video_viewer_ui(at, ui, theme, seq, index, file, bytes);
+        }
+
         let egui_ctx = ui.ctx().clone();
         // The window, so a big picture fills it and a small one does not
         // grow. `available_rect` is the whole surface here: this draws over
@@ -1929,6 +2039,78 @@ impl ChatApp {
         // The backdrop and Escape, which `should_close` covers, and the
         // control above. Three ways out of something that covers the window.
         if response.should_close() {
+            self.pane(at).viewing = None;
+        }
+    }
+
+    /// A video, as large as the window will take: the same player the
+    /// bubble uses, so opening it does not start it over, and the same
+    /// three ways out.
+    #[allow(clippy::too_many_arguments)]
+    fn video_viewer_ui(
+        &mut self,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        seq: u64,
+        index: usize,
+        file: &session::Attached,
+        bytes: std::sync::Arc<[u8]>,
+    ) {
+        let egui_ctx = ui.ctx().clone();
+        if !self.pane(at).players.contains_key(&file.id) {
+            self.start_video(at, &egui_ctx, &file.id, bytes);
+        }
+        if let Some(playing) = self.pane(at).players.get_mut(&file.id) {
+            playing.refresh(&egui_ctx, &file.id);
+        }
+        let screen = ui.ctx().viewport_rect().size();
+        let room = screen * 0.86;
+        let mut done = sigil_ui::VideoAction::default();
+        let mut close = false;
+        let mut save = false;
+        let response = egui::Modal::new(egui::Id::new(("video", seq, index)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme.surface_primary)
+                    .corner_radius(tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8)),
+            )
+            .show(&egui_ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    let pane = self.panes.entry(at.clone()).or_default();
+                    let view = video_view(pane, file);
+                    done = sigil_ui::video(ui, &view, room.x, room.y - tokens::BUTTON_SM * 2.0);
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new(&file.described).small(),
+                        );
+                        if ui.button("Save…").clicked() {
+                            save = true;
+                        }
+                        if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if let Some(playing) = self.pane(at).players.get(&file.id) {
+            if done.toggle {
+                playing.player.toggle();
+            }
+            if let Some(ms) = done.seek {
+                playing.player.seek(ms);
+            }
+            if let Some(mute) = done.mute {
+                playing.player.set_volume(if mute { 0.0 } else { 1.0 });
+            }
+        }
+        if save && let Some(to) = rfd::FileDialog::new().save_file() {
+            self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
+        }
+        if close || done.open || response.should_close() {
             self.pane(at).viewing = None;
         }
     }
@@ -3031,6 +3213,34 @@ impl ChatApp {
         }
 
         let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
+        // **The videos, before the bubbles.** Players for messages no longer
+        // on screen are dropped -- which stops them -- a video whose bytes
+        // have just arrived after play was pressed is started, and every
+        // player's picture due now is uploaded, once per pass.
+        {
+            let ctx = ui.ctx().clone();
+            let here: HashSet<&str> = state
+                .lines
+                .iter()
+                .flat_map(|l| l.attachments.iter().map(|a| a.id.as_str()))
+                .collect();
+            self.pane(at)
+                .players
+                .retain(|id, _| here.contains(id.as_str()));
+            let arrived: Vec<(String, std::sync::Arc<[u8]>)> = state
+                .lines
+                .iter()
+                .flat_map(|l| l.attachments.iter())
+                .filter(|a| self.pane(at).play_when_fetched.contains(&a.id))
+                .filter_map(|a| a.bytes.clone().map(|b| (a.id.clone(), b)))
+                .collect();
+            for (id, bytes) in arrived {
+                self.start_video(at, &ctx, &id, bytes);
+            }
+            for (id, playing) in self.pane(at).players.iter_mut() {
+                playing.refresh(&ctx, id);
+            }
+        }
         // Where the message somebody asked to go to landed this pass, drawn or
         // reserved. See the end of the loop. Only when it is in *this*
         // conversation: the same number names a different message anywhere
@@ -3134,6 +3344,7 @@ impl ChatApp {
 
             let key = line.who.to_string();
             let title = state.people.get(&line.who).and_then(|p| p.title.as_deref());
+            let pane = self.panes.entry(at.clone()).or_default();
             let files: Vec<sigil_ui::Attachment<'_>> = line
                 .attachments
                 .iter()
@@ -3146,6 +3357,7 @@ impl ChatApp {
                     held: a.held,
                     size: a.size,
                     id: &a.id,
+                    video: (a.kind == sigil_ui::attachment::VIDEO).then(|| video_view(pane, a)),
                 })
                 .collect();
             let bubble = sigil_ui::Bubble {
@@ -3177,12 +3389,16 @@ impl ChatApp {
             DREW.with(|n| n.set(n.get() + 1));
             let drawn = ui.scope(|ui| sigil_ui::bubble(ui, &bubble));
             let did = drawn.inner;
+            let rect = drawn.response.rect;
+            // `files` borrows the pane's players for the frames; what
+            // follows wants the pane mutably.
+            drop(files);
             if jump == Some(line.seq) {
-                landed = Some(drawn.response.rect);
+                landed = Some(rect);
             }
             self.pane(at)
                 .tall
-                .insert(line.seq, (shape, width, drawn.response.rect.height()));
+                .insert(line.seq, (shape, width, rect.height()));
             if !did.is_none() {
                 acted = Some((line.seq, line.text.clone(), line.who, did));
             }
@@ -3304,6 +3520,38 @@ impl ChatApp {
             }
             if let Some(index) = did.fetch {
                 self.send_as(Some(at), Cmd::Fetch { seq, index });
+            }
+            if let Some((index, done)) = did.video
+                && let Some(a) = state
+                    .lines
+                    .iter()
+                    .find(|l| l.seq == seq)
+                    .and_then(|l| l.attachments.get(index))
+            {
+                let ctx = ui.ctx().clone();
+                if done.toggle {
+                    if self.pane(at).players.contains_key(&a.id) {
+                        self.pane(at).players[&a.id].player.toggle();
+                    } else if let Some(bytes) = a.bytes.clone() {
+                        self.start_video(at, &ctx, &a.id, bytes);
+                    } else {
+                        // Not here yet: ask, and play when it comes.
+                        self.pane(at).play_when_fetched.insert(a.id.clone());
+                        self.send_as(Some(at), Cmd::Fetch { seq, index });
+                    }
+                }
+                if let Some(playing) = self.pane(at).players.get(&a.id) {
+                    if let Some(ms) = done.seek {
+                        playing.player.seek(ms);
+                    }
+                    if let Some(mute) = done.mute {
+                        playing.player.set_volume(if mute { 0.0 } else { 1.0 });
+                    }
+                }
+                if done.open {
+                    self.pane(at).viewing = Some((seq, index));
+                    self.pane(at).look = Look::default();
+                }
             }
             if let Some(index) = did.open {
                 self.pane(at).viewing = Some((seq, index));

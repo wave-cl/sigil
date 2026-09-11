@@ -48,6 +48,9 @@ pub struct Attachment<'a> {
     pub held: bool,
     /// How big the file is, for the caption that offers to fetch it.
     pub size: u64,
+    /// For a video: the player's view of it, if the caller has one. Drawn
+    /// in place of the file row. See [`crate::video`].
+    pub video: Option<crate::Video<'a>>,
 }
 
 /// How large a picture is drawn in a transcript.
@@ -108,6 +111,8 @@ pub struct AttachmentAction {
     pub retry: bool,
     /// Fetch one that was too big to fetch unasked.
     pub fetch: bool,
+    /// What was done to a video.
+    pub video: Option<crate::VideoAction>,
 }
 
 /// `4.1 MiB`, for a caption.
@@ -178,6 +183,24 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
     // For anything written straight onto `over`. Text inside one of the
     // frames below sits on that frame instead, and keeps the palette's own.
     let quiet = crate::message::faded(theme.text_primary, over);
+
+    if a.kind == VIDEO
+        && let Some(v) = &a.video
+    {
+        let did = crate::video(
+            ui,
+            v,
+            PICTURE.min(ui.available_width().max(160.0)),
+            PICTURE_MAX_TALL,
+        );
+        if did.save {
+            action.save = true;
+        }
+        if did != crate::VideoAction::default() {
+            action.video = Some(did);
+        }
+        return action;
+    }
 
     if a.kind == IMAGE {
         // Whole image if we have it, thumbnail if we do not, and the words if

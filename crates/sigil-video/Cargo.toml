@@ -1,0 +1,20 @@
+[package]
+name = "sigil-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Play a video attachment in the transcript: MP4 with H.264 and AAC, decoded here, no player process."
+
+[dependencies]
+egui = { workspace = true }
+# The container, the picture and the sound, in that order. openh264 is
+# Cisco's decoder built from its own source by the crate, which is what makes
+# it the same on all four release builds without a system package; mp4 and
+# symphonia are Rust. What this plays is what phones and screen recorders make.
+mp4 = "0.14"
+openh264 = { version = "0.9", features = ["source"] }
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
+cpal = "0.18"
+
+[dev-dependencies]
+image = { workspace = true }

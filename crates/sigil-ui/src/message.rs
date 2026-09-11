@@ -207,6 +207,8 @@ pub struct BubbleAction {
     pub retry: bool,
     /// Fetch the file at this index, which was too big to fetch unasked.
     pub fetch: Option<usize>,
+    /// What was done to the video at this index.
+    pub video: Option<(usize, crate::VideoAction)>,
     /// Forward the file it carries somewhere else.
     pub forward: bool,
     /// Go to the message this one replies to, by its place in the channel.
@@ -746,6 +748,9 @@ fn body(
                     if did.fetch {
                         action.fetch = Some(i);
                     }
+                    if let Some(v) = did.video {
+                        action.video = Some((i, v));
+                    }
                 }
             }
             if b.redacted {
@@ -1220,6 +1225,7 @@ mod tests {
                 held: false,
                 size: 2100,
                 id: "abc123",
+                video: None,
             };
             // A limit wide enough that nothing here is clamped by it: what
             // is being measured is what the bubble *asks for*.
