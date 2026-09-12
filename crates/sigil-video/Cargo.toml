@@ -18,3 +18,4 @@ cpal = "0.18"
 
 [dev-dependencies]
 image = { workspace = true }
+eframe = { workspace = true }

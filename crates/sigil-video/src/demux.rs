@@ -194,6 +194,18 @@ impl Demuxer {
         id
     }
 
+    /// Presentation times, in order, from the picture with sample id `id`
+    /// onwards: what the decoder's output pictures are, in order, once it
+    /// has started at that keyframe.
+    pub fn presentation_from(&self, id: u32) -> impl Iterator<Item = u64> + '_ {
+        let start = self
+            .order
+            .iter()
+            .position(|(_, sample)| *sample == id)
+            .unwrap_or(0);
+        self.order[start..].iter().map(|(t, _)| *t)
+    }
+
     /// The sample with this id (1-based, decode order), as the decoder
     /// wants it. `None` past the end.
     pub fn sample(&mut self, id: u32) -> Option<Sample> {

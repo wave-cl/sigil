@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# Build the Linux packages the way the release does, in an Ubuntu 22.04
+# container, from a Mac -- so a Linux build can be handed to somebody to
+# try without waiting for a tag.
+#
+#   scripts/linux-in-docker            # this machine's architecture (arm64 on Apple silicon)
+#   scripts/linux-in-docker amd64      # x86_64, under emulation: slow, but it is what most desktops are
+#
+# The image is what `.github/workflows/release.yml` installs, on the same
+# Ubuntu, so the glibc ceiling (2.35) and the runtime dependencies come out
+# the same. Output lands in target/linux-<arch>/.
+set -euo pipefail
+arch="${1:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}"
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+out="$repo/target/linux-$arch"
+mkdir -p "$out" "$repo/target/docker-cargo-$arch" "$repo/target/docker-target-$arch"
+cat > "$repo/target/Dockerfile.linux" <<'DOCKER'
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl ca-certificates git cmake pkg-config \
+    libasound2-dev libpipewire-0.3-dev libgtk-3-dev libpcsclite-dev libxdo-dev \
+    libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev nasm \
+    dpkg-dev rpm binutils \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
+RUN cargo install cargo-deb cargo-generate-rpm --locked
+DOCKER
+docker build --platform "linux/$arch" -t "sigil-linux-build:$arch" -f "$repo/target/Dockerfile.linux" "$repo/target"
+docker run --rm --platform "linux/$arch" \
+  -v "$repo:/src:ro" \
+  -v "$repo/target/docker-cargo-$arch:/root/.cargo/registry" \
+  -v "$repo/target/docker-target-$arch:/build/target" \
+  -v "$out:/out" \
+  "sigil-linux-build:$arch" bash -c '
+    set -euo pipefail
+    cp -r /src /build/src && cd /build/src && rm -rf target && ln -s /build/target target
+    scripts/linux-packages
+    need="$(objdump -T target/release/sigil | grep -o "GLIBC_[0-9.]*" | sed "s/GLIBC_//" | sort -Vu | tail -1)"
+    echo "newest glibc symbol version needed: $need"
+    cp target/release/sigil /out/sigil
+    cp target/debian/*.deb target/generate-rpm/*.rpm /out/
+    ls -la /out
+  '
+echo "built into $out"

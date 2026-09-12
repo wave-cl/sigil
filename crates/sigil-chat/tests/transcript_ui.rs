@@ -3598,3 +3598,48 @@ fn a_video_is_fetched_when_its_play_mark_is_pressed() {
         asked.borrow()
     );
 }
+
+/// A portrait video is drawn tall and narrow, and its bubble is no wider
+/// than it: a tall video used to sit in a bubble the width of a landscape
+/// picture, with a field of the bubble's colour beside it.
+#[test]
+fn a_portrait_video_gets_a_bubble_its_own_width() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = String::new();
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: sigil_ui::attachment::VIDEO,
+        described: "[video 20s, 3.1 MiB]".into(),
+        size: 3_250_000,
+        preview: sigil_ui::attachment::no_preview().clone(),
+        bytes: None,
+        missing: false,
+        held: true,
+        duration_ms: Some(20_000),
+        shape: Some((720, 1280)),
+        id: "tall".into(),
+    }];
+    // The bubble's time label, in whatever zone the test runs in.
+    let stamp = sigil_ui::clock(state.lines[n - 1].at);
+    let mut h = harness_with(state, true);
+    h.run();
+    let video = h.get_by_label("[video 20s, 3.1 MiB]").rect();
+    assert!(
+        (video.height() / video.width() - 16.0 / 9.0).abs() < 0.05,
+        "drawn {}x{}",
+        video.width(),
+        video.height()
+    );
+    // The bubble around it: the widest thing it holds is the video, so it
+    // is the video plus its own padding and no more.
+    let bubble_right = h
+        .get_all_by_label(&stamp)
+        .map(|n| n.rect().right())
+        .fold(0.0f32, f32::max);
+    assert!(
+        bubble_right - video.right() < 40.0,
+        "the bubble runs {} past the video's right edge",
+        bubble_right - video.right()
+    );
+}

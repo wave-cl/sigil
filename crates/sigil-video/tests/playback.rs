@@ -140,8 +140,15 @@ fn the_player_advances_while_playing_and_holds_while_paused() {
         assert!(at < 40, "{name}: the first picture is at {at} ms");
         assert_eq!(player.position_ms(), 0);
 
+        // Played the way the window plays it: `frame` asked for at each
+        // repaint, which is what takes pictures off the queue as they
+        // fall due.
         player.play();
-        std::thread::sleep(Duration::from_millis(700));
+        let until = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < until {
+            let _ = player.frame();
+            std::thread::sleep(Duration::from_millis(5));
+        }
         player.pause();
         let pos = player.position_ms();
         assert!(
@@ -172,21 +179,46 @@ fn the_player_advances_while_playing_and_holds_while_paused() {
         player.play();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !player.ended() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+            let _ = player.frame();
+            std::thread::sleep(Duration::from_millis(5));
         }
         assert!(player.ended(), "{name}: never ended");
         assert!(!player.playing());
+
+        // And again from the start: play after the end is a seek to nought
+        // and off it goes. It stopped dead the first time -- the sound
+        // reader would not seek back once it had reached the end, and the
+        // threads called the end again on a flag the seek had not yet
+        // reset.
+        player.play();
+        let until = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < until {
+            let _ = player.frame();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(player.playing(), "{name}: play after the end did not play");
+        assert!(!player.ended(), "{name}: ended again at once");
+        let again = player.position_ms();
+        assert!(
+            (300..=900).contains(&again),
+            "{name}: played again for 600 ms and the position is {again} ms"
+        );
     }
 }
 
-/// The same, on the sound's clock, through the output device. Not run by
-/// default: CoreAudio inside `cargo test` on macOS takes ten seconds to
-/// answer the first device query, and a runner has no device at all.
+/// The same, on the sound's clock, through the output device. Opt-in:
+/// CoreAudio inside `cargo test` on macOS takes ten seconds to answer the
+/// first device query, and a runner has no device at all. Not `#[ignore]`,
+/// because `scripts/snapshot-test` runs every ignored test in the
+/// workspace and this is not one it should.
 ///
-///   cargo test -p sigil-video --test playback -- --ignored
+///   SIGIL_VIDEO_DEVICE=1 cargo test --release -p sigil-video --test playback with_the_device
 #[test]
-#[ignore]
 fn with_the_device_the_sound_is_the_clock() {
+    if std::env::var_os("SIGIL_VIDEO_DEVICE").is_none() {
+        eprintln!("skipped: set SIGIL_VIDEO_DEVICE=1 to run against the output device");
+        return;
+    }
     let ctx = egui::Context::default();
     let player = Player::open(fixture("two_seconds.mp4"), ctx).unwrap();
     player.set_volume(0.0);
@@ -204,7 +236,98 @@ fn with_the_device_the_sound_is_the_clock() {
         "a second of wall time was {pos} ms of sound"
     );
     while !player.ended() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+        let _ = player.frame();
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert!(player.ended());
+    // And again, with the device: the sound reader is made afresh.
+    player.play();
+    let until = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < until {
+        let _ = player.frame();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        player.playing() && !player.ended(),
+        "play after the end did not play"
+    );
+    assert!(
+        player.position_ms() > 200,
+        "no sound played the second time"
+    );
+}
+
+/// Picture *k* is display frame *k* -- the same picture ffmpeg decodes
+/// there, not a neighbour of it.
+///
+/// The decoder hands pictures back in display order and says nothing about
+/// which sample each was. Labelling them by the sample just fed (decode
+/// order) and sorting on that put a permutation of neighbouring pictures on
+/// screen, every one on time: pure judder, invisible to every timing
+/// measurement. Five reference frames decoded by ffmpeg, compared by PSNR:
+/// the right picture is about 33 dB (the two decoders convert colour a
+/// little differently, and the pattern has hard colour edges), either
+/// neighbour about 21. The fixture is a moving test pattern, so neighbours
+/// differ, which is what lets an order be told from a shuffle.
+#[test]
+fn each_picture_is_the_one_ffmpeg_decodes_there() {
+    let demuxer = Demuxer::open(fixture("two_seconds.mp4")).unwrap();
+    let mut pictures = Ordered::new(Pictures::new(demuxer).unwrap());
+    let mut mine = Vec::new();
+    while let Some(f) = pictures.decode_next() {
+        mine.push(f);
+    }
+    assert_eq!(mine.len(), 60);
+    // **By the time each picture claims**, not by the order they came out:
+    // the fault was in the labels, and the pictures came out in the right
+    // order all along.
+    let labelled = |n: usize| -> &egui::ColorImage {
+        let want = n as u64 * 1000 / 30;
+        &mine
+            .iter()
+            .min_by_key(|f| f.at_ms.abs_diff(want))
+            .unwrap()
+            .image
+    };
+    for n in [10usize, 21, 33, 44, 57] {
+        let reference = image::open(format!(
+            "{}/tests/fixtures/frames/{n}.png",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+        .to_rgb8();
+        let ours = labelled(n);
+        assert_eq!(ours.size, [96, 64]);
+        let db = psnr(ours, &reference);
+        let near = psnr(labelled(n + 1), &reference);
+        let before = psnr(labelled(n - 1), &reference);
+        assert!(
+            db > 30.0,
+            "picture {n} is not the picture ffmpeg decodes there: {db:.1} dB \
+             (neighbours {before:.1} / {near:.1})"
+        );
+        // And both neighbours are measurably different pictures, or this
+        // test could not tell an order from a shuffle.
+        assert!(
+            near < 26.0 && before < 26.0,
+            "pictures around {n} look alike ({before:.1} / {near:.1} dB)"
+        );
+    }
+}
+
+fn psnr(a: &egui::ColorImage, b: &image::RgbImage) -> f64 {
+    let mut err = 0.0f64;
+    for (i, p) in a.pixels.iter().enumerate() {
+        let q = b.get_pixel((i % 96) as u32, (i / 96) as u32);
+        for (x, y) in [(p.r(), q[0]), (p.g(), q[1]), (p.b(), q[2])] {
+            let d = x as f64 - y as f64;
+            err += d * d;
+        }
+    }
+    let mse = err / (a.pixels.len() as f64 * 3.0);
+    if mse == 0.0 {
+        99.0
+    } else {
+        10.0 * (255.0f64 * 255.0 / mse).log10()
+    }
 }

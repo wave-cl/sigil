@@ -41,6 +41,11 @@ Check the second line. A registration nothing has read looks exactly like sigil
 ignoring the link. There is a `.tar.gz` of the bare binary for distributions
 that are neither; it needs a Vulkan driver, and ALSA or PipeWire for a call.
 
+The Linux builds need **glibc 2.35 or newer** -- Ubuntu 22.04, Debian 12, or
+anything since. They are built on the oldest Ubuntu GitHub still runs for
+exactly that reason, and the release checks the ceiling off the binary. A
+static build is not an option for a program that links GTK and PipeWire.
+
 ## Building
 
 Needs Rust 1.98.0 (pinned in `rust-toolchain.toml`) and **cmake**, which the

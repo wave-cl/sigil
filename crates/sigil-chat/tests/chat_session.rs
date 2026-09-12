@@ -2277,6 +2277,102 @@ async fn a_picture_sent_to_a_public_channel_is_fetched_and_shown() {
     alice.stop();
 }
 
+/// A video goes out with its poster frame, its shape and its length, and
+/// comes in as a thumbnail that is fetched when -- and only when -- play is
+/// pressed.
+///
+/// All three were missing: the sender made a thumbnail for pictures only,
+/// and the session fetched pictures only, so a pressed video said
+/// "fetching" for ever and was never kept on the disc. The fixture is
+/// `sigil-video`'s two-second clip.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_video_travels_with_a_poster_frame_and_is_fetched_when_pressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(35);
+    let (b_signer, b_id) = signer(36);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+
+    let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sigil-video/tests/fixtures/two_seconds.mp4");
+    alice.send(Cmd::SendFile(clip));
+
+    let video = |h: &ChatHandle| {
+        h.state()
+            .lines
+            .iter()
+            .flat_map(|l| l.attachments.clone())
+            .find(|a| a.kind == sigil_ui::attachment::VIDEO)
+    };
+    assert!(
+        until(|| video(&bob).is_some(), 20).await,
+        "the video never reached Bob: {:?}",
+        bob.state().trouble
+    );
+    let a = video(&bob).unwrap();
+    assert!(!a.preview.is_empty(), "no poster frame travelled with it");
+    assert!(
+        a.preview.len() <= 8 * 1024,
+        "the poster frame is {} bytes, over SIP-18's cap",
+        a.preview.len()
+    );
+    assert_eq!(a.shape, Some((96, 64)), "the shape did not travel");
+    assert!(
+        a.duration_ms
+            .is_some_and(|ms| (1_900..=2_100).contains(&ms)),
+        "the length did not travel: {:?}",
+        a.duration_ms
+    );
+    assert!(a.described.starts_with("[video 2s"), "{}", a.described);
+
+    // Not fetched for being small, and not for being on the sender's disc:
+    // the reader has to ask.
+    assert!(
+        !until(|| video(&bob).is_some_and(|a| a.bytes.is_some()), 3).await,
+        "a video was fetched without play being pressed"
+    );
+    let seq = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| !l.attachments.is_empty())
+        .map(|l| l.seq)
+        .unwrap();
+    bob.send(Cmd::Fetch { seq, index: 0 });
+    assert!(
+        until(|| video(&bob).is_some_and(|a| a.bytes.is_some()), 20).await,
+        "pressed, the video should arrive: {:?}",
+        bob.state().trouble
+    );
+    alice.stop();
+    bob.stop();
+}
+
 /// A picture too big to fetch unasked is held as its thumbnail until the
 /// reader asks; the sender, who has it on the disc already, sees it whole.
 ///

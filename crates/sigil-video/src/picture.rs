@@ -31,14 +31,21 @@ pub struct Pictures {
     decoder: Decoder,
     /// Next sample id to decode, 1-based, decode order.
     next: u32,
-    /// Composition times of samples fed and not yet answered with a
-    /// picture, oldest first. The decoder answers a sample with a picture
-    /// one or two samples later, in the order fed, and does not say which;
-    /// this does.
-    fed: std::collections::VecDeque<u64>,
+    /// Presentation times of the pictures still to come out, in order.
+    ///
+    /// **The decoder reorders.** openh264 hands pictures back in display
+    /// order, a sample or two behind what was fed, and says nothing about
+    /// which sample a picture was. The first version labelled each output
+    /// with the time of the sample just fed -- decode order -- and then
+    /// sorted by those labels, and what reached the screen was a permutation
+    /// of neighbouring pictures: on time, every one, and the wrong one, three
+    /// times in four, which looks exactly like judder. Compared against
+    /// ffmpeg's decode frame by frame, output *k* is display frame *k*; so
+    /// the *k*-th picture out gets the *k*-th presentation time from the
+    /// keyframe decoding started at.
+    coming: std::collections::VecDeque<u64>,
     /// Pictures the decoder gave up at the end of the stream, in order.
     flushed: std::collections::VecDeque<Frame>,
-    rgba: Vec<u8>,
     pub skipped_empty: u32,
     pub skipped_err: u32,
     pub last_err: Option<String>,
@@ -47,13 +54,13 @@ pub struct Pictures {
 impl Pictures {
     pub fn new(demuxer: Demuxer) -> Result<Pictures, String> {
         let decoder = fresh_decoder().map_err(|e| format!("H.264 decoder: {e}"))?;
+        let coming = demuxer.presentation_from(1).collect();
         Ok(Pictures {
             demuxer,
             decoder,
             next: 1,
-            fed: std::collections::VecDeque::new(),
+            coming,
             flushed: std::collections::VecDeque::new(),
-            rgba: Vec::new(),
             skipped_empty: 0,
             skipped_err: 0,
             last_err: None,
@@ -65,11 +72,11 @@ impl Pictures {
     }
 
     /// Start decoding from the keyframe at or before `ms`. Pictures before
-    /// `ms` are still decoded (the decoder needs them) and handed back;
+    /// `ms` still come out (the decoder needs them) and are handed back;
     /// the caller drops what is earlier than it wants.
     pub fn seek(&mut self, ms: u64) {
         self.next = self.demuxer.keyframe_before(ms);
-        self.fed.clear();
+        self.coming = self.demuxer.presentation_from(self.next).collect();
         self.flushed.clear();
         // A fresh decoder: what it held was from another place in the
         // stream, and the keyframe carries everything it needs.
@@ -78,50 +85,47 @@ impl Pictures {
         }
     }
 
-    /// The next picture in decode order, or `None` at the end.
+    /// The next picture in display order, or `None` at the end.
     ///
-    /// A sample that yields no picture yet (the decoder is holding it for
-    /// reordering) is followed by the next until one comes out.
+    /// A sample that yields no picture yet (the decoder is holding it) is
+    /// followed by the next until one comes out.
     pub fn decode_next(&mut self) -> Option<Frame> {
         loop {
             if let Some(f) = self.flushed.pop_front() {
                 return Some(f);
             }
-            let Some(Sample { at_ms, annex_b, .. }) = self.demuxer.sample(self.next) else {
+            let Some(Sample { annex_b, .. }) = self.demuxer.sample(self.next) else {
                 // The end of the stream. The decoder is still holding the
                 // last picture or two; without this they are never shown
                 // and a two-second clip is fifty-nine pictures long.
-                if !self.fed.is_empty()
-                    && let Ok(rest) = self.decoder.flush_remaining()
-                {
-                    for yuv in rest {
+                if !self.coming.is_empty() {
+                    let rest = self.decoder.flush_remaining().unwrap_or_default();
+                    let mut out = Vec::new();
+                    for yuv in &rest {
                         let (w, h) = yuv.dimensions();
-                        self.rgba.resize(w * h * 4, 0);
-                        yuv.write_rgba8(&mut self.rgba);
-                        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &self.rgba);
-                        let Some(at_ms) = self.fed.pop_front() else {
+                        let mut rgba = vec![0u8; w * h * 4];
+                        yuv.write_rgba8(&mut rgba);
+                        out.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+                    }
+                    drop(rest);
+                    for image in out {
+                        let Some(at_ms) = self.coming.pop_front() else {
                             break;
                         };
                         self.flushed.push_back(Frame { at_ms, image });
                     }
                 }
-                self.fed.clear();
+                self.coming.clear();
                 return self.flushed.pop_front();
             };
             self.next += 1;
-            self.fed.push_back(at_ms);
             match self.decoder.decode(&annex_b) {
                 Ok(Some(yuv)) => {
                     let (w, h) = yuv.dimensions();
-                    self.rgba.resize(w * h * 4, 0);
-                    yuv.write_rgba8(&mut self.rgba);
-                    let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &self.rgba);
-                    // Pictures come out in the order fed, a sample or two
-                    // behind, so this one is the oldest still owed. The
-                    // caller orders them for display, since decode order is
-                    // not display order when there are B-frames: see
-                    // `Ordered`.
-                    let at_ms = self.fed.pop_front().unwrap_or(at_ms);
+                    let mut rgba = vec![0u8; w * h * 4];
+                    yuv.write_rgba8(&mut rgba);
+                    let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                    let at_ms = self.coming.pop_front()?;
                     return Some(Frame { at_ms, image });
                 }
                 Ok(None) => {
@@ -138,30 +142,17 @@ impl Pictures {
     }
 }
 
-/// Pictures in the order they are shown.
+/// Pictures as the decoder hands them out, which is display order.
 ///
-/// H.264 stores a B-frame after the pictures it is predicted from, which are
-/// shown after it. Decoded with no delay, pictures come out in that stored
-/// order; this holds a few back and hands out the earliest, which is the
-/// reordering a decoder with a delay would have done itself.
+/// Kept as a name because callers had one: the reordering it did was
+/// undoing the decoder's own, and is gone. See [`Pictures::coming`].
 pub struct Ordered {
     pictures: Pictures,
-    held: Vec<Frame>,
-    done: bool,
 }
-
-/// How many pictures are held back for reordering. H.264 allows more, but
-/// what phones and encoders produce is two or three B-frames between
-/// references, and each held picture is a frame of latency at a seek.
-const REORDER: usize = 4;
 
 impl Ordered {
     pub fn new(pictures: Pictures) -> Ordered {
-        Ordered {
-            pictures,
-            held: Vec::new(),
-            done: false,
-        }
+        Ordered { pictures }
     }
 
     pub fn demuxer(&self) -> &Demuxer {
@@ -174,22 +165,9 @@ impl Ordered {
 
     pub fn seek(&mut self, ms: u64) {
         self.pictures.seek(ms);
-        self.held.clear();
-        self.done = false;
     }
 
-    /// The next picture in display order.
     pub fn decode_next(&mut self) -> Option<Frame> {
-        while !self.done && self.held.len() < REORDER {
-            match self.pictures.decode_next() {
-                Some(f) => self.held.push(f),
-                None => self.done = true,
-            }
-        }
-        if self.held.is_empty() {
-            return None;
-        }
-        let (i, _) = self.held.iter().enumerate().min_by_key(|(_, f)| f.at_ms)?;
-        Some(self.held.swap_remove(i))
+        self.pictures.decode_next()
     }
 }

@@ -647,11 +647,17 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     // A picture asks for the size it will be drawn at, not for everything.
     // `INFINITY` made every message carrying a file as wide as the pane
     // allowed, including one whose whole content is `[image, 28 KiB]`.
-    let files = if b.attachments.is_empty() {
-        0.0
-    } else {
-        crate::attachment::PICTURE
-    };
+    // A video is drawn in its own shape, so a portrait one is narrower than
+    // the picture width and the bubble should be too: at the picture width
+    // it was a tall video with a wide blue field beside it.
+    let files = b
+        .attachments
+        .iter()
+        .map(|a| match &a.video {
+            Some(v) => crate::video::bubble_size(v.shape).x,
+            None => crate::attachment::PICTURE,
+        })
+        .fold(0.0f32, f32::max);
 
     // One line when the words and their furniture sit side by side inside the
     // limit. A picture always gets its own rows; so does a tombstone, whose

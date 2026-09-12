@@ -32,11 +32,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # **The oldest Ubuntu GitHub still runs**, deliberately. A binary
+          # built against glibc 2.35 runs on every glibc since; one built on
+          # 24.04 (2.39) refused to start on a machine a year older with
+          # "version GLIBC_2.38 not found". Static linking is not an answer
+          # for a program that links GTK and PipeWire, which expect to be the
+          # system's own copies. The guard below reads the ceiling back off
+          # the binary, so a runner change cannot raise it in silence.
           - artifact: x86_64-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             machine: x86_64
           - artifact: aarch64-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             machine: aarch64
           - artifact: aarch64-apple-darwin
             os: macos-latest
@@ -145,6 +152,21 @@ jobs:
               || { echo "::error::$rpm_ does not contain $want"; rpm -qlp "$rpm_"; exit 1; }
           done
           echo "deb and rpm both carry the binary and the desktop entry"
+
+      # The glibc a binary needs is the newest symbol version it imports, and
+      # it is set by the runner it was built on, not by anything in this
+      # repository -- so it is read back off the binary and compared with
+      # what the README promises. 2.35 is Ubuntu 22.04 and Debian 12.
+      - name: Check the glibc the binary needs
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          need="$(objdump -T target/release/sigil | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -Vu | tail -1)"
+          echo "newest glibc symbol version needed: $need"
+          if [ "$(printf '%s\n2.35\n' "$need" | sort -V | tail -1)" != "2.35" ]; then
+            echo "::error::the binary needs glibc $need, newer than the 2.35 the README promises -- was it built on a newer runner?"
+            exit 1
+          fi
 
       - name: Build sigil.app
         if: runner.os == 'macOS'

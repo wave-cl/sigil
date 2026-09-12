@@ -44,18 +44,33 @@ pub struct Video<'a> {
     pub shape: Option<(u32, u32)>,
     /// What it is, in words, for the accessibility tree.
     pub described: &'a str,
+    /// Where it is drawn, which decides what a press means.
+    pub place: Place,
+}
+
+/// Where a video is being drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// In the transcript: a press opens it in the viewer, and the enlarge
+    /// control does the same.
+    Bubble,
+    /// In the viewer: a press plays or pauses, and the enlarge control
+    /// asks for the whole screen.
+    Viewer,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VideoAction {
     /// Play or pause -- or, held, fetch.
     pub toggle: bool,
+    /// Open it in the viewer (from a bubble).
+    pub open: bool,
+    /// The whole screen, or back from it (from the viewer).
+    pub fullscreen: bool,
     /// Go to this time.
     pub seek: Option<u64>,
     /// Silence it, or let it be heard again.
     pub mute: Option<bool>,
-    /// See it full size.
-    pub open: bool,
     pub save: bool,
 }
 
@@ -165,9 +180,13 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
         );
     }
 
-    // Pressing the picture itself: play, pause, or ask for it.
+    // Pressing the picture itself: in the transcript, into the viewer,
+    // where it plays; in the viewer, play or pause.
     if response.clicked() {
-        action.toggle = true;
+        match v.place {
+            Place::Bubble => action.open = true,
+            Place::Viewer => action.toggle = true,
+        }
     }
 
     // **The bar, while the pointer is over it or nothing is playing.** A
@@ -227,8 +246,16 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
         // Right-hand controls first, so the scrubber takes what is left.
         inner.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             white(ui);
-            if sigil::icon_button_named(ui, Icon::Enlarge, "See it full size").clicked() {
-                action.open = true;
+            let (word, whole) = match v.place {
+                Place::Bubble => ("See it full size", false),
+                Place::Viewer => ("Whole screen", true),
+            };
+            if sigil::icon_button_named(ui, Icon::Enlarge, word).clicked() {
+                if whole {
+                    action.fullscreen = true;
+                } else {
+                    action.open = true;
+                }
             }
             let (icon, word) = if v.volume > 0.0 {
                 (Icon::Sound, "Mute")

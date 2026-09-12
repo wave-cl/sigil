@@ -33,12 +33,17 @@ fn main() {
         first,
         t.elapsed()
     );
-    let t = std::time::Instant::now();
-    sound.seek(200_000);
-    let c = sound.decode_next().unwrap();
-    println!(
-        "seek to 200 s: first chunk at {} ms in {:?}",
-        c.at_ms,
-        t.elapsed()
-    );
+    // To the end, then back to the start: what "play again" does. (The
+    // 2000-chunk loop above already reached the end of a short clip.)
+    while sound.decode_next().is_some() {}
+    sound.seek(0);
+    match sound.decode_next() {
+        Some(c) => println!("after the end, seek to 0: first chunk at {} ms", c.at_ms),
+        None => println!("after the end, seek to 0: NOTHING -- the reader is stuck at the end"),
+    }
+    sound.seek(1_000);
+    match sound.decode_next() {
+        Some(c) => println!("then seek to 1 s: first chunk at {} ms", c.at_ms),
+        None => println!("then seek to 1 s: NOTHING"),
+    }
 }

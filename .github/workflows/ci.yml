@@ -18,7 +18,7 @@ jobs:
   # tests, on Linux.
   # ---------------------------------------------------------------------------
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       # One checkout. sigil pins the sqex crates to a git tag (v0.46.0), so
       # cargo fetches them like any other dependency -- there was a second
@@ -122,7 +122,7 @@ jobs:
   # every machine; a GPU would give a different answer per runner.
   # ---------------------------------------------------------------------------
   snapshots:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -152,7 +152,7 @@ jobs:
   complete:
     if: always()
     needs: [linux, macos, snapshots]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Every job must have actually run
         run: |

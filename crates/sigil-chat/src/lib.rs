@@ -462,7 +462,11 @@ type At = (PubKey, String);
 /// your behalf and not mentioned.
 /// What the bubble is told about a video, from the pane's player for it if
 /// there is one and the message's own word otherwise.
-fn video_view<'a>(pane: &'a Pane, a: &'a session::Attached) -> sigil_ui::Video<'a> {
+fn video_view<'a>(
+    pane: &'a Pane,
+    a: &'a session::Attached,
+    place: sigil_ui::video::Place,
+) -> sigil_ui::Video<'a> {
     let playing = pane.players.get(&a.id);
     let standing = if playing.is_some() {
         sigil_ui::Standing::Ready
@@ -492,6 +496,7 @@ fn video_view<'a>(pane: &'a Pane, a: &'a session::Attached) -> sigil_ui::Video<'
             })
             .or(a.shape),
         described: &a.described,
+        place,
     }
 }
 
@@ -503,17 +508,118 @@ struct Playing {
     /// The time of the picture in the texture, so a pass that finds the
     /// same one uploads nothing.
     shown: Option<u64>,
+    trace: VideoTrace,
+}
+
+/// How pictures land on the window's frames, printed every few seconds to
+/// stderr when `SIGIL_VIDEO_TRACE` is set. The window is the only honest
+/// instrument for stutter, and this is how it is read.
+#[derive(Default)]
+struct VideoTrace {
+    on: bool,
+    started: Option<std::time::Instant>,
+    repaints: Vec<u64>,
+    /// (wall ms, position ms, picture ms) at each change of picture.
+    landed: Vec<(u64, u64, u64)>,
+    reported: u64,
+}
+
+impl VideoTrace {
+    fn new() -> VideoTrace {
+        VideoTrace {
+            on: std::env::var_os("SIGIL_VIDEO_TRACE").is_some(),
+            ..Default::default()
+        }
+    }
+
+    fn wall(&mut self) -> u64 {
+        self.started
+            .get_or_insert_with(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
+
+    fn repaint(&mut self, _position: u64) {
+        if !self.on {
+            return;
+        }
+        let wall = self.wall();
+        self.repaints.push(wall);
+        if wall >= self.reported + 5_000 {
+            self.reported = wall;
+            self.report();
+        }
+    }
+
+    fn landed(&mut self, position: u64, at: u64) {
+        if !self.on {
+            return;
+        }
+        let wall = self.wall();
+        self.landed.push((wall, position, at));
+    }
+
+    fn report(&mut self) {
+        let mut gaps: Vec<i64> = self
+            .repaints
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as i64)
+            .collect();
+        gaps.sort();
+        if gaps.is_empty() {
+            return;
+        }
+        let n = gaps.len();
+        let mut between: Vec<i64> = self
+            .landed
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0) as i64)
+            .collect();
+        let skipped = self
+            .landed
+            .windows(2)
+            .filter(|w| w[1].2 - w[0].2 > 40)
+            .count();
+        let mut late: Vec<i64> = self
+            .landed
+            .iter()
+            .map(|(_, p, a)| *p as i64 - *a as i64)
+            .collect();
+        between.sort();
+        late.sort();
+        let m = between.len().max(1);
+        eprintln!(
+            "video: {} repaints, gap ms median {} p90 {} p99 {} max {} | {} pictures ({skipped} skipped), late ms median {} max {}, between ms min {} median {} p90 {} p99 {} max {}",
+            n + 1,
+            gaps[n / 2],
+            gaps[n * 9 / 10],
+            gaps[n * 99 / 100],
+            gaps[n - 1],
+            late.len(),
+            late.get(late.len() / 2).copied().unwrap_or(0),
+            late.last().copied().unwrap_or(0),
+            between.first().copied().unwrap_or(0),
+            between.get(m / 2).copied().unwrap_or(0),
+            between.get(m * 9 / 10).copied().unwrap_or(0),
+            between.get(m * 99 / 100).copied().unwrap_or(0),
+            between.last().copied().unwrap_or(0),
+        );
+        self.repaints.clear();
+        self.landed.clear();
+    }
 }
 
 impl Playing {
     /// Upload the picture due now, if it is a new one.
     fn refresh(&mut self, ctx: &egui::Context, id: &str) {
+        self.trace.repaint(self.player.position_ms());
         let Some((at, image)) = self.player.frame() else {
             return;
         };
         if self.shown == Some(at) {
             return;
         }
+        self.trace.landed(self.player.position_ms(), at);
         let data = egui::ImageData::Color(image);
         match &mut self.texture {
             Some(t) => t.set(data, egui::TextureOptions::LINEAR),
@@ -535,8 +641,14 @@ struct Pane {
     /// screen; a conversation switched away from stops its videos.
     players: HashMap<String, Playing>,
     /// Videos play was pressed on before their bytes had arrived: they
-    /// start the moment they do.
+    /// start the moment they do -- in the viewer, which is where a press
+    /// on a video in the transcript goes.
     play_when_fetched: HashSet<String>,
+    /// Which message each of those is on, so the viewer can open on it.
+    open_when_fetched: HashMap<String, (u64, usize)>,
+    /// The viewer is showing a video on the whole screen; put back when it
+    /// closes.
+    whole_screen: bool,
     /// Why a video will not play, by blob id.
     unplayable: HashMap<String, String>,
     /// Kept out of the session so that a failed send leaves it on screen:
@@ -639,6 +751,8 @@ impl Default for Pane {
         Pane {
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
+            open_when_fetched: HashMap::new(),
+            whole_screen: false,
             unplayable: HashMap::new(),
             composing: String::new(),
             adding: String::new(),
@@ -975,6 +1089,7 @@ impl ChatApp {
                         player,
                         texture: None,
                         shown: None,
+                        trace: VideoTrace::new(),
                     },
                 );
             }
@@ -2069,6 +2184,50 @@ impl ChatApp {
         let mut done = sigil_ui::VideoAction::default();
         let mut close = false;
         let mut save = false;
+        if self.pane(at).whole_screen {
+            // **The video is the screen.** Edge to edge on black, its own bar
+            // over it, nothing else drawn: the viewer's dialog inside a
+            // fullscreen window was still a small video with a frame round
+            // it, which is not what "whole screen" means. Escape, the bar's
+            // own control, or a press on the backdrop bring the window back.
+            let whole = ui.ctx().viewport_rect();
+            egui::Area::new(egui::Id::new(("video-whole", seq, index)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(whole.min)
+                .show(&egui_ctx, |ui| {
+                    ui.set_min_size(whole.size());
+                    ui.painter().rect_filled(whole, 0.0, egui::Color32::BLACK);
+                    let pane = self.panes.entry(at.clone()).or_default();
+                    let view = video_view(pane, file, sigil_ui::video::Place::Viewer);
+                    let size = sigil_ui::video::size_for(view.shape, whole.width(), whole.height());
+                    let at_pos = whole.center() - size / 2.0;
+                    let mut inner = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(egui::Rect::from_min_size(at_pos, size))
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    done = sigil_ui::video(&mut inner, &view, whole.width(), whole.height());
+                });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+            if let Some(playing) = self.pane(at).players.get(&file.id) {
+                if done.toggle {
+                    playing.player.toggle();
+                }
+                if let Some(ms) = done.seek {
+                    playing.player.seek(ms);
+                }
+                if let Some(mute) = done.mute {
+                    playing.player.set_volume(if mute { 0.0 } else { 1.0 });
+                }
+            }
+            if done.fullscreen || close {
+                self.pane(at).whole_screen = false;
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+            return;
+        }
         let response = egui::Modal::new(egui::Id::new(("video", seq, index)))
             .frame(
                 egui::Frame::NONE
@@ -2079,7 +2238,7 @@ impl ChatApp {
             .show(&egui_ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     let pane = self.panes.entry(at.clone()).or_default();
-                    let view = video_view(pane, file);
+                    let view = video_view(pane, file, sigil_ui::video::Place::Viewer);
                     done = sigil_ui::video(ui, &view, room.x, room.y - tokens::BUTTON_SM * 2.0);
                     ui.add_space(tokens::SPACING_SM);
                     ui.horizontal(|ui| {
@@ -2110,8 +2269,17 @@ impl ChatApp {
         if save && let Some(to) = rfd::FileDialog::new().save_file() {
             self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
         }
-        if close || done.open || response.should_close() {
+        if done.fullscreen {
+            let whole = !self.pane(at).whole_screen;
+            self.pane(at).whole_screen = whole;
+            egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(whole));
+        }
+        if close || response.should_close() {
             self.pane(at).viewing = None;
+            if self.pane(at).whole_screen {
+                self.pane(at).whole_screen = false;
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
         }
     }
 
@@ -3236,6 +3404,10 @@ impl ChatApp {
                 .collect();
             for (id, bytes) in arrived {
                 self.start_video(at, &ctx, &id, bytes);
+                if let Some((seq, index)) = self.pane(at).open_when_fetched.remove(&id) {
+                    self.pane(at).viewing = Some((seq, index));
+                    self.pane(at).look = Look::default();
+                }
             }
             for (id, playing) in self.pane(at).players.iter_mut() {
                 playing.refresh(&ctx, id);
@@ -3357,7 +3529,8 @@ impl ChatApp {
                     held: a.held,
                     size: a.size,
                     id: &a.id,
-                    video: (a.kind == sigil_ui::attachment::VIDEO).then(|| video_view(pane, a)),
+                    video: (a.kind == sigil_ui::attachment::VIDEO)
+                        .then(|| video_view(pane, a, sigil_ui::video::Place::Bubble)),
                 })
                 .collect();
             let bubble = sigil_ui::Bubble {
@@ -3540,6 +3713,25 @@ impl ChatApp {
                         self.send_as(Some(at), Cmd::Fetch { seq, index });
                     }
                 }
+                if done.open {
+                    // Into the viewer, playing. Not here yet: asked for,
+                    // and the viewer opens on it when it arrives.
+                    if let Some(bytes) = a.bytes.clone() {
+                        if !self.pane(at).players.contains_key(&a.id) {
+                            self.start_video(at, &ctx, &a.id, bytes);
+                        } else {
+                            self.pane(at).players[&a.id].player.play();
+                        }
+                        self.pane(at).viewing = Some((seq, index));
+                        self.pane(at).look = Look::default();
+                    } else {
+                        self.pane(at).play_when_fetched.insert(a.id.clone());
+                        self.pane(at)
+                            .open_when_fetched
+                            .insert(a.id.clone(), (seq, index));
+                        self.send_as(Some(at), Cmd::Fetch { seq, index });
+                    }
+                }
                 if let Some(playing) = self.pane(at).players.get(&a.id) {
                     if let Some(ms) = done.seek {
                         playing.player.seek(ms);
@@ -3547,10 +3739,6 @@ impl ChatApp {
                     if let Some(mute) = done.mute {
                         playing.player.set_volume(if mute { 0.0 } else { 1.0 });
                     }
-                }
-                if done.open {
-                    self.pane(at).viewing = Some((seq, index));
-                    self.pane(at).look = Look::default();
                 }
             }
             if let Some(index) = did.open {

@@ -26,6 +26,9 @@ pub struct Chunk {
 pub struct Sound {
     format: Box<dyn FormatReader + 'static>,
     decoder: Box<dyn AudioDecoder>,
+    /// The file, kept so the reader can be made again: once it has read to
+    /// the end it will not seek back, and "play again" is a seek to nought.
+    bytes: std::sync::Arc<[u8]>,
     track: u32,
     time_base: Option<symphonia::core::units::TimeBase>,
     pub rate: u32,
@@ -37,7 +40,7 @@ impl Sound {
     /// a soundtrack plays silent rather than not at all.
     pub fn open(bytes: std::sync::Arc<[u8]>) -> Option<Sound> {
         let mss = MediaSourceStream::new(
-            Box::new(Cursor::new(bytes)),
+            Box::new(Cursor::new(bytes.clone())),
             MediaSourceStreamOptions::default(),
         );
         let mut hint = Hint::new();
@@ -64,13 +67,24 @@ impl Sound {
             time_base: track.time_base,
             format,
             decoder,
+            bytes,
             rate,
             channels,
         })
     }
 
     /// Continue from `ms`.
+    ///
+    /// **On a fresh reader every time.** One that has reached the end
+    /// accepts a seek and then hands back nothing (symphonia's MP4 reader,
+    /// at least), which made playing a clip a second time impossible. Opening
+    /// is under a millisecond, so the reader is simply made again over the
+    /// same bytes and sought from there.
     pub fn seek(&mut self, ms: u64) {
+        if let Some(fresh) = Sound::open(self.bytes.clone()) {
+            self.format = fresh.format;
+            self.decoder = fresh.decoder;
+        }
         let _ = self.format.seek(
             SeekMode::Accurate,
             SeekTo::Time {

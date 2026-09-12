@@ -32,6 +32,18 @@ fn drawn(
     Harness<'static>,
     std::rc::Rc<std::cell::Cell<sigil_ui::VideoAction>>,
 ) {
+    drawn_at(standing, playing, muted, sigil_ui::video::Place::Viewer)
+}
+
+fn drawn_at(
+    standing: sigil_ui::Standing,
+    playing: bool,
+    muted: bool,
+    place: sigil_ui::video::Place,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::Cell<sigil_ui::VideoAction>>,
+) {
     let did = std::rc::Rc::new(std::cell::Cell::new(sigil_ui::VideoAction::default()));
     let seen = did.clone();
     let mut h = Harness::builder()
@@ -54,6 +66,7 @@ fn drawn(
                 trouble: None,
                 shape: Some((1280, 720)),
                 described: "[video 449s, 46.1 MiB]",
+                place,
             };
             let action = sigil_ui::video(ui, &v, 320.0, 320.0);
             if action != sigil_ui::VideoAction::default() {
@@ -91,11 +104,16 @@ fn times_are_said_as_a_clock() {
     assert_eq!(clock(3_725_000), "1:02:05");
 }
 
-/// Held, the video is its thumbnail with the length on it, and pressing it
-/// is the ask to fetch and play.
+/// Held, the video is its thumbnail with the length on it. In a bubble a
+/// press opens it in the viewer; in the viewer a press is the ask to play.
 #[test]
-fn a_held_video_says_how_long_it_is_and_plays_on_a_press() {
-    let (mut h, did) = drawn(sigil_ui::Standing::Held, false, false);
+fn a_held_video_says_how_long_it_is_and_opens_or_plays_on_a_press() {
+    let (mut h, did) = drawn_at(
+        sigil_ui::Standing::Held,
+        false,
+        false,
+        sigil_ui::video::Place::Bubble,
+    );
     let words = said(&h);
     assert!(words.contains("[video 449s"), "{words}");
     // No bar until it is playable: nothing to pause, nothing to scrub.
@@ -103,7 +121,19 @@ fn a_held_video_says_how_long_it_is_and_plays_on_a_press() {
     assert!(h.query_by_label("Mute").is_none());
     h.get_by_label("[video 449s, 46.1 MiB]").click();
     h.run();
-    assert!(did.get().toggle, "pressing the video should ask to play it");
+    assert!(
+        did.get().open && !did.get().toggle,
+        "pressing a video in a bubble should open the viewer: {:?}",
+        did.get()
+    );
+
+    let (mut h, did) = drawn(sigil_ui::Standing::Held, false, false);
+    h.get_by_label("[video 449s, 46.1 MiB]").click();
+    h.run();
+    assert!(
+        did.get().toggle,
+        "pressing the video in the viewer should ask to play it"
+    );
 }
 
 /// Playing, the bar carries pause, the clock, mute, full size and a
@@ -130,9 +160,15 @@ fn a_playing_video_can_be_paused_muted_enlarged_and_scrubbed() {
     h.run();
     assert_eq!(did.get().mute, Some(true));
     did.set(Default::default());
-    h.get_by_label("See it full size").click();
+    // In the viewer, the enlarge control asks for the whole screen; a press
+    // on the picture plays or pauses.
+    h.get_by_label("Whole screen").click();
     h.run();
-    assert!(did.get().open);
+    assert!(did.get().fullscreen && !did.get().open);
+    did.set(Default::default());
+    h.get_by_label("[video 449s, 46.1 MiB]").click();
+    h.run();
+    assert!(did.get().toggle && !did.get().open);
     did.set(Default::default());
     // The scrubber: a press at three quarters along goes three quarters in.
     let slider = h.get_by_role(egui::accesskit::Role::Slider);

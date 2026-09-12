@@ -2498,9 +2498,26 @@ const THUMBNAIL_EDGE: u32 = 96;
 /// transparency and a smooth picture is small anyway; then JPEG, which is what
 /// a busy picture compresses under; then smaller. A picture that fits none of
 /// them goes without, which the protocol allows and a reader survives.
-fn thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
-    let image = image::ImageReader::open(path).ok()?.decode().ok()?;
-    thumbnail_of(&image)
+/// SIP-18's `meta` for a picture or a video: width and height as u16 big
+/// endian, then for a video its length in milliseconds as u32.
+fn shape_meta(width: u32, height: u32, duration_ms: Option<u64>) -> Vec<u8> {
+    let mut m = Vec::with_capacity(8);
+    m.extend_from_slice(&(width.min(u16::MAX as u32) as u16).to_be_bytes());
+    m.extend_from_slice(&(height.min(u16::MAX as u32) as u16).to_be_bytes());
+    if let Some(ms) = duration_ms {
+        m.extend_from_slice(&(ms.min(u32::MAX as u64) as u32).to_be_bytes());
+    }
+    m
+}
+
+/// A decoded frame as the image crate sees it, so the same thumbnail code
+/// serves pictures and videos.
+fn frame_image(frame: &egui::ColorImage) -> image::DynamicImage {
+    let [w, h] = frame.size;
+    let rgba: Vec<u8> = frame.pixels.iter().flat_map(|p| p.to_array()).collect();
+    image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .map(image::DynamicImage::ImageRgba8)
+        .unwrap_or_default()
 }
 
 /// [`thumbnail`] from a decoded image, so it can be tested on one built in
@@ -2631,7 +2648,11 @@ fn fetch_unasked(size: u64, wanted: bool, on_disc: bool) -> bool {
 /// was fetched longest ago, because pictures are fetched as somebody scrolls
 /// and the oldest are the furthest from where they now are; what stays,
 /// whatever its age, is anything in the conversation on screen.
-const HOLD_BYTES: usize = 64 * 1024 * 1024;
+///
+/// Raised from sixty-four when videos joined the pictures: one is forty
+/// megabytes, and two of them in a budget of sixty-four put every picture
+/// in the conversation down.
+const HOLD_BYTES: usize = 256 * 1024 * 1024;
 
 /// Which files to put down, now that `held` has grown past `budget`.
 ///
@@ -2699,10 +2720,21 @@ async fn fetch_files(
         .timeline
         .messages()
         .flat_map(|m| m.post.attachments())
-        .filter(|a| a.effective_kind() == sqex_proto::blob::KIND_IMAGE)
         .filter(|a| !desk.files.contains_key(&a.blob) && !desk.unfetchable.contains(&a.blob))
         .map(|a| (a, chat.store().has_blob(&a.blob).unwrap_or(false)))
-        .filter(|(a, on_disc)| fetch_unasked(a.size, desk.wanted.contains(&a.blob), *on_disc))
+        .filter(|(a, on_disc)| match a.effective_kind() {
+            sqex_proto::blob::KIND_IMAGE => {
+                fetch_unasked(a.size, desk.wanted.contains(&a.blob), *on_disc)
+            }
+            // **A video only when play is pressed.** Never for its size, and
+            // not for being on the disc either: forty megabytes read and
+            // opened into memory for a conversation somebody scrolled past
+            // is not a picture on the way, and the press is what starts it.
+            // This filter used to admit images only, and a pressed video
+            // said "fetching" for ever.
+            sqex_proto::blob::KIND_VIDEO => desk.wanted.contains(&a.blob),
+            _ => false,
+        })
         .map(|(a, on_disc)| (a.clone(), on_disc))
         .collect();
     if wanted.is_empty() {
@@ -4095,8 +4127,33 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             // visible to the exchange than the picture is — and it is what a
             // reader sees before the blob has been fetched, or instead of it
             // when the blob is too big to fetch unasked.
-            if attachment.effective_kind() == sqex_proto::blob::KIND_IMAGE {
-                attachment.preview = thumbnail(&path).unwrap_or_default();
+            match attachment.effective_kind() {
+                sqex_proto::blob::KIND_IMAGE => {
+                    if let Some(image) = image::ImageReader::open(&path)
+                        .ok()
+                        .and_then(|r| r.decode().ok())
+                    {
+                        attachment.meta = shape_meta(image.width(), image.height(), None);
+                        attachment.preview = thumbnail_of(&image).unwrap_or_default();
+                    }
+                }
+                // A video's poster frame is its first picture, decoded here
+                // the same way it will be played; and its shape and length
+                // go in the meta, which is how a reader draws the right box
+                // and says how long it is before fetching forty megabytes.
+                sqex_proto::blob::KIND_VIDEO => {
+                    if let Ok(bytes) = std::fs::read(&path)
+                        && let Ok((described, first)) = sigil_video::still(bytes.into())
+                    {
+                        attachment.meta = shape_meta(
+                            described.width,
+                            described.height,
+                            Some(described.duration_ms),
+                        );
+                        attachment.preview = thumbnail_of(&frame_image(&first)).unwrap_or_default();
+                    }
+                }
+                _ => {}
             }
             let post = sqex_proto::message::Post {
                 parts: vec![sqex_proto::message::Part::Attachment(attachment)],
