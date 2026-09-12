@@ -53,7 +53,12 @@ jobs:
             libpcsclite-dev libxdo-dev \
             libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev
 
+      # Keyed by the runner image, not just the OS: a `target/` built on
+      # Ubuntu 24.04 restored onto 22.04 fails to link with "can't find crate
+      # for `tray_icon`" -- the cache's own key sees both as "Linux".
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-22.04
 
       - name: Check
         run: cargo check --workspace --all-targets
@@ -102,6 +107,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-latest
       - name: Tests
         run: scripts/run-tests
       # The bundle is not optional on macOS: notifications and the microphone
@@ -135,6 +142,8 @@ jobs:
             libx11-dev libxkbcommon-dev libwayland-dev libxcb1-dev \
             mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-22.04
       - name: Snapshots
         run: scripts/snapshot-test
 

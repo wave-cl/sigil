@@ -118,7 +118,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Keyed by the runner image: see ci.yml.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
       - name: Packaging tools (Linux)
         if: runner.os == 'Linux'
