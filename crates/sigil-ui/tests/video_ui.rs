@@ -1,4 +1,4 @@
-//! A video in a bubble, before and while it plays.
+//! A video in a bubble and in the viewer: the one place it plays.
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
@@ -133,6 +133,34 @@ fn a_held_video_says_how_long_it_is_and_opens_or_plays_on_a_press() {
     assert!(
         did.get().toggle,
         "pressing the video in the viewer should ask to play it"
+    );
+}
+
+/// A bubble does not play a video, whatever the player behind it is
+/// doing: with one ready and playing, the bubble is still the thumbnail
+/// with the play mark and the length on it, no bar under the pointer, and
+/// a press opens the viewer rather than pausing anything.
+#[test]
+fn a_bubble_is_a_thumbnail_even_while_the_video_plays() {
+    let (mut h, did) = drawn_at(
+        sigil_ui::Standing::Ready,
+        true,
+        false,
+        sigil_ui::video::Place::Bubble,
+    );
+    let over = h.get_by_label("[video 449s, 46.1 MiB]").rect().center();
+    h.hover_at(over);
+    h.run();
+    assert!(h.query_by_label("Pause").is_none(), "{}", said(&h));
+    assert!(h.query_by_label("Mute").is_none());
+    assert!(h.query_by_label("See it full size").is_none());
+    assert!(h.query_by_role(egui::accesskit::Role::Slider).is_none());
+    h.get_by_label("[video 449s, 46.1 MiB]").click();
+    h.run();
+    assert!(
+        did.get().open && !did.get().toggle,
+        "a press on a playing video's bubble should open the viewer: {:?}",
+        did.get()
     );
 }
 

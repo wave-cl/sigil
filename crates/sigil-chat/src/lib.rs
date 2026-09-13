@@ -636,9 +636,10 @@ impl Playing {
 }
 
 struct Pane {
-    /// Videos with a player, by blob id. A player is made when play is
-    /// pressed and dropped when its message leaves the conversation on
-    /// screen; a conversation switched away from stops its videos.
+    /// Videos with a player, by blob id. A player is made when the viewer
+    /// opens on a video and dropped when it closes, or when the message
+    /// leaves the conversation on screen; a conversation switched away
+    /// from stops its video.
     players: HashMap<String, Playing>,
     /// Videos play was pressed on before their bytes had arrived: they
     /// start the moment they do -- in the viewer, which is where a press
@@ -2158,9 +2159,8 @@ impl ChatApp {
         }
     }
 
-    /// A video, as large as the window will take: the same player the
-    /// bubble uses, so opening it does not start it over, and the same
-    /// three ways out.
+    /// A video, as large as the window will take: the one place it plays,
+    /// with the same three ways out as any dialog. Closing stops it.
     #[allow(clippy::too_many_arguments)]
     fn video_viewer_ui(
         &mut self,
@@ -2276,6 +2276,10 @@ impl ChatApp {
         }
         if close || response.should_close() {
             self.pane(at).viewing = None;
+            // The viewer was the only place it played: leaving takes the
+            // player with it, so nothing goes on sounding behind a
+            // thumbnail.
+            self.pane(at).players.remove(&file.id);
             if self.pane(at).whole_screen {
                 self.pane(at).whole_screen = false;
                 egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -3382,9 +3386,10 @@ impl ChatApp {
 
         let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
         // **The videos, before the bubbles.** Players for messages no longer
-        // on screen are dropped -- which stops them -- a video whose bytes
-        // have just arrived after play was pressed is started, and every
-        // player's picture due now is uploaded, once per pass.
+        // on screen are dropped -- which stops them -- and a video whose
+        // bytes have just arrived after it was pressed is started, in the
+        // viewer. The pictures are the viewer's to upload: a bubble shows
+        // the thumbnail whatever the player is doing.
         {
             let ctx = ui.ctx().clone();
             let here: HashSet<&str> = state
@@ -3408,9 +3413,6 @@ impl ChatApp {
                     self.pane(at).viewing = Some((seq, index));
                     self.pane(at).look = Look::default();
                 }
-            }
-            for (id, playing) in self.pane(at).players.iter_mut() {
-                playing.refresh(&ctx, id);
             }
         }
         // Where the message somebody asked to go to landed this pass, drawn or
@@ -3702,17 +3704,8 @@ impl ChatApp {
                     .and_then(|l| l.attachments.get(index))
             {
                 let ctx = ui.ctx().clone();
-                if done.toggle {
-                    if self.pane(at).players.contains_key(&a.id) {
-                        self.pane(at).players[&a.id].player.toggle();
-                    } else if let Some(bytes) = a.bytes.clone() {
-                        self.start_video(at, &ctx, &a.id, bytes);
-                    } else {
-                        // Not here yet: ask, and play when it comes.
-                        self.pane(at).play_when_fetched.insert(a.id.clone());
-                        self.send_as(Some(at), Cmd::Fetch { seq, index });
-                    }
-                }
+                // A bubble has one control, and it opens the viewer: a
+                // video plays there and nowhere else.
                 if done.open {
                     // Into the viewer, playing. Not here yet: asked for,
                     // and the viewer opens on it when it arrives.
@@ -3730,14 +3723,6 @@ impl ChatApp {
                             .open_when_fetched
                             .insert(a.id.clone(), (seq, index));
                         self.send_as(Some(at), Cmd::Fetch { seq, index });
-                    }
-                }
-                if let Some(playing) = self.pane(at).players.get(&a.id) {
-                    if let Some(ms) = done.seek {
-                        playing.player.seek(ms);
-                    }
-                    if let Some(mute) = done.mute {
-                        playing.player.set_volume(if mute { 0.0 } else { 1.0 });
                     }
                 }
             }

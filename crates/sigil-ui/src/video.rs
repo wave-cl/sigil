@@ -51,8 +51,9 @@ pub struct Video<'a> {
 /// Where a video is being drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// In the transcript: a press opens it in the viewer, and the enlarge
-    /// control does the same.
+    /// In the transcript: the thumbnail, the play mark and the length, and
+    /// nothing else -- a video does not play in a bubble. A press opens it
+    /// in the viewer, which is where it plays.
     Bubble,
     /// In the viewer: a press plays or pauses, and the enlarge control
     /// asks for the whole screen.
@@ -107,9 +108,14 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
     ui.painter()
         .rect_filled(rect, tokens::RADIUS_MD, egui::Color32::BLACK);
 
-    // The picture: the frame, or the thumbnail until there is one.
+    // The picture: the frame, or the thumbnail until there is one. In a
+    // bubble, always the thumbnail: the frames are the viewer's.
     let mut drew = false;
-    if let Some(texture) = v.frame {
+    let frame = match v.place {
+        Place::Bubble => None,
+        Place::Viewer => v.frame,
+    };
+    if let Some(texture) = frame {
         let drawn = fit(texture.size_vec2(), rect.size());
         egui::Image::from_texture(egui::load::SizedTexture::from_handle(texture))
             .corner_radius(tokens::RADIUS_MD)
@@ -139,7 +145,7 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
     // while the pointer is on a button drawn on top, and a bar that
     // vanishes the moment the pointer reaches it cannot be pressed.
     let hovered = ui.rect_contains_pointer(rect);
-    let idle = !v.playing;
+    let idle = !v.playing || v.place == Place::Bubble;
     // **The play mark, big, in the middle**, whenever nothing is playing:
     // the one control everybody looks for first. Dimmed ground behind it so
     // it reads on a bright frame.
@@ -172,7 +178,7 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
 
     // The length, bottom right, while it is a thumbnail. A video that says
     // how long it is before you press it is one you can decide about.
-    if v.standing != Standing::Ready && v.duration_ms > 0 {
+    if (v.standing != Standing::Ready || v.place == Place::Bubble) && v.duration_ms > 0 {
         badge(
             ui,
             rect.right_bottom() - egui::vec2(tokens::SPACING_SM, tokens::SPACING_SM),
@@ -188,11 +194,15 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
             Place::Viewer => action.toggle = true,
         }
     }
+    // That is the whole of a bubble: no bar, because nothing plays here.
+    if v.place == Place::Bubble {
+        return action;
+    }
 
     // **The bar, while the pointer is over it or nothing is playing.** A
     // control that is always on top of the picture is a control that is
     // always in the way of it. Painted rather than laid out, so it takes
-    // no room in the bubble and the video is the same size with it or
+    // no room in the viewer and the video is the same size with it or
     // without.
     if v.standing == Standing::Ready && (hovered || idle || v.ended) {
         let bar = egui::Rect::from_min_max(
@@ -246,16 +256,8 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
         // Right-hand controls first, so the scrubber takes what is left.
         inner.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             white(ui);
-            let (word, whole) = match v.place {
-                Place::Bubble => ("See it full size", false),
-                Place::Viewer => ("Whole screen", true),
-            };
-            if sigil::icon_button_named(ui, Icon::Enlarge, word).clicked() {
-                if whole {
-                    action.fullscreen = true;
-                } else {
-                    action.open = true;
-                }
+            if sigil::icon_button_named(ui, Icon::Enlarge, "Whole screen").clicked() {
+                action.fullscreen = true;
             }
             let (icon, word) = if v.volume > 0.0 {
                 (Icon::Sound, "Mute")
