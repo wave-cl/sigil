@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=sigil
+Name=Sigil
 Comment=Voice and chat over sQUIC
 Exec=sigil %u
 Icon=sigil

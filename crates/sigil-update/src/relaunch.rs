@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn the_pid_and_the_path_are_words_of_their_own() {
-        let app = PathBuf::from("/Applications/Some Body's Apps/sigil.app");
+        let app = PathBuf::from("/Applications/Some Body's Apps/Sigil.app");
         let words = relaunch_command(4242, &Target::MacApp(app.clone()));
         assert_eq!(words[0], "/bin/sh");
         assert_eq!(words[1], "-c");
@@ -87,7 +87,7 @@ mod tests {
             "{}",
             words[2]
         );
-        assert!(!words[2].contains("4242") && !words[2].contains("sigil.app"));
+        assert!(!words[2].contains("4242") && !words[2].contains("Sigil.app"));
         assert_eq!(words[3], "sigil-relaunch");
         assert_eq!(words[4], "4242");
         assert_eq!(words[5], app.to_str().unwrap());
@@ -108,9 +108,9 @@ mod tests {
     fn each_install_knows_what_to_start() {
         assert_eq!(
             target(&Install::MacBundle {
-                app: "/Applications/sigil.app".into()
+                app: "/Applications/Sigil.app".into()
             }),
-            Some(Target::MacApp("/Applications/sigil.app".into()))
+            Some(Target::MacApp("/Applications/Sigil.app".into()))
         );
         assert_eq!(
             target(&Install::LinuxBinary {

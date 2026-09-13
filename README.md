@@ -19,12 +19,12 @@ Built binaries are on the
 [releases page](https://github.com/wave-cl/sigil/releases/latest), for macOS
 and Linux on both aarch64 and x86_64.
 
-**macOS.** Unzip, move `sigil.app` to `/Applications`, and clear the quarantine
+**macOS.** Unzip, move `Sigil.app` to `/Applications`, and clear the quarantine
 flag — the build is signed ad-hoc rather than notarised, so Gatekeeper refuses
 it and blames the file for what is really the flag:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/sigil.app
+xattr -dr com.apple.quarantine /Applications/Sigil.app
 ```
 
 Do that because you trust where you fetched it from, not because a message told
@@ -84,7 +84,7 @@ are not available.
 ## Running it
 
 ```bash
-scripts/macos-app && ./target/sigil.app/Contents/MacOS/sigil
+scripts/macos-app && ./target/Sigil.app/Contents/MacOS/sigil
 ```
 
 The bundle is what makes notifications and the microphone work; running the

@@ -66,7 +66,7 @@ fn probe() -> Support {
             //
             // Those are not the same question, and the difference surprised me
             // enough to be worth writing down. A bare `cargo run` binary fails
-            // this on a machine that has never seen sigil.app, and reports
+            // this on a machine that has never seen Sigil.app, and reports
             // unavailable, correctly. But once the bundle has been run *once*,
             // macOS knows `org.squic.sigil`, and from then on the bare binary
             // binds it happily and really can post. So this can say "available"
@@ -80,7 +80,7 @@ fn probe() -> Support {
                 Ok(()) => Support::Yes,
                 Err(_) => Support::no(
                     "macOS routes notifications by bundle identifier and this build \
-                     has none registered; run the built sigil.app rather than the \
+                     has none registered; run the built Sigil.app rather than the \
                      bare binary",
                 ),
             }

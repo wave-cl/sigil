@@ -3,7 +3,7 @@
 ## macOS
 
 ```bash
-scripts/macos-app          # target/sigil.app, ad-hoc signed
+scripts/macos-app          # target/Sigil.app, ad-hoc signed
 ```
 
 The bundle is **not** a distribution nicety. Two things only work inside one,
@@ -28,7 +28,7 @@ whether the executable sits inside a `.app`, and the two diverge in a way that
 will mislead you:
 
 > A bare `cargo run` binary reports *unavailable* on a machine that has never
-> run `sigil.app`. Once the bundle has run **once**, macOS knows
+> run `Sigil.app`. Once the bundle has run **once**, macOS knows
 > `org.squic.sigil`, and from then on the bare binary binds it happily and
 > really can post.
 
@@ -42,8 +42,8 @@ stronger check than the probe:
 
 ```bash
 cargo build -p sigil-platform --example notify_probe
-install -m 755 target/debug/examples/notify_probe target/sigil.app/Contents/MacOS/
-./target/sigil.app/Contents/MacOS/notify_probe
+install -m 755 target/debug/examples/notify_probe target/Sigil.app/Contents/MacOS/
+./target/Sigil.app/Contents/MacOS/notify_probe
 ```
 
 ### Distributing
@@ -54,9 +54,9 @@ notarisation and stapling:
 
 ```bash
 codesign --force --deep --options runtime --timestamp \
-    -s "Developer ID Application: NAME (TEAMID)" target/sigil.app
+    -s "Developer ID Application: NAME (TEAMID)" target/Sigil.app
 xcrun notarytool submit --wait --apple-id ... --team-id ... --password ... sigil.zip
-xcrun stapler staple target/sigil.app
+xcrun stapler staple target/Sigil.app
 ```
 
 A `.dmg` needs `create-dmg`, which is not installed here; the `.app` is the
@@ -175,7 +175,7 @@ is marked and one notification is posted; nothing is fetched until Update is
 pressed. The download streams through SHA-256 into a `.part` file and is
 only renamed when the digest matches. Installing never writes over the
 running binary: a macOS bundle is unpacked with `ditto` beside the old one,
-renamed into place with the old kept as `sigil.app.previous` (removed at the
+renamed into place with the old kept as `Sigil.app.previous` (removed at the
 next start), and the process keeps running from the moved-aside inode; a
 Linux tarball's binary is copied to `<exe>.new` and renamed over; a `.deb` or
 `.rpm` is handed to `apt-get`/`dnf` (falling back to `dpkg`/`rpm`) under
@@ -194,7 +194,7 @@ release (a `/releases/latest` answer naming the files, and the files under
 `/download/<name>`), sign its manifest with the real seed, then either run the
 app with `SIGIL_UPDATE_API=http://127.0.0.1:PORT` — it says so loudly in the
 log — or run `cargo run -p sigil-update --example rehearsal -- <api base>
-<sigil.app>`, which makes the same calls the buttons do and prints each
+<Sigil.app>`, which makes the same calls the buttons do and prints each
 state. The manifest for a rehearsal has to be written with the library rather
 than the tool, because the tool refuses a tag that is not this tree's
 version — which is the point of it.

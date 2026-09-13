@@ -26,7 +26,7 @@ pub enum PackageKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Install {
-    /// `/Applications/sigil.app`, or wherever the bundle is.
+    /// `/Applications/Sigil.app`, or wherever the bundle is.
     MacBundle { app: PathBuf },
     /// A tarball's binary, somewhere the user can write.
     LinuxBinary { exe: PathBuf },
@@ -198,7 +198,7 @@ pub fn package_command(
 }
 
 /// Unpack a downloaded archive into `into` and say where the payload is:
-/// `into/sigil` for a tarball, `into/sigil.app` for a zip.
+/// `into/sigil` for a tarball, `into/Sigil.app` for a zip.
 ///
 /// `tar` and `ditto` rather than a crate: both are on every machine sigil
 /// runs on, and `ditto` is the only thing that puts a bundle back together
@@ -224,7 +224,7 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, Error> {
                 .arg(archive)
                 .arg(into)
                 .status(),
-            into.join("sigil.app"),
+            into.join("Sigil.app"),
         )
     } else {
         return Err(Error::Install(format!(
@@ -264,7 +264,7 @@ pub fn install_linux_binary(new_binary: &Path, exe: &Path) -> Result<(), Error> 
 /// The bundle that the last update moved aside, if any.
 pub fn previous_bundle(app: &Path) -> PathBuf {
     let mut name = app.file_name().unwrap_or_default().to_os_string();
-    // `sigil.app.previous`, not `sigil.previous.app`: Launch Services indexes
+    // `Sigil.app.previous`, not `Sigil.previous.app`: Launch Services indexes
     // anything ending in .app, and a second sigil registered for the
     // `sigil://` scheme is a coin toss over which one opens a link.
     name.push(".previous");
@@ -303,6 +303,19 @@ pub fn install_mac_bundle(new_app: &Path, app: &Path) -> Result<(), Error> {
             "could not put the new bundle at {}: {e}",
             app.display()
         )));
+    }
+    // The release's spelling of the name, when the installed one differs
+    // only in case -- `Sigil.app` from before it was `Sigil.app`. Finder
+    // shows the file name, and the volume is case-insensitive, so this is a
+    // rename to what is already the same file; if it is not, nothing is
+    // lost by leaving it.
+    if let (Some(theirs), Some(ours)) = (new_app.file_name(), app.file_name())
+        && theirs != ours
+        && theirs
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&ours.to_string_lossy())
+    {
+        let _ = std::fs::rename(app, app.with_file_name(theirs));
     }
     Ok(())
 }
@@ -371,11 +384,11 @@ mod tests {
 
     #[test]
     fn an_executable_inside_a_bundle_is_a_bundle_install() {
-        let exe = Path::new("/Applications/sigil.app/Contents/MacOS/sigil");
+        let exe = Path::new("/Applications/Sigil.app/Contents/MacOS/sigil");
         assert_eq!(
             classify("macos", exe, true, "", false, false),
             Install::MacBundle {
-                app: PathBuf::from("/Applications/sigil.app")
+                app: PathBuf::from("/Applications/Sigil.app")
             }
         );
         let dev = Path::new("/Users/c/projects/sigil/target/release/sigil");
@@ -384,7 +397,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // Inside the tree but not at the executable's place.
-        let odd = Path::new("/Applications/sigil.app/Contents/Resources/sigil");
+        let odd = Path::new("/Applications/Sigil.app/Contents/Resources/sigil");
         assert!(!classify("macos", odd, true, "", false, false).is_supported());
     }
 
@@ -476,8 +489,8 @@ mod tests {
     #[test]
     fn the_previous_bundle_does_not_end_in_dot_app() {
         assert_eq!(
-            previous_bundle(Path::new("/Applications/sigil.app")),
-            PathBuf::from("/Applications/sigil.app.previous")
+            previous_bundle(Path::new("/Applications/Sigil.app")),
+            PathBuf::from("/Applications/Sigil.app.previous")
         );
     }
 
@@ -513,7 +526,7 @@ mod tests {
     #[test]
     fn a_bundle_is_swapped_whole_and_the_old_one_kept_beside_it() {
         let dir = tempfile::tempdir().unwrap();
-        let app = dir.path().join("sigil.app");
+        let app = dir.path().join("Sigil.app");
         let make = |at: &Path, body: &str| {
             std::fs::create_dir_all(at.join("Contents/MacOS")).unwrap();
             std::fs::write(at.join("Contents/MacOS/sigil"), body).unwrap();
@@ -521,7 +534,7 @@ mod tests {
         };
         make(&app, "old");
         let src = dir.path().join("src");
-        make(&src.join("sigil.app"), "new");
+        make(&src.join("Sigil.app"), "new");
         let staging = dir.path().join("staging");
         let new_app = if cfg!(target_os = "macos") {
             // The new one arrives as a zip, exactly as the release makes it.
@@ -529,19 +542,19 @@ mod tests {
             assert!(
                 Command::new("ditto")
                     .args(["-c", "-k", "--keepParent"])
-                    .arg(src.join("sigil.app"))
+                    .arg(src.join("Sigil.app"))
                     .arg(&zip)
                     .status()
                     .unwrap()
                     .success()
             );
             let new_app = unpack(&zip, &staging).unwrap();
-            assert_eq!(new_app, staging.join("sigil.app"));
+            assert_eq!(new_app, staging.join("Sigil.app"));
             new_app
         } else {
             std::fs::create_dir_all(&staging).unwrap();
-            std::fs::rename(src.join("sigil.app"), staging.join("sigil.app")).unwrap();
-            staging.join("sigil.app")
+            std::fs::rename(src.join("Sigil.app"), staging.join("Sigil.app")).unwrap();
+            staging.join("Sigil.app")
         };
 
         install_mac_bundle(&new_app, &app).unwrap();
@@ -571,14 +584,49 @@ mod tests {
         );
     }
 
+    /// An install spelt `sigil.app` from before the name was `Sigil.app`
+    /// takes the release's spelling when the new bundle differs only in
+    /// case -- on a volume that treats them as one file.
+    #[test]
+    fn an_old_spelling_of_the_bundle_takes_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = |at: &Path, body: &str| {
+            std::fs::create_dir_all(at.join("Contents/MacOS")).unwrap();
+            std::fs::write(at.join("Contents/MacOS/sigil"), body).unwrap();
+            std::fs::write(at.join("Contents/Info.plist"), "<plist/>").unwrap();
+        };
+        let old = dir.path().join("sigil.app");
+        make(&old, "old");
+        let new = dir.path().join("staging").join("Sigil.app");
+        make(&new, "new");
+        install_mac_bundle(&new, &old).unwrap();
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".app"))
+            .collect();
+        // Only on a case-insensitive volume is the spelling ours to choose;
+        // either way the bundle is there once and holds the new binary.
+        assert_eq!(names.len(), 1, "{names:?}");
+        let insensitive = dir.path().join("SIGIL.APP").exists();
+        if insensitive {
+            assert_eq!(names[0], "Sigil.app", "{names:?}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&names[0]).join("Contents/MacOS/sigil"))
+                .unwrap(),
+            "new"
+        );
+    }
+
     #[test]
     fn a_zip_without_the_binary_leaves_the_bundle_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let app = dir.path().join("sigil.app");
+        let app = dir.path().join("Sigil.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::write(app.join("Contents/MacOS/sigil"), "old").unwrap();
         std::fs::write(app.join("Contents/Info.plist"), "<plist/>").unwrap();
-        let hollow = dir.path().join("hollow").join("sigil.app");
+        let hollow = dir.path().join("hollow").join("Sigil.app");
         std::fs::create_dir_all(hollow.join("Contents")).unwrap();
         std::fs::write(hollow.join("Contents/Info.plist"), "<plist/>").unwrap();
         assert!(matches!(

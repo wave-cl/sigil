@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build sigil.app.
+# Build Sigil.app.
 #
 #   scripts/macos-app            # release build, ad-hoc signed
 #   scripts/macos-app --debug    # faster, for checking bundle behaviour
@@ -28,7 +28,7 @@ for arg in "$@"; do
     esac
 done
 
-app="$repo/target/sigil.app"
+app="$repo/target/Sigil.app"
 contents="$app/Contents"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -1)"
 
@@ -56,8 +56,8 @@ cat > "$contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>sigil</string>
-    <key>CFBundleDisplayName</key><string>sigil</string>
+    <key>CFBundleName</key><string>Sigil</string>
+    <key>CFBundleDisplayName</key><string>Sigil</string>
     <key>CFBundleExecutable</key><string>sigil</string>
     <!-- Must match BUNDLE_ID in sigil-platform's notify module: macOS routes a
          notification by this, and a mismatch means none are shown. -->

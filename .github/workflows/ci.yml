@@ -115,13 +115,13 @@ jobs:
       # both depend on its Info.plist keys, and both fail silently without
       # them. Building it here catches a broken plist before somebody discovers
       # it as a call with no sound.
-      - name: Build sigil.app
+      - name: Build Sigil.app
         run: |
           scripts/macos-app
-          plutil -lint target/sigil.app/Contents/Info.plist
+          plutil -lint target/Sigil.app/Contents/Info.plist
           for key in NSMicrophoneUsageDescription CFBundleIdentifier CFBundleURLTypes; do
-            /usr/libexec/PlistBuddy -c "Print :$key" target/sigil.app/Contents/Info.plist >/dev/null \
-              || { echo "::error::sigil.app is missing $key"; exit 1; }
+            /usr/libexec/PlistBuddy -c "Print :$key" target/Sigil.app/Contents/Info.plist >/dev/null \
+              || { echo "::error::Sigil.app is missing $key"; exit 1; }
           done
 
   # ---------------------------------------------------------------------------

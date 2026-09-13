@@ -1,7 +1,7 @@
 //! Rehearse an update of a real bundle against a release server of one's
 //! own, without a window:
 //!
-//!     cargo run -p sigil-update --example rehearsal -- http://127.0.0.1:8765 /path/to/sigil.app
+//!     cargo run -p sigil-update --example rehearsal -- http://127.0.0.1:8765 /path/to/Sigil.app
 //!
 //! The same calls the Desktop pane's buttons make, minus the buttons: check,
 //! then Update, then print the relaunch command rather than running it. The
@@ -17,11 +17,11 @@ use sigil_update::{Install, Updater};
 fn main() {
     let api = std::env::args()
         .nth(1)
-        .expect("usage: rehearsal <api base> <sigil.app>");
+        .expect("usage: rehearsal <api base> <Sigil.app>");
     let app = std::path::PathBuf::from(
         std::env::args()
             .nth(2)
-            .expect("usage: rehearsal <api base> <sigil.app>"),
+            .expect("usage: rehearsal <api base> <Sigil.app>"),
     );
     let install = Install::MacBundle { app };
     let updater = Updater::start(

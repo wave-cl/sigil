@@ -33,7 +33,7 @@ impl Tray {
                 support: Support::No(why),
             },
             Support::Yes => match TrayIconBuilder::new()
-                .with_tooltip("sigil")
+                .with_tooltip("Sigil")
                 .with_icon(icon())
                 .build()
             {

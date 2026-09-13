@@ -217,7 +217,7 @@ fn a_release_with_no_build_for_this_install_fails_and_names_it() {
     let (server, _) = served("v0.1.6", b"x", true);
     let client = Client::new(server.base.clone());
     let elsewhere = Install::MacBundle {
-        app: "/Applications/sigil.app".into(),
+        app: "/Applications/Sigil.app".into(),
     };
     let (state, _) = check(&client, &key(), &elsewhere, current());
     match state {

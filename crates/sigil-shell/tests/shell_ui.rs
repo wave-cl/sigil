@@ -882,7 +882,7 @@ fn a_report() -> sigil_shell::Report {
         autostart_enabled: false,
         version: "0.1.5".into(),
         install: sigil_update::Install::MacBundle {
-            app: "/Applications/sigil.app".into(),
+            app: "/Applications/Sigil.app".into(),
         },
         update: sigil_update::UpdateState::Unknown,
     }
@@ -974,7 +974,7 @@ fn the_desktop_pane_says_the_version_and_offers_the_newer_one() {
     let words = said(&h);
     assert!(words.contains("sigil 0.1.5"), "{words}");
     assert!(
-        words.contains("installed as /Applications/sigil.app"),
+        words.contains("installed as /Applications/Sigil.app"),
         "{words}"
     );
     assert!(words.contains("sigil 0.1.6 is available"), "{words}");

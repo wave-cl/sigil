@@ -171,7 +171,7 @@ jobs:
             exit 1
           fi
 
-      - name: Build sigil.app
+      - name: Build Sigil.app
         if: runner.os == 'macOS'
         run: scripts/macos-app
 
@@ -182,16 +182,16 @@ jobs:
       - name: Check the bundle carries the keys it exists for
         if: runner.os == 'macOS'
         run: |
-          plutil -lint target/sigil.app/Contents/Info.plist
+          plutil -lint target/Sigil.app/Contents/Info.plist
           for key in NSMicrophoneUsageDescription CFBundleIdentifier CFBundleURLTypes; do
-            /usr/libexec/PlistBuddy -c "Print :$key" target/sigil.app/Contents/Info.plist >/dev/null \
-              || { echo "::error::sigil.app is missing $key"; exit 1; }
+            /usr/libexec/PlistBuddy -c "Print :$key" target/Sigil.app/Contents/Info.plist >/dev/null \
+              || { echo "::error::Sigil.app is missing $key"; exit 1; }
           done
           # And the architecture of the binary that is actually in the bundle,
           # which is the claim the filename makes.
-          arch="$(lipo -archs target/sigil.app/Contents/MacOS/sigil)"
+          arch="$(lipo -archs target/Sigil.app/Contents/MacOS/sigil)"
           [ "$arch" = "${{ matrix.machine }}" ] || {
-            echo "::error::sigil.app carries $arch, and this artefact is named ${{ matrix.machine }}"
+            echo "::error::Sigil.app carries $arch, and this artefact is named ${{ matrix.machine }}"
             exit 1
           }
           echo "bundle carries $arch"
@@ -219,7 +219,7 @@ jobs:
             # `ditto`, not `zip`: a .app is a tree with symlinks and a
             # _CodeSignature directory, and zip flattens enough of that to
             # produce a bundle macOS refuses to launch.
-            ditto -c -k --keepParent target/sigil.app "dist/${NAME}.zip"
+            ditto -c -k --keepParent target/Sigil.app "dist/${NAME}.zip"
           fi
 
           ls -l dist
@@ -348,7 +348,7 @@ jobs:
           than the file. Clear it deliberately:
 
           ```
-          xattr -dr com.apple.quarantine /Applications/sigil.app
+          xattr -dr com.apple.quarantine /Applications/Sigil.app
           ```
 
           Do that only because you fetched this from a release you trust. A

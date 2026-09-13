@@ -162,7 +162,7 @@ fn main() -> eframe::Result<()> {
             // Kept, and not shown: the window manager, the dock and every
             // window list still want a name. What nobody wants is the word
             // "sigil" written across the top of sigil.
-            .with_title("sigil")
+            .with_title("Sigil")
             .with_title_shown(false)
             // The bar goes transparent and the content is drawn behind it, so
             // the top of the window is the application's own colour instead of
