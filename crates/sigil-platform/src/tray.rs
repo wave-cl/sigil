@@ -35,6 +35,10 @@ impl Tray {
             Support::Yes => match TrayIconBuilder::new()
                 .with_tooltip("Sigil")
                 .with_icon(icon())
+                // The menu bar tints a template to match itself -- black on
+                // a light bar, white on a dark one -- which is what every
+                // other mark up there does. Elsewhere the icon is the icon.
+                .with_icon_as_template(cfg!(target_os = "macos"))
                 .build()
             {
                 Ok(icon) => Tray {
@@ -67,22 +71,18 @@ impl Tray {
 
 /// A plain disc in sigil's accent. Drawn rather than shipped as an asset: an
 /// icon file is one more thing to lose between the build and the bundle.
+/// The mark, as `crate::mark` draws it -- the same drawing as the app icon.
+///
+/// On macOS the S alone, in black, as a template the menu bar tints; on the
+/// others the S on its rounded square, in the accent, at a size the tray
+/// scales from. Twice the nominal size so a Retina bar draws it sharp.
 fn icon() -> Icon {
-    const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    let centre = (SIZE as f32 - 1.0) / 2.0;
-    let radius = centre - 1.0;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (dx, dy) = (x as f32 - centre, y as f32 - centre);
-            let inside = (dx * dx + dy * dy).sqrt() <= radius;
-            if inside {
-                rgba.extend_from_slice(&[0x6E, 0x8B, 0xFF, 0xFF]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
+    const SIZE: u32 = 64;
+    let rgba = if cfg!(target_os = "macos") {
+        crate::mark::glyph_rgba(SIZE, [0, 0, 0])
+    } else {
+        crate::mark::icon_rgba(SIZE)
+    };
     Icon::from_rgba(rgba, SIZE, SIZE).expect("a square rgba buffer is a valid icon")
 }
 

@@ -89,9 +89,14 @@ xdg-mime query default x-scheme-handler/sigil
 
 ## The icon
 
-`packaging/icon.py` draws it at any size, with no dependencies. It is generated
-rather than checked in so it cannot drift from the disc the tray draws, and so
-there is no binary blob in the repository that nobody can diff.
+A seal: a white S of two arcs on a rounded square in the accent.
+`packaging/icon.py` draws it at any size, with no dependencies, and
+`crates/sigil-platform/src/mark.rs` draws the same thing for the tray from
+the same numbers -- a test there runs the script and compares the two pixel
+for pixel, so the dock and the menu bar cannot drift apart. On macOS the tray
+gets the S alone as a template, which the menu bar tints to match itself. The
+icon is generated rather than checked in so there is no binary blob in the
+repository that nobody can diff.
 
 ## Releasing
 
