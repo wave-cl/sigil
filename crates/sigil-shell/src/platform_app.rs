@@ -370,43 +370,52 @@ impl App for PlatformApp {
     fn notice_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
         let theme = ColorTheme::current(ui.ctx());
         let state = self.report.update.clone();
-        ui.horizontal(|ui| {
-            match &state {
-                UpdateState::Available { version, .. } => {
-                    ui.strong(format!("sigil {version} is available."));
+        // One rectangle, a button tall, allocated before anything is placed
+        // in it: a `horizontal` centres each thing against the height it knew
+        // when that thing was placed, so a sentence put down before the
+        // button beside it sat a few pixels above the button's middle.
+        let row = egui::vec2(ui.available_width(), tokens::BUTTON_MD);
+        ui.allocate_ui_with_layout(
+            row,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                match &state {
+                    UpdateState::Available { version, .. } => {
+                        ui.strong(format!("sigil {version} is available."));
+                    }
+                    UpdateState::Downloading {
+                        version,
+                        done,
+                        total,
+                    } => {
+                        let frac = if *total > 0 {
+                            *done as f32 / *total as f32
+                        } else {
+                            0.0
+                        };
+                        ui.label(format!("Fetching sigil {version}…"));
+                        ui.add(egui::ProgressBar::new(frac).desired_width(200.0));
+                    }
+                    UpdateState::Installing { version } => {
+                        ui.label(format!("Installing sigil {version}…"));
+                    }
+                    UpdateState::Ready { version } => {
+                        ui.strong(format!("sigil {version} is installed."));
+                        ui.label("Restart to use it.");
+                    }
+                    UpdateState::Failed { why } => {
+                        ui.colored_label(theme.destructive, format!("The update failed: {why}"));
+                    }
+                    _ => {}
                 }
-                UpdateState::Downloading {
-                    version,
-                    done,
-                    total,
-                } => {
-                    let frac = if *total > 0 {
-                        *done as f32 / *total as f32
-                    } else {
-                        0.0
-                    };
-                    ui.label(format!("Fetching sigil {version}…"));
-                    ui.add(egui::ProgressBar::new(frac).desired_width(200.0));
+                if let Some(why) = &self.restart_trouble {
+                    ui.colored_label(theme.destructive, format!("Could not restart: {why}"));
                 }
-                UpdateState::Installing { version } => {
-                    ui.label(format!("Installing sigil {version}…"));
-                }
-                UpdateState::Ready { version } => {
-                    ui.strong(format!("sigil {version} is installed."));
-                    ui.label("Restart to use it.");
-                }
-                UpdateState::Failed { why } => {
-                    ui.colored_label(theme.destructive, format!("The update failed: {why}"));
-                }
-                _ => {}
-            }
-            if let Some(why) = &self.restart_trouble {
-                ui.colored_label(theme.destructive, format!("Could not restart: {why}"));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.update_buttons(ui, &state, false);
-            });
-        });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.update_buttons(ui, &state, false);
+                });
+            },
+        );
     }
 
     fn tab_notifications(&self) -> TabNotifications {
