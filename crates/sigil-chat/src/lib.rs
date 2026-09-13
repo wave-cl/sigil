@@ -35,6 +35,17 @@ pub enum Route {
     Devices,
 }
 
+/// The exchange to suggest to an identity that names none.
+///
+/// A fresh identity on a fresh machine has no handle sidecar and no
+/// `~/.sqnr/config`, so it has nowhere to talk to and the screen that says so
+/// used to end at "add an exchange" -- a box, and a question somebody new has
+/// no answer to. This is the answer: a public exchange anybody can join, so
+/// the first thing after making an identity is one press rather than a
+/// search for a domain name. Offered, not applied; nobody is connected
+/// anywhere they did not choose.
+pub const SUGGESTED_EXCHANGE: &str = "trunk.exchange";
+
 /// What to call the default exchange in the switcher.
 ///
 /// The default has no name in the roster — it is whatever this identity's own
@@ -1645,7 +1656,33 @@ impl ChatApp {
                     .selectable(true),
             );
             ui.add_space(tokens::SPACING_MD);
-            if ui.button("Add an exchange").clicked() {
+            if only {
+                // The suggestion, first and biggest: the answer to the
+                // question the sentence above raises.
+                ui.colored_label(
+                    theme.text_secondary,
+                    format!("{SUGGESTED_EXCHANGE} is a public exchange anybody can join."),
+                );
+                ui.add_space(tokens::SPACING_SM);
+                if ui.button(format!("Add {SUGGESTED_EXCHANGE}")).clicked()
+                    && ctx
+                        .accounts
+                        .add_exchange(ctx.accounts.active_index(), SUGGESTED_EXCHANGE)
+                {
+                    // Shown straight away, as the dialog does: adding one and
+                    // staying on "not connected" looks like nothing happened.
+                    self.showing.insert(me, SUGGESTED_EXCHANGE.to_string());
+                }
+                ui.add_space(tokens::SPACING_SM);
+            }
+            if ui
+                .button(if only {
+                    "Add a different exchange"
+                } else {
+                    "Add an exchange"
+                })
+                .clicked()
+            {
                 self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
             }
             // Somebody arriving here by switching identity wants the way back

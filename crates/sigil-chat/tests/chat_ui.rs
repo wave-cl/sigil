@@ -276,8 +276,14 @@ fn an_identity_with_nowhere_to_connect_says_so() {
         said.contains("names no exchange"),
         "and does not say why: {said}"
     );
-    // And it offers the way out rather than a dead screen.
-    assert!(said.contains("Add an exchange"), "{said}");
+    // And it offers the way out rather than a dead screen: a public exchange
+    // by name, and the box for any other.
+    assert!(
+        said.contains("trunk.exchange is a public exchange"),
+        "{said}"
+    );
+    assert!(said.contains("Add trunk.exchange"), "{said}");
+    assert!(said.contains("Add a different exchange"), "{said}");
     // The controls of a session that does not exist are not drawn: every one
     // of them would talk to nothing.
     assert!(
@@ -293,7 +299,7 @@ fn an_exchange_can_be_added_from_the_pane_that_offers_it() {
     let mut h = adrift(unlocked(dir.path()));
     h.run();
 
-    h.get_by_label("Add an exchange").click();
+    h.get_by_label("Add a different exchange").click();
     h.run();
     assert!(
         text_of(&h).contains("a domain, or host:port") || text_of(&h).contains("Exchange"),
@@ -326,6 +332,32 @@ fn an_exchange_can_be_added_from_the_pane_that_offers_it() {
     );
 }
 
+/// The suggested exchange is one press: added to the identity and shown.
+#[test]
+fn the_suggested_exchange_is_added_with_one_press() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift(unlocked(dir.path()));
+    h.run();
+    h.get_by_label("Add trunk.exchange").click();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("names no exchange"),
+        "still adrift after the press: {said}"
+    );
+    // And shown, not merely held: the control in the title strip names it,
+    // rather than the default that has nowhere to go.
+    assert!(
+        said.contains("trunk.exchange") && !said.contains("| default |"),
+        "added but not shown: {said}"
+    );
+    h.get_by_label("Exchange").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("trunk.exchange"), "not added: {said}");
+}
+
 /// An exchange that cannot be added says why, rather than doing nothing.
 ///
 /// `add_exchange` answers `false` for an empty name and for one already held,
@@ -336,7 +368,7 @@ fn an_exchange_that_cannot_be_added_says_why() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = adrift(unlocked(dir.path()));
     h.run();
-    h.get_by_label("Add an exchange").click();
+    h.get_by_label("Add a different exchange").click();
     h.run();
 
     // Nothing typed.
