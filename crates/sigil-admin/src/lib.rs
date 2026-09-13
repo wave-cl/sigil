@@ -322,6 +322,14 @@ impl App for AdminApp {
             return AppResponse::default();
         }
 
+        // **The newest answer, where the eye is.** Every answer used to land
+        // in a list at the foot of the page, under five sections of
+        // controls, so an operation that was applied looked like one that
+        // did nothing -- the reply was there, below the fold. The last one
+        // is drawn here, above everything, and the list stays at the foot
+        // for the ones before it.
+        self.latest_answer_ui(&state, ui, &theme);
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -653,6 +661,36 @@ impl AdminApp {
         });
     }
 
+    /// The exchange's most recent reply, pinned under the header.
+    fn latest_answer_ui(&self, state: &AdminState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some(answer) = state.answers.first() else {
+            return;
+        };
+        egui::Frame::NONE
+            .fill(theme.surface_secondary)
+            .corner_radius(tokens::RADIUS_MD)
+            .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme.text_muted, egui::RichText::new("Last answer").small());
+                    ui.colored_label(
+                        if answer.refused {
+                            theme.destructive
+                        } else {
+                            theme.text_secondary
+                        },
+                        &answer.asked,
+                    );
+                });
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&answer.said).monospace().small())
+                        .selectable(true),
+                );
+            });
+        ui.add_space(tokens::SPACING_SM);
+    }
+
     fn answers_ui(&self, state: &AdminState, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.heading("Answers");
         if let Some(status) = &state.status {
@@ -684,7 +722,6 @@ impl AdminApp {
         }
     }
 
-    /// The key in the key box, if it is one. Cleared when it is taken.
     /// The key in the box, if it is one -- and the reason it is not, said
     /// in the pane, if it is not. A press on Add that did nothing and said
     /// nothing was read as the exchange refusing; it was this returning

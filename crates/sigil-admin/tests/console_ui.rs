@@ -160,6 +160,15 @@ fn a_refusal_is_shown_as_it_came() {
     let said = text_of(&h);
     assert!(said.contains("not an administrator"), "{said}");
     assert!(said.contains("enable the managed whitelist"), "{said}");
+    // And where the eye is: above the sections, not in a list at the foot
+    // of the page, where an applied operation looked like one that did
+    // nothing.
+    let reply = said.find("forbidden (403)").unwrap();
+    let first_section = said.find("Whitelist").unwrap();
+    assert!(
+        reply < first_section,
+        "the newest answer is below the controls: {said}"
+    );
 }
 
 /// The console acts on the exchange chosen in the title strip -- the same
