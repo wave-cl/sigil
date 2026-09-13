@@ -28,6 +28,9 @@ struct Pane {
     /// `Some`**: `sign_and_submit`'s review callback runs during signing and
     /// can only report, so the question has to be asked here, first.
     pending: Option<Vec<Op>>,
+    /// Why what is in the key box is not a key, when a press found it was
+    /// not. Cleared by the next press that finds one.
+    key_trouble: Option<String>,
 }
 
 pub struct AdminApp {
@@ -224,6 +227,25 @@ impl AdminApp {
     fn propose(&mut self, me: PubKey, ops: Vec<Op>) {
         self.pane(me).pending = Some(ops);
     }
+}
+
+/// Why `typed` is not a key, in the words of the person who typed it.
+fn key_trouble(typed: &str) -> String {
+    if typed.is_empty() {
+        return "Type or paste a key first.".into();
+    }
+    if typed.contains('…') || typed.contains("...") {
+        return "That is a key shortened for display, not the whole key: copy it from the                 identity's profile, or from Members, where the whole key is."
+            .into();
+    }
+    if typed.contains('@') {
+        return "That is a handle, not a key. The whitelist holds keys; look the handle up                 and paste the key it names."
+            .into();
+    }
+    format!(
+        "That is not a key: a key is 43 or 44 characters of base58, or 64 of hex, and this          is {} characters.",
+        typed.chars().count()
+    )
 }
 
 impl App for AdminApp {
@@ -498,6 +520,14 @@ impl AdminApp {
                 self.propose(me, vec![Op::WhitelistRemove(key)]);
             }
         });
+        self.key_trouble_ui(me, ui, theme);
+    }
+
+    /// Under a key box: why the last press did nothing, until one does.
+    fn key_trouble_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
+        if let Some(why) = self.panes.get(&me).and_then(|p| p.key_trouble.clone()) {
+            ui.colored_label(theme.destructive, why);
+        }
     }
 
     fn admission_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
@@ -594,6 +624,7 @@ impl AdminApp {
                 self.propose(me, vec![Op::PeerRemove(key)]);
             }
         });
+        self.key_trouble_ui(me, ui, theme);
     }
 
     fn audit_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
@@ -654,14 +685,23 @@ impl AdminApp {
     }
 
     /// The key in the key box, if it is one. Cleared when it is taken.
+    /// The key in the box, if it is one -- and the reason it is not, said
+    /// in the pane, if it is not. A press on Add that did nothing and said
+    /// nothing was read as the exchange refusing; it was this returning
+    /// `None` for a key copied in its shortened form.
     fn take_key(&mut self, me: PubKey) -> Option<PubKey> {
         let typed = self.pane(me).key.trim().to_string();
         match typed.parse::<PubKey>() {
             Ok(key) => {
-                self.pane(me).key.clear();
+                let pane = self.pane(me);
+                pane.key.clear();
+                pane.key_trouble = None;
                 Some(key)
             }
-            Err(_) => None,
+            Err(_) => {
+                self.pane(me).key_trouble = Some(key_trouble(&typed));
+                None
+            }
         }
     }
 }

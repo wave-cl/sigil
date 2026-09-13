@@ -263,3 +263,63 @@ fn the_title_strip_offers_the_exchanges_to_administer() {
         "adding is the chat's: {said}"
     );
 }
+
+/// A press on Add or Remove with something that is not a key says so, in
+/// words that say what it was, rather than doing nothing. A shortened key
+/// copied off the screen was the case that looked like the exchange
+/// refusing.
+#[test]
+fn a_key_that_is_not_one_is_refused_in_words() {
+    let mut h = harness(up());
+    h.run();
+    // The first box and the first Add on the screen are the whitelist's.
+    fn field<'a>(h: &'a Harness<'static>) -> egui_kittest::Node<'a> {
+        h.get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .next()
+        .expect("a key box")
+    }
+    fn add(h: &Harness<'static>) {
+        h.get_all_by_label("Add").next().expect("an Add").click();
+    }
+    for (typed, expect) in [
+        ("8qbH…VfeR", "shortened for display"),
+        ("colin@squic.org", "a handle, not a key"),
+        ("not a key", "not a key"),
+    ] {
+        let f = field(&h);
+        f.focus();
+        f.type_text(typed);
+        h.run();
+        add(&h);
+        h.run();
+        let said = text_of(&h);
+        assert!(
+            !said.contains("Sign this?"),
+            "{typed:?} was proposed: {said}"
+        );
+        assert!(
+            said.contains(expect),
+            "{typed:?} refused without saying why: {said}"
+        );
+        // The box keeps what was typed, to be corrected rather than retyped;
+        // cleared here for the next case.
+        let f = field(&h);
+        f.focus();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.key_press(egui::Key::Backspace);
+        h.run();
+    }
+    // A whole key is proposed, and the words go.
+    let f = field(&h);
+    f.focus();
+    f.type_text(&PubKey::new([9u8; 32]).to_string());
+    h.run();
+    add(&h);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Sign this?"), "{said}");
+    assert!(!said.contains("not a key"), "{said}");
+}
