@@ -508,7 +508,8 @@ mod tests {
         assert_eq!(still, "old", "the running inode is untouched");
     }
 
-    #[cfg(target_os = "macos")]
+    /// The swap itself is renames, and runs anywhere; the zip round trip
+    /// through `ditto` is macOS's own and is taken only there.
     #[test]
     fn a_bundle_is_swapped_whole_and_the_old_one_kept_beside_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -519,22 +520,29 @@ mod tests {
             std::fs::write(at.join("Contents/Info.plist"), "<plist/>").unwrap();
         };
         make(&app, "old");
-        // The new one arrives as a zip, exactly as the release makes it.
         let src = dir.path().join("src");
         make(&src.join("sigil.app"), "new");
-        let zip = dir.path().join("sigil-v9.9.9-aarch64-apple-darwin.zip");
-        assert!(
-            Command::new("ditto")
-                .args(["-c", "-k", "--keepParent"])
-                .arg(src.join("sigil.app"))
-                .arg(&zip)
-                .status()
-                .unwrap()
-                .success()
-        );
         let staging = dir.path().join("staging");
-        let new_app = unpack(&zip, &staging).unwrap();
-        assert_eq!(new_app, staging.join("sigil.app"));
+        let new_app = if cfg!(target_os = "macos") {
+            // The new one arrives as a zip, exactly as the release makes it.
+            let zip = dir.path().join("sigil-v9.9.9-aarch64-apple-darwin.zip");
+            assert!(
+                Command::new("ditto")
+                    .args(["-c", "-k", "--keepParent"])
+                    .arg(src.join("sigil.app"))
+                    .arg(&zip)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let new_app = unpack(&zip, &staging).unwrap();
+            assert_eq!(new_app, staging.join("sigil.app"));
+            new_app
+        } else {
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::rename(src.join("sigil.app"), staging.join("sigil.app")).unwrap();
+            staging.join("sigil.app")
+        };
 
         install_mac_bundle(&new_app, &app).unwrap();
         assert_eq!(
@@ -563,7 +571,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_zip_without_the_binary_leaves_the_bundle_alone() {
         let dir = tempfile::tempdir().unwrap();
