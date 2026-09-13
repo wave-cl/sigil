@@ -9,6 +9,7 @@ members = [
     "crates/sigil-chat",
     "crates/sigil-video",
     "crates/sigil-admin",
+    "crates/sigil-update",
     "crates/sigil-shell",
 ]
 

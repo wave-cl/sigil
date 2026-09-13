@@ -1,0 +1,12 @@
+#!/bin/sh
+# Make the key that signs releases, once.
+#
+# Prints the public half as the Rust that goes in
+# crates/sigil-update/src/lib.rs, and the secret half as the value of the
+# repository secret SIGIL_UPDATE_KEY -- which is the only place the secret
+# should ever be. A build trusts exactly one public key; a release signed
+# with any other seed is refused by the signing tool before it is published
+# and by every sigil after.
+set -eu
+cd "$(dirname "$0")/.."
+exec cargo run -q --release -p sigil-update --bin sigil-update-tool -- keygen

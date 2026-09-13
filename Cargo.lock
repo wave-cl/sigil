@@ -5953,6 +5953,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-update"
+version = "0.1.5"
+dependencies = [
+ "dirs",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "sigil-video"
 version = "0.1.5"
 dependencies = [

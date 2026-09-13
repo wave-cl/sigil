@@ -1,0 +1,29 @@
+[package]
+name = "sigil-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Finding, verifying and installing a newer sigil from its GitHub releases -- and the tool that signs one."
+
+# No desktop dependencies on purpose: the release job builds the signing tool
+# on a bare runner with no GTK or ALSA, and the verifier must be the same
+# code the signer ran.
+[dependencies]
+# Already in the tree through egui_extras' image loaders, with the same rustls
+# and the same ring that squic links -- so this adds no second TLS stack.
+ureq = "3"
+sha2 = "0.10"
+ed25519-dalek = "2"
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+# The tests build a release and serve it; sha2 and hex are the crate's own.
+sha2 = "0.10"
+hex = "0.4"
+ed25519-dalek = "2"
