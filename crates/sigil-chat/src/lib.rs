@@ -55,78 +55,6 @@ pub const SUGGESTED_EXCHANGE: &str = "trunk.exchange";
 /// discovered at is the answer when there is one; the key is the fallback,
 /// because a connection made to an address has no domain to report and a key
 /// is still better than a word that names nothing.
-/// One exchange in the title strip's menu: a row the width of the menu, and
-/// the way to remove it, on the same centre line.
-///
-/// Not a `selectable_label`, which highlights the words and nothing else --
-/// a pill in the corner of a row rather than a row -- and beside which the
-/// remove control sat a full button's height lower, because a `horizontal`
-/// centres each thing against the height it knew when that thing was placed.
-/// One rectangle, allocated first at the height of the taller of the two, and
-/// both drawn into it.
-///
-/// Returns (chosen, removed).
-fn exchange_row(
-    ui: &mut egui::Ui,
-    theme: &ColorTheme,
-    label: &str,
-    selected: bool,
-    removable: bool,
-) -> (bool, bool) {
-    let height = tokens::BUTTON_MD;
-    let (rect, row) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::click(),
-    );
-    row.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label));
-    if ui.is_rect_visible(rect) {
-        if selected {
-            ui.painter()
-                .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
-        } else if row.hovered() {
-            ui.painter().rect_filled(
-                rect,
-                tokens::RADIUS_SM,
-                theme.interactive_hover.gamma_multiply(0.5),
-            );
-        }
-        let colour = if selected {
-            theme.accent
-        } else {
-            theme.text_primary
-        };
-        ui.painter().text(
-            egui::pos2(rect.left() + tokens::SPACING_SM, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::TextStyle::Body.resolve(ui.style()),
-            colour,
-        );
-    }
-    if row.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let mut removed = false;
-    if removable {
-        // Drawn **into** the row's rectangle, at its right, after the row --
-        // so it is on top and wins the press over the row underneath it, and
-        // so its centre is the row's centre rather than a centre of its own.
-        let square = egui::Rect::from_center_size(
-            egui::pos2(rect.right() - height / 2.0, rect.center().y),
-            egui::vec2(height, height),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(square), |ui| {
-            removed = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Remove")
-                .on_hover_text(
-                    "Stop connecting to this exchange. Nothing said there is deleted -- the \
-                     conversations stay in this store and come back if it is added again.",
-                )
-                .clicked();
-        });
-    }
-    (row.clicked() && !removed, removed)
-}
-
 fn default_label(its: Option<ChatState>) -> String {
     match its {
         Some(s) => match (s.domain, s.exchange) {
@@ -817,9 +745,6 @@ pub struct ChatApp {
     /// must not be reopened yet; see [`Closing`].
     closing: Vec<(At, Closing)>,
     panes: HashMap<At, Pane>,
-    /// Which exchange is being shown, for each identity. Absent means the
-    /// default one.
-    showing: HashMap<PubKey, String>,
     /// Somebody asked for the opening screen, to be somebody else.
     ///
     /// Set in the identity menu and answered at the end of `render`, because
@@ -898,7 +823,6 @@ impl ChatApp {
             starts: 0,
             closing: Vec::new(),
             panes: HashMap::new(),
-            showing: HashMap::new(),
             switching: false,
             // Open, with the newest conversation in it: what somebody signs
             // in to is their chats, not an empty pane.
@@ -1074,7 +998,10 @@ impl ChatApp {
     fn showing_at(&self, ctx: &AppContext<'_>) -> Option<At> {
         let me = Self::showing(ctx)?;
         let live: Vec<At> = self.sessions.keys().cloned().collect();
-        Some((me, showing_exchange(me, self.showing.get(&me), &live)))
+        Some((
+            me,
+            showing_exchange(me, ctx.accounts.shown_exchange(me), &live),
+        ))
     }
 
     fn state_of(&self, at: Option<&At>) -> ChatState {
@@ -1507,91 +1434,33 @@ impl App for ChatApp {
         } else {
             self.exchange_label(me, &at.1)
         };
-
-        // One control: the name and a chevron, pressed as one thing. The
-        // chevron is painted, not typed -- `▾` is in the same block of the
-        // font as the diamond that drew as nothing, and the rule since is that
-        // a mark is painted. The layout here is right to left, so the chevron
-        // is placed first and lands against the window's edge, with the name
-        // to its left.
-        let control = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-            // Or the label takes the press for its own text selection.
-            ui.style_mut().interaction.selectable_labels = false;
-            let side = ui.text_style_height(&egui::TextStyle::Small);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-            if ui.is_rect_visible(rect) {
-                sigil::icon::draw(
-                    ui.painter(),
-                    rect,
-                    sigil::Icon::Chevron,
-                    theme.text_secondary,
-                );
-            }
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(&shown)
-                        .small()
-                        .color(theme.text_secondary),
-                )
-                .truncate(),
-            );
-        });
-        let button = control.response;
-        if button.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let rows: Vec<sigil_ui::ExchangeRow> = named
+            .iter()
+            .map(|name| sigil_ui::ExchangeRow {
+                name: name.clone(),
+                label: self.exchange_label(me, name),
+                // **A way out, beside the way in.** There was a control to
+                // add an exchange and none to remove one, so a name added by
+                // mistake -- or one that turned out to be the default under
+                // another spelling -- could only be taken back by editing
+                // the roster file by hand. The default is not one of these.
+                removable: !name.is_empty(),
+            })
+            .collect();
+        let did = sigil_ui::exchange_control(ui, &theme, &shown, &at.1, &rows, true);
+        if let Some(name) = did.chosen {
+            ctx.accounts.show_exchange(me, Some(name));
         }
-        // Named for the tree: a painted chevron and a domain say nothing to a
-        // screen reader about what pressing them does.
-        button
-            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Exchange"));
-        let button = button.on_hover_text("The exchange this identity is looking at");
-
-        // Hung from the control's right-hand end, because the control is at
-        // the window's: opened from its left edge the menu ran across the
-        // pane. And **no wider than it needs**: the Remove control on each
-        // row is laid out from the right, and "the right" of a menu with no
-        // maximum is wherever the window ends.
-        egui::Popup::menu(&button)
-            .align(egui::RectAlign::BOTTOM_END)
-            .show(|ui| {
-                ui.set_min_width(200.0);
-                ui.set_max_width(260.0);
-                let which = ctx.accounts.active_index();
-                for name in &named {
-                    let selected = *name == at.1;
-                    let label = self.exchange_label(me, name);
-                    // **A way out, beside the way in.** There was a control to
-                    // add an exchange and none to remove one, so a name added
-                    // by mistake -- or one that turned out to be the default
-                    // under another spelling -- could only be taken back by
-                    // editing the roster file by hand.
-                    //
-                    // The default is not one of these: it is not a name in the
-                    // roster, it is whatever this identity resolves to, and
-                    // there would be nothing to remove.
-                    let (chosen, removed) =
-                        exchange_row(ui, &theme, &label, selected, !name.is_empty());
-                    if chosen && !selected {
-                        self.showing.insert(me, name.clone());
-                        ui.close();
-                    }
-                    if removed {
-                        ctx.accounts.drop_exchange(which, name);
-                        // Back to the default, or the interface would be
-                        // showing a conversation list for an exchange it is
-                        // no longer connected to.
-                        self.showing.remove(&me);
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                // The same shape as the rows above it, or it reads as a
-                // caption under them rather than as one more thing to press.
-                if sigil_ui::icon_item(ui, sigil_ui::Icon::Plus, "Add a domain…").clicked() {
-                    self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
-                    ui.close();
-                }
-            });
+        if let Some(name) = did.removed {
+            let which = ctx.accounts.active_index();
+            ctx.accounts.drop_exchange(which, &name);
+            // Back to the default, or the interface would be showing a
+            // conversation list for an exchange it is no longer connected to.
+            ctx.accounts.show_exchange(me, None);
+        }
+        if did.add {
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
+        }
     }
 
     fn tab_notifications(&self) -> TabNotifications {
@@ -1705,7 +1574,8 @@ impl ChatApp {
                 {
                     // Shown straight away, as the dialog does: adding one and
                     // staying on "not connected" looks like nothing happened.
-                    self.showing.insert(me, SUGGESTED_EXCHANGE.to_string());
+                    ctx.accounts
+                        .show_exchange(me, Some(SUGGESTED_EXCHANGE.to_string()));
                 }
                 ui.add_space(tokens::SPACING_SM);
             }
@@ -1823,7 +1693,7 @@ impl ChatApp {
                     let which = ctx.accounts.active_index();
                     if ui.button("Remove it").clicked() {
                         ctx.accounts.drop_exchange(which, &spare);
-                        self.showing.remove(&at.0);
+                        ctx.accounts.show_exchange(at.0, None);
                     }
                 });
             }
@@ -2666,7 +2536,7 @@ impl ChatApp {
                     pane.dialog = None;
                     // Shown straight away: adding one and staying where you
                     // were makes it look as though nothing happened.
-                    self.showing.insert(me, named);
+                    ctx.accounts.show_exchange(me, Some(named));
                 } else {
                     // **Refused where it was typed.** `add_exchange` answers
                     // `false` for an empty name and for one already held, and

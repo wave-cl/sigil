@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod clock;
 pub mod conversation_row;
 pub mod dot;
+pub mod exchange;
 pub mod gif;
 pub mod identicon;
 pub mod message;
@@ -18,6 +19,7 @@ pub use attachment::{Attachment, AttachmentAction, attachment};
 pub use clock::{brief, clock, day_label, day_of, stamp};
 pub use conversation_row::{ConversationRow, conversation_row};
 pub use dot::dot;
+pub use exchange::{ExchangeAction, ExchangeRow, exchange_control};
 pub use video::{Standing, Video, VideoAction, video};
 pub use working::working;
 // Re-exported from the host crate, where the `App` trait names one -- see

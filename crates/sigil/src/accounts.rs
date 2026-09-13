@@ -86,6 +86,12 @@ pub struct Accounts {
     entries: Vec<Held>,
     active: usize,
     generation: u64,
+    /// The exchange each identity is being looked at, by name, when
+    /// somebody chose one -- `""` for the default. **Shared by every app**:
+    /// the chat's title-strip control writes it and the console reads it,
+    /// so switching there switches both. Not remembered across runs; the
+    /// window opens on the default, as it always has.
+    shown: std::collections::HashMap<PubKey, String>,
 }
 
 impl Accounts {
@@ -113,6 +119,7 @@ impl Accounts {
             entries,
             active: 0,
             generation: 0,
+            shown: Default::default(),
         }
     }
 
@@ -386,6 +393,24 @@ impl Accounts {
         out
     }
 
+    /// The exchange this identity is being looked at, if somebody chose one.
+    pub fn shown_exchange(&self, me: PubKey) -> Option<&String> {
+        self.shown.get(&me)
+    }
+
+    /// Look at `name` for this identity; `None` goes back to whatever the
+    /// apps pick on their own, which is the default when it is connected.
+    pub fn show_exchange(&mut self, me: PubKey, name: Option<String>) {
+        match name {
+            Some(name) => {
+                self.shown.insert(me, name);
+            }
+            None => {
+                self.shown.remove(&me);
+            }
+        }
+    }
+
     /// Make `path` the account on screen, adding it to the roster if it is new.
     ///
     /// Returns its index. An identity already held is switched to rather than
@@ -465,6 +490,7 @@ impl Accounts {
                 .collect(),
             active: 0,
             generation: 0,
+            shown: Default::default(),
         }
     }
 

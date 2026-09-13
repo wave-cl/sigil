@@ -32,6 +32,9 @@ struct Pane {
 
 pub struct AdminApp {
     sessions: HashMap<PubKey, AdminHandle>,
+    /// Which exchange each session is acting on, by the roster's name --
+    /// `""` for the default -- so a change of choice is seen as one.
+    acting: HashMap<PubKey, String>,
     panes: HashMap<PubKey, Pane>,
     config: Config,
     /// A state to draw instead of a session's. Tests only.
@@ -48,6 +51,7 @@ impl AdminApp {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            acting: HashMap::new(),
             panes: HashMap::new(),
             config: Config::load(),
             fixed: None,
@@ -58,6 +62,12 @@ impl AdminApp {
     pub fn set_exchange_for_test(&mut self, host: &str, key: &str) {
         self.config.server = Some(host.to_string());
         self.config.server_key = Some(key.to_string());
+    }
+
+    /// Which exchange the console for `me` is acting on, by name.
+    #[doc(hidden)]
+    pub fn acting_on_for_test(&self, me: PubKey) -> Option<String> {
+        self.acting.get(&me).cloned()
     }
 
     /// Draw this instead of a session's state. See `sigil_chat`'s equivalent:
@@ -110,11 +120,23 @@ impl AdminApp {
                 && let Some(mut session) = self.sessions.remove(&me)
             {
                 session.stop();
+                self.acting.remove(&me);
             }
         }
         for (me, path) in held {
+            // **The exchange this identity is looking at**, which is the
+            // chat's answer as much as this console's: the control in the
+            // title strip writes it for both. A session acting somewhere
+            // else is stopped and one started where the person is looking.
+            let want = Self::exchange_for(ctx, me);
             if self.sessions.contains_key(&me) {
-                continue;
+                if self.acting.get(&me) == want.as_ref() {
+                    continue;
+                }
+                if let Some(mut session) = self.sessions.remove(&me) {
+                    session.stop();
+                    self.acting.remove(&me);
+                }
             }
             let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
                 continue;
@@ -123,29 +145,28 @@ impl AdminApp {
             // Dialling a second is a second handshake, a second socket and a
             // second keep-alive timer for one identity talking to one exchange
             // -- and it is the connection the exchange would fan a call's
-            // datagrams to as well.
+            // datagrams to as well. It also gains the reconnection this
+            // session has never had, for free: the chat session redials and
+            // the slot is rewritten.
             //
-            // Which exchange, when the identity is on more than one, is
-            // `Connections::one_of`'s to answer: this console acts on whichever
-            // one the identity is actually connected to, and the endpoint comes
-            // back with the connection because a signed command is bound to the
-            // exchange's key.
-            //
-            // It also gains the reconnection this session has never had, for
-            // free: the chat session redials and the slot is rewritten.
-            let reach: sigil_net::Dial = match ctx.connections.one_of(me) {
-                // Taken whether or not it is live yet: a slot exists from the
-                // moment a chat session is started, and is filled a handshake
-                // later. The session waits for it rather than dialling its own
-                // over a second's difference.
-                Some(held) => held.into(),
+            // Taken whether or not it is live yet: a slot exists from the
+            // moment a chat session is started, and is filled a handshake
+            // later. The session waits for it rather than dialling its own
+            // over a second's difference.
+            let (reach, name): (sigil_net::Dial, String) = match &want {
+                Some(name) => match ctx.connections.of(me, name) {
+                    Some(held) => (held.into(), name.clone()),
+                    None => continue,
+                },
+                // Nothing held and nothing chosen: what it is configured to
+                // do, which is what the chat would dial for the default.
                 None => {
                     let layers =
                         discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
                     if !discovery::any_configured(&layers) {
                         continue;
                     }
-                    layers.into()
+                    (layers.into(), String::new())
                 }
             };
             let wake = egui_ctx.clone();
@@ -153,7 +174,50 @@ impl AdminApp {
                 me,
                 session::start(reach, unlocked.signer(), move || wake.request_repaint()),
             );
+            self.acting.insert(me, name);
         }
+    }
+
+    /// Which of the identity's connected exchanges to act on: the one chosen
+    /// in the title strip when it is connected, else the rule every borrower
+    /// follows -- the default, or the only one -- and nothing when that rule
+    /// declines to choose.
+    fn exchange_for(ctx: &AppContext<'_>, me: PubKey) -> Option<String> {
+        let held = ctx.connections.names_of(me);
+        if let Some(chosen) = ctx.accounts.shown_exchange(me)
+            && held.contains(chosen)
+        {
+            return Some(chosen.clone());
+        }
+        let names: Vec<&str> = held.iter().map(String::as_str).collect();
+        sigil_net::held::to_borrow(&names).map(str::to_string)
+    }
+
+    /// The exchanges the active identity holds that are worth listing, with
+    /// what to call each: the named ones by name, the default by the domain
+    /// it resolves to -- and not at all when it resolves to nothing.
+    fn rows_for(&self, ctx: &AppContext<'_>) -> Vec<sigil_ui::ExchangeRow> {
+        let path = ctx.accounts.active().path().to_path_buf();
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+        let default_label = discovery::any_configured(&layers)
+            .then(|| sigil_net::domain_of(&layers).unwrap_or_else(|| "default".to_string()));
+        ctx.accounts
+            .active_held()
+            .exchanges()
+            .into_iter()
+            .filter_map(|name| {
+                let label = if name.is_empty() {
+                    default_label.clone()?
+                } else {
+                    name.clone()
+                };
+                Some(sigil_ui::ExchangeRow {
+                    removable: !name.is_empty(),
+                    name,
+                    label,
+                })
+            })
+            .collect()
     }
 
     /// Queue a batch for confirmation. Nothing is signed until it is confirmed.
@@ -165,6 +229,41 @@ impl AdminApp {
 impl App for AdminApp {
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
+    }
+
+    /// The same control the chat draws, over the same answer: which of this
+    /// identity's exchanges is being looked at. Choosing here moves the
+    /// console and the chat together. No "add" -- that is the chat's dialog,
+    /// and an exchange is added to talk on before it is administered.
+    fn chrome_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(me) = Self::showing(ctx) else {
+            return;
+        };
+        let rows = self.rows_for(ctx);
+        if rows.is_empty() {
+            return;
+        }
+        let selected = self
+            .acting
+            .get(&me)
+            .cloned()
+            .or_else(|| ctx.accounts.shown_exchange(me).cloned())
+            .unwrap_or_default();
+        let shown = rows
+            .iter()
+            .find(|r| r.name == selected)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| "no exchange".to_string());
+        let did = sigil_ui::exchange_control(ui, &theme, &shown, &selected, &rows, false);
+        if let Some(name) = did.chosen {
+            ctx.accounts.show_exchange(me, Some(name));
+        }
+        if let Some(name) = did.removed {
+            let which = ctx.accounts.active_index();
+            ctx.accounts.drop_exchange(which, &name);
+            ctx.accounts.show_exchange(me, None);
+        }
     }
 
     fn title(&self) -> &str {
@@ -186,8 +285,9 @@ impl App for AdminApp {
             return AppResponse::default();
         };
         let state = self.state_of(Some(me));
+        let acting = self.acting.get(&me).cloned();
 
-        self.header_ui(&state, ui, &theme);
+        self.header_ui(&state, acting.as_deref(), ui, &theme);
         if let Some(trouble) = &state.trouble {
             ui.colored_label(theme.destructive, trouble);
         }
@@ -221,9 +321,26 @@ impl App for AdminApp {
 
 impl AdminApp {
     /// Who we are signing as, and what we are signing at.
-    fn header_ui(&self, state: &AdminState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn header_ui(
+        &self,
+        state: &AdminState,
+        acting: Option<&str>,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         ui.horizontal(|ui| {
             ui.heading("Exchange");
+            // Which one, by the name somebody chose it under: the key below
+            // is the exchange's answer, this is the person's.
+            match acting {
+                Some("") => {
+                    ui.colored_label(theme.text_secondary, "the default");
+                }
+                Some(name) => {
+                    ui.colored_label(theme.text_secondary, name);
+                }
+                None => {}
+            }
             // Up and admitted are different questions. `/health` is unsigned
             // and unauthenticated, so it answers the first and says nothing
             // about the second — and an operator staring at a refusal wants to

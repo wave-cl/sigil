@@ -129,6 +129,20 @@ impl Connections {
         all.get(&(identity, chosen)).cloned()
     }
 
+    /// Every exchange this identity has a slot at, by name.
+    pub fn names_of(&self, identity: PubKey) -> Vec<String> {
+        let Ok(all) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = all
+            .keys()
+            .filter(|(who, _)| *who == identity)
+            .map(|(_, at)| at.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The session is over; stop offering what it held.
     pub fn forget(&self, identity: PubKey, exchange: &str) {
         if let Ok(mut all) = self.0.lock() {
@@ -153,7 +167,7 @@ impl Connections {
 /// A free function over plain data because the rule is the part worth testing:
 /// a slot cannot be filled without a real connection, so a test of
 /// [`Connections::one_of`] alone could not tell which of two it had picked.
-fn to_borrow<'a>(names: &[&'a str]) -> Option<&'a str> {
+pub fn to_borrow<'a>(names: &[&'a str]) -> Option<&'a str> {
     if names.iter().any(|n| n.is_empty()) {
         return Some("");
     }

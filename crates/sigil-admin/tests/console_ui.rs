@@ -161,3 +161,105 @@ fn a_refusal_is_shown_as_it_came() {
     assert!(said.contains("not an administrator"), "{said}");
     assert!(said.contains("enable the managed whitelist"), "{said}");
 }
+
+/// The console acts on the exchange chosen in the title strip -- the same
+/// answer the chat reads -- and its control offers the identity's exchanges.
+///
+/// Two named exchanges and no default: the borrowing rule alone declines to
+/// choose, so before somebody chooses there is no console at all; after,
+/// there is one, on the one chosen, and choosing the other moves it.
+#[test]
+fn the_console_follows_the_exchange_chosen_in_the_title_strip() {
+    use sigil_net::{Connections, Held};
+    let account = account();
+    let me = account.unlocked().unwrap().me();
+    let mut accounts = sigil::accounts::Accounts::of(vec![account]);
+    assert!(accounts.add_exchange(0, "a.example"));
+    assert!(accounts.add_exchange(0, "b.example"));
+    // Slots for both, as the chat's sessions would lend them: empty, so the
+    // console waits on them rather than dialling.
+    let connections = Connections::new();
+    connections.lend(me, "a.example", Held::empty());
+    connections.lend(me, "b.example", Held::empty());
+
+    let mut app = AdminApp::new();
+    let egui_ctx = egui::Context::default();
+    let mut nav = Navigator::default();
+    let mut run = |accounts: &mut sigil::accounts::Accounts, app: &mut AdminApp| {
+        let mut app_ctx = AppContext {
+            navigator: &mut nav,
+            accounts,
+            unfocused: false,
+            notify: &sigil::Silent,
+            connections: &connections,
+        };
+        app.update(&mut app_ctx, &egui_ctx);
+    };
+    run(&mut accounts, &mut app);
+    assert_eq!(
+        app.acting_on_for_test(me),
+        None,
+        "nothing chosen, two to pick from: no console"
+    );
+
+    accounts.show_exchange(me, Some("b.example".into()));
+    run(&mut accounts, &mut app);
+    assert_eq!(app.acting_on_for_test(me).as_deref(), Some("b.example"));
+
+    accounts.show_exchange(me, Some("a.example".into()));
+    run(&mut accounts, &mut app);
+    assert_eq!(app.acting_on_for_test(me).as_deref(), Some("a.example"));
+
+    // A choice of something the identity is not connected to is not acted
+    // on: the console stays where it can actually reach.
+    accounts.show_exchange(me, Some("c.example".into()));
+    run(&mut accounts, &mut app);
+    assert_eq!(app.acting_on_for_test(me), None);
+}
+
+/// The control in the title strip lists the identity's exchanges by name
+/// and marks the one the console is on.
+#[test]
+fn the_title_strip_offers_the_exchanges_to_administer() {
+    let account = account();
+    let me = account.unlocked().unwrap().me();
+    let mut accounts = sigil::accounts::Accounts::of(vec![account]);
+    assert!(accounts.add_exchange(0, "a.example"));
+    assert!(accounts.add_exchange(0, "b.example"));
+    accounts.show_exchange(me, Some("b.example".into()));
+    let mut app = AdminApp::new();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 200.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut nav = Navigator::default();
+                let mut app_ctx = AppContext {
+                    navigator: &mut nav,
+                    accounts: &mut accounts,
+                    unfocused: false,
+                    notify: &sigil::Silent,
+                    connections: &Default::default(),
+                };
+                app.chrome_ui(&mut app_ctx, ui);
+            });
+        });
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("b.example"),
+        "the chosen one is shown: {said}"
+    );
+    h.get_by_label("Exchange").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("a.example") && said.contains("b.example"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("Add a domain"),
+        "adding is the chat's: {said}"
+    );
+}
