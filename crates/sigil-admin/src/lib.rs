@@ -480,13 +480,15 @@ impl AdminApp {
 
     fn whitelist_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.heading("Whitelist");
-        // SIP-24: the whitelist is a closed set and chat is an open one, which
-        // is why it gates some routes and not others. Saying so stops somebody
-        // reading "enabled" as "the exchange is now private".
+        // Since sqexd 0.57.0 the list is on the transport: enabling it closes
+        // the exchange to every key not on it, at the door, and closes what
+        // is already connected. Administrators and peering exchanges pass
+        // regardless; a YubiKey administrator, having no transport key, does
+        // not. Said here because "enabled" is a large thing to press.
         ui.colored_label(
             theme.text_secondary,
-            "A closed set of transport keys. It gates the routes that are gated — \
-             turning it on does not close the exchange.",
+            "A closed set of transport keys. Enabled, the exchange accepts connections only \
+             from keys on it, its administrators and its peers, and closes the rest.",
         );
         ui.horizontal(|ui| {
             if ui.button("List").clicked() {
