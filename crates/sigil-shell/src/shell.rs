@@ -90,10 +90,22 @@ struct Welcome {
 /// (`identity.handles`) rather than an identity. So a dot is refused here
 /// instead of writing a file that the scan for identities would skip, which
 /// would look exactly like the identity never being created.
+///
+/// **No name is the first one.** Somebody making their first identity has
+/// nothing to tell it apart from, and `sqnr` calls that one `identity`. A
+/// name is asked for only once that exists -- which is the moment it starts
+/// meaning something.
 fn new_identity_path(dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Give it a name, so you can tell it from the others.".into());
+        let path = dir.join("identity");
+        if path.exists() {
+            return Err(
+                "There is already an identity here. Give this one a name, so you can tell them apart."
+                    .into(),
+            );
+        }
+        return Ok(path);
     }
     if !name
         .chars()
@@ -509,11 +521,20 @@ impl Shell {
     /// default: an unsealed identity file is a private key sitting in a folder
     /// in the clear.
     fn making_ui(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.label("Name");
+        // Optional, and said so: the first identity is just `identity`, and
+        // a name is for telling a second one from it.
+        let first = self
+            .identity_dir()
+            .is_none_or(|dir| !dir.join("identity").exists());
+        ui.label(if first { "Name (optional)" } else { "Name" });
         let name = sigil_ui::field(
             ui,
             &mut self.welcome.new_name,
-            "work, phone, the-other-one",
+            if first {
+                "leave blank for your first"
+            } else {
+                "work, phone, the-other-one"
+            },
             CARD_WIDTH,
         );
         // The keyboard lands in the first box, the same way it lands in the
@@ -1035,12 +1056,30 @@ mod naming_tests {
     #[test]
     fn a_name_that_would_not_be_found_again_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["my.key", "../elsewhere", "with/slash", "two words", ""] {
+        for name in ["my.key", "../elsewhere", "with/slash", "two words"] {
             assert!(
                 new_identity_path(dir.path(), name).is_err(),
                 "{name:?} was accepted"
             );
         }
+    }
+
+    /// No name makes the plain `identity` -- but only while there is none:
+    /// the second one has to say what it is.
+    #[test]
+    fn no_name_is_the_first_identity_and_only_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["", "   "] {
+            assert_eq!(
+                new_identity_path(dir.path(), name).unwrap(),
+                dir.path().join("identity")
+            );
+        }
+        std::fs::write(dir.path().join("identity"), "not really a key").unwrap();
+        let why = new_identity_path(dir.path(), "").expect_err("refused");
+        assert!(why.contains("name"), "{why}");
+        // A named one is still fine beside it.
+        assert!(new_identity_path(dir.path(), "work").is_ok());
     }
 
     /// An identity that exists is never written over. It is somebody's only

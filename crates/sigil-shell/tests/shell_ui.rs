@@ -581,6 +581,45 @@ fn an_identity_can_be_made_here_and_is_open_when_it_is() {
     );
 }
 
+/// The first identity needs no name: left blank, it is `identity`, which is
+/// what `sqnr` calls the one you have when you have one. The screen says the
+/// name is optional while that is so.
+#[test]
+fn the_first_identity_needs_no_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let made = dir.path().join("identity");
+
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Calls", 0))];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: dir.path().join("nothing-here"),
+            },
+        ]))
+        .with_identities(dir.path().to_path_buf());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+
+    h.get_by_label("Create a new identity").click();
+    h.run();
+    assert!(said(&h).contains("Name (optional)"), "{}", said(&h));
+    type_into(&mut h, &["", "open sesame", "open sesame"]);
+    h.get_by_label("Create").click();
+    h.run();
+
+    assert!(made.exists(), "no identity was written: {}", said(&h));
+    assert!(!dir.path().join("identity-").exists());
+    assert!(sqnr::identity::is_encrypted(&made).expect("readable"));
+    assert!(said(&h).contains("Calls"), "not opened: {}", said(&h));
+}
+
 /// Two passphrases that do not match make nothing.
 ///
 /// The file is the only copy of the key, so a mistyped passphrase is not an
