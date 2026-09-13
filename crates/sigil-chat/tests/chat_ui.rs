@@ -358,6 +358,68 @@ fn the_suggested_exchange_is_added_with_one_press() {
     assert!(said.contains("trunk.exchange"), "not added: {said}");
 }
 
+/// A default that resolves to nothing is not on offer anywhere: the title
+/// strip says "no exchange" rather than "default", and the switcher lists
+/// only what is named. One that resolves is listed as it always was.
+#[test]
+fn a_default_that_resolves_to_nothing_is_not_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift(unlocked(dir.path()));
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("no exchange"), "{said}");
+    assert!(
+        !said.contains("| default"),
+        "a default that goes nowhere is shown: {said}"
+    );
+
+    h.get_by_label("Add trunk.exchange").click();
+    h.run();
+    h.run();
+    h.get_by_label("Exchange").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("trunk.exchange"), "{said}");
+    assert!(
+        !said.contains("default"),
+        "the switcher lists a default that goes nowhere beside a real exchange: {said}"
+    );
+
+    // And one that does resolve is still there to choose.
+    let other = tempfile::tempdir().unwrap();
+    let mut app = ChatApp::new();
+    app.set_exchange_for_test(
+        "203.0.113.1:443",
+        &sqnr_core::PubKey::new([7u8; 32]).to_string(),
+    );
+    let mut accounts = sigil::accounts::Accounts::of(vec![unlocked(other.path())]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut nav = Navigator::default();
+                let mut app_ctx = AppContext {
+                    navigator: &mut nav,
+                    accounts: &mut accounts,
+                    unfocused: false,
+                    notify: &sigil::Silent,
+                    connections: &Default::default(),
+                };
+                app.chrome_ui(&mut app_ctx, ui);
+            });
+        });
+    h.run();
+    h.get_by_label("Exchange").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("no exchange"),
+        "a default that resolves is called nothing: {said}"
+    );
+}
+
 /// An exchange that cannot be added says why, rather than doing nothing.
 ///
 /// `add_exchange` answers `false` for an empty name and for one already held,

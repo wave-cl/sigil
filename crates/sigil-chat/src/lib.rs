@@ -1045,6 +1045,32 @@ impl ChatApp {
         }
     }
 
+    /// Whether the active identity's default exchange is anywhere at all.
+    ///
+    /// The default is derived -- the handle sidecar, `~/.sqnr/config` -- and
+    /// an identity with neither has one that resolves to nothing. No session
+    /// is started for it, and **nothing is shown for it either**: not a row
+    /// in the switcher, not "default" in the title strip. An entry that names
+    /// nowhere, beside the exchanges that do, was a choice that could only
+    /// disappoint.
+    fn default_resolves(&self, ctx: &AppContext<'_>) -> bool {
+        let path = ctx.accounts.active().path().to_path_buf();
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+        discovery::any_configured(&layers)
+    }
+
+    /// The exchanges the active identity holds that are worth listing: the
+    /// named ones, and the default only when it resolves somewhere.
+    fn listable_exchanges(&self, ctx: &AppContext<'_>) -> Vec<String> {
+        let resolves = self.default_resolves(ctx);
+        ctx.accounts
+            .active_held()
+            .exchanges()
+            .into_iter()
+            .filter(|name| !name.is_empty() || resolves)
+            .collect()
+    }
+
     fn showing_at(&self, ctx: &AppContext<'_>) -> Option<At> {
         let me = Self::showing(ctx)?;
         let live: Vec<At> = self.sessions.keys().cloned().collect();
@@ -1473,8 +1499,14 @@ impl App for ChatApp {
             return;
         };
         let me = at.0;
-        let named = ctx.accounts.active_held().exchanges();
-        let shown = self.exchange_label(me, &at.1);
+        let named = self.listable_exchanges(ctx);
+        // A dead default on show -- nothing named yet, nowhere to go -- is
+        // said as what it is, not as a "default" that sounds like a place.
+        let shown = if at.1.is_empty() && !named.iter().any(String::is_empty) {
+            "no exchange".to_string()
+        } else {
+            self.exchange_label(me, &at.1)
+        };
 
         // One control: the name and a chevron, pressed as one thing. The
         // chevron is painted, not typed -- `▾` is in the same block of the
@@ -1633,8 +1665,10 @@ impl ChatApp {
         // with different answers, and saying the first about the second told
         // somebody their identity named nothing while it was connected
         // perfectly well somewhere they were not looking.
-        let held = ctx.accounts.active_held().exchanges();
-        let only = held.len() == 1;
+        // The default counts only when it goes somewhere; otherwise an
+        // identity with a dead default and nothing named is one with nothing.
+        let held = self.listable_exchanges(ctx);
+        let only = held.iter().all(String::is_empty);
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.25);
             sigil_ui::identicon(ui, &me.to_string(), tokens::AVATAR_LG);
