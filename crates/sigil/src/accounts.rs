@@ -392,12 +392,22 @@ impl Accounts {
     /// opened twice — a second `Account` for one key would take a second store
     /// lock against itself and be refused, which is the right refusal in the
     /// wrong place.
+    ///
+    /// **One that is held but not open is read again first.** The roster
+    /// remembers paths, and a path can be remembered as missing from before
+    /// its file existed: somebody who deleted `identity` and then made a new
+    /// one had it refused as "will not open", because the entry still said
+    /// there was nothing there to open.
     pub fn use_path(&mut self, path: PathBuf) -> usize {
         if let Some(i) = self
             .entries
             .iter()
             .position(|h| h.account.path() == path.as_path())
         {
+            if !self.entries[i].account.is_unlocked() {
+                self.entries[i].account = Account::discover(Some(path));
+                self.generation += 1;
+            }
             self.switch_to(i);
             return i;
         }
@@ -506,6 +516,26 @@ impl Accounts {
 
 #[cfg(test)]
 mod tests {
+    /// A path remembered as missing, whose file has since appeared, is read
+    /// again when it is used -- otherwise the identity somebody just made in
+    /// that place would be refused as one that will not open.
+    #[test]
+    fn using_a_path_that_was_missing_reads_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity");
+        let mut accounts =
+            super::Accounts::of(vec![super::Account::Missing { path: path.clone() }]);
+        sqnr::identity::generate(&path, Some("open sesame")).unwrap();
+        let i = accounts.use_path(path.clone());
+        assert_eq!(i, 0, "the same entry, not a second one");
+        assert!(
+            accounts.unlock(i, "open sesame"),
+            "still thought missing: {:?}",
+            accounts.active()
+        );
+        assert!(accounts.active().is_unlocked());
+    }
+
     use super::*;
 
     fn held(n: u8) -> Account {

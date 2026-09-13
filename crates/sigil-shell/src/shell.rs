@@ -635,7 +635,13 @@ impl Shell {
         // somebody to prove they meant what they typed twice already.
         let i = self.accounts.use_path(path);
         if !self.accounts.unlock(i, &passphrase) {
-            self.welcome.trouble = Some("It was made, but it will not open.".into());
+            // With the state it is in, because "will not open" on its own
+            // sent somebody looking at the passphrase when the roster was
+            // what had it wrong.
+            self.welcome.trouble = Some(format!(
+                "It was made, but it will not open: {}",
+                self.accounts.active().describe()
+            ));
             return;
         }
         self.welcome = Welcome::default();
