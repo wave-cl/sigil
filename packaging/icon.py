@@ -106,8 +106,57 @@ def square_hit(x, y):
     return math.hypot(dx - (half - r), dy - (half - r)) <= r
 
 
-def coverage(size, x, y, hit):
-    """How much of pixel (x, y) `hit` covers, sampled SAMPLES x SAMPLES."""
+def _arc_dist(x, y, cx, cy, radius, start, end):
+    """Distance from (x, y) to the arc as a curve: along it, the radial
+    distance; past either end, the distance to that end."""
+    dx, dy = x - cx, y - cy
+    if _in_arc(math.degrees(math.atan2(dy, dx)), start, end):
+        return abs(math.hypot(dx, dy) - radius)
+    return min(math.hypot(x - ex, y - ey) for ex, ey in (_end(cx, cy, radius, start), _end(cx, cy, radius, end)))
+
+
+def glyph_margin(x, y):
+    """How far (x, y) is inside the mark (negative) or outside it
+    (positive): the least, over every stroke, of distance-to-its-curve less
+    half its width. Exact for these shapes -- an arc with round caps is the
+    set of points within half a width of its curve -- so a pixel whose
+    centre is further from that edge than the pixel's half-diagonal is
+    wholly in or wholly out, and needs no sampling."""
+    m = math.inf
+    for (cx, cy, start, end), free in ((TOP, "start"), (BOTTOM, "end")):
+        m = min(m, _arc_dist(x, y, cx, cy, RADIUS, start, end) - STROKE / 2)
+        ex, ey = _end(cx, cy, RADIUS, start if free == "start" else end)
+        m = min(m, math.hypot(x - ex, y - ey) - TERMINAL)
+    # The ring less its gaps is two arcs: from the end of one gap to the
+    # start of the next.
+    (a0, a1), (b0, b1) = RING_GAPS
+    for start, end in ((a1, b0), (b1, a0)):
+        m = min(m, _arc_dist(x, y, 0.5, 0.5, RING, start, end) - RING_STROKE / 2)
+    return m
+
+
+def square_margin(x, y):
+    """The same, for the rounded square."""
+    half = SQUARE / 2
+    r = CORNER * SQUARE
+    dx, dy = abs(x - 0.5) - (half - r), abs(y - 0.5) - (half - r)
+    outside = math.hypot(max(dx, 0.0), max(dy, 0.0))
+    inside = min(max(dx, dy), 0.0)
+    return outside + inside - r
+
+
+def coverage(size, x, y, hit, margin):
+    """How much of pixel (x, y) `hit` covers, sampled SAMPLES x SAMPLES --
+    unless `margin` at the pixel's centre says the whole pixel is on one
+    side, which it is for all but a thin band along every edge."""
+    px = (x + 0.5) / size
+    py = 1.0 - (y + 0.5) / size
+    half_diagonal = math.sqrt(2.0) / (2.0 * size)
+    m = margin(px, py)
+    if m > half_diagonal:
+        return 0.0
+    if m < -half_diagonal:
+        return 1.0
     hits = 0
     for sy in range(SAMPLES):
         for sx in range(SAMPLES):
@@ -123,11 +172,11 @@ def draw(size, glyph_only=False):
     for y in range(size):
         row = bytearray()
         for x in range(size):
-            g = coverage(size, x, y, glyph_hit)
+            g = coverage(size, x, y, glyph_hit, glyph_margin)
             if glyph_only:
                 row.extend((*BLACK, int(round(255 * g))))
                 continue
-            s = coverage(size, x, y, square_hit)
+            s = coverage(size, x, y, square_hit, square_margin)
             # The S over the square: white where the S is, accent where only
             # the square is, and the square's edge is the icon's edge.
             r, gr, b = (
