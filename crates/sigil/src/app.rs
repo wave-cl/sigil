@@ -205,6 +205,25 @@ pub trait App {
     /// not the things it can do. The default draws nothing.
     fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) {}
 
+    /// Whether [`notice_ui`](App::notice_ui) has something to draw.
+    ///
+    /// Asked every pass, for every opened app, before the band is laid out
+    /// -- a band drawn for nobody would be an empty stripe across the window.
+    fn has_notice(&self) -> bool {
+        false
+    }
+
+    /// Draw into the **notice band**: one line across the whole window,
+    /// under the title strip and above everything else, whichever app is
+    /// on screen and whether or not an identity is open.
+    ///
+    /// For the one thing that must be seen without anybody going to look
+    /// for it -- an update that is ready, say -- with the control to act on
+    /// it at the right-hand end. Rare by nature: a band that is always
+    /// there is a band nobody reads. Called only while
+    /// [`has_notice`](App::has_notice) says so; the default draws nothing.
+    fn notice_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) {}
+
     /// Draw one entry of the shell's global history.
     ///
     /// `token` is exactly the `Rc<dyn Any>` this app pushed. Downcast it back

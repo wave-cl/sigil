@@ -75,8 +75,6 @@ pub struct PlatformApp {
     announced: Option<Version>,
     /// Why Restart did not work, when it did not.
     restart_trouble: Option<String>,
-    /// The waiter is spawned; the window can go.
-    close_wanted: bool,
 }
 
 impl PlatformApp {
@@ -107,7 +105,6 @@ impl PlatformApp {
             updater,
             announced: None,
             restart_trouble: None,
-            close_wanted: false,
         }
     }
 
@@ -125,7 +122,6 @@ impl PlatformApp {
             updater: None,
             announced: None,
             restart_trouble: None,
-            close_wanted: false,
         }
     }
 
@@ -134,7 +130,6 @@ impl PlatformApp {
             ui.strong(format!("sigil {}", self.report.version));
             ui.colored_label(theme.text_muted, self.report.install.describe());
         });
-        let live = self.updater.is_some();
         let state = self.report.update.clone();
         match &state {
             UpdateState::Unknown => {
@@ -209,40 +204,49 @@ impl PlatformApp {
         if !self.report.install.is_supported() {
             return;
         }
-        ui.horizontal(|ui| {
-            if let UpdateState::Available { version, .. } = &state {
-                if ui
-                    .add_enabled(live, egui::Button::new(format!("Update to {version}")))
-                    .clicked()
-                    && let Some(updater) = &self.updater
-                {
-                    updater.update();
-                }
-            } else if matches!(state, UpdateState::Ready { .. })
-                && ui.add_enabled(live, egui::Button::new("Restart")).clicked()
-            {
-                self.restart();
-            }
-            if state.can_check()
-                && ui
-                    .add_enabled(live, egui::Button::new("Check now"))
-                    .clicked()
-                && let Some(updater) = &self.updater
-            {
-                updater.check_now();
-            }
-        });
+        ui.horizontal(|ui| self.update_buttons(ui, &state, true));
     }
 
     /// Start the new copy once this one is gone, then go.
-    fn restart(&mut self) {
+    fn restart(&mut self, ctx: &egui::Context) {
         let Some(target) = sigil_update::relaunch::target(&self.report.install) else {
             self.restart_trouble = Some("nothing to start".into());
             return;
         };
         match sigil_update::relaunch::spawn_relaunch(std::process::id(), &target) {
-            Ok(()) => self.close_wanted = true,
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(e) => self.restart_trouble = Some(e.to_string()),
+        }
+    }
+
+    /// The buttons for the update's state, drawn wherever the state is:
+    /// on the Desktop pane and in the band across the window.
+    /// `with_check` adds Check now, which belongs on the pane and not in
+    /// the band: the band exists for the one thing to press.
+    fn update_buttons(&mut self, ui: &mut egui::Ui, state: &UpdateState, with_check: bool) {
+        let live = self.updater.is_some();
+        if let UpdateState::Available { version, .. } = state {
+            if ui
+                .add_enabled(live, egui::Button::new(format!("Update to {version}")))
+                .clicked()
+                && let Some(updater) = &self.updater
+            {
+                updater.update();
+            }
+        } else if matches!(state, UpdateState::Ready { .. })
+            && ui.add_enabled(live, egui::Button::new("Restart")).clicked()
+        {
+            let ctx = ui.ctx().clone();
+            self.restart(&ctx);
+        }
+        if with_check
+            && state.can_check()
+            && ui
+                .add_enabled(live, egui::Button::new("Check now"))
+                .clicked()
+            && let Some(updater) = &self.updater
+        {
+            updater.check_now();
         }
     }
 }
@@ -282,10 +286,6 @@ impl App for PlatformApp {
         ui.add_space(tokens::SPACING_MD);
 
         self.update_ui(ui, &theme);
-        if self.close_wanted {
-            self.close_wanted = false;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        }
         ui.add_space(tokens::SPACING_MD);
         ui.separator();
         ui.add_space(tokens::SPACING_MD);
@@ -348,6 +348,65 @@ impl App for PlatformApp {
             ui.colored_label(theme.destructive, why);
         }
         AppResponse::default()
+    }
+
+    fn has_notice(&self) -> bool {
+        // From the moment there is something to press until it has been:
+        // Available, the fetch and the install, Ready -- and a failure of
+        // any of those, which would otherwise vanish from under the person
+        // who pressed the button.
+        matches!(
+            self.report.update,
+            UpdateState::Available { .. }
+                | UpdateState::Downloading { .. }
+                | UpdateState::Installing { .. }
+                | UpdateState::Ready { .. }
+                | UpdateState::Failed { .. }
+        )
+    }
+
+    /// One line across the window: what there is, and the button for it at
+    /// the right-hand end.
+    fn notice_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+        let theme = ColorTheme::current(ui.ctx());
+        let state = self.report.update.clone();
+        ui.horizontal(|ui| {
+            match &state {
+                UpdateState::Available { version, .. } => {
+                    ui.strong(format!("sigil {version} is available."));
+                }
+                UpdateState::Downloading {
+                    version,
+                    done,
+                    total,
+                } => {
+                    let frac = if *total > 0 {
+                        *done as f32 / *total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.label(format!("Fetching sigil {version}…"));
+                    ui.add(egui::ProgressBar::new(frac).desired_width(200.0));
+                }
+                UpdateState::Installing { version } => {
+                    ui.label(format!("Installing sigil {version}…"));
+                }
+                UpdateState::Ready { version } => {
+                    ui.strong(format!("sigil {version} is installed."));
+                    ui.label("Restart to use it.");
+                }
+                UpdateState::Failed { why } => {
+                    ui.colored_label(theme.destructive, format!("The update failed: {why}"));
+                }
+                _ => {}
+            }
+            if let Some(why) = &self.restart_trouble {
+                ui.colored_label(theme.destructive, format!("Could not restart: {why}"));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.update_buttons(ui, &state, false);
+            });
+        });
     }
 
     fn tab_notifications(&self) -> TabNotifications {

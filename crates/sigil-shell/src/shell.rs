@@ -413,6 +413,37 @@ impl Shell {
                     );
                 }
             });
+        // The notice band: what an app has to say to everybody, whichever
+        // tab is open -- see `App::notice_ui`. Under the strip, above the
+        // rail and the body, and only when some opened app has something,
+        // so there is no empty stripe the rest of the time.
+        let noticing: Vec<usize> = (0..self.apps.len())
+            .filter(|&i| self.opened[i] && self.apps[i].has_notice())
+            .collect();
+        if !noticing.is_empty() {
+            egui::Panel::top("sigil_notice")
+                .resizable(false)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(theme.surface_secondary)
+                        .inner_margin(egui::Margin::symmetric(
+                            tokens::SPACING_LG as i8,
+                            tokens::SPACING_SM as i8,
+                        )),
+                )
+                .show(ui, |ui| {
+                    for i in noticing {
+                        let mut ctx = AppContext {
+                            navigator: &mut self.navigator,
+                            accounts: &mut self.accounts,
+                            unfocused: false,
+                            notify: self.platform.as_ref(),
+                            connections: &self.connections,
+                        };
+                        self.apps[i].notice_ui(&mut ctx, ui);
+                    }
+                });
+        }
         // Nothing sealed gets a rail. Every app behind it would be a tab onto
         // an identity that cannot do anything, and offering four of those is
         // offering a choice that does not exist yet.

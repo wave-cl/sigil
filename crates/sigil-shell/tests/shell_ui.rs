@@ -995,6 +995,110 @@ fn a_copy_that_cannot_update_itself_says_why() {
     assert!(h.query_by_label("Check now").is_none(), "{words}");
 }
 
+/// A shell whose Desktop app is in the given update state, with Chat on
+/// screen -- the update has to be visible from *there*.
+fn shell_with_update(update: sigil_update::UpdateState, dark: bool) -> Harness<'static> {
+    let apps: Vec<Box<dyn App>> = vec![
+        Box::new(Stub::named("Chat", 0)),
+        Box::new(sigil_shell::PlatformApp::from_report(a_report_with(update))),
+    ];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            shell.ui(ui);
+        });
+    h.run();
+    h
+}
+
+/// An update is announced across the window, whichever tab is open: a
+/// band under the title strip with the button in it. Nothing is drawn
+/// there the rest of the time.
+#[test]
+fn an_update_is_offered_across_the_window_not_only_on_the_desktop_tab() {
+    use sigil_update::UpdateState;
+    let h = shell_with_update(
+        UpdateState::Available {
+            version: version("0.1.6"),
+            notes_url: String::new(),
+            asset: String::new(),
+        },
+        true,
+    );
+    let words = said(&h);
+    assert!(words.contains("Chat"), "Chat is the tab on screen: {words}");
+    assert!(words.contains("sigil 0.1.6 is available"), "{words}");
+    assert!(h.query_by_label("Update to 0.1.6").is_some(), "{words}");
+
+    let h = shell_with_update(
+        UpdateState::Ready {
+            version: version("0.1.6"),
+        },
+        true,
+    );
+    let words = said(&h);
+    assert!(words.contains("sigil 0.1.6 is installed"), "{words}");
+    assert!(h.query_by_label("Restart").is_some(), "{words}");
+
+    let h = shell_with_update(
+        UpdateState::Failed {
+            why: "the digest did not match".into(),
+        },
+        true,
+    );
+    let words = said(&h);
+    assert!(
+        words.contains("The update failed: the digest did not match"),
+        "{words}"
+    );
+
+    for quiet in [
+        UpdateState::Unknown,
+        UpdateState::UpToDate {
+            checked_at: std::time::SystemTime::now(),
+        },
+        UpdateState::Unreachable { why: "no".into() },
+        UpdateState::Unsigned {
+            version: version("0.1.6"),
+            notes_url: String::new(),
+        },
+    ] {
+        let h = shell_with_update(quiet.clone(), true);
+        let words = said(&h);
+        assert!(
+            !words.contains("is available") && !words.contains("is installed"),
+            "{quiet:?}: {words}"
+        );
+        assert!(h.query_by_label("Update to 0.1.6").is_none(), "{quiet:?}");
+    }
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn shell_update_dark() {
+    let mut h = shell_with_update(
+        sigil_update::UpdateState::Available {
+            version: version("0.1.6"),
+            notes_url: "https://github.com/wave-cl/sigil/releases/tag/v0.1.6".into(),
+            asset: "sigil-v0.1.6-aarch64-apple-darwin.zip".into(),
+        },
+        true,
+    );
+    h.run();
+    h.snapshot("shell_update_dark");
+}
+
 /// The rail carries the mark: "Desktop (1)" while there is an update to
 /// press, plain "Desktop" otherwise.
 #[test]
