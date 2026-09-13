@@ -89,7 +89,8 @@ xdg-mime query default x-scheme-handler/sigil
 
 ## The icon
 
-A seal: a white S of two arcs on a rounded square in the accent.
+A seal: a white S of two arcs, its free ends finished with a point, inside a
+ring broken where the stroke leaves it, on a rounded square in the accent.
 `packaging/icon.py` draws it at any size, with no dependencies, and
 `crates/sigil-platform/src/mark.rs` draws the same thing for the tray from
 the same numbers -- a test there runs the script and compares the two pixel

@@ -1,7 +1,8 @@
 //! Sigil's mark, drawn: the same numbers as `packaging/icon.py`.
 //!
-//! A seal -- a white S of two arcs on a rounded square in the accent -- for
-//! the tray and the dock. Two copies of one drawing, in two languages,
+//! A seal: a white S of two arcs, its free ends finished with a point, in
+//! a ring broken where the stroke leaves it, on a rounded square in the
+//! accent -- for the tray and the dock. Two copies of one drawing, in two languages,
 //! because the app icon is made at packaging time by a script with no
 //! dependencies and the tray icon is made at run time by this crate; the
 //! test at the bottom renders both and compares them pixel for pixel, so
@@ -13,11 +14,18 @@ pub const ACCENT: [u8; 3] = [0x6E, 0x8B, 0xFF];
 
 const SQUARE: f64 = 0.80;
 const CORNER: f64 = 0.225;
-const RADIUS: f64 = 0.16;
-const STROKE: f64 = 0.085;
+const RADIUS: f64 = 0.14;
+const STROKE: f64 = 0.075;
 /// Centre x, centre y, from, to -- degrees, anticlockwise, y up.
 const TOP: (f64, f64, f64, f64) = (0.5, 0.5 + RADIUS, 15.0, 270.0);
 const BOTTOM: (f64, f64, f64, f64) = (0.5, 0.5 - RADIUS, -165.0, 90.0);
+/// A sigil's strokes end in a point: a disc at each free end of the S.
+const TERMINAL: f64 = 0.062;
+/// And a seal is drawn in a ring, broken where the S's free ends point out
+/// of it, so the S reads as one stroke leaving the ring and coming back.
+const RING: f64 = 0.355;
+const RING_STROKE: f64 = 0.04;
+const RING_GAPS: [(f64, f64); 2] = [(30.0, 78.0), (210.0, 258.0)];
 const SAMPLES: u32 = 4;
 
 fn in_arc(deg: f64, start: f64, end: f64) -> bool {
@@ -25,18 +33,57 @@ fn in_arc(deg: f64, start: f64, end: f64) -> bool {
     (deg - start).rem_euclid(360.0) <= span
 }
 
-/// Whether (x, y), in canvas fractions with y up, is on the S.
+/// Whether (x, y) is on the arc `(cx, cy, from, to)` of `radius`, drawn
+/// `stroke` wide.
+fn on_arc(x: f64, y: f64, arc: (f64, f64, f64, f64), radius: f64, stroke: f64) -> bool {
+    let (cx, cy, start, end) = arc;
+    let (dx, dy) = (x - cx, y - cy);
+    if (dx.hypot(dy) - radius).abs() > stroke / 2.0 {
+        return false;
+    }
+    in_arc(dy.atan2(dx).to_degrees(), start, end)
+}
+
+fn end(cx: f64, cy: f64, radius: f64, deg: f64) -> (f64, f64) {
+    (
+        cx + radius * deg.to_radians().cos(),
+        cy + radius * deg.to_radians().sin(),
+    )
+}
+
+/// Whether (x, y), in canvas fractions with y up, is on the mark.
 fn glyph_hit(x: f64, y: f64) -> bool {
-    for (cx, cy, start, end) in [TOP, BOTTOM] {
-        let (dx, dy) = (x - cx, y - cy);
-        let dist = dx.hypot(dy);
-        if (dist - RADIUS).abs() <= STROKE / 2.0 && in_arc(dy.atan2(dx).to_degrees(), start, end) {
+    // The S, with a round cap where the two arcs meet and a terminal disc
+    // at each free end: the top arc's start, the bottom arc's end.
+    for (arc, free_is_start) in [(TOP, true), (BOTTOM, false)] {
+        let (cx, cy, start, stop) = arc;
+        if on_arc(x, y, arc, RADIUS, STROKE) {
             return true;
         }
-        for deg in [start, end] {
-            let ex = cx + RADIUS * deg.to_radians().cos();
-            let ey = cy + RADIUS * deg.to_radians().sin();
-            if (x - ex).hypot(y - ey) <= STROKE / 2.0 {
+        for (deg, is_start) in [(start, true), (stop, false)] {
+            let (ex, ey) = end(cx, cy, RADIUS, deg);
+            let r = if is_start == free_is_start {
+                TERMINAL
+            } else {
+                STROKE / 2.0
+            };
+            if (x - ex).hypot(y - ey) <= r {
+                return true;
+            }
+        }
+    }
+    // The ring, less its gaps, with round caps at each break.
+    let (dx, dy) = (x - 0.5, y - 0.5);
+    if (dx.hypot(dy) - RING).abs() <= RING_STROKE / 2.0 {
+        let deg = dy.atan2(dx).to_degrees();
+        if !RING_GAPS.iter().any(|&(a, b)| in_arc(deg, a, b)) {
+            return true;
+        }
+    }
+    for (a, b) in RING_GAPS {
+        for deg in [a, b] {
+            let (ex, ey) = end(0.5, 0.5, RING, deg);
+            if (x - ex).hypot(y - ey) <= RING_STROKE / 2.0 {
                 return true;
             }
         }
@@ -173,9 +220,15 @@ mod tests {
             [255, 255, 255, 255],
             "the centre is the S's waist"
         );
-        assert_eq!(at(32, 12)[..3], [255, 255, 255], "the top of the S");
-        assert_eq!(at(32, 52)[..3], [255, 255, 255], "the bottom of the S");
-        assert_eq!(at(14, 46)[..3], ACCENT, "the S is open at its lower left");
-        assert_eq!(at(50, 18)[..3], ACCENT, "and at its upper right");
+        assert_eq!(at(32, 14)[..3], [255, 255, 255], "the top of the S");
+        assert_eq!(at(32, 50)[..3], [255, 255, 255], "the bottom of the S");
+        assert_eq!(at(32, 23)[..3], ACCENT, "the top bowl is open");
+        assert_eq!(at(32, 41)[..3], ACCENT, "and so is the bottom one");
+        assert_eq!(at(32, 9)[..3], [255, 255, 255], "the ring, above the S");
+        assert_eq!(
+            at(54, 20)[..3],
+            ACCENT,
+            "broken where the S's end points out"
+        );
     }
 }
