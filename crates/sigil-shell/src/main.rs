@@ -128,6 +128,35 @@ fn main() -> eframe::Result<()> {
         )
         .init();
 
+    // What this is, and how it got here -- the first two questions about
+    // any report, answered before the window is up.
+    let install = sigil_update::install::detect();
+    tracing::info!(
+        "sigil {} ({})",
+        sigil_update::Version::current(),
+        install.describe()
+    );
+    // The bundle the last update moved aside: it has done its job the
+    // moment this one starts.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(gone) = sigil_update::install::remove_previous_bundle(&exe)
+    {
+        tracing::info!(
+            "removed {}, the copy before the last update",
+            gone.display()
+        );
+    }
+    // Where releases are asked about. Overridable so the whole update path
+    // can be run against a server of one's own; said loudly because a copy
+    // pointed elsewhere is a copy that will never see a real release.
+    let releases_api = match std::env::var("SIGIL_UPDATE_API") {
+        Ok(base) if !base.is_empty() => {
+            tracing::warn!("SIGIL_UPDATE_API is set: asking {base} about releases, not GitHub");
+            base
+        }
+        _ => sigil_update::release::GITHUB_API.to_string(),
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             // Kept, and not shown: the window manager, the dock and every
@@ -196,6 +225,11 @@ fn main() -> eframe::Result<()> {
                 Box::new(sigil_admin::AdminApp::new()),
                 Box::new(sigil_shell::PlatformApp::new(
                     sigil_platform::Platform::new(),
+                    &releases_api,
+                    {
+                        let ctx = cc.egui_ctx.clone();
+                        move || ctx.request_repaint()
+                    },
                 )),
             ];
             let shell = Shell::new(apps, Some(platform));

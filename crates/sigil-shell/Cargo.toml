@@ -24,6 +24,7 @@ sigil-platform = { path = "../sigil-platform" }
 sigil-voice = { path = "../sigil-voice" }
 sigil-chat = { path = "../sigil-chat" }
 sigil-admin = { path = "../sigil-admin" }
+sigil-update = { path = "../sigil-update" }
 
 [lib]
 name = "sigil_shell"
@@ -31,6 +32,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
+sigil-update = { path = "../sigil-update" }
 sqnr-core = { workspace = true }
 # A real sealed identity for the opening screen's test, written by sqnr's own
 # `generate`. Hand-rolling the file format would test a guess at it.

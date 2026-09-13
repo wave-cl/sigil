@@ -18,6 +18,10 @@ struct Stub {
     /// that asked on every pass would be an app nobody could leave, which is
     /// the failure the shell's own `take` is there to prevent.
     asks_to_switch: bool,
+    /// Wants its background work run before anybody has opened it.
+    unopened: bool,
+    /// How many times the shell ran its background work.
+    updates: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl Stub {
@@ -26,11 +30,19 @@ impl Stub {
             title,
             unread,
             asks_to_switch: false,
+            unopened: false,
+            updates: Default::default(),
         }
     }
 }
 
 impl App for Stub {
+    fn runs_unopened(&self) -> bool {
+        self.unopened
+    }
+    fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
+        self.updates.set(self.updates.get() + 1);
+    }
     fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         ui.heading(self.title);
         if std::mem::take(&mut self.asks_to_switch) {
@@ -131,11 +143,36 @@ fn with_account(dark: bool, account: sigil::Account) -> Harness<'static> {
 }
 
 /// A shell whose app asks, on its first pass, to be shown the opening screen.
+/// Background work runs for the app on screen and for any app that asked
+/// to run unopened -- and for nothing else, so an app nobody has looked at
+/// costs nothing per pass.
+#[test]
+fn an_app_that_runs_unopened_gets_its_update_before_it_is_ever_shown() {
+    let counters: Vec<std::rc::Rc<std::cell::Cell<u32>>> =
+        (0..3).map(|_| Default::default()).collect();
+    let mut apps: Vec<Box<dyn App>> = Vec::new();
+    for (i, title) in ["Chat", "Quiet", "Watching"].into_iter().enumerate() {
+        let mut stub = Stub::named(title, 0);
+        stub.unopened = title == "Watching";
+        stub.updates = counters[i].clone();
+        apps.push(Box::new(stub));
+    }
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    let ctx = egui::Context::default();
+    shell.update_all(&ctx, false);
+    shell.update_all(&ctx, false);
+    assert_eq!(counters[0].get(), 2, "the app on screen");
+    assert_eq!(counters[1].get(), 0, "never opened, never run");
+    assert_eq!(counters[2].get(), 2, "asked to run unopened");
+}
+
 fn asking_to_switch() -> Harness<'static> {
     let apps: Vec<Box<dyn App>> = vec![Box::new(Stub {
-        title: "Calls",
-        unread: 0,
         asks_to_switch: true,
+        ..Stub::named("Calls", 0)
     })];
     let mut shell =
         sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
@@ -685,7 +722,9 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
     use sigil_platform::Platform;
     use sigil_shell::PlatformApp;
 
-    let mut app = PlatformApp::new(Platform::new());
+    // A releases server that is nobody: this test is about the
+    // capabilities, and must not ask GitHub anything.
+    let mut app = PlatformApp::new(Platform::new(), "http://127.0.0.1:1", || {});
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -769,12 +808,33 @@ fn a_report() -> sigil_shell::Report {
         reachable_when_away: true,
         autostart: Support::Yes,
         autostart_enabled: false,
+        version: "0.1.5".into(),
+        install: sigil_update::Install::MacBundle {
+            app: "/Applications/sigil.app".into(),
+        },
+        update: sigil_update::UpdateState::Unknown,
+    }
+}
+
+fn version(s: &str) -> sigil_update::Version {
+    sigil_update::Version::parse(s).unwrap()
+}
+
+/// The report with the update in a given state.
+fn a_report_with(update: sigil_update::UpdateState) -> sigil_shell::Report {
+    sigil_shell::Report {
+        update,
+        ..a_report()
     }
 }
 
 fn platform_harness() -> Harness<'static> {
+    platform_harness_of(a_report())
+}
+
+fn platform_harness_of(report: sigil_shell::Report) -> Harness<'static> {
     use sigil_shell::PlatformApp;
-    let mut app = PlatformApp::from_report(a_report());
+    let mut app = PlatformApp::from_report(report);
     Harness::builder()
         .with_size(egui::vec2(760.0, 480.0))
         .build_ui(move |ui| {
@@ -812,6 +872,161 @@ fn desktop_pane_dark() {
     let mut h = platform_harness();
     h.run();
     h.snapshot("desktop_pane_dark");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn desktop_pane_update_dark() {
+    let mut h = platform_harness_of(a_report_with(sigil_update::UpdateState::Available {
+        version: version("0.1.6"),
+        notes_url: "https://github.com/wave-cl/sigil/releases/tag/v0.1.6".into(),
+        asset: "sigil-v0.1.6-aarch64-apple-darwin.zip".into(),
+    }));
+    h.run();
+    h.snapshot("desktop_pane_update_dark");
+}
+
+/// The pane says what this build is, and when there is a newer one, offers
+/// it -- and the tab is marked, so somebody who never opens this pane still
+/// learns.
+#[test]
+fn the_desktop_pane_says_the_version_and_offers_the_newer_one() {
+    use sigil_update::UpdateState;
+    let available = UpdateState::Available {
+        version: version("0.1.6"),
+        notes_url: "https://example.invalid/v0.1.6".into(),
+        asset: "sigil-v0.1.6-aarch64-apple-darwin.zip".into(),
+    };
+    let mut h = platform_harness_of(a_report_with(available.clone()));
+    h.run();
+    let words = said(&h);
+    assert!(words.contains("sigil 0.1.5"), "{words}");
+    assert!(
+        words.contains("installed as /Applications/sigil.app"),
+        "{words}"
+    );
+    assert!(words.contains("sigil 0.1.6 is available"), "{words}");
+    assert!(h.query_by_label("Update to 0.1.6").is_some(), "{words}");
+    let app = sigil_shell::PlatformApp::from_report(a_report_with(available));
+    assert_eq!(app.tab_notifications().count, 1);
+
+    let ready = UpdateState::Ready {
+        version: version("0.1.6"),
+    };
+    let mut h = platform_harness_of(a_report_with(ready.clone()));
+    h.run();
+    assert!(h.query_by_label("Restart").is_some(), "{}", said(&h));
+    assert!(
+        h.query_by_label("Check now").is_none(),
+        "a check now would only lie"
+    );
+    assert_eq!(
+        sigil_shell::PlatformApp::from_report(a_report_with(ready))
+            .tab_notifications()
+            .count,
+        1
+    );
+
+    // Up to date: no offer, no mark, and a way to ask again.
+    let up_to_date = UpdateState::UpToDate {
+        checked_at: std::time::SystemTime::now(),
+    };
+    let mut h = platform_harness_of(a_report_with(up_to_date.clone()));
+    h.run();
+    let words = said(&h);
+    assert!(words.contains("Up to date"), "{words}");
+    assert!(!words.contains("Update to"), "{words}");
+    assert!(h.query_by_label("Check now").is_some(), "{words}");
+    assert_eq!(
+        sigil_shell::PlatformApp::from_report(a_report_with(up_to_date))
+            .tab_notifications()
+            .count,
+        0
+    );
+}
+
+/// The two ways a check ends without an answer are told apart, in words.
+#[test]
+fn the_desktop_pane_says_unreachable_and_unsigned_apart() {
+    use sigil_update::UpdateState;
+    let mut h = platform_harness_of(a_report_with(UpdateState::Unreachable {
+        why: "could not reach api.github.com".into(),
+    }));
+    h.run();
+    let words = said(&h);
+    assert!(words.contains("could not reach GitHub"), "{words}");
+    assert!(!words.contains("not signed"), "{words}");
+
+    let mut h = platform_harness_of(a_report_with(UpdateState::Unsigned {
+        version: version("0.1.6"),
+        notes_url: "https://example.invalid/v0.1.6".into(),
+    }));
+    h.run();
+    let words = said(&h);
+    assert!(words.contains("not signed"), "{words}");
+    assert!(!words.contains("could not reach"), "{words}");
+    assert!(h.query_by_label("Update to 0.1.6").is_none(), "{words}");
+
+    let mut h = platform_harness_of(a_report_with(UpdateState::Unknown));
+    h.run();
+    let words = said(&h);
+    assert!(
+        !words.contains("could not reach") && !words.contains("not signed"),
+        "{words}"
+    );
+}
+
+/// A copy that cannot update itself says why where the button would be,
+/// and offers no button.
+#[test]
+fn a_copy_that_cannot_update_itself_says_why() {
+    let report = sigil_shell::Report {
+        install: sigil_update::Install::Unsupported {
+            why:
+                "running from target/release, not from a .app bundle, so sigil cannot update itself"
+                    .into(),
+        },
+        ..a_report()
+    };
+    let mut h = platform_harness_of(report);
+    h.run();
+    let words = said(&h);
+    assert!(words.contains("not from a .app bundle"), "{words}");
+    assert!(h.query_by_label("Check now").is_none(), "{words}");
+}
+
+/// The rail carries the mark: "Desktop (1)" while there is an update to
+/// press, plain "Desktop" otherwise.
+#[test]
+fn the_rail_marks_the_desktop_tab_while_an_update_waits() {
+    let rail_with = |update: sigil_update::UpdateState| {
+        let apps: Vec<Box<dyn App>> = vec![
+            Box::new(Stub::named("Chat", 0)),
+            Box::new(sigil_shell::PlatformApp::from_report(a_report_with(update))),
+        ];
+        let mut shell =
+            sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+                sigil::Account::unlocked_for_test([4u8; 32]),
+            ]));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                theme::install(&ctx, theme::light(), theme::dark());
+                shell.ui(ui);
+            });
+        h.run();
+        h
+    };
+    let h = rail_with(sigil_update::UpdateState::Available {
+        version: version("0.1.6"),
+        notes_url: String::new(),
+        asset: String::new(),
+    });
+    assert!(h.query_by_label("Desktop (1)").is_some(), "{}", said(&h));
+    let h = rail_with(sigil_update::UpdateState::Unknown);
+    assert!(h.query_by_label("Desktop").is_some(), "{}", said(&h));
+    assert!(h.query_by_label("Desktop (1)").is_none());
 }
 
 /// Identities are not chosen here.

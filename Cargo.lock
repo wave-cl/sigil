@@ -5931,6 +5931,7 @@ dependencies = [
  "sigil-net",
  "sigil-platform",
  "sigil-ui",
+ "sigil-update",
  "sigil-voice",
  "sqnr",
  "sqnr-core",

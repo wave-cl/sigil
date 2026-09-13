@@ -67,10 +67,7 @@ pub fn detect() -> Install {
             };
         }
     };
-    let dir_writable = exe
-        .parent()
-        .map(dir_is_writable)
-        .unwrap_or(false);
+    let dir_writable = exe.parent().map(dir_is_writable).unwrap_or(false);
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     classify(
         std::env::consts::OS,

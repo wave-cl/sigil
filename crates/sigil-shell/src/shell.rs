@@ -201,7 +201,7 @@ impl Shell {
     /// notification daemon and should not pretend otherwise.
     pub fn new(apps: Vec<Box<dyn App>>, platform: Option<sigil_platform::Platform>) -> Self {
         assert!(!apps.is_empty(), "a shell with no apps has nothing to show");
-        let mut opened = vec![false; apps.len()];
+        let mut opened: Vec<bool> = apps.iter().map(|app| app.runs_unopened()).collect();
         opened[0] = true;
         let (notify, tray): (Box<dyn Notify>, Option<sigil_platform::Tray>) = match platform {
             Some(sigil_platform::Platform { notifier, tray, .. }) => {

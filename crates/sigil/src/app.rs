@@ -181,6 +181,17 @@ pub trait App {
     /// while the window is hidden. Never draws.
     fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {}
 
+    /// Whether [`update`](App::update) should run before this app has ever
+    /// been looked at.
+    ///
+    /// The default is no: an app nobody has opened costs nothing per pass.
+    /// An app whose background work is the point -- one that watches for
+    /// something and badges its tab when it happens -- says yes, or the
+    /// badge could only appear after somebody had already gone looking.
+    fn runs_unopened(&self) -> bool {
+        false
+    }
+
     /// Draw. Called only for the app the user is looking at.
     fn render(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse;
 
