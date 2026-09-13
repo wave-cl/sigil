@@ -620,6 +620,39 @@ fn the_first_identity_needs_no_name() {
     assert!(said(&h).contains("Calls"), "not opened: {}", said(&h));
 }
 
+/// Return in the second passphrase box is Create: the next thing after
+/// typing it twice, without the mouse.
+#[test]
+fn return_in_the_last_box_makes_the_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let made = dir.path().join("identity-work");
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Calls", 0))];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: dir.path().join("nothing-here"),
+            },
+        ]))
+        .with_identities(dir.path().to_path_buf());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            shell.ui(ui);
+        });
+    h.run();
+    h.get_by_label("Create a new identity").click();
+    h.run();
+    type_into(&mut h, &["work", "open sesame", "open sesame"]);
+    assert!(!made.exists(), "not before Return");
+    // The last box still has the keyboard from `type_into`.
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert!(made.exists(), "Return did not create it: {}", said(&h));
+    assert!(said(&h).contains("Calls"), "not opened: {}", said(&h));
+}
+
 /// Two passphrases that do not match make nothing.
 ///
 /// The file is the only copy of the key, so a mistyped passphrase is not an

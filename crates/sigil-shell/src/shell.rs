@@ -554,7 +554,12 @@ impl Shell {
             CARD_WIDTH,
         );
         ui.add_space(tokens::SPACING_SM);
-        sigil_ui::password_field(ui, &mut self.welcome.new_again, "again", CARD_WIDTH);
+        let again = sigil_ui::password_field(ui, &mut self.welcome.new_again, "again", CARD_WIDTH);
+        // Return in the last box is the form, the same as Return in the
+        // passphrase box on the way in: the next thing after typing it twice
+        // is Create, and reaching for the mouse to say so is a step nobody
+        // wants between them and the thing they just made.
+        let entered = again.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(tokens::SPACING_SM);
         ui.colored_label(
             theme.text_secondary,
@@ -566,6 +571,7 @@ impl Shell {
         if ui
             .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Create"))
             .clicked()
+            || entered
         {
             self.make_identity();
         }
