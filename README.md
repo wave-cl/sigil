@@ -46,6 +46,22 @@ anything since. They are built on the oldest Ubuntu GitHub still runs for
 exactly that reason, and the release checks the ceiling off the binary. A
 static build is not an option for a program that links GTK and PipeWire.
 
+## Updating
+
+sigil checks the releases page once a day -- a few seconds after launch, then
+daily -- and marks its **Desktop** tab when there is a newer release. Nothing
+is fetched or installed until you open that tab and press **Update**; then
+**Restart** starts the new copy. The bundle in `/Applications` and a tarball's
+binary replace themselves; a `.deb` or `.rpm` install fetches the matching
+package and hands it to `apt-get` or `dnf` through `pkexec`, so the desktop
+asks for authorisation and the package database stays true. A copy running
+from `target/` does not update itself, and the Desktop tab says so.
+
+Every release carries a manifest of its files, signed with a key sigil is
+built with; sigil verifies the signature and then the digest of what it
+fetched, and installs nothing that does not match. A release without one --
+everything before 0.1.6 -- is shown as "not signed" and left alone.
+
 ## Building
 
 Needs Rust 1.98.0 (pinned in `rust-toolchain.toml`) and **cmake**, which the

@@ -100,8 +100,8 @@ one of them built **natively**:
 
 | | runner |
 |---|---|
-| `x86_64-linux-gnu` | `ubuntu-latest` |
-| `aarch64-linux-gnu` | `ubuntu-24.04-arm` |
+| `x86_64-linux-gnu` | `ubuntu-22.04` |
+| `aarch64-linux-gnu` | `ubuntu-22.04-arm` |
 | `aarch64-apple-darwin` | `macos-latest` |
 | `x86_64-apple-darwin` | `macos-15-intel` |
 
@@ -125,7 +125,7 @@ Three guards, each of which exists because its failure is silent:
   stops a *failed* build publishing. It does not stop a build that succeeded
   while producing less than it should — a rename that matched nothing, an
   upload glob that found one file — and that publishes a release which looks
-  complete and is missing an architecture.
+  complete and is missing an architecture. After signing, ten and only ten.
 
 ### What is not signed
 
@@ -133,6 +133,71 @@ macOS is ad-hoc signed, so Gatekeeper refuses it on first launch and blames the
 file ("damaged and can't be opened") for what is really the quarantine flag.
 The release notes say how to clear it. A Developer ID and notarisation are what
 remove the step; see **Distributing** above.
+
+### The signed manifest, and self-update
+
+What *is* signed is the manifest. After the eight files are in `dist`, the
+`release` job checks out the tag's tree and runs `sigil-update-tool` from
+`crates/sigil-update` — the same crate an installed sigil verifies with, so
+what is signed is byte for byte what is checked:
+
+```
+sigil-update-tool manifest --tag v0.1.6 --dir dist --out dist/sigil-v0.1.6-manifest.json
+sigil-update-tool sign   dist/sigil-v0.1.6-manifest.json      # SIGIL_UPDATE_KEY in the environment
+sigil-update-tool verify dist/sigil-v0.1.6-manifest.json dist  # with the compiled-in key, re-hashing every file
+```
+
+The manifest is compact JSON with sorted keys — the tag, the version, and
+each asset's `bytes` and `sha256` — and `.sig` beside it is 128 hex
+characters: an Ed25519 signature over the **exact bytes of the file**, never a
+re-serialisation. Ten files are published, and the job refuses to publish
+nine or eleven.
+
+The tool refuses three things, each of which would otherwise be a release
+that looks right and installs nowhere: a tag that is not the tree's
+`Cargo.toml` version (bump before tagging), a `dist` that is not exactly the
+eight builds, and a secret whose public key is not the one in
+`crates/sigil-update/src/lib.rs` — `PUBLIC_KEY`, which every sigil is built
+with.
+
+**The key.** `scripts/update-key` prints a fresh pair: the public half as
+Rust for `lib.rs`, the seed as the value of the repository secret
+`SIGIL_UPDATE_KEY` (`gh secret set SIGIL_UPDATE_KEY --repo wave-cl/sigil`).
+The seed lives in that secret and nowhere else. **Rotation** is a future
+concern with a known shape: a build trusts one key, so a new key has to ship
+in a release signed by the old one — commit the new `PUBLIC_KEY`, release
+with the old secret, then swap the secret. Two releases, in that order.
+
+**What the app does with it.** `sigil-update` checks `/releases/latest` five
+seconds after launch and daily; a newer tag with a manifest and signature
+that verify, and a build for this install, is `Available`. The Desktop tab
+is marked and one notification is posted; nothing is fetched until Update is
+pressed. The download streams through SHA-256 into a `.part` file and is
+only renamed when the digest matches. Installing never writes over the
+running binary: a macOS bundle is unpacked with `ditto` beside the old one,
+renamed into place with the old kept as `sigil.app.previous` (removed at the
+next start), and the process keeps running from the moved-aside inode; a
+Linux tarball's binary is copied to `<exe>.new` and renamed over; a `.deb` or
+`.rpm` is handed to `apt-get`/`dnf` (falling back to `dpkg`/`rpm`) under
+`pkexec`. Restart spawns a shell that waits for this pid to release the
+instance lock, then `open -n`s the bundle or execs the binary; it gives up
+after a minute. The ad-hoc signature is per build, so macOS asks about the
+microphone again after an update.
+
+A release with no manifest — everything before v0.1.6 — is shown as "not
+signed" and never installed. A copy that is not in a `.app`, or whose
+directory it cannot write, says so on the Desktop tab instead of offering a
+button.
+
+**Rehearsing an update** without cutting a release: serve a directory as a
+release (a `/releases/latest` answer naming the files, and the files under
+`/download/<name>`), sign its manifest with the real seed, then either run the
+app with `SIGIL_UPDATE_API=http://127.0.0.1:PORT` — it says so loudly in the
+log — or run `cargo run -p sigil-update --example rehearsal -- <api base>
+<sigil.app>`, which makes the same calls the buttons do and prints each
+state. The manifest for a rehearsal has to be written with the library rather
+than the tool, because the tool refuses a tag that is not this tree's
+version — which is the point of it.
 
 ## What the video player links
 

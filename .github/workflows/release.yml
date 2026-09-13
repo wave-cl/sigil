@@ -250,7 +250,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Every artifact must be present
+      - name: Every build artifact must be present
         run: |
           set -eu
           VERSION="${{ github.event.inputs.tag || github.ref_name }}"
@@ -277,6 +277,55 @@ jobs:
             ls -lR dist
             exit 1
           fi
+
+      # -----------------------------------------------------------------------
+      # The signed manifest: what lets an installed sigil update itself.
+      #
+      # A ninth and tenth file -- the tag, the version, and every asset's size
+      # and SHA-256, signed with Ed25519 over the exact bytes of the file. An
+      # installed sigil verifies the signature with the public key it was built
+      # with, then the digest of what it downloaded, and installs nothing
+      # otherwise. The tool is the same crate the app verifies with, built here
+      # from the tag's own tree, and it refuses three things a release would
+      # otherwise carry silently: a tag that is not this tree's version, a set
+      # of files that is not exactly the eight above, and a secret that is not
+      # the key this build trusts -- a release signed with any other key would
+      # be one no sigil ever installs. See docs/packaging.md.
+      # -----------------------------------------------------------------------
+      - uses: actions/checkout@v4
+        with:
+          # The tag's tree, not the branch: the tool compares the tag to the
+          # version it was compiled from.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          path: src
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Sign the manifest
+        env:
+          SIGIL_UPDATE_KEY: ${{ secrets.SIGIL_UPDATE_KEY }}
+        # From inside the checkout, so rustup reads its rust-toolchain.toml
+        # and this is built with the same compiler as the eight files.
+        working-directory: src
+        run: |
+          set -eu
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          test -n "$SIGIL_UPDATE_KEY" || { echo "::error::the SIGIL_UPDATE_KEY secret is not set"; exit 1; }
+          tool() { cargo run -q --release -p sigil-update --bin sigil-update-tool -- "$@"; }
+          tool manifest --tag "$VERSION" --dir ../dist --out "../dist/sigil-${VERSION}-manifest.json"
+          tool sign "../dist/sigil-${VERSION}-manifest.json"
+          tool verify "../dist/sigil-${VERSION}-manifest.json" ../dist
+          cat "../dist/sigil-${VERSION}-manifest.json"; echo
+
+      - name: Every published file must be present
+        run: |
+          set -eu
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          test -s "dist/sigil-${VERSION}-manifest.json"
+          test -s "dist/sigil-${VERSION}-manifest.sig"
+          # Ten and only ten: eight builds, the manifest, its signature. A
+          # stray file here would be published, and a missing one would leave
+          # every installed sigil saying "not signed".
+          n=$(ls dist | wc -l)
+          test "$n" -eq 10 || { echo "::error::dist holds $n files, not 10"; ls -l dist; exit 1; }
 
       - name: Notes
         run: |
@@ -317,6 +366,15 @@ jobs:
 
           The tarball is the bare binary, for distributions that are neither.
           It needs a Vulkan driver, and ALSA or PipeWire for a call.
+
+          ## Updating
+
+          From 0.1.6 on, sigil checks this page for a newer release once a day
+          and marks its Desktop tab when there is one; the update is fetched
+          and installed only when you press the button there. The
+          `-manifest.json` and `.sig` files are how it knows the download is
+          this release: the manifest is signed with a key sigil carries, and
+          nothing is installed that does not verify against it.
           NOTES
 
       - uses: softprops/action-gh-release@v2
