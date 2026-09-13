@@ -978,7 +978,7 @@ fn the_desktop_pane_says_the_version_and_offers_the_newer_one() {
         "{words}"
     );
     assert!(words.contains("sigil 0.1.6 is available"), "{words}");
-    assert!(h.query_by_label("Update to 0.1.6").is_some(), "{words}");
+    assert!(h.query_by_label("Update").is_some(), "{words}");
     let app = sigil_shell::PlatformApp::from_report(a_report_with(available));
     assert_eq!(app.tab_notifications().count, 1);
 
@@ -1007,7 +1007,7 @@ fn the_desktop_pane_says_the_version_and_offers_the_newer_one() {
     h.run();
     let words = said(&h);
     assert!(words.contains("Up to date"), "{words}");
-    assert!(!words.contains("Update to"), "{words}");
+    assert!(h.query_by_label("Update").is_none(), "{words}");
     assert!(h.query_by_label("Check now").is_some(), "{words}");
     assert_eq!(
         sigil_shell::PlatformApp::from_report(a_report_with(up_to_date))
@@ -1037,7 +1037,7 @@ fn the_desktop_pane_says_unreachable_and_unsigned_apart() {
     let words = said(&h);
     assert!(words.contains("not signed"), "{words}");
     assert!(!words.contains("could not reach"), "{words}");
-    assert!(h.query_by_label("Update to 0.1.6").is_none(), "{words}");
+    assert!(h.query_by_label("Update").is_none(), "{words}");
 
     let mut h = platform_harness_of(a_report_with(UpdateState::Unknown));
     h.run();
@@ -1111,7 +1111,7 @@ fn an_update_is_offered_across_the_window_not_only_on_the_desktop_tab() {
     let words = said(&h);
     assert!(words.contains("Chat"), "Chat is the tab on screen: {words}");
     assert!(words.contains("sigil 0.1.6 is available"), "{words}");
-    assert!(h.query_by_label("Update to 0.1.6").is_some(), "{words}");
+    assert!(h.query_by_label("Update").is_some(), "{words}");
 
     let h = shell_with_update(
         UpdateState::Ready {
@@ -1152,7 +1152,7 @@ fn an_update_is_offered_across_the_window_not_only_on_the_desktop_tab() {
             !words.contains("is available") && !words.contains("is installed"),
             "{quiet:?}: {words}"
         );
-        assert!(h.query_by_label("Update to 0.1.6").is_none(), "{quiet:?}");
+        assert!(h.query_by_label("Update").is_none(), "{quiet:?}");
     }
 }
 

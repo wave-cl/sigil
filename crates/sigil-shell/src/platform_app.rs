@@ -225,10 +225,9 @@ impl PlatformApp {
     /// the band: the band exists for the one thing to press.
     fn update_buttons(&mut self, ui: &mut egui::Ui, state: &UpdateState, with_check: bool) {
         let live = self.updater.is_some();
-        if let UpdateState::Available { version, .. } = state {
-            if ui
-                .add_enabled(live, egui::Button::new(format!("Update to {version}")))
-                .clicked()
+        if matches!(state, UpdateState::Available { .. }) {
+            // The version is in the sentence beside it; the button is the verb.
+            if ui.add_enabled(live, egui::Button::new("Update")).clicked()
                 && let Some(updater) = &self.updater
             {
                 updater.update();
