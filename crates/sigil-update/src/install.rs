@@ -309,16 +309,31 @@ pub fn install_mac_bundle(new_app: &Path, app: &Path) -> Result<(), Error> {
     // shows the file name, and the volume is case-insensitive, so this is a
     // rename to what is already the same file; if it is not, nothing is
     // lost by leaving it.
+    let mut placed = app.to_path_buf();
     if let (Some(theirs), Some(ours)) = (new_app.file_name(), app.file_name())
         && theirs != ours
         && theirs
             .to_string_lossy()
             .eq_ignore_ascii_case(&ours.to_string_lossy())
     {
-        let _ = std::fs::rename(app, app.with_file_name(theirs));
+        let spelt = app.with_file_name(theirs);
+        if std::fs::rename(app, &spelt).is_ok() {
+            placed = spelt;
+        }
     }
+    // Tell Launch Services the bundle at this path has changed. It keeps
+    // the name, the version and the icon from when it last looked, and the
+    // relaunch that follows is `open`, which asks it: without this the new
+    // copy came up in the Dock under the old name with a placeholder for an
+    // icon. Best effort -- the bundle is in place either way.
+    let _ = std::process::Command::new(LSREGISTER)
+        .arg("-f")
+        .arg(&placed)
+        .status();
     Ok(())
 }
+
+const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
 /// At a successful start of a bundle: the bundle the last update moved
 /// aside is no longer a way back, so it goes. Nothing is touched when the
