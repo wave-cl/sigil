@@ -242,7 +242,7 @@ impl Worker {
                 let new = install::unpack(&file, &staging.join("unpacked"))?;
                 install::install_linux_binary(&new, exe)?;
             }
-            Install::LinuxPackage { kind } => install::install_package(*kind, &file)?,
+            Install::LinuxPackage { kind, .. } => install::install_package(*kind, &file)?,
             Install::Unsupported { why } => return Err(Error::Install(why.clone())),
         }
         let _ = std::fs::remove_dir_all(&staging);

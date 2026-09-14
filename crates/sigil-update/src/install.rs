@@ -30,8 +30,11 @@ pub enum Install {
     MacBundle { app: PathBuf },
     /// A tarball's binary, somewhere the user can write.
     LinuxBinary { exe: PathBuf },
-    /// `/usr/bin/sigil`, from a .deb or .rpm.
-    LinuxPackage { kind: PackageKind },
+    /// `/usr/bin/sigil`, from a .deb or .rpm. The path is kept from
+    /// startup: asked at restart time, `current_exe()` answers
+    /// `/usr/bin/sigil (deleted)` once the package manager has replaced the
+    /// file under the running process, and that is not a path to exec.
+    LinuxPackage { kind: PackageKind, exe: PathBuf },
     /// Why sigil cannot update itself here.
     Unsupported { why: String },
 }
@@ -44,9 +47,11 @@ impl Install {
             Install::LinuxBinary { exe } => format!("installed as {}", exe.display()),
             Install::LinuxPackage {
                 kind: PackageKind::Deb,
+                ..
             } => "installed as a .deb package".into(),
             Install::LinuxPackage {
                 kind: PackageKind::Rpm,
+                ..
             } => "installed as an .rpm package".into(),
             Install::Unsupported { why } => why.clone(),
         }
@@ -102,7 +107,10 @@ pub fn classify(
         "linux" => {
             if exe.starts_with("/usr") {
                 match package_kind(os_release, has_dpkg, has_rpm) {
-                    Some(kind) => Install::LinuxPackage { kind },
+                    Some(kind) => Install::LinuxPackage {
+                        kind,
+                        exe: exe.to_path_buf(),
+                    },
                     None => Install::Unsupported {
                         why: format!(
                             "installed at {}, and neither dpkg nor rpm is here to replace it",
@@ -422,20 +430,23 @@ mod tests {
         assert_eq!(
             classify("linux", usr, false, DEBIAN, true, false),
             Install::LinuxPackage {
-                kind: PackageKind::Deb
+                kind: PackageKind::Deb,
+                exe: usr.to_path_buf()
             }
         );
         assert_eq!(
             classify("linux", usr, false, FEDORA, false, true),
             Install::LinuxPackage {
-                kind: PackageKind::Rpm
+                kind: PackageKind::Rpm,
+                exe: usr.to_path_buf()
             }
         );
         // Writable /usr/bin means root; the package is still the truth.
         assert_eq!(
             classify("linux", usr, true, DEBIAN, true, false),
             Install::LinuxPackage {
-                kind: PackageKind::Deb
+                kind: PackageKind::Deb,
+                exe: usr.to_path_buf()
             }
         );
         assert!(!classify("linux", usr, false, "", false, false).is_supported());

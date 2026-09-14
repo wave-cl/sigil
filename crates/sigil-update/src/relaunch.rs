@@ -27,7 +27,11 @@ pub fn target(install: &Install) -> Option<Target> {
     match install {
         Install::MacBundle { app } => Some(Target::MacApp(app.clone())),
         Install::LinuxBinary { exe } => Some(Target::Exe(exe.clone())),
-        Install::LinuxPackage { .. } => std::env::current_exe().ok().map(Target::Exe),
+        // The path from startup, never `current_exe()` now: on Linux that
+        // reads `/proc/self/exe`, which says `/usr/bin/sigil (deleted)` once
+        // the package manager has replaced the file -- and the waiter, told
+        // to exec that, exited, so Restart quit and started nothing.
+        Install::LinuxPackage { exe, .. } => Some(Target::Exe(exe.clone())),
         Install::Unsupported { .. } => None,
     }
 }
@@ -117,6 +121,14 @@ mod tests {
                 exe: "/home/c/bin/sigil".into()
             }),
             Some(Target::Exe("/home/c/bin/sigil".into()))
+        );
+        assert_eq!(
+            target(&Install::LinuxPackage {
+                kind: crate::install::PackageKind::Deb,
+                exe: "/usr/bin/sigil".into()
+            }),
+            Some(Target::Exe("/usr/bin/sigil".into())),
+            "the path recorded at startup, not one read now"
         );
         assert_eq!(target(&Install::Unsupported { why: "no".into() }), None);
     }

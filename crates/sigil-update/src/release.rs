@@ -135,9 +135,11 @@ pub fn asset_name(tag: &str, install: &Install, arch: &str) -> Option<String> {
         Install::LinuxBinary { .. } => "linux-gnu.tar.gz",
         Install::LinuxPackage {
             kind: PackageKind::Deb,
+            ..
         } => "linux-gnu.deb",
         Install::LinuxPackage {
             kind: PackageKind::Rpm,
+            ..
         } => "linux-gnu.rpm",
         Install::Unsupported { .. } => return None,
     };
@@ -170,7 +172,8 @@ mod tests {
             asset_name(
                 tag,
                 &Install::LinuxPackage {
-                    kind: PackageKind::Deb
+                    kind: PackageKind::Deb,
+                    exe: "/usr/bin/sigil".into()
                 },
                 "x86_64"
             )
@@ -181,7 +184,8 @@ mod tests {
             asset_name(
                 tag,
                 &Install::LinuxPackage {
-                    kind: PackageKind::Rpm
+                    kind: PackageKind::Rpm,
+                    exe: "/usr/bin/sigil".into()
                 },
                 "aarch64"
             )
