@@ -3326,6 +3326,13 @@ impl ChatApp {
         }
 
         let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
+        // Whether this conversation is already somebody's direct message,
+        // in which case "direct message" on their bubbles would open the
+        // conversation it is in.
+        let in_direct = state
+            .conversations
+            .iter()
+            .any(|c| Some(c.channel) == state.open && c.peer.is_some());
         // **The videos, before the bubbles.** Players for messages no longer
         // on screen are dropped -- which stops them -- and a video whose
         // bytes have just arrived after it was pressed is started, in the
@@ -3500,6 +3507,7 @@ impl ChatApp {
                 attachments: &files,
                 standing: line.standing.word().zip(line.standing.means()),
                 alarming: line.standing == session::Standing::Fork,
+                direct: !line.mine && !in_direct,
             };
             // Measured as it is drawn, so the next frame can reserve it.
             DREW.with(|n| n.set(n.get() + 1));
@@ -3624,6 +3632,12 @@ impl ChatApp {
             }
             if did.copy_key {
                 ui.ctx().copy_text(who.to_string());
+            }
+            if did.direct {
+                // The one with them, whether it exists yet or not: a direct
+                // message's channel is the pair's, so opening it a second
+                // time is switching to it.
+                self.send_as(Some(at), Cmd::OpenDm(who));
             }
             if did.forward {
                 self.pane(at).forwarding = Some(seq);

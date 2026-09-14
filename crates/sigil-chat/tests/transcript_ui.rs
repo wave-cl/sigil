@@ -2648,6 +2648,68 @@ fn hovering_a_message_offers_replying_and_reacting() {
     );
 }
 
+/// A message in a group offers a direct message with whoever sent it, and
+/// pressing it opens the conversation with them -- the same one, whether or
+/// not it exists yet, because a direct message's channel is the pair's.
+/// Not on your own messages, and not inside the direct message itself,
+/// where it would open the conversation already open.
+#[test]
+fn a_message_in_a_group_offers_a_direct_message_with_its_sender() {
+    // The group, open, with the same lines.
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    h.get_by_label("one").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    assert!(text_of(&h).contains("Direct message"), "{}", text_of(&h));
+    h.get_by_label("Direct message").click();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains(&format!("OpenDm({:?})", them())),
+        "pressing it should open the conversation with the sender: {sent}"
+    );
+
+    // Your own message: nobody to message. One of ours at the foot of the
+    // transcript, where the pointer can reach it -- the fixture's own sits
+    // under the top edge of the pane.
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let mut last = state.lines[1].clone();
+    last.seq = 99;
+    last.text = "and one more of mine".into();
+    last.reply_to = None;
+    last.reactions.clear();
+    state.lines.push(last);
+    let mut h = harness_with(state, true);
+    h.run();
+    h.get_by_label("and one more of mine").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Delete"), "the menu is open: {said}");
+    assert!(!said.contains("Direct message"), "{said}");
+
+    // Inside the direct message with them: already here.
+    let mut h = harness(true);
+    h.run();
+    h.get_by_label("one").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Delete"), "the menu is open: {said}");
+    assert!(!said.contains("Direct message"), "{said}");
+}
+
 // ---------------------------------------------------------------------------
 // Names: what is drawn where one goes, and what it does when pressed.
 // ---------------------------------------------------------------------------

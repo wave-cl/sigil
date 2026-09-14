@@ -170,6 +170,9 @@ pub struct Bubble<'a> {
     pub reply_to: Option<Quote<'a>>,
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: &'a [(String, usize, bool)],
+    /// Offer a direct message with the sender: somebody else, seen in a
+    /// conversation that is not already the one with them.
+    pub direct: bool,
     /// What happened to the message after it was said. Drawn **under** the
     /// bubble rather than inside it: it is not part of what was said, and
     /// having it in there made the bubble taller than its own contents, which
@@ -213,6 +216,8 @@ pub struct BubbleAction {
     pub forward: bool,
     /// Go to the message this one replies to, by its place in the channel.
     pub jump: Option<u64>,
+    /// Open a direct message with whoever sent this.
+    pub direct: bool,
 }
 
 impl BubbleAction {
@@ -556,6 +561,13 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
         }
         if ui.button("Copy key").clicked() {
             action.copy_key = true;
+            ui.close();
+        }
+        // The reply to a room that belongs to one person in it. Absent in
+        // the direct message itself and on one's own messages, where it
+        // would open the conversation already open, or none.
+        if b.direct && ui.button("Direct message").clicked() {
+            action.direct = true;
             ui.close();
         }
         if !b.attachments.is_empty() {
@@ -1207,6 +1219,7 @@ mod tests {
             attachments: files,
             standing: None,
             alarming: false,
+            direct: false,
         }
     }
 
