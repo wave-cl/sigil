@@ -128,7 +128,12 @@ impl Report for Bridge {
                 s.connecting = *connecting;
             }
             // The rest are narrative: they say what happened, not what is true.
+            // `Moved` is SIP-40: the exchange's pinned key changed hands and
+            // the pin followed a signed handover. Like `Pinned`, it is said
+            // once through `describe()` and holds no state -- the new key is
+            // already what every later connection checks against.
             Event::Pinned { .. }
+            | Event::Moved { .. }
             | Event::StillWaiting { .. }
             | Event::Roster(_)
             | Event::Draining
