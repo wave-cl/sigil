@@ -609,6 +609,20 @@ impl Playing {
     }
 }
 
+/// A file in the composer, not yet sent.
+struct Staged {
+    path: std::path::PathBuf,
+    name: String,
+    /// SIP-18's kind, from the name.
+    kind: u8,
+    /// A small PNG of it, once the decoding thread has made one; `None`
+    /// until then, and for a kind that has no picture.
+    preview: Option<std::sync::Arc<[u8]>>,
+}
+
+/// The wire's cap on files in one message (SIP-19).
+const MOST_FILES: usize = sqex_proto::message::MAX_ATTACHMENTS;
+
 struct Pane {
     /// Videos with a player, by blob id. A player is made when the viewer
     /// opens on a video and dropped when it closes, or when the message
@@ -634,6 +648,15 @@ struct Pane {
     /// the key it stood for. Read at send time against the text, so a name
     /// deleted from the box is a mention that is not sent.
     mentions: Vec<(String, PubKey)>,
+    /// Files waiting in the composer, to go with the next message: each
+    /// with its thumbnail once one is decoded, and a way to take it back
+    /// out before sending.
+    staged: Vec<Staged>,
+    /// Thumbnails arriving from the threads that decode them, by path.
+    previews: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Option<Vec<u8>>)>>,
+    previews_tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, Option<Vec<u8>>)>>,
+    /// Why not every file picked was staged.
+    staging_trouble: Option<String>,
     /// Which row of the mention list the keyboard is on.
     picking: usize,
     /// Escape closed the list for this `@`; typing reopens it.
@@ -739,6 +762,10 @@ impl Default for Pane {
             unplayable: HashMap::new(),
             composing: String::new(),
             mentions: Vec::new(),
+            staged: Vec::new(),
+            previews: None,
+            previews_tx: None,
+            staging_trouble: None,
             picking: 0,
             picker_dismissed: false,
             adding: String::new(),
@@ -3788,6 +3815,154 @@ impl ChatApp {
     /// button before the field -- consumed the whole row, and the field was
     /// allocated the nothing that remained: a composer with no box to write in,
     /// which is what the first snapshot of this showed.
+    /// Stage files without a file dialog, for a test that cannot open one.
+    #[doc(hidden)]
+    pub fn stage_for_test(&mut self, me: PubKey, exchange: &str, paths: Vec<std::path::PathBuf>) {
+        let at = (me, exchange.to_string());
+        self.stage(&at, paths, &egui::Context::default());
+    }
+
+    /// Put files in the composer, to go with the next message. No more
+    /// than the wire takes in one message; the rest are refused, and said
+    /// so. Thumbnails are made on a thread of their own -- a photograph
+    /// decodes in a good fraction of a second, a clip's first frame longer
+    /// -- and land through `previews`.
+    fn stage(&mut self, at: &At, paths: Vec<std::path::PathBuf>, ctx: &egui::Context) {
+        let pane = self.pane(at);
+        // One channel for the life of the pane; the sending half is cloned
+        // into each decoding thread.
+        if pane.previews.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            pane.previews = Some(rx);
+            pane.previews_tx = Some(tx);
+        }
+        let tx = pane.previews_tx.clone().expect("made above");
+        let mut refused = 0;
+        for path in paths {
+            if pane.staged.len() >= MOST_FILES {
+                refused += 1;
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (kind, _) = sqex_chat::kind_of(&name);
+            pane.staged.push(Staged {
+                path: path.clone(),
+                name,
+                kind,
+                preview: None,
+            });
+            let tx = tx.clone();
+            let wake = ctx.clone();
+            std::thread::spawn(move || {
+                let preview = session::preview_of(&path, kind).map(|(_, p)| p);
+                let _ = tx.send((path, preview));
+                wake.request_repaint();
+            });
+        }
+        if refused > 0 {
+            pane.staging_trouble = Some(format!(
+                "A message carries up to {MOST_FILES} files; {refused} left out."
+            ));
+        }
+    }
+
+    /// The staged files, above the box: a thumbnail each, the name under
+    /// it while there is no picture, and a way to take it back out.
+    fn staged_ui(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
+        // Thumbnails that have arrived since last pass.
+        let landed: Vec<(std::path::PathBuf, Option<Vec<u8>>)> = self
+            .pane(at)
+            .previews
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for (path, preview) in landed {
+            if let Some(s) = self.pane(at).staged.iter_mut().find(|s| s.path == path) {
+                s.preview = preview.filter(|p| !p.is_empty()).map(|p| p.into());
+            }
+        }
+        if self.pane(at).staged.is_empty() {
+            self.pane(at).staging_trouble = None;
+            return;
+        }
+        const TILE: f32 = 72.0;
+        let mut remove: Option<usize> = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, s) in self.pane(at).staged.iter().enumerate() {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(TILE, TILE), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, tokens::RADIUS_MD, theme.surface_secondary);
+                match &s.preview {
+                    Some(bytes) => {
+                        let uri = format!("bytes://staged-{}", s.path.display());
+                        ui.ctx()
+                            .include_bytes(uri.clone(), egui::load::Bytes::Shared(bytes.clone()));
+                        egui::Image::from_bytes(uri, egui::load::Bytes::Shared(bytes.clone()))
+                            .corner_radius(tokens::RADIUS_MD)
+                            .show_loading_spinner(false)
+                            .paint_at(ui, rect);
+                    }
+                    None => {
+                        // The name, for a file with no picture -- or one
+                        // whose picture is still being made.
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            sigil_ui::message::preview(&s.name, 10),
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            theme.text_secondary,
+                        );
+                    }
+                }
+                if s.kind == sigil_ui::attachment::VIDEO {
+                    let r = TILE * 0.18;
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        r,
+                        egui::Color32::from_black_alpha(140),
+                    );
+                    sigil::icon::draw(
+                        ui.painter(),
+                        egui::Rect::from_center_size(rect.center(), egui::vec2(r, r)),
+                        sigil::Icon::Play,
+                        egui::Color32::WHITE,
+                    );
+                }
+                // The way out, in the corner, over the picture.
+                let corner = egui::Rect::from_center_size(
+                    rect.right_top() + egui::vec2(-tokens::SPACING_SM, tokens::SPACING_SM),
+                    egui::vec2(tokens::BUTTON_SM, tokens::BUTTON_SM),
+                );
+                let out = ui.scope_builder(egui::UiBuilder::new().max_rect(corner), |ui| {
+                    sigil_ui::icon_button_named(
+                        ui,
+                        sigil_ui::Icon::Close,
+                        &format!("Remove {}", s.name),
+                    )
+                    .clicked()
+                });
+                if out.inner {
+                    remove = Some(i);
+                }
+                // Said to the tree, since the picture says nothing to it.
+                out.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Image, true, &s.name)
+                });
+            }
+        });
+        if let Some(i) = remove {
+            self.pane(at).staged.remove(i);
+        }
+        if let Some(why) = self.pane(at).staging_trouble.clone() {
+            ui.colored_label(theme.warning, egui::RichText::new(why).small());
+        }
+        ui.add_space(tokens::SPACING_XS);
+    }
+
     fn composer_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         // What Enter will do, said above the box. A composer that silently
         // means three different things depending on invisible state is one
@@ -3907,6 +4082,8 @@ impl ChatApp {
             completed = true;
         }
 
+        self.staged_ui(at, ui, theme);
+
         ui.horizontal(|ui| {
             // Room for both controls, measured rather than guessed: the field
             // took `available - one button` while two sat beside it, and Send
@@ -3950,11 +4127,14 @@ impl ChatApp {
             // Attach sits before Send, which is where every messenger puts
             // it: the last control on the row is the one that commits.
             if sigil_ui::icon_button(ui, sigil_ui::Icon::Attach)
-                .on_hover_text("Send a file. It is sealed before it leaves this machine.")
+                .on_hover_text(
+                    "Attach files -- pictures, clips, anything, up to four in a message. \
+                     They are sealed before they leave this machine.",
+                )
                 .clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_file()
+                && let Some(paths) = rfd::FileDialog::new().pick_files()
             {
-                self.send_as(Some(at), Cmd::SendFile(path));
+                self.stage(at, paths, ui.ctx());
             }
             let send = sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
                 .on_hover_text(if editing.is_some() {
@@ -3964,7 +4144,9 @@ impl ChatApp {
                 })
                 .clicked();
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (entered || send) && !self.pane(at).composing.trim().is_empty() {
+            let something =
+                !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
+            if (entered || send) && something {
                 // Taken, not cleared: if the send fails the text has to come
                 // back, and the session is what knows whether it did.
                 let text = std::mem::take(&mut self.pane(at).composing);
@@ -3974,14 +4156,17 @@ impl ChatApp {
                 // The keys, for every name still in the text.
                 let mentions = mention::mentions_in(&text, &pane.mentions);
                 pane.mentions.clear();
+                // And the files, in the order they were staged.
+                let files: Vec<std::path::PathBuf> =
+                    pane.staged.drain(..).map(|s| s.path).collect();
                 self.send_as(
                     Some(at),
                     Cmd::Post(session::Draft {
-                        text,
+                        text: text.trim().to_string(),
                         reply: replying,
                         edit: editing,
                         mentions,
-                        files: Vec::new(),
+                        files,
                     }),
                 );
                 self.send_as(Some(at), Cmd::Typing(false));

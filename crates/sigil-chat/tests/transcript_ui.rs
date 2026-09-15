@@ -4092,3 +4092,189 @@ fn escape_closes_the_list_and_enter_then_sends() {
     assert!(sent.contains("hi @Ad"), "{sent}");
     assert!(sent.contains("mentions: []"), "nothing was chosen: {sent}");
 }
+
+// ---------------------------------------------------------------------------
+// Files in the composer.
+// ---------------------------------------------------------------------------
+
+/// Files picked wait in the composer, each shown with a way to take it
+/// back out, and go with the next message in the order they were staged
+/// -- less any taken out. No more than the wire's four; the rest are
+/// refused and said so.
+#[test]
+fn staged_files_are_shown_removable_and_sent_with_the_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<std::path::PathBuf> = ["a.png", "b.png", "c.mp4", "d.png", "e.png"]
+        .iter()
+        .map(|n| {
+            let p = dir.path().join(n);
+            std::fs::write(&p, b"not really").unwrap();
+            p
+        })
+        .collect();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(the_room());
+    app.stage_for_test(me(), "", paths.clone());
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let recorder = asked.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+            *recorder.borrow_mut() = app.asked_for_test().to_vec();
+        });
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    for name in ["a.png", "b.png", "c.mp4", "d.png"] {
+        assert!(
+            h.query_by_label(&format!("Remove {name}")).is_some(),
+            "{name}: {said}"
+        );
+    }
+    assert!(
+        h.query_by_label("Remove e.png").is_none(),
+        "the fifth is refused: {said}"
+    );
+    assert!(said.contains("up to 4 files"), "and said: {said}");
+
+    h.get_by_label("Remove b.png").click();
+    h.run();
+    assert!(h.query_by_label("Remove b.png").is_none());
+    assert!(h.query_by_label("Remove a.png").is_some());
+
+    composer(&h).focus();
+    composer(&h).type_text("from the walk");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("Post("), "{sent}");
+    assert!(sent.contains("from the walk"), "{sent}");
+    for name in ["a.png", "c.mp4", "d.png"] {
+        assert!(
+            sent.contains(name),
+            "{name} should go with the message: {sent}"
+        );
+    }
+    assert!(
+        !sent.contains("b.png"),
+        "the one taken out does not: {sent}"
+    );
+    let a = sent.find("a.png").unwrap();
+    let c = sent.find("c.mp4").unwrap();
+    let d = sent.find("d.png").unwrap();
+    assert!(a < c && c < d, "in the order staged: {sent}");
+    // And the composer is empty again.
+    h.run();
+    assert!(
+        h.query_by_label("Remove a.png").is_none(),
+        "{}",
+        text_of(&h)
+    );
+}
+
+/// Files alone are a message: nothing typed, Send sends them.
+#[test]
+fn files_alone_are_a_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("only.png");
+    std::fs::write(&p, b"x").unwrap();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(the_room());
+    app.stage_for_test(me(), "", vec![p]);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let recorder = asked.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+            *recorder.borrow_mut() = app.asked_for_test().to_vec();
+        });
+    h.run();
+    h.get_by_label("Send").click();
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Post(") && sent.contains("only.png"),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("text: \"\""),
+        "no words, and none invented: {sent}"
+    );
+}
+
+/// The staged files, looked at: two pictures decoded to thumbnails, a clip
+/// with its play mark, and the way out on each.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn composer_files_dark() {
+    let fixtures = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sigil-video/tests/fixtures"
+    ));
+    let paths = vec![
+        fixtures.join("frames/10.png"),
+        fixtures.join("frames/44.png"),
+        fixtures.join("two_seconds.mp4"),
+    ];
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(the_room());
+    app.stage_for_test(me(), "", paths);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            // Without the loaders every thumbnail is egui's broken-picture
+            // mark, which is what the first take of this snapshot showed.
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    // The thumbnails are made on threads; give them a moment to land.
+    for _ in 0..40 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    hide_column(&mut h);
+    h.snapshot("composer_files_dark");
+}
