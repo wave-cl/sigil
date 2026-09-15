@@ -4,7 +4,7 @@
 //! closed. Where it cannot exist, closing the window must not make the program
 //! unreachable — see [`Tray::support`].
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use crate::support::{Session, Support};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -42,18 +42,12 @@ const QUIT: &str = "sigil-quit";
 /// callbacks run on the desktop's own thread, so they leave the event here
 /// and ask the interface to look, and the interface drains it each pass.
 static PENDING: Mutex<Vec<TrayAction>> = Mutex::new(Vec::new());
-/// How to ask the interface to look: egui's `request_repaint`, set once the
-/// interface exists. Without it a press would wait for the next pass, which
-/// on an idle window is whenever something else happens.
-static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 fn report(action: TrayAction) {
     if let Ok(mut pending) = PENDING.lock() {
         pending.push(action);
     }
-    if let Some(wake) = WAKE.get() {
-        wake();
-    }
+    crate::wake();
 }
 
 impl Default for Tray {
@@ -147,12 +141,6 @@ impl Tray {
 
     pub fn support(&self) -> &Support {
         &self.support
-    }
-
-    /// How to ask the interface to look when something happens at the tray.
-    /// Once per process; a later call is ignored.
-    pub fn wake_with(f: impl Fn() + Send + Sync + 'static) {
-        let _ = WAKE.set(Box::new(f));
     }
 
     /// What has happened at the tray since last asked.

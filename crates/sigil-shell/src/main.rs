@@ -206,10 +206,10 @@ fn main() -> eframe::Result<()> {
             // thread — the macOS menu bar and Linux's GTK context both insist —
             // and eframe's creator is the one place that is guaranteed to be.
             let platform = sigil_platform::Platform::new();
-            // A press on the tray is seen at once rather than at the next
-            // pass, which on an idle window is whenever something else
-            // happens.
-            sigil_platform::Tray::wake_with({
+            // A press on the tray or on a notification is seen at once
+            // rather than at the next pass, which on an idle window is
+            // whenever something else happens.
+            sigil_platform::wake_with({
                 let ctx = cc.egui_ctx.clone();
                 move || ctx.request_repaint()
             });

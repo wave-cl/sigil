@@ -2717,7 +2717,12 @@ async fn a_mention_reaches_the_person_named_and_reading_clears_it() {
         "the mention is counted with the unread on Bob's side: {:?}",
         bob.state().conversations
     );
-    let announced = bob.state().mentions;
+    let announced: Vec<_> = bob
+        .state()
+        .arrivals
+        .into_iter()
+        .filter(|a| a.mentions_me)
+        .collect();
     assert_eq!(announced.len(), 1, "{announced:?}");
     assert_eq!(announced[0].from, a_id);
     assert_eq!(announced[0].channel, channel);
@@ -2747,7 +2752,23 @@ async fn a_mention_reaches_the_person_named_and_reading_clears_it() {
         Some(0),
         "a mention of Bob is not a mention of Carol"
     );
-    assert!(carol.state().mentions.is_empty());
+    // Carol got the message as an arrival all the same -- what is said
+    // out loud while she is away -- naming who, where, and what.
+    let carols_arrivals = carol.state().arrivals;
+    assert_eq!(carols_arrivals.len(), 1, "{carols_arrivals:?}");
+    assert!(!carols_arrivals[0].mentions_me);
+    assert!(!carols_arrivals[0].direct, "a room, not a direct message");
+    assert_eq!(carols_arrivals[0].channel, channel);
+    assert!(
+        carols_arrivals[0].said.contains("look at this"),
+        "{carols_arrivals:?}"
+    );
+    // And Alice, who wrote it, has nothing arriving.
+    assert!(
+        alice.state().arrivals.is_empty(),
+        "{:?}",
+        alice.state().arrivals
+    );
 
     // Reading clears the count; the line says who was mentioned, with the
     // key the part carried, and that it was us.

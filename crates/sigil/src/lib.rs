@@ -24,7 +24,8 @@ pub mod tokens;
 pub use account::{Account, Unlocked};
 pub use accounts::Accounts;
 pub use app::{
-    App, AppAction, AppContext, AppResponse, Attention, Notify, Silent, TabNotifications,
+    App, AppAction, AppContext, AppResponse, Attention, Notice, Notify, Silent, Sound,
+    TabNotifications, Target,
 };
 pub use deck::{Layout, layout};
 pub use icon::{Icon, icon_button, icon_button_named, icon_button_tinted};

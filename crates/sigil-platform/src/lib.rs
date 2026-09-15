@@ -23,6 +23,26 @@ pub mod notify;
 pub mod support;
 pub mod tray;
 
+use std::sync::OnceLock;
+
+/// How to ask the interface to look when something happens off its thread
+/// -- a press on the tray, a notification pressed: egui's `request_repaint`,
+/// set once the interface exists. Without it the event would wait for the
+/// next pass, which on an idle window is whenever something else happens.
+static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Set what [`wake`] does. Once per process; a later call is ignored.
+pub fn wake_with(f: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKE.set(Box::new(f));
+}
+
+/// Ask the interface to look.
+pub(crate) fn wake() {
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+}
+
 pub use autostart::Autostart;
 pub use badge::Badge;
 pub use deeplink::Link;

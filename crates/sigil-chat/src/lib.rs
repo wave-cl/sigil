@@ -12,7 +12,9 @@ pub use session::{
 
 use std::collections::{HashMap, HashSet};
 
-use sigil::app::{App, AppAction, AppContext, AppResponse, TabNotifications};
+use sigil::app::{
+    App, AppAction, AppContext, AppResponse, Notice, Sound, TabNotifications, Target,
+};
 use sigil::{ColorTheme, tokens};
 use sigil_net::discovery;
 use sqnr::config::Config;
@@ -232,6 +234,42 @@ fn mention_said(m: &session::Mention, called: &str, held: usize) -> (String, Str
         format!("{who} — {}", m.said)
     };
     (summary, body)
+}
+
+/// One or several messages arrived in one conversation, in words: who and
+/// where, and what the last one said. With several identities held, which
+/// one it came to.
+fn arrivals_said(together: &[session::Arrival], called: &str, held: usize) -> (String, String) {
+    let last = together.last().expect("at least one arrival");
+    let room = if last.public {
+        format!("#{}", last.conversation)
+    } else {
+        last.conversation.clone()
+    };
+    let mut summary = match (together.len(), last.direct) {
+        (1, true) => last.from_label.clone(),
+        (1, false) => format!("{} in {room}", last.from_label),
+        (n, true) => format!("{n} new messages from {}", last.from_label),
+        (n, false) => format!("{n} new messages in {room}"),
+    };
+    if held > 1 {
+        summary.push_str(&format!(", as {called}"));
+    }
+    let body = if together.len() > 1 && !last.direct {
+        format!("{}: {}", last.from_label, last.said)
+    } else {
+        last.said.clone()
+    };
+    (summary, body)
+}
+
+/// Where a notification about `channel` at `at` leads.
+fn target(at: &At, channel: [u8; 32]) -> Target {
+    Target {
+        identity: at.0,
+        exchange: at.1.clone(),
+        channel,
+    }
 }
 
 /// Where a picture sits inside the viewer, and how large.
@@ -1518,10 +1556,33 @@ impl App for ChatApp {
         std::mem::take(&mut self.asked)
     }
 
+    /// A notification pressed: the identity it came to is shown, at its
+    /// exchange, with the conversation open.
+    fn open(&mut self, ctx: &mut AppContext<'_>, target: &Target) -> bool {
+        let at: At = (target.identity, target.exchange.clone());
+        if !self.sessions.contains_key(&at) {
+            return false;
+        }
+        let held = ctx
+            .accounts
+            .iter()
+            .position(|a| a.unlocked().is_some_and(|u| u.me() == target.identity));
+        if let Some(i) = held {
+            ctx.accounts.switch_to(i);
+        }
+        ctx.accounts.show_exchange(
+            target.identity,
+            (!target.exchange.is_empty()).then(|| target.exchange.clone()),
+        );
+        self.send_as(Some(&at), Cmd::Show(target.channel));
+        true
+    }
+
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
         self.announce_rings(ctx);
         self.announce_mentions(ctx);
+        self.announce_arrivals(ctx);
         self.join_answered_calls(ctx, egui_ctx);
         self.end_calls_nobody_is_in();
         // **A window carrying audio is not idle.** Everything else here sleeps
@@ -5289,7 +5350,7 @@ impl ChatApp {
         // and the notification then has to say which, or it names a caller,
         // a conversation, and no way to tell where either of them is.
         let held = self.sessions.len();
-        let mut fresh: Vec<String> = Vec::new();
+        let mut fresh: Vec<(String, Target)> = Vec::new();
         for (at, session) in &self.sessions {
             // The rings, not the whole state: this runs for every identity on
             // every pass, and what it wants is a list that is nearly always
@@ -5304,15 +5365,19 @@ impl ChatApp {
                 // about yet -- which happens about as often as a telephone
                 // rings, rather than sixty times a second.
                 let me = session.state().mine.label(&at.0);
-                fresh.push(ring_said(&ring.from, &ring.label, &me, held));
+                fresh.push((
+                    ring_said(&ring.from, &ring.label, &me, held),
+                    target(at, ring.channel),
+                ));
             }
         }
         self.announce_rings_in(ctx, fresh);
     }
 
     /// The deciding half: rings nobody has been told about yet are said,
-    /// and the window is asked for.
-    fn announce_rings_in(&mut self, ctx: &mut AppContext<'_>, fresh: Vec<String>) {
+    /// with a sound, leading to the conversation ringing; and the window
+    /// is asked for.
+    fn announce_rings_in(&mut self, ctx: &mut AppContext<'_>, fresh: Vec<(String, Target)>) {
         if !fresh.is_empty() {
             // A call reaches somebody looking at something else: the window
             // comes forward, and where the desktop will not let it, the
@@ -5321,8 +5386,13 @@ impl ChatApp {
             self.asked
                 .push(AppAction::Attention(sigil::Attention::Critical));
         }
-        for said in fresh {
-            ctx.notify.post("Incoming call", &said);
+        for (said, to) in fresh {
+            ctx.notify.notice(Notice {
+                summary: "Incoming call",
+                body: &said,
+                target: Some(to),
+                sound: Sound::Ring,
+            });
         }
     }
 
@@ -5334,14 +5404,14 @@ impl ChatApp {
     /// notification later.
     fn announce_mentions(&mut self, ctx: &mut AppContext<'_>) {
         let held = self.sessions.len();
-        let mut found: Vec<(String, Vec<session::Mention>)> = Vec::new();
+        let mut found: Vec<(At, String, Vec<session::Mention>)> = Vec::new();
         for (at, session) in &self.sessions {
             let mentions = session.mentions();
             if mentions.is_empty() {
                 continue;
             }
             let me = session.state().mine.label(&at.0);
-            found.push((me, mentions));
+            found.push((at.clone(), me, mentions));
         }
         self.announce_mentions_in(ctx, held, found);
     }
@@ -5353,16 +5423,21 @@ impl ChatApp {
         &mut self,
         ctx: &mut AppContext<'_>,
         held: usize,
-        found: Vec<(String, Vec<session::Mention>)>,
+        found: Vec<(At, String, Vec<session::Mention>)>,
     ) {
-        for (me, mentions) in found {
+        for (at, me, mentions) in found {
             for m in mentions {
                 if !self.announced.insert((m.channel, m.seq)) {
                     continue;
                 }
                 if ctx.unfocused || !m.in_open {
                     let (summary, body) = mention_said(&m, &me, held);
-                    ctx.notify.post(&summary, &body);
+                    ctx.notify.notice(Notice {
+                        summary: &summary,
+                        body: &body,
+                        target: Some(target(&at, m.channel)),
+                        sound: Sound::Default,
+                    });
                 }
                 // Worth noticing, not worth interrupting for: the icon
                 // bounces once while the window is not in front.
@@ -5370,6 +5445,60 @@ impl ChatApp {
                     self.asked
                         .push(AppAction::Attention(sigil::Attention::Informational));
                 }
+            }
+        }
+    }
+
+    /// Say out loud that a message arrived, when we are not looking.
+    ///
+    /// The same shape as the mentions, and after them: a mention has its
+    /// own words and is not said twice. Only while the window is not in
+    /// front -- in front, a message in another conversation is what the
+    /// list's count is for. Several arriving together in one conversation
+    /// are one notification.
+    fn announce_arrivals(&mut self, ctx: &mut AppContext<'_>) {
+        let held = self.sessions.len();
+        let mut found: Vec<(At, String, Vec<session::Arrival>)> = Vec::new();
+        for (at, session) in &self.sessions {
+            let arrivals = session.arrivals();
+            if arrivals.is_empty() {
+                continue;
+            }
+            let me = session.state().mine.label(&at.0);
+            found.push((at.clone(), me, arrivals));
+        }
+        self.announce_arrivals_in(ctx, held, found);
+    }
+
+    /// The deciding half. Told once per message whether or not it is
+    /// posted: one read on screen as it arrived is not owed a notification
+    /// later.
+    fn announce_arrivals_in(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        held: usize,
+        found: Vec<(At, String, Vec<session::Arrival>)>,
+    ) {
+        for (at, me, arrivals) in found {
+            let mut fresh: std::collections::BTreeMap<[u8; 32], Vec<session::Arrival>> =
+                Default::default();
+            for a in arrivals {
+                // Mentions are said with their own words, before this.
+                if a.mentions_me || !self.announced.insert((a.channel, a.seq)) {
+                    continue;
+                }
+                if ctx.unfocused {
+                    fresh.entry(a.channel).or_default().push(a);
+                }
+            }
+            for (channel, together) in fresh {
+                let (summary, body) = arrivals_said(&together, &me, held);
+                ctx.notify.notice(Notice {
+                    summary: &summary,
+                    body: &body,
+                    target: Some(target(&at, channel)),
+                    sound: Sound::Default,
+                });
             }
         }
     }
@@ -5913,23 +6042,49 @@ mod mention_notice_tests {
         PubKey::new([b; 32])
     }
 
+    /// Where the test's session lives: the identity, at its default
+    /// exchange.
+    fn at() -> At {
+        (key(4), String::new())
+    }
+
     /// A notifier that writes down what it was asked to say. `Silent` is
     /// the only other one, and silence is what a working notifier looks
     /// like from inside a test.
-    struct Noted(RefCell<Vec<(String, String)>>);
+    struct Noted(
+        RefCell<Vec<(String, String)>>,
+        RefCell<Vec<(Option<Target>, Sound)>>,
+    );
+
+    impl Noted {
+        fn new() -> Noted {
+            Noted(RefCell::new(Vec::new()), RefCell::new(Vec::new()))
+        }
+    }
 
     impl sigil::app::Notify for Noted {
-        fn post(&self, summary: &str, body: &str) -> bool {
-            self.0.borrow_mut().push((summary.into(), body.into()));
+        fn notice(&self, notice: sigil::Notice<'_>) -> bool {
+            self.0
+                .borrow_mut()
+                .push((notice.summary.into(), notice.body.into()));
+            self.1.borrow_mut().push((notice.target, notice.sound));
             true
         }
     }
 
     fn a_mention(seq: u64, in_open: bool) -> session::Mention {
-        session::Mention {
+        let mut m = an_arrival(seq, in_open);
+        m.mentions_me = true;
+        m
+    }
+
+    fn an_arrival(seq: u64, in_open: bool) -> session::Arrival {
+        session::Arrival {
             channel: [8u8; 32],
             seq,
             from: key(2),
+            direct: false,
+            mentions_me: false,
             from_label: "Ada".into(),
             conversation: "general".into(),
             public: true,
@@ -5959,7 +6114,7 @@ mod mention_notice_tests {
     /// screen while the window is in front, which was read as it arrived.
     #[test]
     fn a_mention_is_said_once_when_not_looking_and_never_when_looking() {
-        let noted = Noted(RefCell::new(Vec::new()));
+        let noted = Noted::new();
         let mut nav = sigil::navigator::Navigator::default();
         let mut accounts =
             sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
@@ -5968,7 +6123,11 @@ mod mention_notice_tests {
 
         // Not in front: said.
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
-        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(1, true)])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(1, true)])],
+        );
         assert_eq!(noted.0.borrow().len(), 1, "{:?}", noted.0.borrow());
         let (summary, body) = noted.0.borrow()[0].clone();
         assert_eq!(summary, "Ada mentioned you in #general");
@@ -5980,17 +6139,29 @@ mod mention_notice_tests {
 
         // The same mention on the next pass: not again.
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
-        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(1, true)])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(1, true)])],
+        );
         assert_eq!(noted.0.borrow().len(), 1, "told twice");
 
         // In front and on screen: read as it arrived, nothing to say.
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
-        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(2, true)])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(2, true)])],
+        );
         assert_eq!(noted.0.borrow().len(), 1, "said about a message on screen");
 
         // In front but in another conversation: said.
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
-        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(3, false)])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(3, false)])],
+        );
         assert_eq!(noted.0.borrow().len(), 2);
     }
 
@@ -6001,7 +6172,7 @@ mod mention_notice_tests {
     /// answered.
     #[test]
     fn a_mention_away_asks_for_attention_and_a_ring_asks_to_be_presented() {
-        let noted = Noted(RefCell::new(Vec::new()));
+        let noted = Noted::new();
         let mut nav = sigil::navigator::Navigator::default();
         let mut accounts =
             sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
@@ -6009,7 +6180,11 @@ mod mention_notice_tests {
         let mut app = ChatApp::new();
 
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
-        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(1, true)])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(1, true)])],
+        );
         assert_eq!(
             app.asked(),
             vec![AppAction::Attention(sigil::Attention::Informational)]
@@ -6017,11 +6192,18 @@ mod mention_notice_tests {
         assert_eq!(app.asked(), vec![], "taken once");
 
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
-        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(2, false)])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(2, false)])],
+        );
         assert_eq!(app.asked(), vec![], "in front: nothing asked");
 
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
-        app.announce_rings_in(&mut c, vec!["Ada is calling".into()]);
+        app.announce_rings_in(
+            &mut c,
+            vec![("Ada is calling".into(), target(&at(), [8u8; 32]))],
+        );
         assert_eq!(
             app.asked(),
             vec![
@@ -6047,6 +6229,137 @@ mod mention_notice_tests {
         private.conversation = "the four of us".into();
         let (s, _) = mention_said(&private, "x", 1);
         assert_eq!(s, "Ada mentioned you in the four of us");
+    }
+
+    /// A message arriving while the window is not in front is said once,
+    /// leading to its conversation, with the ordinary sound; several in one
+    /// conversation together are one notification that counts them; a
+    /// mention is left to its own words; in front, nothing is said and
+    /// nothing is owed later.
+    #[test]
+    fn arrivals_are_said_while_away_grouped_by_conversation_and_lead_back() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        // Away: one message, said with who and where and what.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 1, "{:?}", noted.0.borrow());
+        let (summary, body) = noted.0.borrow()[0].clone();
+        assert_eq!(summary, "Ada in #general");
+        assert_eq!(body, "look at this");
+        let (target, sound) = noted.1.borrow()[0].clone();
+        assert_eq!(
+            target,
+            Some(Target {
+                identity: key(4),
+                exchange: String::new(),
+                channel: [8u8; 32],
+            })
+        );
+        assert_eq!(sound, Sound::Default);
+
+        // The same message again: not twice.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 1);
+
+        // Three at once in one conversation: one notification, counted.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(
+                at(),
+                "me".into(),
+                vec![
+                    an_arrival(2, false),
+                    an_arrival(3, false),
+                    an_arrival(4, false),
+                ],
+            )],
+        );
+        assert_eq!(noted.0.borrow().len(), 2, "{:?}", noted.0.borrow());
+        let (summary, body) = noted.0.borrow()[1].clone();
+        assert_eq!(summary, "3 new messages in #general");
+        assert_eq!(body, "Ada: look at this");
+
+        // A mention among them is not said here: it has its own words.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(5, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 2);
+
+        // In front: nothing said, and the message is not owed later.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(6, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 2);
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(6, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 2, "read as it arrived: not owed");
+    }
+
+    /// A direct message names the person, not a room; several identities
+    /// held say which one it came to. A ring carries the ring sound and
+    /// leads to the ringing conversation; a mention carries the ordinary
+    /// one.
+    #[test]
+    fn arrivals_are_worded_for_direct_messages_and_several_identities() {
+        let mut direct = an_arrival(1, false);
+        direct.direct = true;
+        direct.conversation = "Ada".into();
+        let (summary, body) = arrivals_said(&[direct.clone()], "me", 1);
+        assert_eq!(summary, "Ada");
+        assert_eq!(body, "look at this");
+        let (summary, body) = arrivals_said(&[direct.clone(), direct.clone()], "me", 2);
+        assert_eq!(summary, "2 new messages from Ada, as me");
+        assert_eq!(body, "look at this");
+
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_rings_in(
+            &mut c,
+            vec![("Ada is calling".into(), target(&at(), [9u8; 32]))],
+        );
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(1, false)])],
+        );
+        let carried = noted.1.borrow().clone();
+        assert_eq!(carried.len(), 2);
+        assert_eq!(carried[0].1, Sound::Ring);
+        assert_eq!(carried[0].0.as_ref().map(|t| t.channel), Some([9u8; 32]));
+        assert_eq!(carried[1].1, Sound::Default);
+        assert_eq!(carried[1].0.as_ref().map(|t| t.channel), Some([8u8; 32]));
     }
 }
 

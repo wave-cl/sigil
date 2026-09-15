@@ -1539,3 +1539,96 @@ fn closing_the_window_puts_sigil_in_the_tray_and_quit_lets_it_go() {
         window_asks(&h)
     );
 }
+
+/// A notification pressed brings the window up and is handed to the apps;
+/// the one it belongs to shows it and is switched to. One that belongs to
+/// nobody brings the window up and nothing else.
+#[test]
+fn a_pressed_notification_opens_the_app_it_came_from() {
+    use sigil::{Notice, Notify, Target};
+    struct Pressing(std::rc::Rc<std::cell::RefCell<Vec<Target>>>);
+    impl Notify for Pressing {
+        fn notice(&self, _notice: Notice<'_>) -> bool {
+            false
+        }
+        fn pressed(&self) -> Vec<Target> {
+            std::mem::take(&mut *self.0.borrow_mut())
+        }
+    }
+    struct Opening {
+        title: &'static str,
+        mine: bool,
+        opened: std::rc::Rc<std::cell::RefCell<Vec<Target>>>,
+    }
+    impl App for Opening {
+        fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+            ui.heading(format!("{} here", self.title));
+            AppResponse::default()
+        }
+        fn title(&self) -> &str {
+            self.title
+        }
+        fn open(&mut self, _ctx: &mut AppContext<'_>, target: &Target) -> bool {
+            if self.mine {
+                self.opened.borrow_mut().push(target.clone());
+            }
+            self.mine
+        }
+    }
+    let pressed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let apps: Vec<Box<dyn App>> = vec![
+        Box::new(Opening {
+            title: "Calls",
+            mine: false,
+            opened: opened.clone(),
+        }),
+        Box::new(Opening {
+            title: "Chat",
+            mine: true,
+            opened: opened.clone(),
+        }),
+    ];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]))
+        .with_notify(Box::new(Pressing(pressed.clone())));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            shell.update_all(&ctx, false);
+            shell.ui(ui);
+        });
+    h.run();
+    assert!(
+        said(&h).contains("Calls here"),
+        "the first app to begin with"
+    );
+
+    let target = Target {
+        identity: sqnr_core::PubKey::new([4u8; 32]),
+        exchange: String::new(),
+        channel: [8u8; 32],
+    };
+    pressed.borrow_mut().push(target.clone());
+    h.step();
+    assert!(
+        window_asks(&h).contains(&"Visible(true)".to_string()),
+        "the window is brought up: {:?}",
+        window_asks(&h)
+    );
+    h.step();
+    assert_eq!(
+        *opened.borrow(),
+        vec![target],
+        "handed to the app that owns it"
+    );
+    assert!(
+        said(&h).contains("Chat here"),
+        "and switched to it: {}",
+        said(&h)
+    );
+}

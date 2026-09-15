@@ -123,6 +123,17 @@ X11's class -- which is also what `StartupWMClass=sigil` in the `.desktop`
 file matches. Both are `Capability` rows in the Desktop pane, so an absent
 badge has a stated reason.
 
+**Notifications.** A message arriving while the window is not in front
+is said out loud -- who, where, and what; several arriving together in
+one conversation are one notice that counts them; a mention keeps its own
+words. A ring is said with a sound (one chime -- sigil has no ringer of
+its own yet) and brings the window up. Pressing a notification brings the
+window up on the conversation it was about: each notification with
+somewhere to lead is watched on a thread of its own until pressed or
+dismissed, which is the only shape either desktop's library offers, so no
+more than 32 are watched at once and the rest lead nowhere. On Linux the
+press is the daemon's `default` action, which not every daemon delivers.
+
 ## Releasing
 
 `.github/workflows/release.yml`, on a pushed `v*` tag. Four artefacts, and every

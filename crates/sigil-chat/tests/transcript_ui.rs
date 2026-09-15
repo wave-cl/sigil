@@ -221,7 +221,7 @@ fn a_conversation() -> ChatState {
         i_am_admin: true,
         topic: String::new(),
         ringing: Vec::new(),
-        mentions: Vec::new(),
+        arrivals: Vec::new(),
         devices: Vec::new(),
         linked: None,
         credential: None,

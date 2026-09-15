@@ -355,6 +355,7 @@ impl Shell {
         for action in asked {
             self.act(action, egui_ctx);
         }
+        self.open_pressed(egui_ctx);
         self.badge();
         self.tray_actions(egui_ctx);
         self.apply_nav();
@@ -380,6 +381,28 @@ impl Shell {
                 TrayAction::Quit => {
                     self.quitting = true;
                     egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    /// Notifications pressed since last pass: the window comes up, and the
+    /// app the notification was about shows it.
+    fn open_pressed(&mut self, egui_ctx: &egui::Context) {
+        for target in self.platform.pressed() {
+            self.present(egui_ctx);
+            for (i, app) in self.apps.iter_mut().enumerate() {
+                let mut ctx = AppContext {
+                    navigator: &mut self.navigator,
+                    accounts: &mut self.accounts,
+                    unfocused: false,
+                    notify: self.platform.as_ref(),
+                    connections: &self.connections,
+                };
+                if app.open(&mut ctx, &target) {
+                    self.opened[i] = true;
+                    self.navigator.switch_to(AppId(i));
+                    break;
                 }
             }
         }
@@ -430,6 +453,12 @@ impl Shell {
     /// Whether the window is closed to the tray.
     pub fn hidden(&self) -> bool {
         self.hidden
+    }
+
+    /// Somewhere else to say things: a recorder, in a test.
+    pub fn with_notify(mut self, notify: Box<dyn Notify>) -> Self {
+        self.platform = notify;
+        self
     }
 
     /// Hand the shell what a tray would have reported. Tests only.

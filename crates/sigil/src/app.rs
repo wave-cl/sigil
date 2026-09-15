@@ -160,19 +160,71 @@ impl AppContext<'_> {
     }
 }
 
+/// Where a notification leads: the conversation it is about, at the
+/// identity and exchange it belongs to. Pressing the notification opens it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub identity: sqnr_core::PubKey,
+    pub exchange: String,
+    pub channel: [u8; 32],
+}
+
+/// Whether a notification makes a sound, and which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sound {
+    #[default]
+    None,
+    /// The desktop's ordinary notification sound: a message.
+    Default,
+    /// Something more insistent: a call.
+    Ring,
+}
+
+/// One notification: what it says, where it leads, what it sounds like.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice<'a> {
+    pub summary: &'a str,
+    pub body: &'a str,
+    pub target: Option<Target>,
+    pub sound: Sound,
+}
+
+impl<'a> Notice<'a> {
+    /// Words alone: no sound, nowhere to go.
+    pub fn plain(summary: &'a str, body: &'a str) -> Notice<'a> {
+        Notice {
+            summary,
+            body,
+            target: None,
+            sound: Sound::None,
+        }
+    }
+}
+
 /// Telling somebody something when they are not looking at sigil.
 ///
 /// A trait so that `sigil` needs no dependency on the desktop crates, and so a
 /// test can watch what would have been said without a notification daemon.
 pub trait Notify {
-    fn post(&self, summary: &str, body: &str) -> bool;
+    /// Post a notification. Returns whether it went out.
+    fn notice(&self, notice: Notice<'_>) -> bool;
+
+    /// Words alone.
+    fn post(&self, summary: &str, body: &str) -> bool {
+        self.notice(Notice::plain(summary, body))
+    }
+
+    /// The targets of notifications pressed since last asked.
+    fn pressed(&self) -> Vec<Target> {
+        Vec::new()
+    }
 }
 
 /// Says nothing, for tests and for a session with no desktop at all.
 pub struct Silent;
 
 impl Notify for Silent {
-    fn post(&self, _summary: &str, _body: &str) -> bool {
+    fn notice(&self, _notice: Notice<'_>) -> bool {
         false
     }
 }
@@ -192,6 +244,13 @@ pub trait App {
     /// `update`'s arguments so an app with nothing to ask changes nothing.
     fn asked(&mut self) -> Vec<AppAction> {
         Vec::new()
+    }
+
+    /// Somebody pressed a notification: show what it was about, if it is
+    /// this app's. The shell has already brought the window up, and
+    /// switches to the app that says yes.
+    fn open(&mut self, _ctx: &mut AppContext<'_>, _target: &Target) -> bool {
+        false
     }
 
     /// Whether [`update`](App::update) should run before this app has ever

@@ -189,11 +189,11 @@ pub struct Mentioned {
     pub label: String,
 }
 
-/// A message that mentions us, arrived while this session was up: what the
-/// interface announces. Derived from the log every pass, like [`Ring`], so
-/// there is nothing to store and nothing to clear.
+/// A message from somebody else, arrived while this session was up: what
+/// the interface announces. Derived from the log every pass, like [`Ring`],
+/// so there is nothing to store and nothing to clear.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mention {
+pub struct Arrival {
     pub channel: [u8; 32],
     pub seq: u64,
     pub from: PubKey,
@@ -202,11 +202,19 @@ pub struct Mention {
     /// What we call the conversation.
     pub conversation: String,
     pub public: bool,
-    /// What they said, shortened.
+    /// A conversation with one person, where the conversation *is* them.
+    pub direct: bool,
+    /// What they said, shortened -- or what they sent, for files alone.
     pub said: String,
     /// The conversation is the one on screen.
     pub in_open: bool,
+    /// It names us.
+    pub mentions_me: bool,
 }
+
+/// An arrival that names us. The same record; the name is what it was
+/// called when only mentions were said out loud.
+pub type Mention = Arrival;
 
 /// Something that happened *to* the conversation rather than in it.
 ///
@@ -621,7 +629,9 @@ pub struct ChatState {
     pub ringing: Vec<Ring>,
     /// Messages mentioning us that arrived while this session was up, in
     /// every conversation. See [`Mention`].
-    pub mentions: Vec<Mention>,
+    /// Every message from somebody else that arrived live; the ones that
+    /// name us are the mentions.
+    pub arrivals: Vec<Arrival>,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -1308,7 +1318,18 @@ impl ChatHandle {
     /// Messages mentioning us that arrived while this session was up. The
     /// same shape as [`ringing`](Self::ringing), for the same reason.
     pub fn mentions(&self) -> Vec<Mention> {
-        self.state.borrow().mentions.clone()
+        self.state
+            .borrow()
+            .arrivals
+            .iter()
+            .filter(|a| a.mentions_me)
+            .cloned()
+            .collect()
+    }
+
+    /// Every message from somebody else that arrived live.
+    pub fn arrivals(&self) -> Vec<Arrival> {
+        self.state.borrow().arrivals.clone()
     }
 
     /// How much is waiting here, across every conversation.
@@ -3733,20 +3754,21 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     }
     ringing.sort_by_key(|r| r.seq);
 
-    // Messages mentioning us that arrived live, anywhere -- what gets said
+    // Messages from others that arrived live, anywhere -- what gets said
     // out loud. From the log, like the rings, so nothing is stored: a
     // message is live if it came after what the channel had when the
     // exchange first answered for it this session, and history is not news.
-    let mut mentions: Vec<Mention> = Vec::new();
+    let mut arrivals: Vec<Arrival> = Vec::new();
     for (channel, known) in &desk.channels {
         let Some(live_from) = known.live_from else {
             continue;
         };
         for m in known.timeline.messages().filter(|m| m.seq > live_from) {
-            if m.account == me || m.redacted || !m.post.mentions().any(|k| *k == me) {
+            if m.account == me || m.redacted {
                 continue;
             }
-            mentions.push(Mention {
+            let words = m.post.body_text().unwrap_or("");
+            arrivals.push(Arrival {
                 channel: *channel,
                 seq: m.seq,
                 from: m.account,
@@ -3756,12 +3778,18 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     None => known.label.clone(),
                 },
                 public: known.public.unwrap_or(false),
-                said: stub(m.post.body_text().unwrap_or("")),
+                direct: known.peer.is_some(),
+                said: if words.is_empty() {
+                    only_files(m.post.attachments().map(|a| a.effective_kind()))
+                } else {
+                    stub(words)
+                },
                 in_open: desk.open == Some(*channel),
+                mentions_me: m.post.mentions().any(|k| *k == me),
             });
         }
     }
-    mentions.sort_by_key(|m| (m.channel, m.seq));
+    arrivals.sort_by_key(|m| (m.channel, m.seq));
 
     let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
     let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
@@ -3809,7 +3837,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(i_am_admin, i_am_admin);
         set!(topic, topic);
         set!(ringing, ringing);
-        set!(mentions, mentions);
+        set!(arrivals, arrivals);
         moved
     })
 }

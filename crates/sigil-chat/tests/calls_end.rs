@@ -223,3 +223,67 @@ fn labels(h: &egui_kittest::Harness<'static>) -> Vec<String> {
     walk(h.root(), &mut out);
     out
 }
+
+/// A notification pressed leads to its conversation: the identity it came
+/// to is switched to, and the conversation opened, at the exchange it came
+/// from. One for an identity this window does not hold is not this app's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let two = Account::unlocked_for_test([2u8; 32]);
+    let second = two.unlocked().expect("an open account").me();
+    let mut accounts = Accounts::of(vec![one, two]);
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(accounts.active_index(), 0);
+    assert_eq!(app.running_at_for_test().len(), 2, "both sessions up");
+
+    let target = sigil::Target {
+        identity: second,
+        exchange: String::new(),
+        channel: [7u8; 32],
+    };
+    let mut nav = Navigator::default();
+    let mut ctx = AppContext {
+        navigator: &mut nav,
+        accounts: &mut accounts,
+        unfocused: true,
+        notify: &Silent,
+        connections: &Default::default(),
+    };
+    // What the app asks its session is written down while a fixed state is
+    // installed; the sessions are real and the exchange answers nothing,
+    // so what was asked is the thing to look at.
+    app.show_state_for_test(sigil_chat::ChatState::default());
+    assert!(app.open(&mut ctx, &target), "this app's to open");
+    assert_eq!(
+        accounts.active_index(),
+        1,
+        "switched to the identity it came to"
+    );
+    let asked = app.asked_for_test().join(" | ");
+    assert!(
+        asked.contains(&format!("Show({:?})", [7u8; 32])),
+        "the conversation is asked for: {asked}"
+    );
+
+    // Somebody else's identity: not ours, nothing moved.
+    let stranger = sigil::Target {
+        identity: PubKey::new([9u8; 32]),
+        exchange: String::new(),
+        channel: [7u8; 32],
+    };
+    let mut nav = Navigator::default();
+    let mut ctx = AppContext {
+        navigator: &mut nav,
+        accounts: &mut accounts,
+        unfocused: true,
+        notify: &Silent,
+        connections: &Default::default(),
+    };
+    assert!(!app.open(&mut ctx, &stranger));
+    assert_eq!(accounts.active_index(), 1);
+}

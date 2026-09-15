@@ -2,6 +2,20 @@
 //!
 //! The reason this exists is the ring. Without it a call only reaches somebody
 //! who happens to be looking at the window, which is not a telephone.
+//!
+//! **A notification pressed leads somewhere.** One that carries a
+//! [`Target`] is watched, on a thread of its own, until it is pressed or
+//! dismissed; a press puts the target down for the interface, which brings
+//! the window up on that conversation. The watching is blocking on both
+//! desktops -- there is no other shape the libraries offer -- so it is
+//! bounded: past [`MOST_WATCHED`] notifications waiting at once, the rest
+//! go out as plain notices that lead nowhere, rather than as threads that
+//! may never end.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use sigil::{Notice, Sound, Target};
 
 use crate::support::{Session, Support};
 
@@ -11,8 +25,15 @@ use crate::support::{Session, Support};
 #[cfg(target_os = "macos")]
 const BUNDLE_ID: &str = "org.squic.sigil";
 
+/// How many notifications may be waiting to be pressed at once.
+const MOST_WATCHED: usize = 32;
+
 pub struct Notifier {
     support: Support,
+    /// Targets of notifications that were pressed, waiting to be collected.
+    pressed: Arc<Mutex<Vec<Target>>>,
+    /// How many threads are waiting on a notification right now.
+    watching: Arc<AtomicUsize>,
 }
 
 impl Default for Notifier {
@@ -23,7 +44,11 @@ impl Default for Notifier {
 
 impl Notifier {
     pub fn new() -> Notifier {
-        Notifier { support: probe() }
+        Notifier {
+            support: probe(),
+            pressed: Arc::new(Mutex::new(Vec::new())),
+            watching: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     pub fn support(&self) -> &Support {
@@ -37,6 +62,11 @@ impl Notifier {
     /// this: notifications can be off at the desktop level with nothing here
     /// able to tell.
     pub fn post(&self, summary: &str, body: &str) -> bool {
+        self.notice(Notice::plain(summary, body))
+    }
+
+    /// Post a notification, with where it leads and what it sounds like.
+    pub fn notice(&self, notice: Notice<'_>) -> bool {
         if !self.support.is_yes() {
             return false;
         }
@@ -44,12 +74,70 @@ impl Notifier {
         {
             let _ = notify_rust::set_application(BUNDLE_ID);
         }
-        notify_rust::Notification::new()
-            .summary(summary)
-            .body(body)
-            .appname("sigil")
-            .show()
+        let mut n = notify_rust::Notification::new();
+        n.summary(notice.summary).body(notice.body).appname("sigil");
+        if let Some(sound) = sound_name(notice.sound) {
+            n.sound_name(sound);
+        }
+        // A target, and room to watch it: the notification is sent on its
+        // own thread and watched there until pressed or dismissed.
+        let watched = notice
+            .target
+            .filter(|_| self.watching.load(Ordering::Relaxed) < MOST_WATCHED);
+        let Some(target) = watched else {
+            return n.show().is_ok();
+        };
+        // On Linux a press on the notification itself is the "default"
+        // action, which the daemon only reports for a notification that
+        // declared it. On macOS a press is a press, and an action would be
+        // a button.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        n.action("default", "Open");
+        let pressed = Arc::clone(&self.pressed);
+        let watching = Arc::clone(&self.watching);
+        watching.fetch_add(1, Ordering::Relaxed);
+        std::thread::Builder::new()
+            .name("sigil-notification".into())
+            .spawn(move || {
+                if let Ok(handle) = n.show() {
+                    handle.wait_for_action(|action| {
+                        if action == "default"
+                            && let Ok(mut pressed) = pressed.lock()
+                        {
+                            pressed.push(target);
+                            crate::wake();
+                        }
+                    });
+                }
+                watching.fetch_sub(1, Ordering::Relaxed);
+            })
             .is_ok()
+    }
+
+    /// The targets of notifications pressed since last asked.
+    pub fn pressed(&self) -> Vec<Target> {
+        self.pressed
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default()
+    }
+}
+
+/// The desktop's name for the sound, if any.
+///
+/// macOS takes the name of a system sound; the freedesktop sound naming
+/// specification has words for both cases.
+fn sound_name(sound: Sound) -> Option<&'static str> {
+    match sound {
+        Sound::None => None,
+        #[cfg(target_os = "macos")]
+        Sound::Default => Some("Tink"),
+        #[cfg(target_os = "macos")]
+        Sound::Ring => Some("Glass"),
+        #[cfg(not(target_os = "macos"))]
+        Sound::Default => Some("message-new-instant"),
+        #[cfg(not(target_os = "macos"))]
+        Sound::Ring => Some("phone-incoming-call"),
     }
 }
 
@@ -97,7 +185,42 @@ fn probe() -> Support {
 /// [`sigil::Notify`]. Implemented here rather than in the shell, which may not
 /// implement another crate's trait for another crate's type.
 impl sigil::Notify for Notifier {
-    fn post(&self, summary: &str, body: &str) -> bool {
-        Notifier::post(self, summary, body)
+    fn notice(&self, notice: Notice<'_>) -> bool {
+        Notifier::notice(self, notice)
+    }
+
+    fn pressed(&self) -> Vec<Target> {
+        Notifier::pressed(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ring sounds different from a message, and a plain notice is silent.
+    #[test]
+    fn a_ring_and_a_message_sound_different_and_a_plain_notice_is_silent() {
+        assert_eq!(sound_name(Sound::None), None);
+        assert!(sound_name(Sound::Default).is_some());
+        assert_ne!(sound_name(Sound::Default), sound_name(Sound::Ring));
+    }
+
+    /// What was pressed is held until asked, then handed over once.
+    #[test]
+    fn pressed_targets_are_handed_over_once() {
+        let notifier = Notifier {
+            support: Support::no("test"),
+            pressed: Arc::new(Mutex::new(Vec::new())),
+            watching: Arc::new(AtomicUsize::new(0)),
+        };
+        let target = Target {
+            identity: sqnr_core::PubKey::new([1u8; 32]),
+            exchange: "trunk.exchange".into(),
+            channel: [2u8; 32],
+        };
+        notifier.pressed.lock().unwrap().push(target.clone());
+        assert_eq!(notifier.pressed(), vec![target]);
+        assert_eq!(notifier.pressed(), vec![]);
     }
 }
