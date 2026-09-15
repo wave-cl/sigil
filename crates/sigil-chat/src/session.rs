@@ -369,6 +369,15 @@ pub struct Draft {
     pub token: u64,
 }
 
+/// Whether a message posted at `posted` can still be rewritten at `now`.
+///
+/// SIP-19 gives a rewrite a day: past that, every reader -- the sender's own
+/// included -- drops it on the floor. The interface offers Edit by this, and
+/// the session refuses by it, so a rewrite that cannot land is never sent.
+pub fn rewritable(posted: u64, now: u64) -> bool {
+    now.saturating_sub(posted) <= sqex_proto::message::EDIT_WINDOW
+}
+
 /// What became of the last [`Cmd::Post`]: which draft, and why it did not
 /// go, if it did not.
 ///
@@ -860,6 +869,17 @@ mod draft_tests {
 
     fn k(b: u8) -> PubKey {
         PubKey::new([b; 32])
+    }
+
+    /// A rewrite lands for a day and not a second longer -- the same edge
+    /// the reader's fold uses, so what is offered is what will be taken.
+    #[test]
+    fn a_rewrite_is_possible_for_exactly_the_window() {
+        let day = sqex_proto::message::EDIT_WINDOW;
+        assert!(rewritable(1_000, 1_000));
+        assert!(rewritable(1_000, 1_000 + day));
+        assert!(!rewritable(1_000, 1_000 + day + 1));
+        assert!(rewritable(2_000, 1_000), "a clock behind the exchange's");
     }
 
     /// Text first, the reply if any, then each mention once: the order a
@@ -4284,6 +4304,15 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     .get(&channel)
                     .and_then(|k| k.timeline.get(target))
             {
+                // Refused here rather than sent to be dropped by every
+                // reader in silence -- the interface no longer offers it,
+                // but a rewrite can be armed at the edge of the window.
+                if !rewritable(m.posted, unix_now()) {
+                    let why = "Too late to rewrite it: a message can be changed for a day \
+                               after it is sent.";
+                    trouble(state, why);
+                    return posted(state, draft.token, Some(why.to_string()));
+                }
                 if draft.reply.is_none() {
                     draft.reply = m.post.reply_to();
                 }
@@ -4315,9 +4344,9 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             };
             let sent = match draft.edit {
                 // Enforced at the **reader**: only from the account that
-                // posted it and only inside the edit window. The client
-                // checks too, so it can say an edit will be ignored rather
-                // than send one that silently is.
+                // posted it and only inside the edit window. The window is
+                // checked above, so an edit that would be ignored is said
+                // to be rather than sent.
                 Some(target) => chat.edit(&channel, target, post).await,
                 None => chat.send_post(&channel, post).await,
             };
@@ -4849,11 +4878,20 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
 /// keeping the two in one field puts every confirmation on screen for less than
 /// a tick, which is to say it is never read.
 fn note(state: &watch::Sender<ChatState>, said: String) {
-    let at = std::time::SystemTime::now()
+    state.send_modify(|s| {
+        s.note = Some(Note {
+            said,
+            at: unix_now(),
+        })
+    });
+}
+
+/// The wall clock, in Unix seconds.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    state.send_modify(|s| s.note = Some(Note { said, at }));
+        .unwrap_or(0)
 }
 
 fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {

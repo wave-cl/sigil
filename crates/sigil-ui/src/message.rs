@@ -186,6 +186,10 @@ pub struct Bubble<'a> {
     pub mentions: &'a [Mentioned<'a>],
     /// One of them is the reader.
     pub mentions_me: bool,
+    /// Ours, and still inside the window in which a rewrite lands. Past it
+    /// every reader drops the rewrite (SIP-19), so offering one would be
+    /// offering a button that does nothing.
+    pub editable: bool,
     /// What happened to the message after it was said. Drawn **under** the
     /// bubble rather than inside it: it is not part of what was said, and
     /// having it in there made the bubble taller than its own contents, which
@@ -596,7 +600,7 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
 
     let more = crate::icon_button(ui, crate::Icon::More);
     egui::Popup::menu(&more).show(|ui| {
-        if b.mine && ui.button("Edit").clicked() {
+        if b.editable && ui.button("Edit").clicked() {
             action.edit = true;
             ui.close();
         }
@@ -1659,6 +1663,7 @@ mod tests {
             direct: false,
             mentions: &[],
             mentions_me: false,
+            editable: false,
         }
     }
 
