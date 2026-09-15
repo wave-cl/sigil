@@ -3656,6 +3656,7 @@ impl ChatApp {
                     seq: q.seq,
                     who: &q.who,
                     said: &q.said,
+                    preview: q.preview.as_ref(),
                 }),
                 reactions: &line.reactions,
                 receipt: line.receipt.map(|r| match r {
@@ -4047,14 +4048,47 @@ impl ChatApp {
             } else {
                 "Replying to"
             };
-            let said = state
-                .lines
-                .iter()
-                .find(|l| l.seq == target)
-                .map(|l| sigil_ui::message::preview(&l.text, 48))
+            let line = state.lines.iter().find(|l| l.seq == target);
+            let said = line
+                .map(|l| {
+                    if l.text.is_empty() {
+                        // Only files: say what, as the quote in a bubble does.
+                        match l.attachments.len() {
+                            1 => "a file".to_string(),
+                            n => format!("{n} files"),
+                        }
+                    } else {
+                        sigil_ui::message::preview(&l.text, 48)
+                    }
+                })
                 .unwrap_or_default();
+            // The picture being answered, small, so a reply to a picture is
+            // seen to be one before it is sent.
+            let picture = line.and_then(|l| {
+                l.attachments
+                    .iter()
+                    .find(|a| {
+                        (a.kind == sigil_ui::attachment::IMAGE
+                            || a.kind == sigil_ui::attachment::VIDEO)
+                            && !a.preview.is_empty()
+                    })
+                    .map(|a| (a.id.clone(), a.preview.clone()))
+            });
             ui.horizontal(|ui| {
-                ui.colored_label(theme.accent, format!("{what}: {said}"));
+                ui.colored_label(theme.accent, format!("{what}:"));
+                if let Some((id, preview)) = picture {
+                    let side = sigil_ui::message::quote_picture_side(ui);
+                    let (pic, _) =
+                        ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                    let uri = format!("bytes://{id}-preview");
+                    ui.ctx()
+                        .include_bytes(uri.clone(), egui::load::Bytes::Shared(preview.clone()));
+                    egui::Image::from_bytes(uri, egui::load::Bytes::Shared(preview))
+                        .corner_radius(tokens::RADIUS_SM)
+                        .show_loading_spinner(false)
+                        .paint_at(ui, pic);
+                }
+                ui.colored_label(theme.accent, said);
                 if ui.button("Cancel").clicked() {
                     let pane = self.pane(at);
                     pane.replying = None;

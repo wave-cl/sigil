@@ -2878,4 +2878,64 @@ async fn words_and_several_files_are_one_message() {
         "one message, not one per file: {:?}",
         bob.state().lines
     );
+
+    // A reply to a picture quotes the picture: a real one this time, so
+    // there is a thumbnail to carry, and no words, so the quote has to say
+    // what it is.
+    let real = dir.path().join("real.png");
+    let img = image::RgbaImage::from_pixel(64, 48, image::Rgba([200, 30, 30, 255]));
+    image::DynamicImage::ImageRgba8(img).save(&real).unwrap();
+    alice.send(Cmd::Post(session::Draft {
+        files: vec![real],
+        ..Default::default()
+    }));
+    let picture = until(
+        || {
+            bob.state().lines.iter().any(|l| {
+                l.text.is_empty()
+                    && l.attachments.len() == 1
+                    && !l.attachments[0].preview.is_empty()
+            })
+        },
+        30,
+    )
+    .await;
+    assert!(
+        picture,
+        "the picture arrives with its thumbnail: {:?}",
+        bob.state().lines
+    );
+    let target = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| l.text.is_empty() && l.attachments.len() == 1)
+        .map(|l| l.seq)
+        .unwrap();
+    bob.send(Cmd::Post(session::Draft {
+        text: "lovely".into(),
+        reply: Some(target),
+        ..Default::default()
+    }));
+    let quoted = until(
+        || {
+            bob.state().lines.iter().any(|l| {
+                l.text == "lovely"
+                    && l.reply_to
+                        .as_ref()
+                        .is_some_and(|q| q.said == "a picture" && q.preview.is_some())
+            })
+        },
+        30,
+    )
+    .await;
+    assert!(
+        quoted,
+        "the reply quotes the picture, by thumbnail and by name: {:?}",
+        bob.state()
+            .lines
+            .iter()
+            .find(|l| l.text == "lovely")
+            .map(|l| &l.reply_to)
+    );
 }

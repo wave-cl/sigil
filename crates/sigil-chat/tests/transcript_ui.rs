@@ -155,6 +155,7 @@ fn a_conversation() -> ChatState {
                     seq: 2,
                     who: "me".into(),
                     said: "mine, on the other side".into(),
+                    preview: None,
                 }),
                 receipt: None,
                 attachments: Vec::new(),
@@ -1456,6 +1457,7 @@ fn mine_dark() {
         seq: 1,
         who: "Ada".into(),
         said: "the second one, then".into(),
+        preview: None,
     });
     state.lines[n - 1].attachments = vec![Attached {
         kind: 0x04,
@@ -3590,6 +3592,7 @@ fn pressing_a_quote_scrolls_to_the_message_it_quotes() {
         seq: 5,
         who: "Ada".into(),
         said: "message 4".into(),
+        preview: None,
     });
     let mut h = harness_with(state, true);
     h.run();
@@ -3642,6 +3645,7 @@ fn a_quote_of_an_unfetched_message_fetches_its_page_and_then_goes_there() {
         seq: 5,
         who: "Ada".into(),
         said: "message 4".into(),
+        preview: None,
     });
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut h = harness_recording_commands(state, asked.clone());
@@ -3671,6 +3675,7 @@ fn a_kept_ask_is_answered_when_the_page_arrives() {
         seq: 5,
         who: "Ada".into(),
         said: "message 4".into(),
+        preview: None,
     });
     let shown = std::rc::Rc::new(std::cell::RefCell::new(state));
     let mut h = harness_of(shown.clone());
@@ -3693,6 +3698,7 @@ fn a_kept_ask_is_answered_when_the_page_arrives() {
         seq: 5,
         who: "Ada".into(),
         said: "message 4".into(),
+        preview: None,
     });
     *shown.borrow_mut() = whole;
     for _ in 0..8 {
@@ -4418,4 +4424,79 @@ fn gallery_dark() {
     }
     hide_column(&mut h);
     h.snapshot("gallery_dark");
+}
+
+/// A reply to a picture quotes the picture: the thumbnail sits before the
+/// words in the quote, and takes its room, so the words start further in
+/// than they do in a quote of words alone.
+#[test]
+fn a_reply_to_a_picture_quotes_the_picture() {
+    let quoted = |preview: Option<std::sync::Arc<[u8]>>| {
+        let mut state = the_room();
+        let n = state.lines.len();
+        state.lines[n - 1].redacted = false;
+        state.lines[n - 1].text = "lovely".into();
+        state.lines[n - 1].reply_to = Some(Quoted {
+            seq: 1,
+            who: "Ada".into(),
+            said: "a picture".into(),
+            preview,
+        });
+        state
+    };
+    let words_at = |state: ChatState| {
+        let mut h = harness_with(state, true);
+        h.run();
+        h.run();
+        h.get_by_label("Ada: a picture").rect().left()
+    };
+    let without = words_at(quoted(None));
+    let with = words_at(quoted(Some(a_png())));
+    assert!(
+        with > without + 20.0,
+        "the thumbnail makes room before the words: {without} -> {with}"
+    );
+}
+
+/// The same, looked at.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn reply_to_picture_dark() {
+    let mut state = the_room();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "lovely, where was this?".into();
+    state.lines[n - 1].reply_to = Some(Quoted {
+        seq: 1,
+        who: "Ada".into(),
+        said: "a picture".into(),
+        preview: Some(a_png()),
+    });
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("reply_to_picture_dark");
 }

@@ -140,6 +140,13 @@ pub struct Quote<'a> {
     pub seq: u64,
     pub who: &'a str,
     pub said: &'a str,
+    /// The thumbnail of the first picture the quoted message carries.
+    pub preview: Option<&'a std::sync::Arc<[u8]>>,
+}
+
+/// How wide the thumbnail in a quote is drawn: two small lines, square.
+pub fn quote_picture_side(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS) * 2.0
 }
 
 pub struct Bubble<'a> {
@@ -703,6 +710,11 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
                 + tokens::STROKE_THICK
                 + tokens::SPACING_XXS
                 + gap * 2.0
+                + if q.preview.is_some() {
+                    quote_picture_side(ui) + gap
+                } else {
+                    0.0
+                }
         })
         .unwrap_or(0.0);
     // A picture asks for the size it will be drawn at, not for everything.
@@ -1322,12 +1334,30 @@ fn reply_stub(ui: &mut egui::Ui, q: Quote<'_>, quiet: egui::Color32, rule: egui:
         ui.style_mut().interaction.selectable_labels = false;
         ui.horizontal(|ui| {
             // Taller than its text, so the rule reads as a rule. At exactly the
-            // line height it is a dash the length of one word.
-            let h = ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS;
+            // line height it is a dash the length of one word -- and as tall
+            // as the picture, when the quote carries one.
+            let h = if q.preview.is_some() {
+                quote_picture_side(ui)
+            } else {
+                ui.text_style_height(&egui::TextStyle::Small) + tokens::SPACING_XS
+            };
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(tokens::STROKE_THICK, h), egui::Sense::hover());
             ui.painter().rect_filled(rect, tokens::RADIUS_SM, rule);
             ui.add_space(tokens::SPACING_XXS);
+            // The picture being replied to, small, before the words about
+            // it: a quote of a picture is a picture.
+            if let Some(preview) = q.preview {
+                let side = quote_picture_side(ui);
+                let (pic, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                let uri = format!("bytes://quote-{}", q.seq);
+                ui.ctx()
+                    .include_bytes(uri.clone(), egui::load::Bytes::Shared(preview.clone()));
+                egui::Image::from_bytes(uri, egui::load::Bytes::Shared(preview.clone()))
+                    .corner_radius(tokens::RADIUS_SM)
+                    .show_loading_spinner(false)
+                    .paint_at(ui, pic);
+            }
             // **Truncated, not extended.** A `horizontal` layout does not wrap, so
             // a label long enough grows the frame around it — past the width the
             // bubble was given, and off the side of the pane. This is what cuts

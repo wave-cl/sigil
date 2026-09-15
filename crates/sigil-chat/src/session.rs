@@ -142,6 +142,10 @@ pub struct Line {
     pub me_mentioned: bool,
 }
 
+/// What a reply quotes, as the fold finds it: who, a line of what, and the
+/// thumbnail of the first picture if there is one.
+type Stub = (PubKey, String, Option<std::sync::Arc<[u8]>>);
+
 /// Somebody a message mentions: the key the part carries, and what to call
 /// it -- ours to decide, and drawn with the key beside it (SIP-21).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,8 +208,12 @@ pub struct Quoted {
     pub seq: u64,
     /// Who said it, named.
     pub who: String,
-    /// A line of what they said.
+    /// A line of what they said -- or, for a message that is only files,
+    /// what it carries.
     pub said: String,
+    /// The thumbnail of the first picture or clip it carries, if any: a
+    /// quote of a picture shows the picture.
+    pub preview: Option<std::sync::Arc<[u8]>>,
 }
 
 /// What SIP-31 verification concluded about one message.
@@ -3277,19 +3285,48 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
             // in the fold rather than built for every message that ever
             // existed -- which is precisely the work the window exists to
             // avoid doing.
-            let stubs: HashMap<u64, (PubKey, String)> = k
+            let stubs: HashMap<u64, Stub> = k
                 .timeline
                 .messages()
                 .skip(window)
                 .filter_map(|m| m.post.reply_to())
                 .filter_map(|target| k.timeline.get(target))
                 .map(|m| {
+                    let pictures: Vec<_> = m
+                        .post
+                        .attachments()
+                        .filter(|a| {
+                            let kind = a.effective_kind();
+                            kind == sqex_proto::blob::KIND_IMAGE
+                                || kind == sqex_proto::blob::KIND_VIDEO
+                        })
+                        .collect();
+                    let files = m.post.attachments().count();
+                    let words = m.post.body_text().unwrap_or_default();
                     let said = if m.redacted {
                         "deleted".to_string()
+                    } else if !words.is_empty() {
+                        stub(words)
                     } else {
-                        stub(m.post.body_text().unwrap_or_default())
+                        // Only files: say what, since there are no words.
+                        match (pictures.len(), files) {
+                            (1, 1)
+                                if pictures[0].effective_kind() == sqex_proto::blob::KIND_VIDEO =>
+                            {
+                                "a clip".to_string()
+                            }
+                            (1, 1) => "a picture".to_string(),
+                            (n, f) if n == f => format!("{n} pictures"),
+                            (_, 1) => "a file".to_string(),
+                            (_, f) => format!("{f} files"),
+                        }
                     };
-                    (m.seq, (m.account, said))
+                    let preview = (!m.redacted)
+                        .then(|| pictures.first())
+                        .flatten()
+                        .filter(|a| !a.preview.is_empty())
+                        .map(|a| a.preview.as_slice().into());
+                    (m.seq, (m.account, said, preview))
                 })
                 .collect();
             k.timeline
@@ -3310,13 +3347,14 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         .map(|(emoji, who)| (emoji.clone(), who.len(), who.contains(&me)))
                         .collect(),
                     reply_to: m.post.reply_to().and_then(|target| {
-                        stubs.get(&target).map(|(account, said)| Quoted {
+                        stubs.get(&target).map(|(account, said, preview)| Quoted {
                             seq: target,
                             who: people
                                 .get(account)
                                 .and_then(|p| p.name.clone())
                                 .unwrap_or_else(|| short(account)),
                             said: said.clone(),
+                            preview: preview.clone(),
                         })
                     }),
                     // Only ever on our own. On somebody else's it would be a
