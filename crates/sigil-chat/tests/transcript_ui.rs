@@ -4755,6 +4755,49 @@ fn rewrite_preview_dark() {
     h.snapshot("rewrite_preview_dark");
 }
 
+/// Reactions, looked at: hung off the bubble's bottom edge, half over it,
+/// on both sides of the conversation.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn reactions_dark() {
+    let mut state = with_mine("and one of mine", 60);
+    let n = state.lines.len();
+    state.lines[n - 1].reactions = vec![
+        ("\u{1f389}".to_string(), 3, true),
+        ("\u{1f44d}".to_string(), 1, false),
+    ];
+    state.lines[n - 2].reactions = vec![("\u{2764}".to_string(), 1, true)];
+    state.lines[n - 2].redacted = false;
+    state.lines[n - 2].text = "theirs, reacted to".into();
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("reactions_dark");
+}
+
 /// A reply to a picture quotes the picture: the thumbnail sits before the
 /// words in the quote, and takes its room, so the words start further in
 /// than they do in a quote of words alone.
@@ -5544,5 +5587,48 @@ fn staging_refuses_duplicates_and_non_files_and_forgets_a_stale_refusal() {
         !text_of(&h).contains("left out"),
         "room was made: {}",
         text_of(&h)
+    );
+}
+
+/// Reactions hang off the bubble: half over its bottom edge and half
+/// below, not in a row of their own under it -- and the next message
+/// starts clear of them, even the next in a run from the same person,
+/// which follows closest.
+#[test]
+fn reactions_hang_off_the_bubbles_bottom_edge() {
+    let mut state = with_mine("and the next", 60);
+    let n = state.lines.len();
+    state.lines[n - 2].redacted = false;
+    state.lines[n - 2].text = "theirs, reacted to".into();
+    state.lines[n - 2].reactions = vec![("\u{2764}".to_string(), 1, true)];
+    // Theirs too, so it is grouped under the reacted one.
+    state.lines[n - 1].who = them();
+    state.lines[n - 1].mine = false;
+    state.lines[n - 1].name = Some("Ada".into());
+    state.lines[n - 1].receipt = None;
+    let mut h = harness_with(state, true);
+    h.run();
+    h.run();
+    // The bubble's bottom edge is the time's bottom plus the bubble's own
+    // padding; the chip's middle should sit on it.
+    let words = h.get_by_label("theirs, reacted to").rect();
+    let time = h
+        .get_all_by_label(&sigil_ui::clock(NOW - 30))
+        .map(|t| t.rect())
+        .find(|r| (r.center().y - words.center().y).abs() < 4.0)
+        .expect("the time beside the words");
+    let heart = h.get_by_label("\u{2764}").rect();
+    let edge = time.bottom() + 12.0;
+    assert!(
+        (heart.center().y - edge).abs() <= 3.0,
+        "the chip straddles the bubble's edge at {edge}: {heart:?}"
+    );
+    // The next bubble's top edge is its words' top less the padding; it
+    // must not run under the chip.
+    let next = h.get_by_label("and the next").rect();
+    let next_edge = next.top() - 12.0;
+    assert!(
+        next_edge >= heart.bottom() + 2.0,
+        "the next bubble starts clear of the chip: chip {heart:?}, next edge {next_edge}"
     );
 }

@@ -1228,17 +1228,38 @@ fn body(
         });
     });
 
+    let rect = inner.response.rect;
     if !b.reactions.is_empty() {
-        ui.horizontal_wrapped(|ui| {
+        // **Hung off the bubble's bottom edge**, half over it and half
+        // below, from the corner nearest the pane's middle. In a row of
+        // their own under the bubble they read as a separate thing -- a
+        // message of their own -- rather than as marks on this one.
+        let half = crate::emoji::chip_height(ui) / 2.0;
+        let area = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + PAD_X, rect.bottom() - half),
+            egui::pos2(rect.right() - PAD_X, rect.bottom() + half),
+        );
+        // From the inner corner: one's own bubble sits against the right
+        // edge, so its marks hang from its left; everybody else's from the
+        // right.
+        let layout = if b.mine {
+            egui::Layout::left_to_right(egui::Align::Min)
+        } else {
+            egui::Layout::right_to_left(egui::Align::Min)
+        };
+        let hung = ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(layout), |ui| {
             for (emoji, count, ours) in b.reactions {
                 if reaction_chip(ui, emoji, *count, *ours).clicked() {
                     action.react = Some(emoji.clone());
                 }
             }
         });
+        // The part that hangs below is room the next message must not take.
+        let below = (hung.response.rect.bottom() - rect.bottom()).max(0.0);
+        ui.allocate_space(egui::vec2(0.0, below));
     }
 
-    inner.response.rect
+    rect
 }
 
 /// The time, and what else there is to say about the entry: "edited", a word

@@ -94,6 +94,12 @@ pub fn paint(ui: &mut egui::Ui, chars: &str, rect: egui::Rect, colour: egui::Col
 }
 
 /// One emoji and how many people sent it, under a message. Ours is outlined.
+/// How tall a chip is, for whoever has to make room for one before it is
+/// drawn.
+pub fn chip_height(_ui: &egui::Ui) -> f32 {
+    tokens::ICON_SM + 2.0 * tokens::SPACING_XS
+}
+
 pub fn chip(ui: &mut egui::Ui, chars: &str, count: usize, ours: bool) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
     let picture = tokens::ICON_SM;
@@ -109,7 +115,7 @@ pub fn chip(ui: &mut egui::Ui, chars: &str, count: usize, ours: bool) -> egui::R
             .as_ref()
             .map_or(0.0, |g| tokens::SPACING_XS + g.size().x)
         + pad;
-    let height = picture + 2.0 * tokens::SPACING_XS;
+    let height = chip_height(ui);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     // What the chip means, in words: the emoji and the count, so a reader of
     // the tree gets "🎉 2" and not a picture and a number.
