@@ -206,6 +206,33 @@ fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
     }
 }
 
+/// The words for a mention: the summary and the body of the notification.
+///
+/// The same rules as [`ring_said`]: the sender by the name this client has
+/// for them and by their key, since the name is an assertion (SIP-21); the
+/// conversation as it is called here, `#` before a public one; the identity
+/// it arrived at only when this host holds several. The body carries what
+/// was said, shortened, so the notification is worth reading on its own.
+fn mention_said(m: &session::Mention, called: &str, held: usize) -> (String, String) {
+    let room = if m.public {
+        format!("#{}", m.conversation)
+    } else {
+        m.conversation.clone()
+    };
+    let summary = if held > 1 {
+        format!("{} mentioned you in {room}, as {called}", m.from_label)
+    } else {
+        format!("{} mentioned you in {room}", m.from_label)
+    };
+    let who = sigil_ui::message::short(&m.from.to_string());
+    let body = if m.said.is_empty() {
+        who
+    } else {
+        format!("{who} — {}", m.said)
+    };
+    (summary, body)
+}
+
 /// Where a picture sits inside the viewer, and how large.
 ///
 /// `zoom` is a multiple of the size the picture is drawn at when it fits: 1 is
@@ -1272,6 +1299,7 @@ impl App for ChatApp {
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
         self.announce_rings(ctx);
+        self.announce_mentions(ctx);
         self.join_answered_calls(ctx, egui_ctx);
         self.end_calls_nobody_is_in();
         // **A window carrying audio is not idle.** Everything else here sleeps
@@ -4556,6 +4584,48 @@ impl ChatApp {
         }
     }
 
+    /// Say out loud that somebody mentioned us, when we are not looking.
+    ///
+    /// The same shape as [`announce_rings`](Self::announce_rings), and from
+    /// the same place, for the same reason. Told once per message, whether or
+    /// not it is posted: a mention read on screen as it arrived is not owed a
+    /// notification later.
+    fn announce_mentions(&mut self, ctx: &mut AppContext<'_>) {
+        let held = self.sessions.len();
+        let mut found: Vec<(String, Vec<session::Mention>)> = Vec::new();
+        for (at, session) in &self.sessions {
+            let mentions = session.mentions();
+            if mentions.is_empty() {
+                continue;
+            }
+            let me = session.state().mine.label(&at.0);
+            found.push((me, mentions));
+        }
+        self.announce_mentions_in(ctx, held, found);
+    }
+
+    /// The deciding half, over what the sessions said: posted when the
+    /// window is not in front or the conversation is not the one on screen,
+    /// and once.
+    fn announce_mentions_in(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        held: usize,
+        found: Vec<(String, Vec<session::Mention>)>,
+    ) {
+        for (me, mentions) in found {
+            for m in mentions {
+                if !self.announced.insert((m.channel, m.seq)) {
+                    continue;
+                }
+                if ctx.unfocused || !m.in_open {
+                    let (summary, body) = mention_said(&m, &me, held);
+                    ctx.notify.post(&summary, &body);
+                }
+            }
+        }
+    }
+
     /// A call we are placing, drawn where a call arriving is drawn.
     ///
     /// **The same banner, because it is the same kind of thing**: a call that
@@ -5083,6 +5153,112 @@ mod ring_tests {
             !said.contains("colin@squic.org"),
             "a fact nobody was in doubt about: {said}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mention_notice_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn key(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    /// A notifier that writes down what it was asked to say. `Silent` is
+    /// the only other one, and silence is what a working notifier looks
+    /// like from inside a test.
+    struct Noted(RefCell<Vec<(String, String)>>);
+
+    impl sigil::app::Notify for Noted {
+        fn post(&self, summary: &str, body: &str) -> bool {
+            self.0.borrow_mut().push((summary.into(), body.into()));
+            true
+        }
+    }
+
+    fn a_mention(seq: u64, in_open: bool) -> session::Mention {
+        session::Mention {
+            channel: [8u8; 32],
+            seq,
+            from: key(2),
+            from_label: "Ada".into(),
+            conversation: "general".into(),
+            public: true,
+            said: "look at this".into(),
+            in_open,
+        }
+    }
+
+    fn ctx<'a>(
+        nav: &'a mut sigil::navigator::Navigator,
+        accounts: &'a mut sigil::accounts::Accounts,
+        notify: &'a dyn sigil::app::Notify,
+        connections: &'a sigil_net::Connections,
+        unfocused: bool,
+    ) -> AppContext<'a> {
+        AppContext {
+            navigator: nav,
+            accounts,
+            unfocused,
+            notify,
+            connections,
+        }
+    }
+
+    /// Said once while the window is not in front, and not again on the
+    /// next pass; not said at all for a mention in the conversation on
+    /// screen while the window is in front, which was read as it arrived.
+    #[test]
+    fn a_mention_is_said_once_when_not_looking_and_never_when_looking() {
+        let noted = Noted(RefCell::new(Vec::new()));
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        // Not in front: said.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(1, true)])]);
+        assert_eq!(noted.0.borrow().len(), 1, "{:?}", noted.0.borrow());
+        let (summary, body) = noted.0.borrow()[0].clone();
+        assert_eq!(summary, "Ada mentioned you in #general");
+        assert!(
+            body.contains("look at this")
+                && body.contains(&sigil_ui::message::short(&key(2).to_string())),
+            "{body}"
+        );
+
+        // The same mention on the next pass: not again.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(1, true)])]);
+        assert_eq!(noted.0.borrow().len(), 1, "told twice");
+
+        // In front and on screen: read as it arrived, nothing to say.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(2, true)])]);
+        assert_eq!(noted.0.borrow().len(), 1, "said about a message on screen");
+
+        // In front but in another conversation: said.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(3, false)])]);
+        assert_eq!(noted.0.borrow().len(), 2);
+    }
+
+    /// With several identities held, which one was mentioned; with one,
+    /// nothing nobody was in doubt about. A private room has no `#`.
+    #[test]
+    fn a_mention_names_the_identity_only_when_there_are_several() {
+        let (one, _) = mention_said(&a_mention(1, false), "colin@squic.org", 1);
+        assert_eq!(one, "Ada mentioned you in #general");
+        let (several, _) = mention_said(&a_mention(1, false), "colin@squic.org", 3);
+        assert!(several.contains("as colin@squic.org"), "{several}");
+        let mut private = a_mention(1, false);
+        private.public = false;
+        private.conversation = "the four of us".into();
+        let (s, _) = mention_said(&private, "x", 1);
+        assert_eq!(s, "Ada mentioned you in the four of us");
     }
 }
 
