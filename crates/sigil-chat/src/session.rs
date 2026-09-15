@@ -36,7 +36,7 @@ use sqex_proto::channel::{
 };
 use sqex_proto::events::Event;
 use sqex_proto::message::{
-    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, CALL_FAILED, CALL_MISSED, MEDIA_AUDIO,
+    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, CALL_FAILED, CALL_MISSED, MEDIA_AUDIO, Part,
     RING_ACCEPTED, RING_DECLINED, RING_ENDED, RING_RINGING,
 };
 use sqex_proto::timeline::{Timeline, Verdict};
@@ -272,6 +272,49 @@ pub enum Receipt {
     Delivered,
     /// Everybody has read it.
     Read,
+}
+
+/// A message as the composer hands it over.
+///
+/// `mentions` are keys and nothing else: SIP-19's `Mention` part carries no
+/// name, so whatever the sender typed beside the `@` is text like any other
+/// and the reader calls the key what the reader calls it. `edit` rewrites
+/// the message at that sequence number instead of posting a new one; an
+/// edit with a `reply` keeps the reply.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Draft {
+    pub text: String,
+    pub reply: Option<u64>,
+    pub edit: Option<u64>,
+    pub mentions: Vec<PubKey>,
+}
+
+impl Draft {
+    /// Just words.
+    pub fn text(text: impl Into<String>) -> Draft {
+        Draft {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The SIP-19 parts, in the order a reader expects them: the text, the
+    /// reply if any, then each mention once, no more than the wire allows.
+    pub fn parts(&self) -> Vec<Part> {
+        let mut parts = vec![Part::Text(self.text.clone())];
+        if let Some(target) = self.reply {
+            parts.push(Part::Reply(target));
+        }
+        let mut seen = std::collections::HashSet::new();
+        parts.extend(
+            self.mentions
+                .iter()
+                .filter(|k| seen.insert(**k))
+                .take(sqex_proto::message::MAX_MENTIONS)
+                .map(|k| Part::Mention(*k)),
+        );
+        parts
+    }
 }
 
 /// One conversation in the list.
@@ -701,6 +744,52 @@ impl LinkState {
 }
 
 #[cfg(test)]
+mod draft_tests {
+    use super::*;
+
+    fn k(b: u8) -> PubKey {
+        PubKey::new([b; 32])
+    }
+
+    /// Text first, the reply if any, then each mention once: the order a
+    /// reader expects, and no more mentions than the wire allows.
+    #[test]
+    fn a_drafts_parts_are_text_reply_then_each_mention_once() {
+        let plain = Draft::text("hi");
+        assert!(matches!(plain.parts().as_slice(), [Part::Text(t)] if t == "hi"));
+
+        let full = Draft {
+            text: "@Ada @Bram look".into(),
+            reply: Some(7),
+            edit: None,
+            mentions: vec![k(1), k(2), k(1)],
+        };
+        let parts = full.parts();
+        assert!(matches!(&parts[0], Part::Text(t) if t == "@Ada @Bram look"));
+        assert!(matches!(parts[1], Part::Reply(7)));
+        assert!(matches!(parts[2], Part::Mention(m) if m == k(1)));
+        assert!(matches!(parts[3], Part::Mention(m) if m == k(2)));
+        assert_eq!(parts.len(), 4, "a key picked twice is one part");
+
+        let many = Draft {
+            mentions: (0..40).map(k).collect(),
+            ..Draft::text("all of you")
+        };
+        assert_eq!(
+            many.parts().len(),
+            1 + sqex_proto::message::MAX_MENTIONS,
+            "no more than the wire allows"
+        );
+        // And a post of those parts is one the wire accepts.
+        let post = sqex_proto::message::Post {
+            parts: many.parts(),
+            ..Default::default()
+        };
+        post.validate().expect("a valid post");
+    }
+}
+
+#[cfg(test)]
 mod link_tests {
     use super::*;
 
@@ -841,19 +930,12 @@ pub enum Cmd {
         target: u64,
         emoji: String,
     },
-    /// A message that names another.
-    Reply {
-        target: u64,
-        text: String,
-    },
-    /// Rewrite one of ours. Enforced at the **reader**: only from the account
-    /// that posted it and only inside the edit window. The client checks too,
-    /// so it can say an edit will be ignored rather than send one that
-    /// silently is.
-    Edit {
-        target: u64,
-        text: String,
-    },
+    /// What the composer sends: text, and what goes with it -- a reply, an
+    /// edit, the people it mentions. One shape for every message the
+    /// composer makes, because the parts a message carries are one list
+    /// (SIP-19) and a variant per combination was a variant per
+    /// combination.
+    Post(Draft),
     /// Remove a message's body. The entry stays, and the gap is the record.
     Redact(u64),
     /// Say we are typing, or have stopped. Best effort, ephemeral and
@@ -3852,25 +3934,27 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 }
             };
         }
-        Cmd::Reply { target, text } => {
-            let Some(channel) = desk.open else { return };
-            match chat.reply(&channel, target, &text).await {
-                Ok(_) => desk.dirty.insert(channel),
-                Err(e) => {
-                    trouble(state, e);
-                    false
-                }
-            };
-        }
-        Cmd::Edit { target, text } => {
+        Cmd::Post(draft) => {
             let Some(channel) = desk.open else { return };
             let post = sqex_proto::message::Post {
-                parts: vec![sqex_proto::message::Part::Text(text)],
+                parts: draft.parts(),
                 ..Default::default()
             };
-            match chat.edit(&channel, target, post).await {
+            let sent = match draft.edit {
+                // Enforced at the **reader**: only from the account that
+                // posted it and only inside the edit window. The client
+                // checks too, so it can say an edit will be ignored rather
+                // than send one that silently is.
+                Some(target) => chat.edit(&channel, target, post).await,
+                None => chat.send_post(&channel, post).await,
+            };
+            match sent {
                 Ok(_) => desk.dirty.insert(channel),
                 Err(e) => {
+                    // The text is not thrown away here; the interface keeps
+                    // it in the composer, because retyping a message the
+                    // program lost is the worst thing a chat client can do
+                    // to somebody.
                     trouble(state, e);
                     false
                 }

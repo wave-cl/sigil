@@ -4,8 +4,8 @@ pub mod session;
 
 use session::RING_WINDOW;
 pub use session::{
-    Attached, ChatHandle, ChatState, Closing, Cmd, Found, Happened, Hit, Line, LinkState, Linked,
-    Member, Person, Quoted, Receipt, Ring, Standing, Summary, Trouble,
+    Attached, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, Hit, Line, LinkState,
+    Linked, Member, Person, Quoted, Receipt, Ring, Standing, Summary, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -3786,12 +3786,15 @@ impl ChatApp {
                 let pane = self.pane(at);
                 let (editing, replying) = (pane.editing.take(), pane.replying.take());
                 pane.announced_typing = false;
-                let cmd = match (editing, replying) {
-                    (Some(target), _) => Cmd::Edit { target, text },
-                    (None, Some(target)) => Cmd::Reply { target, text },
-                    (None, None) => Cmd::Send(text),
-                };
-                self.send_as(Some(at), cmd);
+                self.send_as(
+                    Some(at),
+                    Cmd::Post(session::Draft {
+                        text,
+                        reply: replying,
+                        edit: editing,
+                        mentions: Vec::new(),
+                    }),
+                );
                 self.send_as(Some(at), Cmd::Typing(false));
                 field.request_focus();
             }
