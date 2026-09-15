@@ -19,11 +19,14 @@ sqnr = { workspace = true }
 sqex-proto = { workspace = true }
 sqex-voice = { workspace = true }
 sigil-net = { path = "../sigil-net" }
+dirs = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
+sigil-emoji = { path = "../sigil-emoji" }
 sqexd = { workspace = true }
 squic = { workspace = true }
 tempfile = "3"

@@ -1892,43 +1892,71 @@ fn an_added_exchange_can_be_removed_again() {
     );
 }
 
-/// A message's controls sit beside it, on the side it has room on.
+/// A message's strip hangs off its top-outer corner: the right corner of
+/// somebody else's message, the left of one's own.
 ///
-/// Under the bubble they pushed everything below them down as the pointer
-/// moved along the transcript, so reading with the mouse anywhere near it made
-/// the whole conversation twitch.
+/// The controls have been under the bubble (everything below moved as the
+/// pointer went by), then beside it (a column of the pane reserved on both
+/// sides). Off the corner, on their own layer, they take no room in the row
+/// and move nothing — so this asserts the corner, from both sides.
 #[test]
-fn the_controls_are_beside_the_message_and_on_its_free_side() {
-    let mut h = harness(true);
-    h.run();
-    hide_column(&mut h);
-    // One of theirs, which sits on the left: the controls belong to its right.
-    let bubble = h.get_by_label_contains("the second one, then").rect();
-    h.get_by_label_contains("the second one, then").hover();
-    h.step();
-    h.step();
-    let reply = h.get_by_label("Reply").rect();
-    assert!(
-        reply.left() >= bubble.right(),
-        "somebody else's message keeps its controls on the right: \
-         {reply:?} against {bubble:?}"
-    );
-    // And beside it, not under it: the controls are centred on the **bubble**,
-    // and the bubble is the author line above the words as well as the words.
-    // Measured against that whole span, because measuring against the words
-    // alone held only while the bubble had a third row under them -- the time
-    // -- to push its middle down onto the text.
-    let author = h
-        .get_all_by_label("Ada")
-        .map(|n| n.rect())
-        .filter(|r| (r.left() - bubble.left()).abs() < 4.0)
-        .min_by(|a, b| a.top().total_cmp(&b.top()))
-        .expect("the author line over the words");
-    let span = author.union(bubble);
-    assert!(
-        reply.center().y > span.top() && reply.center().y < span.bottom(),
-        "the controls are not beside the message: {reply:?} against {span:?}"
-    );
+fn the_strip_hangs_off_the_top_outer_corner() {
+    for mine in [false, true] {
+        let mut state = a_conversation();
+        state.lines.truncate(1);
+        state.lines[0].text = "the first line\nand a second one\nand a third".into();
+        state.lines[0].mine = mine;
+        let mut h = harness_with(state, true);
+        h.run();
+        hide_column(&mut h);
+        h.run();
+        let words = h.get_by_label_contains("and a third").rect();
+        h.get_by_label_contains("and a third").hover();
+        h.step();
+        h.step();
+        h.step();
+        let reply = h.get_by_label("Reply").rect();
+        let quick = h.get_by_label(sigil_emoji::QUICK[0]).rect();
+        let strip = reply.union(quick);
+        let whose = if mine { "your own" } else { "theirs" };
+        // The bubble, as the tree can see it: the author line over the words
+        // on theirs, the words alone on one's own. The frame is not in the
+        // tree, and it begins a padding above whichever is first.
+        let span = if mine {
+            words
+        } else {
+            let author = h
+                .get_all_by_label("Ada")
+                .map(|n| n.rect())
+                .filter(|r| (r.left() - words.left()).abs() < 4.0)
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .expect("the author line over the words");
+            author.union(words)
+        };
+        // Off the top: the strip straddles the bubble's top edge — over the
+        // first line of the bubble and above it — rather than sitting level
+        // with the middle of the message or under it.
+        assert!(
+            strip.top() < span.top() && strip.bottom() > span.top(),
+            "the strip on {whose} message does not hang off its top: bubble \
+             {span:?}, strip {strip:?}"
+        );
+        // Off the outer corner: reaching past the bubble on the side it has
+        // room on, and no further back over it than a corner.
+        if mine {
+            assert!(
+                strip.left() < words.left() && strip.right() < words.right(),
+                "your own message's strip should hang off its left corner: words \
+                 {words:?}, strip {strip:?}"
+            );
+        } else {
+            assert!(
+                strip.right() > words.right() && strip.left() > words.left(),
+                "their message's strip should hang off its right corner: words \
+                 {words:?}, strip {strip:?}"
+            );
+        }
+    }
 }
 
 /// One's own messages sit on the other side.
@@ -2019,40 +2047,82 @@ fn ones_own_message_keeps_its_controls_on_the_left() {
     h.get_by_label_contains("sent by me").hover();
     h.step();
     h.step();
+    h.step();
     let reply = h.get_by_label("Reply").rect();
     assert!(
-        reply.right() <= bubble.left(),
-        "one's own message keeps its controls on the right, where the bubble is: \
-         {reply:?} against {bubble:?}"
+        reply.center().x < bubble.left(),
+        "one's own message keeps its strip off its left corner, the bubble being \
+         on the right: {reply:?} against {bubble:?}"
     );
 }
 
-/// The controls sit against the middle of the message, not its top edge.
+/// The strip reveals itself only once its message has held still.
+///
+/// A scroll carries message after message under a pointer that has not
+/// moved, and each one under it got a strip for a frame: a flicker of pills
+/// up the pane, and a new foreground area every frame, which is a sizing
+/// pass and a repaint every frame for as long as the scroll lasted. Pinned
+/// here by hovering and reading after **one** step — the frame in which the
+/// message has just been seen where it is — and then after another.
 #[test]
-fn the_controls_are_vertically_centred_on_the_message() {
-    // **One's own message**, which is the side with an alignment of its own:
-    // the other side is a plain `horizontal`, which centres already, so a test
-    // that hovered one of theirs would pass whatever this branch did.
+fn the_strip_waits_for_the_message_to_hold_still() {
+    // Enough of a transcript to scroll.
     let mut state = a_conversation();
-    let n = state.lines.len();
-    state.lines[n - 1].redacted = false;
-    state.lines[n - 1].mine = true;
-    state.lines[n - 1].text = "the first line\nand a second one\nand a third".into();
+    let base = state.lines[1].clone();
+    for i in 0..40 {
+        let mut line = base.clone();
+        line.seq = 1000 + i;
+        line.text = format!("filler {i}");
+        line.redacted = false;
+        state.lines.push(line);
+    }
     let mut h = harness_with(state, true);
     h.run();
-
-    let bubble = h.get_by_label_contains("and a third").rect();
-    h.get_by_label_contains("and a third").hover();
+    hide_column(&mut h);
+    h.run();
+    h.run();
+    let before = h.get_by_label("filler 38").rect();
+    // A slow scroll: a little each frame, so the same message stays under
+    // the pointer while it moves. (One big wheel would carry a different
+    // message under the pointer every frame, and a strip that is new every
+    // frame never gets past its sizing pass into the tree — so a test with
+    // one big wheel passes with the rule removed. This one does not.)
+    h.get_by_label("filler 38").hover();
+    for i in 0..5 {
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 6.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.step();
+        // A wheel arrives one frame and moves the transcript the next, so
+        // the first frame is a still one and may show the strip; every
+        // frame after it is a moving one and must not.
+        if i > 0 {
+            assert!(
+                !text_of(&h).contains("Reply"),
+                "a strip stayed on a message that was moving (frame {i}): {}",
+                text_of(&h)
+            );
+        }
+    }
+    let after = h.get_by_label("filler 38").rect();
+    assert_ne!(
+        before.top(),
+        after.top(),
+        "the transcript did not scroll, so this tests nothing"
+    );
+    // Let the scroll finish, then hover where the message has come to rest.
+    h.run();
+    h.get_by_label("filler 38").hover();
     h.step();
     h.step();
-    let reply = h.get_by_label("Reply").rect();
-    // **The controls begin no higher than the words do.** Top-aligned they
-    // begin at the frame's padding, above the first line; centred on a bubble
-    // of three lines they begin well down it. Stated against the text's own
-    // rect because the frame's is not in the accessibility tree.
+    h.step();
     assert!(
-        reply.top() >= bubble.top(),
-        "the controls are pinned to the top edge: {reply:?} against {bubble:?}"
+        text_of(&h).contains("Reply"),
+        "and never appeared once it held still: {}",
+        text_of(&h)
     );
 }
 
@@ -2071,12 +2141,14 @@ fn a_picker_survives_the_pointer_leaving_the_message() {
     h.get_by_label_contains("the second one, then").hover();
     h.step();
     h.step();
-    h.get_by_label("React").click();
     h.step();
-    // An emoji the picker offers and **this conversation does not already
-    // carry**: the fixture has a `👍 2` chip on another message, so looking
-    // for a thumb finds one whether or not the picker ever opened.
-    let picker = '\u{1f389}';
+    h.get_by_label("More emoji").click();
+    h.step();
+    // An emoji the picker offers on its first page and **neither the strip
+    // nor this conversation already carries**: the fixture has a `👍 2` chip
+    // on another message, and the strip has its own five, so looking for one
+    // of those finds it whether or not the picker ever opened.
+    let picker = '\u{1f600}';
     assert!(
         text_of(&h).contains(picker),
         "the picker did not open: {}",
@@ -2271,63 +2343,6 @@ fn cancel_is_centred_against_the_call_it_would_stop() {
         "the button's centre is {apart:.1}px from the middle of the call it \
          would stop: block {block:?}, button {button:?}"
     );
-}
-
-/// Reply and react sit **beside** a message, on both sides of the conversation.
-///
-/// Under it they push everything below them down as the pointer moves along a
-/// conversation, which makes the transcript twitch while it is being read —
-/// the reason the controls are placed beside in the first place.
-///
-/// **Your own messages had it wrong and nobody could have noticed from the
-/// other side.** The right-hand side used `with_layout`, which takes the ui's
-/// whole remaining size, so `Align::Center` centred the controls in the rest of
-/// the transcript rather than against the message: seventy-five pixels below a
-/// one-word bubble, and further the emptier the conversation. The left-hand
-/// side used `ui.horizontal`, which is bounded, and was right.
-///
-/// Asserted as overlap and side rather than as a pixel offset: the question is
-/// whether they are next to the words, and a tolerance would have to be
-/// invented.
-#[test]
-fn the_controls_sit_beside_a_message_and_not_under_it() {
-    for mine in [false, true] {
-        let mut state = a_conversation();
-        state.lines.truncate(1);
-        state.lines[0].text = "ok".into();
-        state.lines[0].mine = mine;
-        let mut h = harness_with(state, true);
-        h.run();
-        h.get_by_label_contains("ok").hover();
-        // `step`, not `run`: the controls appearing is an animation, and `run`
-        // waits for a frame that never settles.
-        h.step();
-        h.step();
-
-        let words = h.get_by_label_contains("ok").rect();
-        let reply = h.get_by_label_contains("Reply").rect();
-        let whose = if mine { "your own" } else { "theirs" };
-        assert!(
-            reply.top() < words.bottom() && reply.bottom() > words.top(),
-            "the controls on {whose} message are not level with it: words \
-             {words:?}, reply {reply:?}"
-        );
-        // And on the side each has room on: to the left of your own, to the
-        // right of somebody else's.
-        if mine {
-            assert!(
-                reply.right() <= words.left(),
-                "your own message's controls should be to its left: words \
-                 {words:?}, reply {reply:?}"
-            );
-        } else {
-            assert!(
-                reply.left() >= words.right(),
-                "their message's controls should be to its right: words \
-                 {words:?}, reply {reply:?}"
-            );
-        }
-    }
 }
 
 /// The receipt is in the bubble, on the time's row.
@@ -2857,12 +2872,110 @@ fn hovering_a_message_offers_replying_and_reacting() {
     h.get_by_label("one").hover();
     h.run();
     h.run();
+    h.run();
     let said = text_of(&h);
     assert!(said.contains("Reply"), "hovering offers a reply: {said}");
-    assert!(said.contains("React"), "and a reaction: {said}");
+    for quick in sigil_emoji::QUICK {
+        assert!(said.contains(quick), "and a quick reaction {quick}: {said}");
+    }
+    assert!(said.contains("More emoji"), "and the rest of them: {said}");
     assert!(
         said.contains("More"),
         "and the rest, behind one more control: {said}"
+    );
+}
+
+/// A quick reaction from the strip is sent, and counted as this person's.
+///
+/// The count is what the picker's "Frequently used" row is drawn from, so
+/// the row is asserted through the app's own reading of it rather than by
+/// finding it on screen — the strip carries the same five, and a label found
+/// there proves nothing about the row.
+#[test]
+fn a_quick_reaction_is_sent_and_remembered() {
+    let state = a_conversation();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    h.get_by_label("one").hover();
+    h.run();
+    h.run();
+    h.get_by_label(sigil_emoji::QUICK[2]).click();
+    h.run();
+    let sent = asked.borrow().join("\n");
+    assert!(
+        sent.contains("React") && sent.contains(sigil_emoji::QUICK[2]),
+        "the strip did not send the reaction: {sent}"
+    );
+}
+
+/// The picker lists every group under its heading, narrows to a search, and
+/// puts the person's own most-used first.
+#[test]
+fn the_picker_has_groups_a_search_and_the_persons_own_row() {
+    let mut h = harness(true);
+    h.run();
+    hide_column(&mut h);
+    h.get_by_label_contains("the second one, then").hover();
+    h.step();
+    h.step();
+    h.step();
+    h.get_by_label("More emoji").click();
+    h.step();
+    h.step();
+    let said = text_of(&h);
+    // Only the rows on screen are laid out — that is the point of the row
+    // view — so the first heading and the first smiley are in the tree and
+    // the last group is not until it is scrolled to.
+    assert!(
+        said.contains(sigil_emoji::Group::Smileys.label()),
+        "no first heading: {said}"
+    );
+    assert!(
+        said.contains("\u{1f600}"),
+        "the first smiley is offered: {said}"
+    );
+    assert!(
+        !said.contains(sigil_emoji::Group::Flags.label()),
+        "every row was laid out at once: {said}"
+    );
+    assert!(
+        !said.contains("Frequently used"),
+        "a row of favourites for somebody who has sent none: {said}"
+    );
+
+    // The search box has the focus when the picker opens, so that is how it
+    // is found: it is the field somebody is typing into.
+    let search = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .find(|n| n.is_focused())
+        .expect("the picker's search box, focused");
+    search.type_text("party popper");
+    h.step();
+    h.step();
+    let said = text_of(&h);
+    assert!(
+        said.contains("\u{1f389}"),
+        "the search did not find it: {said}"
+    );
+    assert!(
+        !said.contains("\u{1f600}"),
+        "the search did not narrow the list: {said}"
+    );
+    assert!(
+        !said.contains("Smileys & emotion"),
+        "a search result is a flat list, not groups: {said}"
+    );
+    h.get_by_label("\u{1f389}").click();
+    h.step();
+    h.step();
+    assert!(
+        !text_of(&h).contains("Nothing by that name") && !text_of(&h).contains("Flags"),
+        "choosing did not close the picker: {}",
+        text_of(&h)
     );
 }
 

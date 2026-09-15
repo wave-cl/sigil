@@ -11,6 +11,7 @@ egui_extras = { workspace = true }
 image = { workspace = true }
 jiff = "0.2"
 sigil = { path = "../sigil" }
+sigil-emoji = { path = "../sigil-emoji" }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }

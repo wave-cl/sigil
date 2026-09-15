@@ -150,6 +150,16 @@ pub fn quote_picture_side(ui: &egui::Ui) -> f32 {
 }
 
 pub struct Bubble<'a> {
+    /// This message, and no other on the pane: what the strip, its picker
+    /// and its menu are keyed on.
+    ///
+    /// **Not derived from the ui.** Every message's child ui carries the
+    /// same id — a row is a row — so an id taken from it was one id for
+    /// the whole transcript: the pointer over one strip counted as over
+    /// all of them, and every message drew a strip on the same spot. The
+    /// caller has the one thing that tells messages apart, its place in the
+    /// channel, and passes it here.
+    pub id: egui::Id,
     /// The author's key, in full.
     pub key: &'a str,
     /// Their display name, if a profile has been seen. Never shown alone.
@@ -177,6 +187,9 @@ pub struct Bubble<'a> {
     pub reply_to: Option<Quote<'a>>,
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: &'a [(String, usize, bool)],
+    /// The emoji this person sends most, for the picker's own row. Empty
+    /// until they have sent any.
+    pub frequent: &'a [String],
     /// Offer a direct message with the sender: somebody else, seen in a
     /// conversation that is not already the one with them.
     pub direct: bool,
@@ -285,21 +298,6 @@ impl BubbleAction {
 /// numbers that happened to match.
 const PAD_X: f32 = tokens::SPACING_LG;
 const PAD_Y: f32 = tokens::SPACING_MD;
-
-/// The emoji offered by the picker.
-///
-/// A short list, like the terminal client's, and for the same reason: it is
-/// what fits without becoming a grid nobody wants. **Any emoji can still be
-/// sent** — the wire carries the string, not an index into this — so this is a
-/// convenience and not the set.
-pub const REACTIONS: &[&str] = &[
-    "\u{1f44d}",
-    "\u{1f389}",
-    "\u{1f9e1}",
-    "\u{1f602}",
-    "\u{1f914}",
-    "\u{1f440}",
-];
 
 /// A label centred in the transcript with a rule either side of it.
 ///
@@ -445,14 +443,11 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
         tokens::SPACING_XS
     });
 
-    // Room for the controls beside the bubble, always — so a message does not
-    // move sideways when the pointer arrives.
-    let aside = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 3.0;
-    // **Three quarters of the pane, and never so wide the controls fall off.**
-    // The first is the rule; the second is what the rule has to give way to
-    // on a pane narrow enough that a quarter of it is less than three buttons.
+    // Three quarters of the pane. Nothing is reserved beside the bubble any
+    // more: what used to sit there hangs off its corner now, on its own
+    // layer, and takes no room in the row.
     let available = ui.available_width();
-    let limit = (available * WIDEST).min(available - aside).max(160.0);
+    let limit = (available * WIDEST).max(160.0);
     if b.mine {
         // Measured, not filled. A frame in a top-down layout takes the width
         // it is given, so capping at the limit made every message the same
@@ -496,7 +491,7 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                     },
                 )
                 .inner;
-            controls(ui, b, bubble, &mut action);
+            strip(ui, b, bubble, &mut action);
         });
     } else {
         ui.horizontal(|ui| {
@@ -521,50 +516,59 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                     },
                 )
                 .inner;
-            controls(ui, b, bubble, &mut action);
+            strip(ui, b, bubble, &mut action);
         });
     }
 
     action
 }
 
-/// Reply, react, and the rest — **beside** the message rather than under it.
+/// Reactions, reply and the rest — on a strip that **hangs off the bubble's
+/// top-outer corner**, on its own layer.
 ///
-/// # Why beside
+/// # Why there
 ///
 /// Under the bubble they pushed everything below them down as the pointer
 /// moved along a conversation, so reading with the mouse anywhere near the
-/// transcript made it twitch. Beside, they sit in the space that is already
-/// empty: to the right of somebody else's message and to the left of one's
-/// own, which is also the side each has room on.
+/// transcript made it twitch. Beside it they took a column of the pane on
+/// both sides, whether or not the pointer was anywhere. Off the corner, as a
+/// foreground area, they take no room in the row at all and move nothing.
 ///
-/// Shown while the pointer is over the message, so a transcript at rest is a
-/// transcript and not a field of buttons. `reach` covers the bubble **and the
-/// controls** — a region stopping at the bubble's edge made them impossible to
-/// press, because moving towards one left the region and the row stopped being
-/// drawn before the click landed.
-fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut BubbleAction) {
-    let aside = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 3.0;
-    let reach = bubble
-        .expand2(egui::vec2(0.0, tokens::SPACING_XS))
-        .translate(egui::vec2(if b.mine { -aside } else { aside } / 2.0, 0.0))
-        .expand2(egui::vec2(aside / 2.0, 0.0));
-    let over = ui.rect_contains_pointer(reach);
+/// Shown while the pointer is over the message — or over the strip itself,
+/// which is a different layer and so has to be asked separately — so a
+/// transcript at rest is a transcript and not a field of buttons.
+fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut BubbleAction) {
+    let id = b.id.with("strip");
+    let reach = bubble.expand2(egui::vec2(0.0, tokens::SPACING_XS));
+    // **Not while the transcript is moving.** A scroll carries message after
+    // message under a pointer that has not moved, and each one under it
+    // would get a strip for a frame: a flicker of pills up the pane, and a
+    // new area every frame, which is a sizing pass every frame and so a
+    // repaint every frame for as long as the scroll lasts. A message reveals
+    // its strip once it has held still for a frame.
+    let seen = id.with("top");
+    let was = ui.ctx().data(|d| d.get_temp::<f32>(seen));
+    ui.ctx().data_mut(|d| d.insert_temp(seen, bubble.top()));
+    let still = was == Some(bubble.top());
+    let over = still
+        && (ui.rect_contains_pointer(reach)
+            || ui
+                .ctx()
+                .pointer_hover_pos()
+                .is_some_and(|p| ui.ctx().layer_id_at(p) == Some(crate::emoji::strip_layer(id))));
 
-    // **A menu opened from these keeps them up.**
+    // **A menu opened from the strip keeps it up.**
     //
-    // The reaction picker and the rest are drawn below their button, which is
-    // outside `reach` — so moving the pointer down into one left the region,
-    // the controls stopped being drawn, and the popup went with them. The
-    // picker was visible and could not be reached, which is the same defect as
-    // the controls themselves had when they were under the bubble.
+    // The picker and the More menu are drawn beside the strip, outside both
+    // it and the bubble — so moving the pointer into one left both regions,
+    // the strip stopped being drawn, and the popup went with it. Visible and
+    // unreachable, the same defect the controls had when they were under
+    // the bubble.
     //
-    // One slot in memory rather than a flag per message: only one message can
-    // be under the pointer at a time, so remembering *which* is enough, and
-    // the alternative is inventing a stable identity for a message that the
-    // widget deliberately does not have.
+    // One slot in memory rather than a flag per message: only one message
+    // can be under the pointer at a time, so remembering *which* is enough.
     let slot = egui::Id::new("sigil-message-controls");
-    let me = ui.id();
+    let me = b.id;
     if over {
         ui.ctx().data_mut(|d| d.insert_temp(slot, me));
     }
@@ -574,60 +578,52 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
         return;
     }
 
-    if crate::icon_button(ui, crate::Icon::Reply).clicked() {
-        action.reply = true;
-    }
-
-    // Painted openers, not glyph labels. `menu_button` takes text, and the two
-    // obvious characters for these — a face and an ellipsis — are exactly the
-    // sort this font set has already turned into boxes twice. `Popup::menu`
-    // takes any response, so the button can be a shape we drew ourselves.
-    let react = crate::icon_button(ui, crate::Icon::React);
-    egui::Popup::menu(&react).show(|ui| {
-        ui.horizontal(|ui| {
-            for emoji in REACTIONS {
-                if ui.button(*emoji).clicked() {
-                    action.react = Some((*emoji).to_string());
+    let strip = crate::emoji::Strip {
+        id,
+        bubble,
+        mine: b.mine,
+        clip: ui.clip_rect(),
+        frequent: b.frequent,
+    };
+    crate::emoji::strip(ui, strip, action, |ui, action| {
+        if crate::emoji::cell_icon(ui, crate::Icon::Reply, "Reply").clicked() {
+            action.reply = true;
+        }
+        let more = crate::emoji::cell_icon(ui, crate::Icon::More, "More");
+        egui::Popup::menu(&more).show(|ui| {
+            if b.mine && ui.button("Edit").clicked() {
+                action.edit = true;
+                ui.close();
+            }
+            if ui.button("Delete").clicked() {
+                action.redact = true;
+                ui.close();
+            }
+            if ui.button("Copy key").clicked() {
+                action.copy_key = true;
+                ui.close();
+            }
+            // The reply to a room that belongs to one person in it. Absent in
+            // the direct message itself and on one's own messages, where it
+            // would open the conversation already open, or none.
+            if b.direct && ui.button("Direct message").clicked() {
+                action.direct = true;
+                ui.close();
+            }
+            if !b.attachments.is_empty() {
+                // Saving lives here rather than on the picture: it is the one
+                // action nobody takes often, and it had the loudest place on
+                // the bubble.
+                if ui.button("Save file").clicked() {
+                    action.save = Some(0);
+                    ui.close();
+                }
+                if ui.button("Forward file").clicked() {
+                    action.forward = true;
                     ui.close();
                 }
             }
         });
-    });
-
-    let more = crate::icon_button(ui, crate::Icon::More);
-    egui::Popup::menu(&more).show(|ui| {
-        if b.mine && ui.button("Edit").clicked() {
-            action.edit = true;
-            ui.close();
-        }
-        if ui.button("Delete").clicked() {
-            action.redact = true;
-            ui.close();
-        }
-        if ui.button("Copy key").clicked() {
-            action.copy_key = true;
-            ui.close();
-        }
-        // The reply to a room that belongs to one person in it. Absent in
-        // the direct message itself and on one's own messages, where it
-        // would open the conversation already open, or none.
-        if b.direct && ui.button("Direct message").clicked() {
-            action.direct = true;
-            ui.close();
-        }
-        if !b.attachments.is_empty() {
-            // Saving lives here rather than on the picture: it is the one
-            // action nobody takes often, and it had the loudest place on the
-            // bubble.
-            if ui.button("Save file").clicked() {
-                action.save = Some(0);
-                ui.close();
-            }
-            if ui.button("Forward file").clicked() {
-                action.forward = true;
-                ui.close();
-            }
-        }
     });
 }
 
@@ -1385,31 +1381,7 @@ fn reply_stub(ui: &mut egui::Ui, q: Quote<'_>, quiet: egui::Color32, rule: egui:
 
 /// One emoji and how many people sent it. Ours is outlined.
 pub fn reaction_chip(ui: &mut egui::Ui, emoji: &str, count: usize, ours: bool) -> egui::Response {
-    let theme = ColorTheme::current(ui.ctx());
-    let text = if count > 1 {
-        format!("{emoji} {count}")
-    } else {
-        emoji.to_string()
-    };
-    let button = egui::Button::new(egui::RichText::new(&text).small())
-        .corner_radius(tokens::RADIUS_PILL)
-        .fill(if ours {
-            theme.interactive_hover
-        } else {
-            theme.surface_secondary
-        })
-        .stroke(if ours {
-            // Outlined as well as filled: "I reacted" and "somebody reacted"
-            // must not be one shade apart.
-            egui::Stroke::new(tokens::STROKE_THIN, theme.accent)
-        } else {
-            egui::Stroke::NONE
-        });
-    ui.add(button).on_hover_text(if ours {
-        "you reacted — click to take it back"
-    } else {
-        "react"
-    })
+    crate::emoji::chip(ui, emoji, count, ours)
 }
 
 /// A key, for where the whole one will not fit: its first four characters,
@@ -1582,6 +1554,7 @@ mod tests {
 
     fn plain<'a>(text: &'a str, files: &'a [crate::Attachment<'a>]) -> Bubble<'a> {
         Bubble {
+            id: egui::Id::new("plain"),
             key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
             name: None,
             title: None,
@@ -1593,6 +1566,7 @@ mod tests {
             redacted: false,
             reply_to: None,
             reactions: &[],
+            frequent: &[],
             receipt: None,
             attachments: files,
             standing: None,

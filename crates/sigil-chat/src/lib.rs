@@ -1,5 +1,6 @@
 //! Messaging, as a sigil app.
 
+pub mod frequent;
 pub mod mention;
 pub mod session;
 
@@ -870,6 +871,8 @@ pub struct ChatApp {
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
+    /// The emoji this person sends most, for the picker's own row.
+    frequent: frequent::Frequent,
 }
 
 /// A call this client is actually carrying audio for.
@@ -908,12 +911,17 @@ impl ChatApp {
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
+            frequent: frequent::Frequent::load(),
         }
     }
 
     /// Keep the stores somewhere other than `~/.sqex/chat`. Tests only.
+    ///
+    /// The emoji counts go with them: a test that reacts must not add to
+    /// the counts on the machine it runs on.
     #[doc(hidden)]
     pub fn set_store_root_for_test(&mut self, root: std::path::PathBuf) {
+        self.frequent = frequent::Frequent::at(root.join("emoji.txt"));
         self.store_root = Some(root);
     }
 
@@ -1098,7 +1106,17 @@ impl ChatApp {
     /// covers against a real `sqexd`.
     #[doc(hidden)]
     pub fn show_state_for_test(&mut self, state: ChatState) {
+        // A fixed state is a test, and a test's reactions are not this
+        // machine's habits: the counts stay in memory unless a root was set.
+        if self.store_root.is_none() {
+            self.frequent = frequent::Frequent::in_memory();
+        }
         self.fixed = Some(state);
+    }
+
+    /// The emoji this person sends most. Tests read it; the picker draws it.
+    pub fn frequent_for_test(&self) -> Vec<String> {
+        self.frequent.top(sigil_ui::emoji::FREQUENT)
     }
 
     /// Everything the interface has asked the session for, as `Debug` writes
@@ -3473,6 +3491,8 @@ impl ChatApp {
         }
 
         let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
+        // Once per pass, not per message: the counts are sorted to find it.
+        let frequent = self.frequent.top(sigil_ui::emoji::FREQUENT);
         // Whether this conversation is already somebody's direct message,
         // in which case "direct message" on their bubbles would open the
         // conversation it is in.
@@ -3643,6 +3663,7 @@ impl ChatApp {
                 })
                 .collect();
             let bubble = sigil_ui::Bubble {
+                id: egui::Id::new(("message", at, line.seq)),
                 key: &key,
                 name: line.name.as_deref(),
                 title,
@@ -3659,6 +3680,7 @@ impl ChatApp {
                     preview: q.preview.as_ref(),
                 }),
                 reactions: &line.reactions,
+                frequent: &frequent,
                 receipt: line.receipt.map(|r| match r {
                     Receipt::Sent => sigil_ui::Receipt::Sent,
                     Receipt::Delivered => sigil_ui::Receipt::Delivered,
@@ -3778,6 +3800,17 @@ impl ChatApp {
 
         if let Some((seq, text, who, did)) = acted {
             if let Some(emoji) = did.react {
+                // Counted when it is *sent*, not when it is taken back: the
+                // session toggles, so whether this press adds is read from
+                // the line — ours already there means this removes it.
+                let ours = state
+                    .lines
+                    .iter()
+                    .find(|l| l.seq == seq)
+                    .is_some_and(|l| l.reactions.iter().any(|(e, _, us)| *us && *e == emoji));
+                if !ours {
+                    self.frequent.bump(&emoji);
+                }
                 self.send_as(Some(at), Cmd::React { target: seq, emoji });
             }
             if did.reply {

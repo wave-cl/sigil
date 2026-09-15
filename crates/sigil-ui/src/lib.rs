@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod clock;
 pub mod conversation_row;
 pub mod dot;
+pub mod emoji;
 pub mod exchange;
 pub mod gif;
 pub mod identicon;
