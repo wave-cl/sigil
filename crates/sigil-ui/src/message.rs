@@ -695,11 +695,7 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     let chips = b
         .mentions
         .iter()
-        .map(|m| {
-            measure(&format!("@{}", m.label), egui::TextStyle::Body)
-                + gap
-                + measure(&short(m.key), egui::TextStyle::Small)
-        })
+        .map(|m| measure(&format!("@{}", m.label), egui::TextStyle::Body))
         .fold(0.0f32, f32::max);
     let together = body + gap * 2.0 + meta;
     // A mention is a row, so a message with one is never one line.
@@ -715,36 +711,39 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     }
 }
 
-/// Who the message mentions, one chip each: `@name` in the accent and the
-/// short key beside it in monospace. The name is the reader's own word for
-/// the key -- the sender's text is not consulted -- and the key is always
-/// there because the name is nobody's to vouch for (SIP-21).
+/// Who the message mentions, one chip each: `@name` in the accent, and on
+/// hover a card with the mark, the name and the whole key. The name is the
+/// reader's own word for the key -- the sender's text is not consulted --
+/// and the key is one gesture away because the name is nobody's to vouch
+/// for (SIP-21).
 fn mention_chips(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
     if b.mentions.is_empty() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
         for m in b.mentions {
-            let chip = ui
-                .horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = tokens::SPACING_XS;
-                    ui.label(
-                        egui::RichText::new(format!("@{}", m.label))
-                            .strong()
-                            .color(theme.accent),
-                    );
-                    ui.label(
-                        egui::RichText::new(short(m.key))
-                            .monospace()
-                            .small()
-                            .color(quiet),
-                    );
-                })
-                .response;
-            chip.on_hover_text(format!(
-                "Mentioned. The name is what this client calls the key; the key is {}",
-                m.key
-            ));
+            let chip = ui.label(
+                egui::RichText::new(format!("@{}", m.label))
+                    .strong()
+                    .color(theme.accent),
+            );
+            if chip.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
+            }
+            chip.on_hover_ui(|ui| {
+                ui.horizontal(|ui| {
+                    crate::identicon(ui, m.key, tokens::AVATAR_MD);
+                    ui.vertical(|ui| {
+                        ui.strong(m.label);
+                        ui.label(egui::RichText::new(m.key).monospace().small());
+                        ui.colored_label(
+                            quiet,
+                            egui::RichText::new("The name is what this client calls the key.")
+                                .small(),
+                        );
+                    });
+                });
+            });
         }
     });
 }

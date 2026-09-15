@@ -1532,13 +1532,21 @@ fn a_name_never_appears_without_its_key_reachable() {
 #[test]
 fn a_mention_is_drawn_with_its_key_and_one_of_me_is_marked() {
     let mut state = a_conversation();
-    // Ada mentions me; I mention Ada.
-    state.lines[0].mentions = vec![sigil_chat::session::Mentioned {
+    // On lines at the foot, where the bottom-aligned transcript shows them
+    // and a hover lands on something: Ada's "one" mentions me, and her
+    // "the second one, then" mentions Ada herself.
+    let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
         key: me(),
         label: "me".into(),
     }];
-    state.lines[0].me_mentioned = true;
-    state.lines[1].mentions = vec![sigil_chat::session::Mentioned {
+    state.lines[one].me_mentioned = true;
+    let second = state
+        .lines
+        .iter()
+        .position(|l| l.text == "the second one, then")
+        .unwrap();
+    state.lines[second].mentions = vec![sigil_chat::session::Mentioned {
         key: them(),
         label: "Ada".into(),
     }];
@@ -1548,8 +1556,17 @@ fn a_mention_is_drawn_with_its_key_and_one_of_me_is_marked() {
     assert!(said.contains("@me"), "the chip names the key: {said}");
     assert!(said.contains("@Ada"), "{said}");
     assert!(
-        said.contains(&short_form(&them())) && said.contains(&short_form(&me())),
-        "and the key is beside every name: {said}"
+        !said.contains(&them().to_string()),
+        "the key is not in the way until asked for: {said}"
+    );
+    // One gesture away: the whole key, on the chip's card.
+    h.get_by_label("@Ada").hover();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains(&them().to_string()),
+        "hovering the name shows the key: {said}"
     );
     // The outline on the line that mentions me is a stroke, which the tree
     // cannot see: it is looked at in the snapshot and not asserted here.
