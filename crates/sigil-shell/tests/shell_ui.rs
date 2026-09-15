@@ -796,7 +796,7 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
 
     // A releases server that is nobody: this test is about the
     // capabilities, and must not ask GitHub anything.
-    let mut app = PlatformApp::new(Platform::new(), "http://127.0.0.1:1", || {});
+    let mut app = PlatformApp::new(&Platform::new(), "http://127.0.0.1:1", || {});
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
@@ -1270,5 +1270,66 @@ fn a_sealed_identity_has_no_app_corner() {
         h.query_by_label("Calls corner").is_none() && h.query_by_label("Chat corner").is_none(),
         "an app drew into the strip with nothing unlocked: {}",
         said(&h)
+    );
+}
+
+/// The shell with a hand on the tray: actions pushed here reach it on the
+/// next pass, as a desktop's would.
+fn with_tray_actions(
+    actions: std::rc::Rc<std::cell::RefCell<Vec<sigil_platform::tray::TrayAction>>>,
+) -> Harness<'static> {
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Chat", 0))];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            shell.tray_actions_for_test(std::mem::take(&mut *actions.borrow_mut()));
+            shell.update_all(&ctx, false);
+            shell.ui(ui);
+        })
+}
+
+/// The window's commands from the last pass, as words.
+fn window_asks(h: &Harness<'static>) -> Vec<String> {
+    h.output()
+        .viewport_output
+        .values()
+        .flat_map(|v| v.commands.iter())
+        .map(|c| format!("{c:?}"))
+        .collect()
+}
+
+/// A press on the tray's mark, or Open in its menu, brings the window up:
+/// shown, then focused, in that order, since focusing a hidden window does
+/// nothing. Quit closes it. Nothing happens on a pass with nothing pressed.
+#[test]
+fn the_tray_brings_the_window_up_and_can_quit() {
+    use sigil_platform::tray::TrayAction;
+    let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = with_tray_actions(actions.clone());
+    h.run();
+    assert!(window_asks(&h).is_empty(), "{:?}", window_asks(&h));
+
+    actions.borrow_mut().push(TrayAction::Open);
+    h.step();
+    let asks = window_asks(&h);
+    let shown = asks.iter().position(|a| a == "Visible(true)");
+    let focused = asks.iter().position(|a| a == "Focus");
+    assert!(
+        matches!((shown, focused), (Some(s), Some(f)) if s < f),
+        "shown, then focused: {asks:?}"
+    );
+
+    actions.borrow_mut().push(TrayAction::Quit);
+    h.step();
+    assert!(
+        window_asks(&h).iter().any(|a| a == "Close"),
+        "{:?}",
+        window_asks(&h)
     );
 }

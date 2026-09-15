@@ -154,8 +154,16 @@ pub struct Shell {
     /// the main thread by the shell's owner, because the tray insists on it.
     platform: Box<dyn Notify>,
     tray: Option<sigil_platform::Tray>,
+    /// The count on sigil's own icon in the Dock or the launcher.
+    badge: Option<sigil_platform::Badge>,
     /// The badge last given to the tray, so it is only set when it changes.
     shown_unread: u32,
+    /// Tray actions handed in by a test, in place of a desktop's.
+    tray_actions: Vec<sigil_platform::tray::TrayAction>,
+    /// Do-not-disturb, as the tray's menu item shows it.
+    quiet: bool,
+    /// Quit was chosen: the next close of the window is a real one.
+    pub quitting: bool,
     /// The opening screen's state: which identity is chosen, and what has been
     /// typed at it. See [`Shell::welcome`].
     welcome: Welcome,
@@ -215,11 +223,18 @@ impl Shell {
         assert!(!apps.is_empty(), "a shell with no apps has nothing to show");
         let mut opened: Vec<bool> = apps.iter().map(|app| app.runs_unopened()).collect();
         opened[0] = true;
-        let (notify, tray): (Box<dyn Notify>, Option<sigil_platform::Tray>) = match platform {
-            Some(sigil_platform::Platform { notifier, tray, .. }) => {
-                (Box::new(notifier), Some(tray))
-            }
-            None => (Box::new(sigil::Silent), None),
+        let (notify, tray, badge): (
+            Box<dyn Notify>,
+            Option<sigil_platform::Tray>,
+            Option<sigil_platform::Badge>,
+        ) = match platform {
+            Some(sigil_platform::Platform {
+                notifier,
+                tray,
+                badge,
+                ..
+            }) => (Box::new(notifier), Some(tray), Some(badge)),
+            None => (Box::new(sigil::Silent), None, None),
         };
         Self {
             apps,
@@ -234,7 +249,11 @@ impl Shell {
             seen_generation: 0,
             platform: notify,
             tray,
+            badge,
             shown_unread: 0,
+            tray_actions: Vec::new(),
+            quiet: false,
+            quitting: false,
             welcome: Welcome::default(),
             remember: true,
             identities: None,
@@ -312,8 +331,40 @@ impl Shell {
             };
             app.update(&mut ctx, egui_ctx);
         }
-        self.badge_tray();
+        self.badge();
+        self.tray_actions(egui_ctx);
         self.apply_nav();
+    }
+
+    /// What was done at the tray since last pass: the window brought up,
+    /// do-not-disturb flipped, or quitting.
+    fn tray_actions(&mut self, egui_ctx: &egui::Context) {
+        use sigil_platform::tray::TrayAction;
+        let mut actions = std::mem::take(&mut self.tray_actions);
+        if let Some(tray) = &self.tray {
+            actions.extend(tray.events());
+        }
+        for action in actions {
+            match action {
+                TrayAction::Open => present(egui_ctx),
+                TrayAction::QuietToggled => {
+                    self.quiet = !self.quiet;
+                    if let Some(tray) = &self.tray {
+                        tray.set_quiet(self.quiet);
+                    }
+                }
+                TrayAction::Quit => {
+                    self.quitting = true;
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    /// Hand the shell what a tray would have reported. Tests only.
+    #[doc(hidden)]
+    pub fn tray_actions_for_test(&mut self, actions: Vec<sigil_platform::tray::TrayAction>) {
+        self.tray_actions.extend(actions);
     }
 
     /// Tell every app the roster moved, once per change.
@@ -346,14 +397,20 @@ impl Shell {
         }
     }
 
-    /// Keep the tray's tooltip current, and only when it changes: setting it
-    /// every pass would be a D-Bus round trip fifty times a second.
-    fn badge_tray(&mut self) {
-        let Some(tray) = &self.tray else { return };
+    /// Keep the count on the tray and on the application's own icon
+    /// current, and only when it changes: setting it every pass would be a
+    /// D-Bus round trip fifty times a second.
+    fn badge(&mut self) {
         let unread: u32 = self.apps.iter().map(|a| a.tab_notifications().count).sum();
-        if unread != self.shown_unread {
+        if unread == self.shown_unread {
+            return;
+        }
+        self.shown_unread = unread;
+        if let Some(tray) = &mut self.tray {
             tray.set_unread(unread);
-            self.shown_unread = unread;
+        }
+        if let Some(badge) = &mut self.badge {
+            badge.set_count(unread);
         }
     }
 
@@ -936,11 +993,7 @@ impl Shell {
             // Both commands, in this order. A window closed to the tray is
             // hidden as well as unfocused, and focusing something invisible
             // does nothing on any of the three desktops sigil targets.
-            Some(AppAction::Present) => {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
+            Some(AppAction::Present) => present(ui.ctx()),
             // Back to the opening screen. Where it came from is remembered
             // here and not there: the screen changes which identity is active
             // as somebody looks through the list, so by the time they cancel
@@ -1037,6 +1090,14 @@ impl Shell {
             ctx.memory_mut(|m| m.request_focus(id));
         }
     }
+}
+
+/// Bring the window forward. Both commands, in this order: a window closed
+/// to the tray is hidden as well as unfocused, and focusing something
+/// invisible does nothing on any of the three desktops sigil targets.
+pub fn present(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
 
 #[cfg(test)]

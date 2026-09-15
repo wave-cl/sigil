@@ -24,6 +24,12 @@ const ARM_TIP: f64 = 0.012;
 /// height and the square's margin around it is wasted there, so the
 /// hexagon is scaled to nearly the canvas's width.
 const GLYPH_SCALE: f64 = 1.55;
+/// The mark of something waiting, on the glyph: a solid dot in the top
+/// right corner, cut out of the emblem by a clear ring so it reads as a
+/// dot on it rather than a lump of it.
+const DOT: (f64, f64) = (0.84, 0.84);
+const DOT_RADIUS: f64 = 0.13;
+const DOT_GAP: f64 = 0.06;
 const SAMPLES: u32 = 4;
 
 /// One arm: centre, half width, half height, and a radius per corner in
@@ -130,6 +136,14 @@ fn arms_margin(x: f64, y: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+fn dot_margin(x: f64, y: f64) -> f64 {
+    (x - DOT.0).hypot(y - DOT.1) - DOT_RADIUS
+}
+
+fn dot_ring_margin(x: f64, y: f64) -> f64 {
+    (x - DOT.0).hypot(y - DOT.1) - (DOT_RADIUS + DOT_GAP)
+}
+
 /// Signed distance to the rounded square: negative inside.
 fn square_margin(x: f64, y: f64) -> f64 {
     let half = SQUARE / 2.0;
@@ -196,10 +210,25 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
 /// alpha: for a menu bar that tints a template, or a tray that wants the
 /// mark without the square.
 pub fn glyph_rgba(size: u32, colour: [u8; 3]) -> Vec<u8> {
+    glyph(size, colour, false)
+}
+
+/// The same, with the dot: something is waiting.
+pub fn glyph_rgba_marked(size: u32, colour: [u8; 3]) -> Vec<u8> {
+    glyph(size, colour, true)
+}
+
+fn glyph(size: u32, colour: [u8; 3], marked: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            let g = emblem(size, x, y, GLYPH_SCALE);
+            let mut g = emblem(size, x, y, GLYPH_SCALE);
+            if marked {
+                // The emblem cleared around the dot, then the dot.
+                g = (g * (1.0 - coverage(size, x, y, dot_ring_margin, 1.0))
+                    + coverage(size, x, y, dot_margin, 1.0))
+                .min(1.0);
+            }
             out.extend_from_slice(&colour);
             out.push((255.0 * g).round_ties_even() as u8);
         }
@@ -214,11 +243,18 @@ mod tests {
     /// `packaging/icon.py`, run for real, decoded, and compared: the tray
     /// and the dock are one drawing or they are two.
     fn python_png(size: u32, glyph: bool) -> Vec<u8> {
+        python_png_as(size, glyph, false)
+    }
+
+    fn python_png_as(size: u32, glyph: bool, marked: bool) -> Vec<u8> {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/icon.py");
         let mut cmd = std::process::Command::new("python3");
         cmd.arg(script).arg(size.to_string()).arg("-");
         if glyph {
             cmd.arg("--glyph");
+        }
+        if marked {
+            cmd.arg("--marked");
         }
         let out = cmd.output().expect("python3 runs packaging/icon.py");
         assert!(
@@ -256,6 +292,23 @@ mod tests {
     #[test]
     fn the_glyph_alone_matches_too() {
         compare(&glyph_rgba(32, [0, 0, 0]), &python_png(32, true), 32);
+    }
+
+    /// And the marked one: the dot is solid, and the ring around it clear,
+    /// so it stands off the emblem in a menu bar that only has alpha.
+    #[test]
+    fn the_marked_glyph_matches_and_has_its_dot() {
+        let size = 64;
+        let px = glyph_rgba_marked(size, [0, 0, 0]);
+        compare(&px, &python_png_as(size, true, true), size);
+        let alpha = |x: u32, y: u32| px[((y * size + x) * 4 + 3) as usize];
+        assert_eq!(alpha(54, 10), 255, "the dot is solid");
+        assert_eq!(alpha(46, 18), 0, "the ring around it is clear");
+        let plain = glyph_rgba(size, [0, 0, 0]);
+        assert!(
+            plain[((18 * size + 46) * 4 + 3) as usize] > 0,
+            "where the emblem was, before the ring cleared it"
+        );
     }
 
     /// The glyph fills its canvas: a menu bar draws a template at a fixed

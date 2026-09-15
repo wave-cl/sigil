@@ -102,6 +102,25 @@ itself at launch, so the dock shows one icon before and after. The icon is
 generated rather than checked in so there is no binary blob in the
 repository that nobody can diff.
 
+## What the desktop shows while sigil is not in front
+
+**The tray.** The number waiting sits beside the mark (a menu bar title on
+macOS, an appindicator label on Linux), the mark carries a dot while there
+is anything, and the tooltip says it in words. A left press on the mark
+brings the window up on macOS; the library reports no press at all on
+Linux, so there the menu is what a press opens, and **Open Sigil** is its
+first item. The menu also holds **Do not disturb** and **Quit Sigil**.
+
+**The application's own icon.** On macOS the count goes on the Dock tile
+(`NSDockTile`). On Linux there is no standard; sigil sends the
+`com.canonical.Unity.LauncherEntry.Update` signal on the session bus,
+naming `application://sigil.desktop`, which KDE, Cinnamon and most docks
+honour and GNOME ignores. For the desktop to tie the window to that
+`.desktop` file the window's app id is set to `sigil` -- Wayland's app id,
+X11's class -- which is also what `StartupWMClass=sigil` in the `.desktop`
+file matches. Both are `Capability` rows in the Desktop pane, so an absent
+badge has a stated reason.
+
 ## Releasing
 
 `.github/workflows/release.yml`, on a pushed `v*` tag. Four artefacts, and every

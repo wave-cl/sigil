@@ -14,6 +14,7 @@
 //! somebody believing they are muted.
 
 pub mod autostart;
+pub mod badge;
 pub mod deeplink;
 pub mod hotkey;
 pub mod instance;
@@ -23,6 +24,7 @@ pub mod support;
 pub mod tray;
 
 pub use autostart::Autostart;
+pub use badge::Badge;
 pub use deeplink::Link;
 pub use hotkey::Hotkeys;
 pub use instance::Instance;
@@ -37,6 +39,7 @@ pub use tray::Tray;
 pub struct Platform {
     pub notifier: Notifier,
     pub tray: Tray,
+    pub badge: Badge,
     pub hotkeys: Hotkeys,
     pub autostart: Autostart,
     session: Session,
@@ -53,6 +56,7 @@ impl Platform {
         Platform {
             notifier: Notifier::new(),
             tray: Tray::new(),
+            badge: Badge::new(),
             hotkeys: Hotkeys::new(),
             autostart: Autostart::new(),
             session: Session::detect(),
@@ -79,6 +83,11 @@ impl Platform {
                 "Tray icon",
                 "keeps sigil reachable with its window closed",
                 self.tray.support().clone(),
+            ),
+            Capability::new(
+                "Application badge",
+                "puts the number waiting on sigil's own icon in the Dock or the launcher",
+                self.badge.support().clone(),
             ),
             Capability::new(
                 "Global shortcuts",

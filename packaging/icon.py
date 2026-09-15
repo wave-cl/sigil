@@ -14,8 +14,9 @@ the white between them winds through the middle. Every number below is a
 fraction of the canvas, so the 16-pixel menu bar and the 1024-pixel dock
 get the same shape.
 
-    icon.py SIZE [OUT]           the app icon: the emblem on the square
-    icon.py SIZE [OUT] --glyph   the emblem alone, in black, for a template
+    icon.py SIZE [OUT]                    the app icon: the emblem on the square
+    icon.py SIZE [OUT] --glyph            the emblem alone, in black, for a template
+    icon.py SIZE [OUT] --glyph --marked   the same with a dot: something is waiting
 """
 import math
 import struct
@@ -61,6 +62,12 @@ ARMS = (
 # height and the square's margin around it is wasted there, so the hexagon
 # is scaled to nearly the canvas's width.
 GLYPH_SCALE = 1.55
+# The mark of something waiting, on the glyph: a solid dot in the top right
+# corner, cut out of the emblem by a clear ring so it reads as a dot on it
+# rather than a lump of it.
+DOT = (0.84, 0.84)
+DOT_RADIUS = 0.13
+DOT_GAP = 0.06
 SAMPLES = 4
 
 
@@ -105,6 +112,14 @@ def arms_margin(x, y):
     return min(box_margin(x, y, *arm) for arm in ARMS)
 
 
+def dot_margin(x, y):
+    return math.hypot(x - DOT[0], y - DOT[1]) - DOT_RADIUS
+
+
+def dot_ring_margin(x, y):
+    return math.hypot(x - DOT[0], y - DOT[1]) - (DOT_RADIUS + DOT_GAP)
+
+
 def square_margin(x, y):
     """Signed distance to the rounded square: negative inside."""
     half = SQUARE / 2
@@ -143,7 +158,7 @@ def coverage(size, x, y, margin, scale=1.0):
     return hits / (SAMPLES * SAMPLES)
 
 
-def draw(size, glyph_only=False):
+def draw(size, glyph_only=False, marked=False):
     scale = GLYPH_SCALE if glyph_only else 1.0
     rows = []
     for y in range(size):
@@ -155,6 +170,9 @@ def draw(size, glyph_only=False):
                 0.0,
                 coverage(size, x, y, hex_margin, scale) - coverage(size, x, y, arms_margin, scale),
             )
+            if marked:
+                # The emblem cleared around the dot, then the dot.
+                g = min(1.0, g * (1.0 - coverage(size, x, y, dot_ring_margin)) + coverage(size, x, y, dot_margin))
             if glyph_only:
                 row.extend((*BLACK, int(round(255 * g))))
                 continue
@@ -188,9 +206,10 @@ def encode(size, rows):
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     glyph_only = "--glyph" in sys.argv
+    marked = "--marked" in sys.argv
     size = int(args[0]) if args else 512
     out = args[1] if len(args) > 1 else "-"
-    png = draw(size, glyph_only)
+    png = draw(size, glyph_only, marked)
     if out == "-":
         sys.stdout.buffer.write(png)
     else:

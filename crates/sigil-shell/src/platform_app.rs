@@ -67,7 +67,9 @@ const FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
 const EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 pub struct PlatformApp {
-    platform: Option<Platform>,
+    /// The one thing this pane changes on the desktop. Its own rather than
+    /// a whole `Platform`: building a second one built a second tray.
+    autostart: Option<sigil_platform::Autostart>,
     report: Report,
     updater: Option<Updater>,
     /// The version a notification has been posted about, so a newer
@@ -83,12 +85,12 @@ impl PlatformApp {
     /// path against a server of their own. `wake` is called from the
     /// update thread whenever there is something new to draw.
     pub fn new(
-        platform: Platform,
+        platform: &Platform,
         api_base: &str,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> PlatformApp {
         let install = sigil_update::install::detect();
-        let report = Report::of(&platform, install.clone());
+        let report = Report::of(platform, install.clone());
         let updater = install.is_supported().then(|| {
             Updater::start(
                 sigil_update::release::Client::new(api_base),
@@ -100,7 +102,7 @@ impl PlatformApp {
             )
         });
         PlatformApp {
-            platform: Some(platform),
+            autostart: Some(sigil_platform::Autostart::new()),
             report,
             updater,
             announced: None,
@@ -117,7 +119,7 @@ impl PlatformApp {
     #[doc(hidden)]
     pub fn from_report(report: Report) -> PlatformApp {
         PlatformApp {
-            platform: None,
+            autostart: None,
             report,
             updater: None,
             announced: None,
@@ -330,15 +332,15 @@ impl App for PlatformApp {
         ui.add_space(tokens::SPACING_MD);
         ui.separator();
         let starts = self.report.autostart_enabled;
-        let can = self.report.autostart.is_yes() && self.platform.is_some();
+        let can = self.report.autostart.is_yes() && self.autostart.is_some();
         ui.add_enabled_ui(can, |ui| {
             let mut on = starts;
             if ui.checkbox(&mut on, "Start sigil at login").changed()
-                && let Some(platform) = &self.platform
+                && let Some(autostart) = &self.autostart
             {
                 // Best effort, and the checkbox reflects what the desktop
                 // actually holds on the next pass rather than what was asked.
-                if platform.autostart.set(on).is_ok() {
+                if autostart.set(on).is_ok() {
                     self.report.autostart_enabled = on;
                 }
             }

@@ -164,6 +164,10 @@ fn main() -> eframe::Result<()> {
             // "sigil" written across the top of sigil.
             .with_title("Sigil")
             .with_title_shown(false)
+            // The window's name to the desktop -- Wayland's app id, X11's
+            // class -- which is how a launcher ties the window to
+            // `sigil.desktop`, and so to the count put on its icon.
+            .with_app_id("sigil")
             // Our own mark, set on the running application: without one,
             // eframe sets its own at launch, and the dock switched from the
             // bundle's icon to egui's the moment the window came up.
@@ -202,6 +206,13 @@ fn main() -> eframe::Result<()> {
             // thread — the macOS menu bar and Linux's GTK context both insist —
             // and eframe's creator is the one place that is guaranteed to be.
             let platform = sigil_platform::Platform::new();
+            // A press on the tray is seen at once rather than at the next
+            // pass, which on an idle window is whenever something else
+            // happens.
+            sigil_platform::Tray::wake_with({
+                let ctx = cc.egui_ctx.clone();
+                move || ctx.request_repaint()
+            });
 
             // Said at startup as well as drawn in the Desktop pane. The first
             // question about a notification that never appeared is whether it
@@ -231,14 +242,10 @@ fn main() -> eframe::Result<()> {
             let apps: Vec<Box<dyn App>> = vec![
                 Box::new(sigil_chat::ChatApp::new()),
                 Box::new(sigil_admin::AdminApp::new()),
-                Box::new(sigil_shell::PlatformApp::new(
-                    sigil_platform::Platform::new(),
-                    &releases_api,
-                    {
-                        let ctx = cc.egui_ctx.clone();
-                        move || ctx.request_repaint()
-                    },
-                )),
+                Box::new(sigil_shell::PlatformApp::new(&platform, &releases_api, {
+                    let ctx = cc.egui_ctx.clone();
+                    move || ctx.request_repaint()
+                })),
             ];
             let shell = Shell::new(apps, Some(platform));
 
