@@ -135,6 +135,38 @@ pub struct Line {
     /// What SIP-31 concluded about it. SIP-31 **requires** a fork be
     /// surfaced, and a message with nothing wrong says nothing.
     pub standing: Standing,
+    /// Who it mentions, from the SIP-19 parts and not from the text: the
+    /// part carries a key, and the name is what *this* client calls it.
+    pub mentions: Vec<Mentioned>,
+    /// One of those keys is ours.
+    pub me_mentioned: bool,
+}
+
+/// Somebody a message mentions: the key the part carries, and what to call
+/// it -- ours to decide, and drawn with the key beside it (SIP-21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mentioned {
+    pub key: PubKey,
+    pub label: String,
+}
+
+/// A message that mentions us, arrived while this session was up: what the
+/// interface announces. Derived from the log every pass, like [`Ring`], so
+/// there is nothing to store and nothing to clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mention {
+    pub channel: [u8; 32],
+    pub seq: u64,
+    pub from: PubKey,
+    /// What we call them.
+    pub from_label: String,
+    /// What we call the conversation.
+    pub conversation: String,
+    pub public: bool,
+    /// What they said, shortened.
+    pub said: String,
+    /// The conversation is the one on screen.
+    pub in_open: bool,
 }
 
 /// Something that happened *to* the conversation rather than in it.
@@ -325,6 +357,8 @@ pub struct Summary {
     pub peer: Option<PubKey>,
     pub label: String,
     pub unread: usize,
+    /// How many of the unread mention us.
+    pub mentioned: usize,
     /// The last thing said, for the list. `None` when nothing has been.
     pub preview: Option<String>,
     /// When that was, for the list's time column.
@@ -468,6 +502,9 @@ pub struct ChatState {
     /// Not only the one on screen: a call is the thing that most needs to
     /// reach somebody who is looking elsewhere.
     pub ringing: Vec<Ring>,
+    /// Messages mentioning us that arrived while this session was up, in
+    /// every conversation. See [`Mention`].
+    pub mentions: Vec<Mention>,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -1107,6 +1144,12 @@ impl ChatHandle {
         self.state.borrow().ringing.clone()
     }
 
+    /// Messages mentioning us that arrived while this session was up. The
+    /// same shape as [`ringing`](Self::ringing), for the same reason.
+    pub fn mentions(&self) -> Vec<Mention> {
+        self.state.borrow().mentions.clone()
+    }
+
     /// How much is waiting here, across every conversation.
     pub fn unread(&self) -> usize {
         self.state
@@ -1638,6 +1681,12 @@ struct Known {
     /// The newest thing said here. What the list sorts on.
     last_at: u64,
     unread: usize,
+    /// How many of the unread mention us.
+    mentioned: usize,
+    /// The newest sequence number this channel had when the exchange first
+    /// answered for it this session -- everything after it arrived live.
+    /// What was there already is history, and history is not announced.
+    live_from: Option<u64>,
     /// The read mark this client has already written to the exchange.
     ///
     /// **A cursor is only worth writing when it has moved.** It was written on
@@ -1666,6 +1715,7 @@ impl Known {
             peer: self.peer,
             label: self.label.clone(),
             unread: self.unread,
+            mentioned: self.mentioned,
             waiting: self.waiting,
             preview: self.preview(me),
             at: (self.last_at > 0).then_some(self.last_at),
@@ -1989,6 +2039,8 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 wanted: PAGE,
                 last_at,
                 unread: 0,
+                mentioned: 0,
+                live_from: None,
                 told: 0,
                 waiting: false,
                 typing: false,
@@ -2029,6 +2081,8 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             seen: 0,
             wanted: PAGE,
             unread: 0,
+            mentioned: 0,
+            live_from: None,
             // Nothing has happened here yet, so it sorts below anything that
             // has rather than claiming a time it does not have.
             last_at: 0,
@@ -2157,6 +2211,8 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
             wanted: PAGE,
             last_at,
             unread: 0,
+            mentioned: 0,
+            live_from: None,
             told: 0,
             waiting: false,
             typing: false,
@@ -2363,6 +2419,9 @@ fn took(
     known.waiting = false;
     // Answered for. Until this, what is on screen came off the disc and the
     // interface says it is still asking.
+    if !known.fetched {
+        known.live_from = Some(known.timeline.messages().last().map_or(0, |m| m.seq));
+    }
     known.fetched = true;
     // Which of the unreadable this identity may take down. The fold says
     // which entries; the store says who wrote each, which the fold does not
@@ -2407,6 +2466,12 @@ fn took(
     // when it arrives.
     if after > known.seen && open != Some(channel) {
         known.unread += after - known.seen;
+        known.mentioned += known
+            .timeline
+            .messages()
+            .skip(known.seen)
+            .filter(|m| m.account != me && m.post.mentions().any(|k| *k == me))
+            .count();
     }
     known.seen = after;
     if let Some(newest) = known.timeline.messages().last().map(|m| m.posted) {
@@ -2485,6 +2550,7 @@ async fn refresh(
         && let Some(known) = desk.channels.get_mut(&open)
     {
         known.unread = 0;
+        known.mentioned = 0;
         // **Only when it has moved.** See `Known::told`: writing an unchanged
         // cursor tells every other member that something happened, and what
         // they do about it is fetch and write their own.
@@ -2959,6 +3025,11 @@ fn wanted_names(desk: &Desk, me: PubKey) -> Vec<PubKey> {
         && let Some(known) = desk.channels.get(&open)
     {
         want.extend(known.timeline.messages().map(|m| m.account));
+        // And everybody in it, said anything or not: the mention picker
+        // offers the room's members by name, and a member who has never
+        // spoken is exactly the one you are trying to get to speak. Bounded
+        // by the roster, and only the room on screen.
+        want.extend(known.members.iter().map(|m| m.account));
     }
     want.remove(&me);
     want.into_iter().collect()
@@ -2986,6 +3057,9 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
         // first -- one allocation the length of the conversation, per pass,
         // for a lookup that already dedupes.
         for m in known.timeline.messages() {
+            look(m.account, &mut out);
+        }
+        for m in &known.members {
             look(m.account, &mut out);
         }
     }
@@ -3160,6 +3234,18 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         })
                         .collect(),
                     standing: standing.get(&m.seq).copied().unwrap_or_default(),
+                    mentions: m
+                        .post
+                        .mentions()
+                        .map(|key| Mentioned {
+                            key: *key,
+                            label: people
+                                .get(key)
+                                .map(|p| p.label(key))
+                                .unwrap_or_else(|| short(key)),
+                        })
+                        .collect(),
+                    me_mentioned: m.post.mentions().any(|key| *key == me),
                 })
                 .collect()
         })
@@ -3392,6 +3478,36 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     }
     ringing.sort_by_key(|r| r.seq);
 
+    // Messages mentioning us that arrived live, anywhere -- what gets said
+    // out loud. From the log, like the rings, so nothing is stored: a
+    // message is live if it came after what the channel had when the
+    // exchange first answered for it this session, and history is not news.
+    let mut mentions: Vec<Mention> = Vec::new();
+    for (channel, known) in &desk.channels {
+        let Some(live_from) = known.live_from else {
+            continue;
+        };
+        for m in known.timeline.messages().filter(|m| m.seq > live_from) {
+            if m.account == me || m.redacted || !m.post.mentions().any(|k| *k == me) {
+                continue;
+            }
+            mentions.push(Mention {
+                channel: *channel,
+                seq: m.seq,
+                from: m.account,
+                from_label: name_for(&people, &m.account, ""),
+                conversation: match known.peer {
+                    Some(peer) => name_for(&people, &peer, &known.label),
+                    None => known.label.clone(),
+                },
+                public: known.public.unwrap_or(false),
+                said: stub(m.post.body_text().unwrap_or("")),
+                in_open: desk.open == Some(*channel),
+            });
+        }
+    }
+    mentions.sort_by_key(|m| (m.channel, m.seq));
+
     let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
     let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
     let members = open.map(|(_, k)| k.members.clone()).unwrap_or_default();
@@ -3438,6 +3554,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(i_am_admin, i_am_admin);
         set!(topic, topic);
         set!(ringing, ringing);
+        set!(mentions, mentions);
         moved
     })
 }
@@ -3758,6 +3875,8 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     wanted: PAGE,
                     last_at: 0,
                     unread: 0,
+                    mentioned: 0,
+                    live_from: None,
                     told: 0,
                     waiting,
                     typing: false,
@@ -4720,6 +4839,8 @@ mod naming_tests {
             wanted: 0,
             last_at: 0,
             unread: 0,
+            mentioned: 0,
+            live_from: None,
             told: 0,
             waiting: false,
             typing: false,
@@ -4757,6 +4878,40 @@ mod naming_tests {
         let mut desk = Desk::default();
         desk.channels.insert([1u8; 32], dm_with(Some(key(9))));
         assert_eq!(wanted_names(&desk, key(9)), Vec::new());
+    }
+
+    /// Everybody in the room on screen, said anything or not: the mention
+    /// picker offers them by name. And only the room on screen -- a member
+    /// of a room nobody is looking at is not asked about.
+    #[test]
+    fn a_silent_member_of_the_open_room_is_named_and_of_another_is_not() {
+        let mut desk = Desk::default();
+        let mut open = dm_with(None);
+        open.members = vec![
+            super::Member {
+                account: key(3),
+                admin: true,
+            },
+            super::Member {
+                account: key(4),
+                admin: false,
+            },
+        ];
+        let mut closed = dm_with(None);
+        closed.members = vec![super::Member {
+            account: key(5),
+            admin: false,
+        }];
+        desk.channels.insert([1u8; 32], open);
+        desk.channels.insert([2u8; 32], closed);
+        desk.open = Some([1u8; 32]);
+        let mut want = wanted_names(&desk, key(3));
+        want.sort_by_key(|k| k.to_string());
+        assert_eq!(
+            want,
+            vec![key(4)],
+            "the other member of the open room, not us, not the closed room's"
+        );
     }
 
     /// Nothing held is nobody to ask about — and an empty list is what stops

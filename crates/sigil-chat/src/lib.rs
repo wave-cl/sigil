@@ -5049,6 +5049,7 @@ mod first_look_tests {
             peer: None,
             label: String::new(),
             unread: 0,
+            mentioned: 0,
             preview: None,
             at,
             public: Some(false),

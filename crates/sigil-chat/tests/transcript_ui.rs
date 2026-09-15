@@ -52,6 +52,7 @@ fn a_conversation() -> ChatState {
                 peer: Some(them()),
                 label: "Ada".into(),
                 unread: 2,
+                mentioned: 0,
                 waiting: false,
                 preview: Some("the second one, then".into()),
                 at: Some(NOW - 60),
@@ -64,6 +65,7 @@ fn a_conversation() -> ChatState {
                 peer: None,
                 label: "release check".into(),
                 unread: 0,
+                mentioned: 0,
                 waiting: false,
                 preview: Some("anybody may join this one".into()),
                 at: Some(NOW - 2 * DAY),
@@ -88,6 +90,8 @@ fn a_conversation() -> ChatState {
                 receipt: None,
                 attachments: Vec::new(),
                 standing: Default::default(),
+                mentions: Vec::new(),
+                me_mentioned: false,
             },
             Line {
                 seq: 2,
@@ -103,6 +107,8 @@ fn a_conversation() -> ChatState {
                 receipt: Some(Receipt::Read),
                 attachments: Vec::new(),
                 standing: Default::default(),
+                mentions: Vec::new(),
+                me_mentioned: false,
             },
             Line {
                 seq: 3,
@@ -132,6 +138,8 @@ fn a_conversation() -> ChatState {
                     id: "abc123".into(),
                 }],
                 standing: Default::default(),
+                mentions: Vec::new(),
+                me_mentioned: false,
             },
             Line {
                 seq: 4,
@@ -151,6 +159,8 @@ fn a_conversation() -> ChatState {
                 receipt: None,
                 attachments: Vec::new(),
                 standing: Default::default(),
+                mentions: Vec::new(),
+                me_mentioned: false,
             },
             Line {
                 seq: 5,
@@ -166,6 +176,8 @@ fn a_conversation() -> ChatState {
                 receipt: None,
                 attachments: Vec::new(),
                 standing: Default::default(),
+                mentions: Vec::new(),
+                me_mentioned: false,
             },
         ],
         typing: false,
@@ -207,6 +219,7 @@ fn a_conversation() -> ChatState {
         i_am_admin: true,
         topic: String::new(),
         ringing: Vec::new(),
+        mentions: Vec::new(),
         devices: Vec::new(),
         linked: None,
         credential: None,
@@ -1224,6 +1237,8 @@ fn a_page(from: u32, to: u32) -> ChatState {
             receipt: None,
             attachments: Vec::new(),
             standing: Default::default(),
+            mentions: Vec::new(),
+            me_mentioned: false,
         })
         .collect();
     state.events.clear();
@@ -3275,6 +3290,8 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         receipt: Some(Receipt::Read),
         attachments: Vec::new(),
         standing: Default::default(),
+        mentions: Vec::new(),
+        me_mentioned: false,
     });
     state.lines.push(Line {
         seq: 10,
@@ -3292,6 +3309,8 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         receipt: Some(Receipt::Read),
         attachments: Vec::new(),
         standing: Default::default(),
+        mentions: Vec::new(),
+        me_mentioned: false,
     });
     let mut h = harness_with(state, true);
     h.run();

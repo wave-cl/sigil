@@ -2616,3 +2616,182 @@ async fn an_unreadable_message_can_be_deleted_from_the_notice() {
     );
     alice.stop();
 }
+
+/// A mention reaches the person named: counted with the unread on their
+/// side, announced as live, drawn on the line with the key, and cleared by
+/// reading -- and a mention of somebody else does none of that to them.
+///
+/// Against a real exchange, because the part has to survive the whole way:
+/// sealed by Alice's client, stored, fetched and folded by Bob's, and read
+/// out of the post rather than out of the text.
+#[tokio::test]
+async fn a_mention_reaches_the_person_named_and_reading_clears_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(21);
+    let (b_signer, b_id) = signer(22);
+    let (c_signer, c_id) = signer(23);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    let carol = start_at(endpoint, c_signer, &dir.path().join("c.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id)
+                && bob.state().me == Some(b_id)
+                && carol.state().me == Some(c_id),
+            15
+        )
+        .await
+    );
+
+    alice.send(Cmd::NewGroup("the room".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.group && c.public == Some(false)),
+            15
+        )
+        .await
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.group && c.public == Some(false))
+        .map(|c| c.channel)
+        .unwrap();
+    assert!(
+        until(
+            || alice.state().open == Some(channel) && alice.state().i_am_admin,
+            15
+        )
+        .await
+    );
+    alice.send(Cmd::Invite(b_id));
+    alice.send(Cmd::Invite(c_id));
+    let both = || {
+        [&bob, &carol]
+            .iter()
+            .all(|s| s.state().conversations.iter().any(|c| c.channel == channel))
+    };
+    assert!(until(both, 15).await, "both invitees learn of the room");
+    // Each has the room in the list and answered for, so what comes next is
+    // live rather than history.
+    assert!(
+        until(
+            || [&bob, &carol].iter().all(|s| s
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel && !c.waiting)),
+            15
+        )
+        .await
+    );
+
+    // Alice mentions Bob. Neither Bob nor Carol has the room open.
+    alice.send(Cmd::Post(session::Draft {
+        text: "@Bob look at this".into(),
+        mentions: vec![b_id],
+        ..Default::default()
+    }));
+    let counted = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel && c.unread == 1 && c.mentioned == 1)
+        },
+        20,
+    )
+    .await;
+    assert!(
+        counted,
+        "the mention is counted with the unread on Bob's side: {:?}",
+        bob.state().conversations
+    );
+    let announced = bob.state().mentions;
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    assert_eq!(announced[0].from, a_id);
+    assert_eq!(announced[0].channel, channel);
+    assert!(!announced[0].in_open);
+    assert!(announced[0].said.contains("look at this"), "{announced:?}");
+
+    // Carol was in the room and read the same message: unread, not mentioned.
+    assert!(
+        until(
+            || carol
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel && c.unread == 1),
+            20
+        )
+        .await
+    );
+    let carols = carol
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.channel == channel)
+        .map(|c| c.mentioned);
+    assert_eq!(
+        carols,
+        Some(0),
+        "a mention of Bob is not a mention of Carol"
+    );
+    assert!(carol.state().mentions.is_empty());
+
+    // Reading clears the count; the line says who was mentioned, with the
+    // key the part carried, and that it was us.
+    bob.send(Cmd::Show(channel));
+    let read = until(
+        || {
+            let s = bob.state();
+            s.open == Some(channel)
+                && s.lines.iter().any(|l| l.me_mentioned)
+                && s.conversations
+                    .iter()
+                    .any(|c| c.channel == channel && c.mentioned == 0 && c.unread == 0)
+        },
+        20,
+    )
+    .await;
+    assert!(
+        read,
+        "{:?} / {:?}",
+        bob.state().lines,
+        bob.state().conversations
+    );
+    let line = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| l.me_mentioned)
+        .cloned()
+        .unwrap();
+    assert_eq!(line.mentions.len(), 1);
+    assert_eq!(line.mentions[0].key, b_id);
+    // And on Carol's screen the same line mentions Bob, not her.
+    carol.send(Cmd::Show(channel));
+    assert!(
+        until(
+            || carol
+                .state()
+                .lines
+                .iter()
+                .any(|l| !l.me_mentioned && l.mentions.iter().any(|m| m.key == b_id)),
+            20
+        )
+        .await,
+        "{:?}",
+        carol.state().lines
+    );
+}
