@@ -2917,13 +2917,22 @@ async fn words_and_several_files_are_one_message() {
         reply: Some(target),
         ..Default::default()
     }));
+    // The thumbnail is named by the blob it is of, so two quotes of two
+    // pictures are never one picture.
+    let blob = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| l.seq == target)
+        .map(|l| l.attachments[0].id.clone())
+        .unwrap();
     let quoted = until(
         || {
             bob.state().lines.iter().any(|l| {
                 l.text == "lovely"
-                    && l.reply_to
-                        .as_ref()
-                        .is_some_and(|q| q.said == "a picture" && q.preview.is_some())
+                    && l.reply_to.as_ref().is_some_and(|q| {
+                        q.said == "a picture" && q.preview.as_ref().is_some_and(|t| t.id == blob)
+                    })
             })
         },
         30,

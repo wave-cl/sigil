@@ -141,7 +141,23 @@ pub struct Quote<'a> {
     pub who: &'a str,
     pub said: &'a str,
     /// The thumbnail of the first picture the quoted message carries.
-    pub preview: Option<&'a std::sync::Arc<[u8]>>,
+    pub preview: Option<Thumb<'a>>,
+}
+
+/// A thumbnail and the blob it is of: the id is what the picture is
+/// registered under, so two quotes of two pictures never share one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thumb<'a> {
+    pub id: &'a str,
+    pub bytes: &'a std::sync::Arc<[u8]>,
+}
+
+impl Thumb<'_> {
+    /// Where the picture is registered: by blob, the same name the
+    /// message's own attachment uses, so the bytes are shared with it.
+    pub fn uri(&self) -> String {
+        format!("bytes://{}-preview", self.id)
+    }
 }
 
 /// How wide the thumbnail in a quote is drawn: two small lines, square.
@@ -1354,10 +1370,12 @@ fn reply_stub(ui: &mut egui::Ui, q: Quote<'_>, quiet: egui::Color32, rule: egui:
             if let Some(preview) = q.preview {
                 let side = quote_picture_side(ui);
                 let (pic, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-                let uri = format!("bytes://quote-{}", q.seq);
-                ui.ctx()
-                    .include_bytes(uri.clone(), egui::load::Bytes::Shared(preview.clone()));
-                egui::Image::from_bytes(uri, egui::load::Bytes::Shared(preview.clone()))
+                let uri = preview.uri();
+                ui.ctx().include_bytes(
+                    uri.clone(),
+                    egui::load::Bytes::Shared(preview.bytes.clone()),
+                );
+                egui::Image::from_bytes(uri, egui::load::Bytes::Shared(preview.bytes.clone()))
                     .corner_radius(tokens::RADIUS_SM)
                     .show_loading_spinner(false)
                     .paint_at(ui, pic);
@@ -1367,14 +1385,14 @@ fn reply_stub(ui: &mut egui::Ui, q: Quote<'_>, quiet: egui::Color32, rule: egui:
             // bubble was given, and off the side of the pane. This is what cuts
             // the quote to the bubble: the session hands over a couple of hundred
             // characters, and what shows is whatever the width allows.
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("{}: {}", q.who, q.said))
-                        .small()
-                        .color(quiet),
-                )
-                .truncate(),
-            );
+            // "Ada: lovely" -- or, for a message nobody can name, what it
+            // is: "an earlier message", not ": an earlier message".
+            let line = if q.who.is_empty() {
+                q.said.to_string()
+            } else {
+                format!("{}: {}", q.who, q.said)
+            };
+            ui.add(egui::Label::new(egui::RichText::new(line).small().color(quiet)).truncate());
         });
     });
     ui.add_space(tokens::SPACING_XS);
@@ -1539,6 +1557,34 @@ pub fn preview(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quote's picture is registered by the blob it is of and by nothing
+    /// else: named by the quoted message's number, message 12's picture in
+    /// one conversation was drawn on message 12's quote in every other,
+    /// because egui keeps the first bytes given for a name.
+    #[test]
+    fn a_quotes_picture_is_named_by_its_blob() {
+        let a: std::sync::Arc<[u8]> = std::sync::Arc::from(&b"a"[..]);
+        let b: std::sync::Arc<[u8]> = std::sync::Arc::from(&b"b"[..]);
+        let one = Thumb {
+            id: "blobA",
+            bytes: &a,
+        };
+        let other = Thumb {
+            id: "blobB",
+            bytes: &b,
+        };
+        assert_ne!(one.uri(), other.uri());
+        assert_eq!(
+            one.uri(),
+            Thumb {
+                id: "blobA",
+                bytes: &b
+            }
+            .uri()
+        );
+        assert!(one.uri().contains("blobA"));
+    }
 
     /// Everything quiet inside one's own bubble is still legible on it.
     ///

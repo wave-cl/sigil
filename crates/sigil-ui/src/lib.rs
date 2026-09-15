@@ -139,8 +139,8 @@ fn field_as(
     )
 }
 pub use message::{
-    Bubble, BubbleAction, Quote, Receipt, bubble, day_separator, reaction_chip, short, system_line,
-    unread_divider, unread_pill,
+    Bubble, BubbleAction, Quote, Receipt, Thumb, bubble, day_separator, reaction_chip, short,
+    system_line, unread_divider, unread_pill,
 };
 pub use roster::{Row, roster};
 pub use sigil::icon;

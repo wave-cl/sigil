@@ -12,7 +12,7 @@ use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
     Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Posted, Quoted,
-    Receipt, Summary, Trouble,
+    Receipt, Summary, Thumb, Trouble,
 };
 use sqnr_core::PubKey;
 
@@ -4553,7 +4553,7 @@ fn reply_preview_dark() {
 /// than they do in a quote of words alone.
 #[test]
 fn a_reply_to_a_picture_quotes_the_picture() {
-    let quoted = |preview: Option<std::sync::Arc<[u8]>>| {
+    let quoted = |preview: Option<Thumb>| {
         let mut state = the_room();
         let n = state.lines.len();
         state.lines[n - 1].redacted = false;
@@ -4573,7 +4573,10 @@ fn a_reply_to_a_picture_quotes_the_picture() {
         h.get_by_label("Ada: a picture").rect().left()
     };
     let without = words_at(quoted(None));
-    let with = words_at(quoted(Some(a_png())));
+    let with = words_at(quoted(Some(Thumb {
+        id: "pic0".into(),
+        bytes: a_png(),
+    })));
     assert!(
         with > without + 20.0,
         "the thumbnail makes room before the words: {without} -> {with}"
@@ -4592,7 +4595,10 @@ fn reply_to_picture_dark() {
         seq: 1,
         who: "Ada".into(),
         said: "a picture".into(),
-        preview: Some(a_png()),
+        preview: Some(Thumb {
+            id: "pic0".into(),
+            bytes: a_png(),
+        }),
     });
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
@@ -5144,5 +5150,26 @@ fn a_rewrite_carries_a_mention_whose_name_has_changed() {
     assert!(
         sent.contains(&format!("{:?}", them())),
         "the renamed mention still goes: {sent}"
+    );
+}
+
+/// A reply to a message this reader does not hold -- from before it joined,
+/// or pruned -- is quoted as what it is, "an earlier message", with no
+/// author's colon in front of it, rather than drawn as no reply at all.
+#[test]
+fn a_reply_to_a_message_not_held_is_quoted_as_an_earlier_message() {
+    let mut state = the_room();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "as I said".into();
+    state.lines[n - 1].reply_to = Some(Quoted::unheld(1));
+    let mut h = harness_with(state, true);
+    h.run();
+    h.run();
+    h.get_by_label("an earlier message");
+    assert!(
+        h.query_by_label_contains(": an earlier message").is_none(),
+        "{}",
+        text_of(&h)
     );
 }

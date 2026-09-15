@@ -6,7 +6,7 @@ pub mod session;
 use session::RING_WINDOW;
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, Hit, Line, LinkState,
-    Linked, Member, Person, Posted, Quoted, Receipt, Ring, Standing, Summary, Trouble,
+    Linked, Member, Person, Posted, Quoted, Receipt, Ring, Standing, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -3818,7 +3818,7 @@ impl ChatApp {
                     seq: q.seq,
                     who: &q.who,
                     said: &q.said,
-                    preview: q.preview.as_ref(),
+                    preview: q.preview.as_ref().map(thumb),
                 }),
                 reactions: &line.reactions,
                 receipt: line.receipt.map(|r| match r {
@@ -4298,19 +4298,14 @@ impl ChatApp {
                 .iter()
                 .find(|l| l.seq == target)
                 .map(session::Line::quoted)
-                .unwrap_or_else(|| session::Quoted {
-                    seq: target,
-                    who: String::new(),
-                    said: format!("message {target}"),
-                    preview: None,
-                });
+                .unwrap_or_else(|| session::Quoted::unheld(target));
             let head = sigil_ui::message::reply_preview(
                 ui,
                 sigil_ui::Quote {
                     seq: quoted.seq,
                     who: &quoted.who,
                     said: &quoted.said,
-                    preview: quoted.preview.as_ref(),
+                    preview: quoted.preview.as_ref().map(thumb),
                 },
                 editing.is_some(),
             );
@@ -4554,6 +4549,14 @@ impl ChatApp {
                 field.request_focus();
             }
         });
+    }
+}
+
+/// A session thumbnail, borrowed for drawing.
+fn thumb(t: &session::Thumb) -> sigil_ui::Thumb<'_> {
+    sigil_ui::Thumb {
+        id: &t.id,
+        bytes: &t.bytes,
     }
 }
 
