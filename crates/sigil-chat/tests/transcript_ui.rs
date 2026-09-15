@@ -4984,3 +4984,165 @@ fn a_rewrite_does_not_throw_away_what_was_being_typed() {
     assert!(asked.borrow().join(" | ").contains("edit: Some(99)"));
     assert_eq!(composed(&h), "half a th", "sent: the words come back");
 }
+
+// ---------------------------------------------------------------------------
+// A rewrite is a whole post: its files, its mentions, and the way out.
+// ---------------------------------------------------------------------------
+
+/// A message of mine at the foot of the room, with `n` pictures on it.
+fn mine_with_pictures(text: &str, n: usize) -> ChatState {
+    let mut state = with_mine(text, 60);
+    let last = state.lines.len() - 1;
+    state.lines[last].attachments = with_pictures(n).lines.last().unwrap().attachments.clone();
+    state
+}
+
+/// Rewriting a message shows its files as tiles beside any new ones, each
+/// with its ×; the rewrite keeps the ones left and takes the others off.
+/// And a picture's caption can be cleared: files alone are a message.
+#[test]
+fn a_rewrite_shows_the_files_it_carries_and_keeps_only_those_left() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(mine_with_pictures("look", 2), asked.clone());
+    h.run();
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Remove [image 0, 4 KiB]").is_some()
+            && h.query_by_label("Remove [image 1, 4 KiB]").is_some(),
+        "the original's pictures are tiles: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Remove [image 1, 4 KiB]").click();
+    h.run();
+    assert!(h.query_by_label("Remove [image 1, 4 KiB]").is_none());
+
+    // The caption goes too; the picture left is enough to send.
+    composer(&h).focus();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.key_press(egui::Key::Backspace);
+    h.run();
+    assert_eq!(composed(&h), "");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("text: \"\", reply: None, edit: Some(99)"),
+        "a wordless rewrite goes: {sent}"
+    );
+    assert!(
+        sent.contains("keep: [\"pic0\"]"),
+        "the picture left is kept, the one removed is not: {sent}"
+    );
+    assert!(
+        h.query_by_label("Remove [image 0, 4 KiB]").is_none(),
+        "sent: the tiles are gone"
+    );
+}
+
+/// Dropping a rewrite drops the files staged for it, the original's
+/// included; none of them belongs to the next message. And Escape drops a
+/// reply or a rewrite as the × does, while the box has the keyboard.
+#[test]
+fn dropping_a_rewrite_drops_its_files_and_escape_drops_either() {
+    let mut h = harness_with(mine_with_pictures("look", 1), true);
+    h.run();
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    assert!(h.query_by_label("Remove [image 0, 4 KiB]").is_some());
+    h.get_by_label("Cancel rewrite").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Remove [image 0, 4 KiB]").is_none(),
+        "the tile went with the rewrite: {}",
+        text_of(&h)
+    );
+    assert_eq!(composed(&h), "");
+
+    // Escape, from the box.
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    composer(&h).focus();
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Cancel rewrite").is_none(),
+        "Escape drops the rewrite: {}",
+        text_of(&h)
+    );
+    assert_eq!(composed(&h), "", "and its words");
+
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    composer(&h).focus();
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Cancel reply").is_none(),
+        "Escape drops the reply: {}",
+        text_of(&h)
+    );
+}
+
+/// A mention whose name has changed since the message was written is not
+/// in the words any more, so no rewrite can find it there -- and no rewrite
+/// typed it out, so it goes as it is rather than being dropped.
+#[test]
+fn a_rewrite_carries_a_mention_whose_name_has_changed() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = with_mine("thanks @Countess", 60);
+    let last = state.lines.len() - 1;
+    state.lines[last].mentions = vec![sigil_chat::session::Mentioned {
+        key: them(),
+        label: "Ada".into(),
+    }];
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    h.get_by_label("thanks @Countess").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("!");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("edit: Some(99)"), "{sent}");
+    assert!(
+        sent.contains(&format!("{:?}", them())),
+        "the renamed mention still goes: {sent}"
+    );
+}

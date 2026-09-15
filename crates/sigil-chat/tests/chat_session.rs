@@ -3036,10 +3036,13 @@ async fn an_edit_keeps_the_reply_and_the_files() {
         seen(&bob, "lovely").map(|l| l.reply_to)
     );
 
-    // And Alice corrects her caption: the picture stays on the message.
+    // And Alice corrects her caption, keeping the picture: it stays on
+    // the message.
+    let kept = seen(&alice, "look").unwrap().attachments[0].id.clone();
     alice.send(Cmd::Post(session::Draft {
         text: "look here".into(),
         edit: Some(picture),
+        keep: vec![kept],
         ..Default::default()
     }));
     let captioned = |l: &session::Line| {
@@ -3059,6 +3062,23 @@ async fn an_edit_keeps_the_reply_and_the_files() {
         seen(&bob, "look").is_none(),
         "the old words are gone: {:?}",
         bob.state().lines
+    );
+
+    // A rewrite that leaves the picture out takes it off the message: the
+    // composer showed it as a tile and it was removed.
+    alice.send(Cmd::Post(session::Draft {
+        text: "never mind the picture".into(),
+        edit: Some(picture),
+        ..Default::default()
+    }));
+    assert!(
+        until(
+            || seen(&bob, "never mind the picture").is_some_and(|l| l.attachments.is_empty()),
+            30
+        )
+        .await,
+        "the picture is taken off: {:?}",
+        seen(&bob, "never mind the picture").map(|l| l.attachments)
     );
 }
 

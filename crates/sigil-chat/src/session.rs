@@ -363,6 +363,10 @@ pub struct Draft {
     /// more than the wire's four in one message; the composer stops at
     /// that.
     pub files: Vec<std::path::PathBuf>,
+    /// On a rewrite: which of the original's files stay on it, by blob id.
+    /// A rewrite is a whole post, so one left out here is taken off the
+    /// message. The composer always fills this from what it showed.
+    pub keep: Vec<String>,
     /// The composer's own number for this draft, answered in
     /// [`ChatState::posted`] so the composer can tell which of its sends
     /// failed and put that one back. Zero for a draft nobody is waiting on.
@@ -895,6 +899,7 @@ mod draft_tests {
             edit: None,
             mentions: vec![k(1), k(2), k(1)],
             files: Vec::new(),
+            keep: Vec::new(),
             token: 0,
         };
         let parts = full.parts();
@@ -4290,13 +4295,14 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
         Cmd::Post(mut draft) => {
             let Some(channel) = desk.open else { return };
-            // **An edit replaces the whole post** (SIP-19), and the composer
-            // holds only the words. What the original carried besides them
-            // -- the message it replied to, the files -- comes back from the
-            // original here, or a rewrite of one word silently unthreads the
-            // message and drops its pictures. The mentions are the composer's:
-            // it loads them with the text, so a name taken out of the words
-            // takes its mention with it, as in a fresh message.
+            // **An edit replaces the whole post** (SIP-19). What the original
+            // carried besides its words comes back from the original here:
+            // the message it replied to always -- a rewrite of one word must
+            // not unthread it -- and the files the composer said to keep,
+            // which it showed as tiles, so one taken out is taken off the
+            // message. The mentions are the composer's: it loads them with
+            // the text, so a name taken out of the words takes its mention
+            // with it, as in a fresh message.
             let mut attachments = Vec::with_capacity(draft.files.len());
             if let Some(target) = draft.edit
                 && let Some(m) = desk
@@ -4316,7 +4322,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 if draft.reply.is_none() {
                     draft.reply = m.post.reply_to();
                 }
-                attachments.extend(m.post.attachments().cloned());
+                attachments.extend(
+                    m.post
+                        .attachments()
+                        .filter(|a| draft.keep.contains(&bs58::encode(a.blob).into_string()))
+                        .cloned(),
+                );
             }
             // The files, each uploaded and described; one that fails fails
             // the message, because half a message is not the message.
