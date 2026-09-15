@@ -4548,6 +4548,51 @@ fn reply_preview_dark() {
     h.snapshot("reply_preview_dark");
 }
 
+/// A rewrite in progress, looked at: the "Rewriting" caption over the
+/// quote, "Cancel rewrite" in its corner, and the message's own picture
+/// staged as a tile with its ×.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn rewrite_preview_dark() {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(mine_with_pictures("look at this one", 1));
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    h.get_by_label("look at this one").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    for _ in 0..10 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("rewrite_preview_dark");
+}
+
 /// A reply to a picture quotes the picture: the thumbnail sits before the
 /// words in the quote, and takes its room, so the words start further in
 /// than they do in a quote of words alone.
@@ -5170,6 +5215,172 @@ fn a_reply_to_a_message_not_held_is_quoted_as_an_earlier_message() {
     assert!(
         h.query_by_label_contains(": an earlier message").is_none(),
         "{}",
+        text_of(&h)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pictures: the viewer waits, every file can be saved, staging is careful.
+// ---------------------------------------------------------------------------
+
+/// Next onto a picture whose bytes have not arrived keeps the viewer up on
+/// its thumbnail and says what is happening, instead of shutting it. One
+/// too big to come unasked offers to fetch it; one the exchange would not
+/// give offers another try.
+#[test]
+fn the_viewer_waits_on_a_picture_not_yet_fetched() {
+    let open_on_second = |state: ChatState, asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>| {
+        let mut h = harness_recording_commands(state, asked);
+        h.run();
+        h.run();
+        let tile = h.get_by_label("[image 0, 4 KiB]").rect();
+        press_at(&mut h, tile.center());
+        h.run();
+        h.run();
+        assert!(text_of(&h).contains("1 of 3"), "{}", text_of(&h));
+        h.get_by_label("Next").click();
+        h.run();
+        h.run();
+        h
+    };
+
+    // Still on its way.
+    let mut state = with_pictures(3);
+    let last = state.lines.len() - 1;
+    state.lines[last].attachments[1].bytes = None;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let h = open_on_second(state, asked);
+    let said = text_of(&h);
+    assert!(said.contains("2 of 3"), "the viewer stays up: {said}");
+    assert!(said.contains("fetching the full image"), "{said}");
+    assert!(
+        h.query_by_label("Save…").is_none(),
+        "nothing to save yet: {said}"
+    );
+
+    // Too big to come unasked: ask.
+    let mut state = with_pictures(3);
+    state.lines[last].attachments[1].bytes = None;
+    state.lines[last].attachments[1].held = true;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = open_on_second(state, asked.clone());
+    h.get_by_label("Fetch").click();
+    h.run();
+    assert!(
+        asked
+            .borrow()
+            .iter()
+            .any(|c| c == "Fetch { seq: 5, index: 1 }"),
+        "{:?}",
+        asked.borrow()
+    );
+
+    // Refused by the exchange: try again.
+    let mut state = with_pictures(3);
+    state.lines[last].attachments[1].bytes = None;
+    state.lines[last].attachments[1].missing = true;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = open_on_second(state, asked.clone());
+    assert!(
+        text_of(&h).contains("could not be fetched"),
+        "{}",
+        text_of(&h)
+    );
+    h.get_by_label("Try again").click();
+    h.run();
+    assert!(
+        asked.borrow().iter().any(|c| c == "Refetch"),
+        "{:?}",
+        asked.borrow()
+    );
+}
+
+/// A message with several files offers each of them to save and to
+/// forward, by name; "Save file" on a gallery of three said nothing about
+/// which, and always took the first.
+#[test]
+fn each_file_on_a_message_can_be_saved_and_forwarded() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(with_pictures(3), asked.clone());
+    h.run();
+    h.run();
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    let said = text_of(&h);
+    for i in 0..3 {
+        assert!(
+            said.contains(&format!("Forward [image {i}, 4 KiB]")),
+            "{said}"
+        );
+        assert!(said.contains(&format!("Save [image {i}, 4 KiB]")), "{said}");
+    }
+    assert!(!said.contains("Save file"), "{said}");
+    h.get_by_label("Forward [image 1, 4 KiB]").click();
+    h.run();
+    h.run();
+    // The destination list: the other conversation, lowest of the "Ada"s
+    // on screen -- the list is above the composer, under the transcript.
+    h.get_all_by_label("Ada")
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the direct message")
+        .click();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Forward { seq: 5, index: 1,"),
+        "the second file, not the first: {sent}"
+    );
+}
+
+/// Staging is careful: the same file twice is one tile, a path that is not
+/// a file is refused with its name and does not fail the message later, and
+/// "left out" goes away once room is made.
+#[test]
+fn staging_refuses_duplicates_and_non_files_and_forgets_a_stale_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let make = |n: &str| {
+        let p = dir.path().join(n);
+        std::fs::write(&p, b"not really").unwrap();
+        p
+    };
+    let a = make("a.png");
+    let paths = vec![
+        a.clone(),
+        a.clone(),
+        dir.path().join("never-made.png"),
+        make("b.png"),
+        make("c.png"),
+        make("d.png"),
+        make("e.png"),
+    ];
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let next = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut h = harness_that_can_be_told(the_room(), asked.clone(), next, paths);
+    h.run();
+    h.run();
+    assert_eq!(
+        h.get_all_by_label("Remove a.png").count(),
+        1,
+        "once: {}",
+        text_of(&h)
+    );
+    let said = text_of(&h);
+    assert!(said.contains("Not a file: never-made.png"), "{said}");
+    assert!(
+        said.contains("1 left out"),
+        "a, b, c, d fit; e does not: {said}"
+    );
+    assert!(h.query_by_label("Remove e.png").is_none());
+
+    h.get_by_label("Remove d.png").click();
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("left out"),
+        "room was made: {}",
         text_of(&h)
     );
 }

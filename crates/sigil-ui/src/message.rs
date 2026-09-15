@@ -254,8 +254,8 @@ pub struct BubbleAction {
     pub fetch: Option<usize>,
     /// What was done to the video at this index.
     pub video: Option<(usize, crate::VideoAction)>,
-    /// Forward the file it carries somewhere else.
-    pub forward: bool,
+    /// Forward the file at this index somewhere else.
+    pub forward: Option<usize>,
     /// Go to the message this one replies to, by its place in the channel.
     pub jump: Option<u64>,
     /// Open a direct message with whoever sent this.
@@ -635,17 +635,42 @@ fn controls(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut 
             action.direct = true;
             ui.close();
         }
-        if !b.attachments.is_empty() {
-            // Saving lives here rather than on the picture: it is the one
-            // action nobody takes often, and it had the loudest place on the
-            // bubble.
-            if ui.button("Save file").clicked() {
-                action.save = Some(0);
-                ui.close();
+        // Saving lives here rather than on the picture: it is the one
+        // action nobody takes often, and it had the loudest place on the
+        // bubble. One entry per file when there are several -- named, since
+        // "Save file" on a gallery of four said nothing about which -- and
+        // the plain word when there is one.
+        match b.attachments {
+            [] => {}
+            [_] => {
+                if ui.button("Save file").clicked() {
+                    action.save = Some(0);
+                    ui.close();
+                }
+                if ui.button("Forward file").clicked() {
+                    action.forward = Some(0);
+                    ui.close();
+                }
             }
-            if ui.button("Forward file").clicked() {
-                action.forward = true;
-                ui.close();
+            many => {
+                for (i, a) in many.iter().enumerate() {
+                    if ui
+                        .button(format!("Save {}", preview(a.described, 24)))
+                        .clicked()
+                    {
+                        action.save = Some(i);
+                        ui.close();
+                    }
+                }
+                for (i, a) in many.iter().enumerate() {
+                    if ui
+                        .button(format!("Forward {}", preview(a.described, 24)))
+                        .clicked()
+                    {
+                        action.forward = Some(i);
+                        ui.close();
+                    }
+                }
             }
         }
     });
