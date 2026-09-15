@@ -1526,41 +1526,54 @@ fn a_name_never_appears_without_its_key_reachable() {
     );
 }
 
-/// A mention is drawn from the message's parts, with the key beside the
-/// name: the name is this client's word for the key (SIP-21). A line that
-/// mentions nobody draws neither.
+/// A mention is marked in the words themselves -- the name, by this
+/// client's spelling of it, once -- with the mark, the name and the whole
+/// key on a card when it is hovered (SIP-21). A mention whose name is not
+/// in the words is a chip under them, so it is never invisible. A line
+/// that mentions nobody draws neither.
 #[test]
-fn a_mention_is_drawn_with_its_key_and_one_of_me_is_marked() {
+fn a_mention_is_marked_in_the_words_and_its_key_is_a_hover_away() {
     let mut state = a_conversation();
     // On lines at the foot, where the bottom-aligned transcript shows them
-    // and a hover lands on something: Ada's "one" mentions me, and her
-    // "the second one, then" mentions Ada herself.
+    // and a hover lands on something.
     let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].text = "hi @Ada hi".into();
     state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
-        key: me(),
-        label: "me".into(),
+        key: them(),
+        label: "Ada".into(),
     }];
-    state.lines[one].me_mentioned = true;
     let second = state
         .lines
         .iter()
         .position(|l| l.text == "the second one, then")
         .unwrap();
+    // Written as one name over a part that names somebody else.
+    state.lines[second].text = "hey @Eve".into();
     state.lines[second].mentions = vec![sigil_chat::session::Mentioned {
-        key: them(),
-        label: "Ada".into(),
+        key: me(),
+        label: "me".into(),
     }];
+    state.lines[second].me_mentioned = true;
     let mut h = harness_with(state, true);
     h.run();
     let said = text_of(&h);
-    assert!(said.contains("@me"), "the chip names the key: {said}");
-    assert!(said.contains("@Ada"), "{said}");
+    assert!(said.contains("hi @Ada hi"), "{said}");
+    assert!(
+        h.query_by_label("@Ada").is_none(),
+        "the name is in the words, not printed a second time: {said}"
+    );
+    assert!(
+        h.query_by_label("@me").is_some(),
+        "a name the words do not carry is a chip: {said}"
+    );
     assert!(
         !said.contains(&them().to_string()),
-        "the key is not in the way until asked for: {said}"
+        "the key waits to be asked for: {said}"
     );
-    // One gesture away: the whole key, on the chip's card.
-    h.get_by_label("@Ada").hover();
+
+    // Hovering the name in the words: the card, with the whole key.
+    let words = h.get_by_label("hi @Ada hi").rect();
+    h.hover_at(words.center());
     h.run();
     h.run();
     let said = text_of(&h);
@@ -1568,12 +1581,12 @@ fn a_mention_is_drawn_with_its_key_and_one_of_me_is_marked() {
         said.contains(&them().to_string()),
         "hovering the name shows the key: {said}"
     );
-    // The outline on the line that mentions me is a stroke, which the tree
-    // cannot see: it is looked at in the snapshot and not asserted here.
+
+    // A line with no mention has no chip and no mark.
     let mut h = harness_with(a_conversation(), true);
     h.run();
     let said = text_of(&h);
-    assert!(!said.contains("@me") && !said.contains("@Ada"), "{said}");
+    assert!(!said.contains("@Ada") && !said.contains("@me"), "{said}");
 }
 
 /// The same, looked at: the chips, and the outline on the line that
@@ -1586,6 +1599,7 @@ fn transcript_mention_dark() {
     // them: Ada's "one" mentions me; her "the second one, then" mentions
     // Bram, a third person.
     let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].text = "one for @me, then".into();
     state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
         key: me(),
         label: "me".into(),

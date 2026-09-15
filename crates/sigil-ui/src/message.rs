@@ -633,10 +633,21 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
             .width()
     };
     let gap = ui.spacing().item_spacing.x;
+    let spans = mention_spans(b.text, b.mentions);
     let body = if b.redacted {
         measure("Deleted", egui::TextStyle::Body)
     } else {
-        measure(b.text, egui::TextStyle::Body)
+        // The words as they are drawn: a name in them is bold, and bold is
+        // wider.
+        let job = words_job(
+            ui,
+            b.text,
+            &spans,
+            f32::INFINITY,
+            egui::Color32::PLACEHOLDER,
+            egui::Color32::PLACEHOLDER,
+        );
+        ui.ctx().fonts_mut(|f| f.layout_job(job)).rect.width()
     };
     // The furniture after the text, with the gap before each piece: the
     // time, then "edited", a word about how the entry stands, and the
@@ -689,18 +700,17 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     // One line when the words and their furniture sit side by side inside the
     // limit. A picture always gets its own rows; so does a tombstone, whose
     // one word is not the message.
-    // A mention is a chip on a row of its own under the words: the name and
-    // the key, with the gap between. The widest of them is a width the
-    // bubble has to have.
-    let chips = b
-        .mentions
+    // A mention whose name is not in the words is a chip on a row of its
+    // own under them; the widest is a width the bubble has to have, and a
+    // row is a row, so such a message is never one line.
+    let unmatched = unmatched_mentions(b, &spans);
+    let chips = unmatched
         .iter()
         .map(|m| measure(&format!("@{}", m.label), egui::TextStyle::Body))
         .fold(0.0f32, f32::max);
     let together = body + gap * 2.0 + meta;
-    // A mention is a row, so a message with one is never one line.
     let one_line = b.attachments.is_empty()
-        && b.mentions.is_empty()
+        && unmatched.is_empty()
         && !b.redacted
         && together + PAD_X * 2.0 <= limit;
     let content = if one_line { together } else { body.max(meta) };
@@ -711,17 +721,157 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     }
 }
 
-/// Who the message mentions, one chip each: `@name` in the accent, and on
-/// hover a card with the mark, the name and the whole key. The name is the
-/// reader's own word for the key -- the sender's text is not consulted --
-/// and the key is one gesture away because the name is nobody's to vouch
-/// for (SIP-21).
+/// Where each mention's name is in the words: the first whole-word
+/// occurrence of `@name`, by the name *this* client has for the key --
+/// never the sender's spelling, which is text like any other. Byte ranges
+/// into `text`, in order, none overlapping; the index is into `mentions`.
+///
+/// A sender who writes one name over a part that points at somebody else
+/// gets no highlight for it: the part is then drawn as a chip under the
+/// words, naming whoever the key really is.
+fn mention_spans(text: &str, mentions: &[Mentioned<'_>]) -> Vec<(std::ops::Range<usize>, usize)> {
+    let mut spans: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for (i, m) in mentions.iter().enumerate() {
+        let token = format!("@{}", m.label);
+        let mut from = 0;
+        while let Some(at) = text[from..].find(&token) {
+            let start = from + at;
+            let end = start + token.len();
+            let before_ok = start == 0 || text[..start].ends_with(char::is_whitespace);
+            let after_ok = end == text.len() || !text[end..].starts_with(char::is_alphanumeric);
+            let free = !spans.iter().any(|(r, _)| r.start < end && start < r.end);
+            if before_ok && after_ok && free {
+                spans.push((start..end, i));
+                break;
+            }
+            from = start + 1;
+        }
+    }
+    spans.sort_by_key(|(r, _)| r.start);
+    spans
+}
+
+/// The mentions with no name in the words.
+fn unmatched_mentions<'a>(
+    b: &'a Bubble<'a>,
+    spans: &[(std::ops::Range<usize>, usize)],
+) -> Vec<&'a Mentioned<'a>> {
+    b.mentions
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !spans.iter().any(|(_, j)| j == i))
+        .map(|(_, m)| m)
+        .collect()
+}
+
+/// The words with each mentioned name in the accent, laid out to `wrap`.
+fn words_job(
+    ui: &egui::Ui,
+    text: &str,
+    spans: &[(std::ops::Range<usize>, usize)],
+    wrap: f32,
+    plain: egui::Color32,
+    accent: egui::Color32,
+) -> egui::text::LayoutJob {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap;
+    let mut at = 0;
+    for (range, _) in spans {
+        if range.start > at {
+            job.append(
+                &text[at..range.start],
+                0.0,
+                egui::TextFormat::simple(body.clone(), plain),
+            );
+        }
+        job.append(
+            &text[range.clone()],
+            0.0,
+            egui::TextFormat {
+                font_id: body.clone(),
+                color: accent,
+                underline: egui::Stroke::new(1.0, accent),
+                ..Default::default()
+            },
+        );
+        at = range.end;
+    }
+    if at < text.len() {
+        job.append(&text[at..], 0.0, egui::TextFormat::simple(body, plain));
+    }
+    job
+}
+
+/// The message's words, with the mentioned names marked in them, and a
+/// card with the mark, the name and the whole key on hovering one -- the
+/// key is one gesture away because the name is nobody's to vouch for
+/// (SIP-21). The words stay selectable.
+fn words(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32, wrap: bool) {
+    let spans = mention_spans(b.text, b.mentions);
+    if spans.is_empty() {
+        let label = egui::Label::new(b.text).selectable(true);
+        ui.add(if wrap { label.wrap() } else { label });
+        return;
+    }
+    let plain = ui.visuals().text_color();
+    let accent = if b.mine {
+        theme.text_primary
+    } else {
+        theme.accent
+    };
+    let width = if wrap {
+        ui.available_width()
+    } else {
+        f32::INFINITY
+    };
+    let job = words_job(ui, b.text, &spans, width, plain, accent);
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let response = ui.add(egui::Label::new(galley.clone()).selectable(true));
+    // Which name is under the pointer, if any: the galley says which
+    // character, the spans say whose it is.
+    if let Some(pos) = response.hover_pos() {
+        let index = galley.cursor_from_pos(pos - response.rect.min).index.0;
+        let byte = b
+            .text
+            .char_indices()
+            .nth(index)
+            .map(|(i, _)| i)
+            .unwrap_or(b.text.len());
+        if let Some((_, i)) = spans.iter().find(|(r, _)| r.contains(&byte)) {
+            let m = &b.mentions[*i];
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
+            response.on_hover_ui(|ui| mention_card(ui, m, quiet));
+        }
+    }
+}
+
+/// The card for a mentioned name: the mark, the name and the whole key.
+fn mention_card(ui: &mut egui::Ui, m: &Mentioned<'_>, quiet: egui::Color32) {
+    ui.horizontal(|ui| {
+        crate::identicon(ui, m.key, tokens::AVATAR_MD);
+        ui.vertical(|ui| {
+            ui.strong(m.label);
+            ui.label(egui::RichText::new(m.key).monospace().small());
+            ui.colored_label(
+                quiet,
+                egui::RichText::new("The name is what this client calls the key.").small(),
+            );
+        });
+    });
+}
+
+/// The mentions whose name is not in the words, one chip each under them,
+/// so a mention is never invisible: a sender who wrote one name over a
+/// part pointing at somebody else has that somebody named here.
 fn mention_chips(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
-    if b.mentions.is_empty() {
+    let spans = mention_spans(b.text, b.mentions);
+    let unmatched = unmatched_mentions(b, &spans);
+    if unmatched.is_empty() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        for m in b.mentions {
+        for m in unmatched {
             let chip = ui.label(
                 egui::RichText::new(format!("@{}", m.label))
                     .strong()
@@ -730,20 +880,7 @@ fn mention_chips(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: e
             if chip.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
             }
-            chip.on_hover_ui(|ui| {
-                ui.horizontal(|ui| {
-                    crate::identicon(ui, m.key, tokens::AVATAR_MD);
-                    ui.vertical(|ui| {
-                        ui.strong(m.label);
-                        ui.label(egui::RichText::new(m.key).monospace().small());
-                        ui.colored_label(
-                            quiet,
-                            egui::RichText::new("The name is what this client calls the key.")
-                                .small(),
-                        );
-                    });
-                });
-            });
+            chip.on_hover_ui(|ui| mention_card(ui, m, quiet));
         }
     });
 }
@@ -870,7 +1007,7 @@ fn body(
                     row,
                     egui::Layout::left_to_right(egui::Align::Max),
                     |ui| {
-                        ui.add(egui::Label::new(b.text).selectable(true));
+                        words(ui, b, theme, quiet, false);
                         // **Against the right edge**, whatever the bubble's
                         // width came out as. A bubble has a minimum width, and
                         // "ok" does not reach it, so drawn straight after the
@@ -885,7 +1022,7 @@ fn body(
                 );
             } else {
                 if !b.text.is_empty() {
-                    ui.add(egui::Label::new(b.text).wrap().selectable(true));
+                    words(ui, b, theme, quiet, true);
                 }
                 mention_chips(ui, b, theme, quiet);
                 meta_row_beneath(ui, b, theme, quiet);
@@ -1417,5 +1554,35 @@ mod tests {
     fn a_key_is_shown_by_both_its_ends() {
         let key = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
         assert_eq!(short(key), "8qbH...VfeR");
+    }
+
+    /// A name is found in the words by this client's spelling of it, as a
+    /// whole word, once; a name that is not there is not invented.
+    #[test]
+    fn a_mentioned_name_is_found_in_the_words_by_our_spelling() {
+        let ada = Mentioned {
+            label: "Ada",
+            key: "k1",
+        };
+        let adam = Mentioned {
+            label: "Adam",
+            key: "k2",
+        };
+        let spans = mention_spans("hi @Ada and @Adam", &[ada, adam]);
+        assert_eq!(spans, vec![(3..7, 0), (12..17, 1)]);
+        assert_eq!(
+            mention_spans("hi @Adam", &[ada]),
+            vec![],
+            "@Adam is not @Ada"
+        );
+        assert_eq!(
+            mention_spans("mail@Ada.example", &[ada]),
+            vec![],
+            "inside a word"
+        );
+        assert_eq!(mention_spans("@Ada @Ada", &[ada]), vec![(0..4, 0)], "once");
+        // The sender wrote one name over a part naming somebody else: the
+        // words carry no span for it, and the chip will.
+        assert_eq!(mention_spans("hi @Eve", &[ada]), vec![]);
     }
 }
