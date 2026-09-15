@@ -92,6 +92,11 @@ pub struct Accounts {
     /// so switching there switches both. Not remembered across runs; the
     /// window opens on the default, as it always has.
     shown: std::collections::HashMap<PubKey, String>,
+    /// What is not to be said out loud. Here because everything that draws
+    /// a conversation already has the roster in hand, and a mute belongs to
+    /// this machine, like the roster does. Loaded with the remembered
+    /// roster and empty with a fixed one; written by the shell.
+    pub quiet: crate::quiet::Quiet,
 }
 
 impl Accounts {
@@ -120,6 +125,7 @@ impl Accounts {
             active: 0,
             generation: 0,
             shown: Default::default(),
+            quiet: Default::default(),
         }
     }
 
@@ -491,6 +497,7 @@ impl Accounts {
             active: 0,
             generation: 0,
             shown: Default::default(),
+            quiet: crate::quiet::Quiet::load(),
         }
     }
 

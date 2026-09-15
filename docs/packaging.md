@@ -134,6 +134,14 @@ dismissed, which is the only shape either desktop's library offers, so no
 more than 32 are watched at once and the rest lead nowhere. On Linux the
 press is the daemon's `default` action, which not every daemon delivers.
 
+**Quiet.** A conversation can be muted -- the bell in its header, or the
+switch in its channel settings: nothing in it is said out loud or asks for
+attention, and its waiting messages are left off the count on the icons;
+its own row still says, with a struck bell. **Do not disturb**, in the
+tray's menu and the Desktop pane, silences everything and bounces nothing;
+the counts stay. Both are this machine's, whatever identity is in use,
+remembered in `quiet.json` beside the roster.
+
 ## Releasing
 
 `.github/workflows/release.yml`, on a pushed `v*` tag. Four artefacts, and every

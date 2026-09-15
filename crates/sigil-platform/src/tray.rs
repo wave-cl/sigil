@@ -152,12 +152,14 @@ impl Tray {
     }
 
     /// Say how many things want attention, so the icon carries it: the
-    /// number beside the mark, the dot on it, and the tooltip.
-    pub fn set_unread(&mut self, unread: u32) {
+    /// number beside the mark, the dot on it, and the tooltip. Under
+    /// do-not-disturb the number stays and the dot does not: the count is
+    /// a fact, the dot is a nudge.
+    pub fn set_unread(&mut self, unread: u32, quiet: bool) {
         let Some(icon) = &self.icon else { return };
         icon.set_title(tray_title(unread).as_deref());
         let _ = icon.set_tooltip(Some(tray_tooltip(unread)));
-        let marked = unread > 0;
+        let marked = unread > 0 && !quiet;
         if marked != self.marked {
             self.marked = marked;
             let _ =

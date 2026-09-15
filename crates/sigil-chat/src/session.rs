@@ -1334,10 +1334,17 @@ impl ChatHandle {
 
     /// How much is waiting here, across every conversation.
     pub fn unread(&self) -> usize {
+        self.unread_but(|_| false)
+    }
+
+    /// How much is waiting here, leaving out the conversations `muted`
+    /// says to: their own row still counts, the icon does not.
+    pub fn unread_but(&self, muted: impl Fn(&[u8; 32]) -> bool) -> usize {
         self.state
             .borrow()
             .conversations
             .iter()
+            .filter(|c| !muted(&c.channel))
             .map(|c| c.unread)
             .sum()
     }

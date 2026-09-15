@@ -5632,3 +5632,66 @@ fn reactions_hang_off_the_bubbles_bottom_edge() {
         "the next bubble starts clear of the chip: chip {heart:?}, next edge {next_edge}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Muting a conversation.
+// ---------------------------------------------------------------------------
+
+/// The bell in the conversation's header mutes it: the control turns into
+/// its opposite, the row shows the muted mark, and the channel settings say
+/// the same thing; pressing again unmutes.
+#[test]
+fn the_bell_mutes_a_conversation_and_the_row_says_so() {
+    let mut h = harness_with(the_room(), true);
+    h.run();
+    assert!(
+        h.query_by_label("muted").is_none(),
+        "not muted to begin with: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Mute this conversation").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("muted").is_some(),
+        "the row carries the mark: {}",
+        text_of(&h)
+    );
+    assert!(h.query_by_label("Unmute this conversation").is_some());
+    assert!(h.query_by_label("Mute this conversation").is_none());
+
+    // Pressed again: unmuted.
+    h.get_by_label("Unmute this conversation").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("muted").is_none(),
+        "unmuted: {}",
+        text_of(&h)
+    );
+}
+
+/// The channel settings carry the same switch, ticked when the
+/// conversation is muted, and it is yours whatever your standing there.
+#[test]
+fn the_channel_settings_carry_the_mute() {
+    let mut state = the_room();
+    state.i_am_admin = false;
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    let checkbox = h.get_by_label("Mute this conversation");
+    assert!(
+        format!("{:?}", checkbox.accesskit_node().toggled()).contains("False"),
+        "not muted to begin with: {:?}",
+        checkbox.accesskit_node().toggled()
+    );
+    checkbox.click();
+    h.run();
+    h.run();
+    let checkbox = h.get_by_label("Mute this conversation");
+    assert!(
+        format!("{:?}", checkbox.accesskit_node().toggled()).contains("True"),
+        "muted: {:?}",
+        checkbox.accesskit_node().toggled()
+    );
+}

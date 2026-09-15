@@ -1074,6 +1074,10 @@ pub struct ChatApp {
     /// What this pass's background work wants of the shell, handed over
     /// through `App::asked`.
     asked: Vec<AppAction>,
+    /// What is not to be said out loud, as of the last pass: a copy of the
+    /// roster's, so the count on the tab -- asked for without the roster in
+    /// hand -- can leave the muted out.
+    quiet: sigil::Quiet,
     /// The emoji this person sends most, for the picker's own row.
     frequent: frequent::Frequent,
 }
@@ -1115,6 +1119,7 @@ impl ChatApp {
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
             asked: Vec::new(),
+            quiet: sigil::Quiet::default(),
             frequent: frequent::Frequent::load(),
         }
     }
@@ -1580,6 +1585,9 @@ impl App for ChatApp {
 
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
+        if self.quiet != ctx.accounts.quiet {
+            self.quiet = ctx.accounts.quiet.clone();
+        }
         self.announce_rings(ctx);
         self.announce_mentions(ctx);
         self.announce_arrivals(ctx);
@@ -1794,7 +1802,15 @@ impl App for ChatApp {
     }
 
     fn tab_notifications(&self) -> TabNotifications {
-        TabNotifications::count(self.sessions.values().map(|s| s.unread() as u32).sum())
+        // Not the muted ones: a conversation muted is one whose count the
+        // icon must not carry, or muting it would not be quiet.
+        let quiet = &self.quiet;
+        TabNotifications::count(
+            self.sessions
+                .iter()
+                .map(|(at, s)| s.unread_but(|channel| quiet.is_muted(&at.1, channel)) as u32)
+                .sum(),
+        )
     }
 
     fn title(&self) -> &str {
@@ -3230,6 +3246,7 @@ impl ChatApp {
                         waiting: convo.waiting,
                         typing: convo.typing,
                         mentioned: convo.mentioned > 0,
+                        muted: ctx.accounts.quiet.is_muted(&at.1, &convo.channel),
                     };
                     if sigil_ui::conversation_row(ui, &row, selected).clicked() {
                         self.send_as(Some(at), Cmd::Show(convo.channel));
@@ -3305,6 +3322,19 @@ impl ChatApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Settings).clicked() {
                     ctx.navigator.push_here(Route::Settings);
+                }
+                // Muted or not: a conversation muted is not said out loud
+                // and not counted on the icon; its own row still says.
+                if let Some(channel) = state.open {
+                    let muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
+                    let bell = if muted {
+                        sigil_ui::Icon::BellOff
+                    } else {
+                        sigil_ui::Icon::Bell
+                    };
+                    if sigil_ui::icon_button(ui, bell).clicked() {
+                        ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
+                    }
                 }
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Device).clicked() {
                     self.send_as(Some(at), Cmd::Devices);
@@ -5043,6 +5073,23 @@ impl ChatApp {
             ui.heading("Channel settings");
         });
 
+        // Yours, whatever your standing here: what this machine says out
+        // loud about the conversation.
+        if let Some(channel) = state.open {
+            let mut muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
+            if ui
+                .checkbox(&mut muted, "Mute this conversation")
+                .on_hover_text(
+                    "Nothing in it is said out loud or counted on sigil's icon; its own \
+                     row still shows what is waiting.",
+                )
+                .changed()
+            {
+                ctx.accounts.quiet.set_muted(&at.1, &channel, muted);
+            }
+            ui.add_space(tokens::SPACING_SM);
+        }
+
         if !state.i_am_admin {
             ui.colored_label(
                 theme.text_secondary,
@@ -5378,6 +5425,12 @@ impl ChatApp {
     /// with a sound, leading to the conversation ringing; and the window
     /// is asked for.
     fn announce_rings_in(&mut self, ctx: &mut AppContext<'_>, fresh: Vec<(String, Target)>) {
+        // A muted conversation, or do-not-disturb: it rings on the screen,
+        // and nowhere else.
+        let fresh: Vec<(String, Target)> = fresh
+            .into_iter()
+            .filter(|(_, to)| !ctx.accounts.quiet.silenced(&to.exchange, &to.channel))
+            .collect();
         if !fresh.is_empty() {
             // A call reaches somebody looking at something else: the window
             // comes forward, and where the desktop will not let it, the
@@ -5428,6 +5481,9 @@ impl ChatApp {
         for (at, me, mentions) in found {
             for m in mentions {
                 if !self.announced.insert((m.channel, m.seq)) {
+                    continue;
+                }
+                if ctx.accounts.quiet.silenced(&at.1, &m.channel) {
                     continue;
                 }
                 if ctx.unfocused || !m.in_open {
@@ -5487,7 +5543,7 @@ impl ChatApp {
                 if a.mentions_me || !self.announced.insert((a.channel, a.seq)) {
                     continue;
                 }
-                if ctx.unfocused {
+                if ctx.unfocused && !ctx.accounts.quiet.silenced(&at.1, &a.channel) {
                     fresh.entry(a.channel).or_default().push(a);
                 }
             }
@@ -6360,6 +6416,68 @@ mod mention_notice_tests {
         assert_eq!(carried[0].0.as_ref().map(|t| t.channel), Some([9u8; 32]));
         assert_eq!(carried[1].1, Sound::Default);
         assert_eq!(carried[1].0.as_ref().map(|t| t.channel), Some([8u8; 32]));
+    }
+
+    /// A muted conversation is not said out loud -- not its messages, not a
+    /// mention in it, not a ring from it -- and asks for no attention;
+    /// under do-not-disturb, nothing anywhere is. What went unsaid is not
+    /// owed later: unmuting does not replay it.
+    #[test]
+    fn a_muted_conversation_and_do_not_disturb_say_nothing() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        accounts.quiet.set_muted("", &[8u8; 32], true);
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(2, false)])],
+        );
+        assert!(noted.0.borrow().is_empty(), "{:?}", noted.0.borrow());
+        assert_eq!(app.asked(), vec![], "and nothing asked for");
+        // Another conversation is still said.
+        let mut elsewhere = an_arrival(3, false);
+        elsewhere.channel = [9u8; 32];
+        app.announce_arrivals_in(&mut c, 1, vec![(at(), "me".into(), vec![elsewhere])]);
+        assert_eq!(noted.0.borrow().len(), 1);
+
+        // Unmuted: what went unsaid stays unsaid.
+        accounts.quiet.set_muted("", &[8u8; 32], false);
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 1, "not replayed");
+
+        // Do not disturb: nothing anywhere, rings included.
+        accounts.quiet.set_dnd(true);
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        let mut anywhere = an_arrival(4, false);
+        anywhere.channel = [9u8; 32];
+        app.announce_arrivals_in(&mut c, 1, vec![(at(), "me".into(), vec![anywhere])]);
+        app.announce_mentions_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![a_mention(5, false)])],
+        );
+        app.announce_rings_in(
+            &mut c,
+            vec![("Ada is calling".into(), target(&at(), [9u8; 32]))],
+        );
+        assert_eq!(noted.0.borrow().len(), 1, "{:?}", noted.0.borrow());
+        assert_eq!(app.asked(), vec![], "not even a ring");
     }
 }
 

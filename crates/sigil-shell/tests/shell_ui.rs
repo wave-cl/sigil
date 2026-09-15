@@ -1632,3 +1632,52 @@ fn a_pressed_notification_opens_the_app_it_came_from() {
         said(&h)
     );
 }
+
+/// Do not disturb from the tray's menu flips the setting the roster holds,
+/// which the Desktop pane and every app read; and back again.
+#[test]
+fn do_not_disturb_from_the_tray_flips_the_setting() {
+    use sigil_platform::tray::TrayAction;
+    let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let dnd = std::rc::Rc::new(std::cell::Cell::new(false));
+    struct Reading {
+        dnd: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+    impl App for Reading {
+        fn update(&mut self, ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
+            self.dnd.set(ctx.accounts.quiet.dnd);
+        }
+        fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+            ui.label("reading");
+            AppResponse::default()
+        }
+        fn title(&self) -> &str {
+            "Chat"
+        }
+    }
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Reading { dnd: dnd.clone() })];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    let pending = actions.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            shell.tray_actions_for_test(std::mem::take(&mut *pending.borrow_mut()));
+            shell.update_all(&ctx, false);
+            shell.ui(ui);
+        });
+    h.run();
+    assert!(!dnd.get());
+    actions.borrow_mut().push(TrayAction::QuietToggled);
+    h.step();
+    h.step();
+    assert!(dnd.get(), "on, as every app sees it");
+    actions.borrow_mut().push(TrayAction::QuietToggled);
+    h.step();
+    h.step();
+    assert!(!dnd.get(), "and off again");
+}

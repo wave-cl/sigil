@@ -2752,6 +2752,21 @@ async fn a_mention_reaches_the_person_named_and_reading_clears_it() {
         Some(0),
         "a mention of Bob is not a mention of Carol"
     );
+    // Muted, the room's waiting message is left off the count the icon
+    // carries; unmuted it is on it. The row's own count is the summary's
+    // and is untouched by either.
+    assert_eq!(carol.unread(), 1);
+    assert_eq!(
+        carol.unread_but(|c| *c == channel),
+        0,
+        "muted: off the icon"
+    );
+    assert_eq!(
+        carol.unread_but(|c| *c != channel),
+        1,
+        "another muted: still on"
+    );
+
     // Carol got the message as an arrival all the same -- what is said
     // out loud while she is away -- naming who, where, and what.
     let carols_arrivals = carol.state().arrivals;

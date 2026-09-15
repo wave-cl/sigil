@@ -44,6 +44,8 @@ pub struct ConversationRow<'a> {
     pub typing: bool,
     /// One of the unread mentions the reader.
     pub mentioned: bool,
+    /// Nothing in it is said out loud, and its count is not on the icon.
+    pub muted: bool,
 }
 
 /// Draw one row. Returns its response, so the caller decides what a click means.
@@ -208,6 +210,28 @@ fn row_body(
                             if row.mentioned {
                                 ui.colored_label(theme.accent, egui::RichText::new("@").strong())
                                     .on_hover_text("mentions you");
+                            }
+                            // A muted conversation says so, quietly, in the
+                            // corner where its count would otherwise nudge.
+                            if row.muted {
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(tokens::ICON_SM, tokens::ICON_SM),
+                                    egui::Sense::hover(),
+                                );
+                                sigil::icon::draw(
+                                    ui.painter(),
+                                    rect,
+                                    sigil::Icon::BellOff,
+                                    theme.text_muted,
+                                );
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Label,
+                                        true,
+                                        "muted",
+                                    )
+                                });
+                                response.on_hover_text("muted");
                             }
                             ui.colored_label(theme.text_muted, egui::RichText::new(row.at).small());
                             ui.with_layout(

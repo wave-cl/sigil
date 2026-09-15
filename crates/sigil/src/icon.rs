@@ -87,6 +87,10 @@ pub enum Icon {
     Muted,
     /// See it as large as the window allows.
     Enlarge,
+    /// This conversation is said out loud; press to mute it.
+    Bell,
+    /// This conversation is muted; press to hear about it again.
+    BellOff,
 }
 
 impl Icon {
@@ -119,6 +123,8 @@ impl Icon {
             Icon::Sound => "Mute",
             Icon::Muted => "Unmute",
             Icon::Enlarge => "See it full size",
+            Icon::Bell => "Mute this conversation",
+            Icon::BellOff => "Unmute this conversation",
         }
     }
 }
@@ -414,6 +420,22 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 line(p(0.80, 0.38), p(0.58, 0.62));
             }
         }
+        Icon::Bell | Icon::BellOff => {
+            // A bell: the dome, the lip, and the clapper under it. Muted, a
+            // stroke through it.
+            let mut dome = vec![p(0.26, 0.66), p(0.26, 0.42)];
+            for step in 0..=8 {
+                let a = std::f32::consts::PI * (1.0 - step as f32 / 8.0);
+                dome.push(p(0.50 + a.cos() * 0.24, 0.42 - a.sin() * 0.24));
+            }
+            dome.push(p(0.74, 0.66));
+            path(dome);
+            line(p(0.18, 0.66), p(0.82, 0.66));
+            line(p(0.42, 0.76), p(0.58, 0.76));
+            if icon == Icon::BellOff {
+                line(p(0.20, 0.18), p(0.80, 0.82));
+            }
+        }
         Icon::Enlarge => {
             // Two corners pulling apart.
             line(p(0.22, 0.42), p(0.22, 0.22));
@@ -622,6 +644,8 @@ mod tests {
             Icon::Sound,
             Icon::Muted,
             Icon::Enlarge,
+            Icon::Bell,
+            Icon::BellOff,
         ] {
             let word = icon.word();
             assert!(word.len() > 2, "{icon:?} has no word");

@@ -280,7 +280,7 @@ impl App for PlatformApp {
         }
     }
 
-    fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+    fn render(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
         ui.heading("This desktop");
         ui.colored_label(theme.text_secondary, &self.report.session);
@@ -331,6 +331,21 @@ impl App for PlatformApp {
 
         ui.add_space(tokens::SPACING_MD);
         ui.separator();
+        // Do-not-disturb: nothing said out loud and nothing asking for
+        // attention, while it is on. The counts stay. Also in the tray's
+        // menu; this is the same switch.
+        let mut dnd = ctx.accounts.quiet.dnd;
+        if ui
+            .checkbox(&mut dnd, "Do not disturb")
+            .on_hover_text(
+                "No notifications, no sounds, and nothing bouncing, until this is off. \
+                 What is waiting is still counted.",
+            )
+            .changed()
+        {
+            ctx.accounts.quiet.set_dnd(dnd);
+        }
+        ui.add_space(tokens::SPACING_SM);
         let starts = self.report.autostart_enabled;
         let can = self.report.autostart.is_yes() && self.autostart.is_some();
         ui.add_enabled_ui(can, |ui| {

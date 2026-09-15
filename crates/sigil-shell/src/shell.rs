@@ -160,8 +160,9 @@ pub struct Shell {
     shown_unread: u32,
     /// Tray actions handed in by a test, in place of a desktop's.
     tray_actions: Vec<sigil_platform::tray::TrayAction>,
-    /// Do-not-disturb, as the tray's menu item shows it.
-    quiet: bool,
+    /// Do-not-disturb as last shown on the tray and the icon, so they are
+    /// only told when it changes.
+    shown_quiet: bool,
     /// Quit was chosen: the next close of the window is a real one.
     pub quitting: bool,
     /// The window is closed to the tray: hidden on a close request while
@@ -258,7 +259,7 @@ impl Shell {
             badge,
             shown_unread: 0,
             tray_actions: Vec::new(),
-            quiet: false,
+            shown_quiet: false,
             quitting: false,
             hidden: false,
             hideable: false,
@@ -357,6 +358,7 @@ impl Shell {
         }
         self.open_pressed(egui_ctx);
         self.badge();
+        self.remember_quiet();
         self.tray_actions(egui_ctx);
         self.apply_nav();
     }
@@ -373,10 +375,8 @@ impl Shell {
             match action {
                 TrayAction::Open => self.present(egui_ctx),
                 TrayAction::QuietToggled => {
-                    self.quiet = !self.quiet;
-                    if let Some(tray) = &self.tray {
-                        tray.set_quiet(self.quiet);
-                    }
+                    let dnd = !self.accounts.quiet.dnd;
+                    self.accounts.quiet.set_dnd(dnd);
                 }
                 TrayAction::Quit => {
                     self.quitting = true;
@@ -502,15 +502,29 @@ impl Shell {
     /// D-Bus round trip fifty times a second.
     fn badge(&mut self) {
         let unread: u32 = self.apps.iter().map(|a| a.tab_notifications().count).sum();
-        if unread == self.shown_unread {
+        let quiet = self.accounts.quiet.dnd;
+        if unread == self.shown_unread && quiet == self.shown_quiet {
             return;
         }
         self.shown_unread = unread;
+        self.shown_quiet = quiet;
         if let Some(tray) = &mut self.tray {
-            tray.set_unread(unread);
+            tray.set_unread(unread, quiet);
+            tray.set_quiet(quiet);
         }
         if let Some(badge) = &mut self.badge {
             badge.set_count(unread);
+        }
+    }
+
+    /// Write what is not to be said out loud, when it changed. Like the
+    /// roster, and for the same reason it is here: every path that changes
+    /// it -- the tray, the Desktop pane, a conversation's own control --
+    /// goes through this pass, and one that forgot to write would lose a
+    /// mute at the next launch.
+    fn remember_quiet(&mut self) {
+        if self.accounts.quiet.take_changed() && self.remember {
+            self.accounts.quiet.save();
         }
     }
 
