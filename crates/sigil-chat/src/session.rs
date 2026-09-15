@@ -363,6 +363,23 @@ pub struct Draft {
     /// more than the wire's four in one message; the composer stops at
     /// that.
     pub files: Vec<std::path::PathBuf>,
+    /// The composer's own number for this draft, answered in
+    /// [`ChatState::posted`] so the composer can tell which of its sends
+    /// failed and put that one back. Zero for a draft nobody is waiting on.
+    pub token: u64,
+}
+
+/// What became of the last [`Cmd::Post`]: which draft, and why it did not
+/// go, if it did not.
+///
+/// **The composer's, not the reader's.** `trouble` says what is wrong with
+/// the conversation and is rebuilt by every refresh; this says what happened
+/// to one message somebody wrote, and stays until the next one is sent, so
+/// the interface can put the words back in the box rather than lose them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Posted {
+    pub token: u64,
+    pub trouble: Option<String>,
 }
 
 impl Draft {
@@ -471,6 +488,9 @@ pub struct ChatState {
     /// colour on its own is not a message.
     pub link: LinkState,
     pub trouble: Option<String>,
+    /// What became of the last message sent from the composer; see
+    /// [`Posted`].
+    pub posted: Option<Posted>,
     pub conversations: Vec<Summary>,
     /// Which conversation is on screen, and what is in it.
     pub open: Option<[u8; 32]>,
@@ -855,6 +875,7 @@ mod draft_tests {
             edit: None,
             mentions: vec![k(1), k(2), k(1)],
             files: Vec::new(),
+            token: 0,
         };
         let parts = full.parts();
         assert!(matches!(&parts[0], Part::Text(t) if t == "@Ada @Bram look"));
@@ -4273,7 +4294,10 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             for path in &draft.files {
                 match attach_file(chat, state, &channel, path).await {
                     Ok(a) => attachments.push(a),
-                    Err(e) => return trouble(state, e),
+                    Err(e) => {
+                        trouble(state, &e);
+                        return posted(state, draft.token, Some(e.to_string()));
+                    }
                 }
             }
             let names: Vec<String> = draft
@@ -4302,17 +4326,18 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     if !names.is_empty() {
                         note(state, format!("Sent {}.", names.join(", ")));
                     }
-                    desk.dirty.insert(channel)
+                    posted(state, draft.token, None);
+                    desk.dirty.insert(channel);
                 }
                 Err(e) => {
-                    // The text is not thrown away here; the interface keeps
-                    // it in the composer, because retyping a message the
-                    // program lost is the worst thing a chat client can do
-                    // to somebody.
-                    trouble(state, e);
-                    false
+                    // The interface took the words out of the box to send
+                    // them; this is what tells it to put them back. Retyping
+                    // a message the program lost is the worst thing a chat
+                    // client can do to somebody.
+                    trouble(state, &e);
+                    posted(state, draft.token, Some(e.to_string()));
                 }
-            };
+            }
         }
         Cmd::Redact(target) => {
             let Some(channel) = desk.open else { return };
@@ -4833,6 +4858,11 @@ fn note(state: &watch::Sender<ChatState>, said: String) {
 
 fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {
     state.send_modify(|s| s.trouble = Some(e.to_string()));
+}
+
+/// Say what became of a draft; see [`Posted`].
+fn posted(state: &watch::Sender<ChatState>, token: u64, trouble: Option<String>) {
+    state.send_modify(|s| s.posted = Some(Posted { token, trouble }));
 }
 
 /// Put the open conversation away, without touching it at the exchange.

@@ -11,8 +11,8 @@ use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
-    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Quoted, Receipt,
-    Summary, Trouble,
+    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Posted, Quoted,
+    Receipt, Summary, Trouble,
 };
 use sqnr_core::PubKey;
 
@@ -46,6 +46,7 @@ fn a_conversation() -> ChatState {
         domain: Some("squic.org".into()),
         link: LinkState::Up,
         trouble: None,
+        posted: None,
         conversations: vec![
             Summary {
                 channel,
@@ -4690,4 +4691,158 @@ fn rewriting_a_message_keeps_the_mentions_its_words_still_make() {
         sent.contains("mentions: []"),
         "a name no longer in the words is no longer mentioned: {sent}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A message the exchange refused comes back.
+// ---------------------------------------------------------------------------
+
+/// The recording harness, with a state that can be replaced between passes:
+/// what the session would publish next.
+fn harness_that_can_be_told(
+    state: ChatState,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    next: std::rc::Rc<std::cell::RefCell<Option<ChatState>>>,
+    staged: Vec<std::path::PathBuf>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    if !staged.is_empty() {
+        app.stage_for_test(me(), "", staged);
+    }
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            if let Some(state) = next.borrow_mut().take() {
+                app.show_state_for_test(state);
+            }
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+            *asked.borrow_mut() = app.asked_for_test().to_vec();
+        })
+}
+
+/// A message the exchange refused comes back into the box whole -- the
+/// words, the file, and what it was replying to -- and one it took does
+/// not. The composer used to empty itself on Send and never look back, so
+/// every refused message was retyped by hand, which three comments said
+/// could not happen.
+#[test]
+fn a_refused_message_comes_back_into_the_box() {
+    let dir = tempfile::tempdir().unwrap();
+    let picture = dir.path().join("walk.png");
+    std::fs::write(&picture, b"not really").unwrap();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let next = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut h = harness_that_can_be_told(the_room(), asked.clone(), next.clone(), vec![picture]);
+    h.run();
+    h.get_by_label("one").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("from the walk");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("token: 1"), "{sent}");
+    assert_eq!(composed(&h), "", "the box empties on Send");
+    assert!(h.query_by_label("Cancel reply").is_none());
+    assert!(h.query_by_label("Remove walk.png").is_none());
+
+    // The exchange says no.
+    let mut refused = the_room();
+    refused.posted = Some(Posted {
+        token: 1,
+        trouble: Some("the exchange said no".into()),
+    });
+    *next.borrow_mut() = Some(refused);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "from the walk", "the words are back");
+    assert!(
+        h.query_by_label("Cancel reply").is_some(),
+        "and what it replied to: {}",
+        text_of(&h)
+    );
+    assert!(
+        h.query_by_label("Remove walk.png").is_some(),
+        "and the file: {}",
+        text_of(&h)
+    );
+    assert!(!text_of(&h).contains("Put it back"), "{}", text_of(&h));
+
+    // Sent again, and taken this time: nothing comes back.
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "");
+    let mut taken = the_room();
+    taken.posted = Some(Posted {
+        token: 2,
+        trouble: None,
+    });
+    *next.borrow_mut() = Some(taken);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "", "a message that went stays gone");
+    assert!(h.query_by_label("Remove walk.png").is_none());
+}
+
+/// A refused message does not write over the next one being typed: it is
+/// offered under the box, to be put back or let go.
+#[test]
+fn a_refused_message_does_not_overwrite_the_next_one() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let next = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut h = harness_that_can_be_told(the_room(), asked.clone(), next.clone(), Vec::new());
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("the first");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("the second, half");
+    h.run();
+
+    let mut refused = the_room();
+    refused.posted = Some(Posted {
+        token: 1,
+        trouble: Some("the exchange said no".into()),
+    });
+    *next.borrow_mut() = Some(refused);
+    h.run();
+    h.run();
+    assert_eq!(
+        composed(&h),
+        "the second, half",
+        "what was being typed stays"
+    );
+    let said = text_of(&h);
+    assert!(said.contains("Not sent"), "{said}");
+    assert!(said.contains("the first"), "{said}");
+    assert!(said.contains("the exchange said no"), "{said}");
+
+    h.get_by_label("Put it back").click();
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "the first");
+    assert!(!text_of(&h).contains("Put it back"), "{}", text_of(&h));
 }

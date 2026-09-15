@@ -6,7 +6,7 @@ pub mod session;
 use session::RING_WINDOW;
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, Hit, Line, LinkState,
-    Linked, Member, Person, Quoted, Receipt, Ring, Standing, Summary, Trouble,
+    Linked, Member, Person, Posted, Quoted, Receipt, Ring, Standing, Summary, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -623,6 +623,17 @@ struct Staged {
 /// The wire's cap on files in one message (SIP-19).
 const MOST_FILES: usize = sqex_proto::message::MAX_ATTACHMENTS;
 
+/// Everything the composer held when a message was sent, so the message can
+/// be put back if it does not go.
+struct Unsent {
+    token: u64,
+    composing: String,
+    mentions: Vec<(String, PubKey)>,
+    staged: Vec<Staged>,
+    editing: Option<u64>,
+    replying: Option<u64>,
+}
+
 struct Pane {
     /// Videos with a player, by blob id. A player is made when the viewer
     /// opens on a video and dropped when it closes, or when the message
@@ -640,10 +651,22 @@ struct Pane {
     whole_screen: bool,
     /// Why a video will not play, by blob id.
     unplayable: HashMap<String, String>,
-    /// Kept out of the session so that a failed send leaves it on screen:
-    /// retyping a message the program lost is the worst thing a chat client can
-    /// do to somebody.
+    /// What is in the box. Taken out to be sent, and held in `in_flight`
+    /// until the session says the message went: a message the exchange
+    /// refused comes back here, because retyping a message the program lost
+    /// is the worst thing a chat client can do to somebody.
     composing: String,
+    /// Messages sent and not yet answered, oldest first, each under the
+    /// token its draft carried; see `session::Posted`. Kept whole -- words,
+    /// mentions, files, what it replied to or rewrote -- so a refused one
+    /// can be put back exactly as it was.
+    in_flight: Vec<Unsent>,
+    /// The next draft's token. From one: zero is a draft nobody waits on.
+    next_token: u64,
+    /// A refused message that could not go straight back into the box
+    /// because something else had been typed since. Offered under the box
+    /// instead, until it is taken or dismissed.
+    put_back: Option<(Unsent, String)>,
     /// Whom the text mentions so far: each label chosen from the list, and
     /// the key it stood for. Read at send time against the text, so a name
     /// deleted from the box is a mention that is not sent.
@@ -761,6 +784,9 @@ impl Default for Pane {
             whole_screen: false,
             unplayable: HashMap::new(),
             composing: String::new(),
+            in_flight: Vec::new(),
+            next_token: 1,
+            put_back: None,
             mentions: Vec::new(),
             staged: Vec::new(),
             previews: None,
@@ -4046,7 +4072,73 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_XS);
     }
 
+    /// Settle what the session has said about the messages in flight: the
+    /// ones that went are forgotten, and one that did not comes back.
+    ///
+    /// Straight into the box when the box is empty -- what somebody who
+    /// pressed Send and saw an error expects to find. If something else has
+    /// been typed since, it is offered under the box instead of written
+    /// over it: one message must not be lost while putting another back.
+    fn took_back(&mut self, at: &At, state: &ChatState) {
+        let Some(posted) = &state.posted else { return };
+        let pane = self.pane(at);
+        let Some(i) = pane.in_flight.iter().position(|u| u.token == posted.token) else {
+            return;
+        };
+        // Everything up to it went, in order, or was answered before.
+        let mut settled = pane.in_flight.drain(..=i);
+        let this = settled.next_back().expect("the one at i");
+        drop(settled);
+        let Some(why) = posted.trouble.clone() else {
+            return;
+        };
+        let empty = pane.composing.trim().is_empty()
+            && pane.staged.is_empty()
+            && pane.editing.is_none()
+            && pane.replying.is_none();
+        if empty {
+            pane.composing = this.composing;
+            pane.mentions = this.mentions;
+            pane.staged = this.staged;
+            pane.editing = this.editing;
+            pane.replying = this.replying;
+        } else {
+            pane.put_back = Some((this, why));
+        }
+    }
+
     fn composer_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        self.took_back(at, state);
+        // A refused message that could not go straight back: said, with
+        // its first words, and the way to have it back or to let it go.
+        if let Some((unsent, why)) = self.pane(at).put_back.take() {
+            let mut keep = Some((unsent, why));
+            ui.horizontal_wrapped(|ui| {
+                let (unsent, why) = keep.as_ref().expect("set above");
+                ui.colored_label(
+                    theme.destructive,
+                    egui::RichText::new(format!(
+                        "Not sent: \"{}\" -- {why}",
+                        sigil_ui::message::preview(&unsent.composing, 32)
+                    ))
+                    .small(),
+                );
+                if ui.small_button("Put it back").clicked() {
+                    let (unsent, _) = keep.take().expect("set above");
+                    let pane = self.pane(at);
+                    // Over what is there: chosen, this time.
+                    pane.composing = unsent.composing;
+                    pane.mentions = unsent.mentions;
+                    pane.staged = unsent.staged;
+                    pane.editing = unsent.editing;
+                    pane.replying = unsent.replying;
+                }
+                if ui.small_button("Forget it").clicked() {
+                    keep = None;
+                }
+            });
+            self.pane(at).put_back = keep;
+        }
         // What Enter will do, said above the box. A composer that silently
         // means three different things depending on invisible state is one
         // that will eventually send an edit as a new message.
@@ -4246,18 +4338,31 @@ impl ChatApp {
             let something =
                 !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
             if (entered || send) && something {
-                // Taken, not cleared: if the send fails the text has to come
-                // back, and the session is what knows whether it did.
-                let text = std::mem::take(&mut self.pane(at).composing);
+                // Taken, and kept: the box is emptied for the next message,
+                // and everything that was in it goes into `in_flight` under
+                // the draft's token until the session says whether it went.
+                // See `took_back`.
                 let pane = self.pane(at);
+                let token = pane.next_token;
+                pane.next_token += 1;
+                let text = std::mem::take(&mut pane.composing);
                 let (editing, replying) = (pane.editing.take(), pane.replying.take());
                 pane.announced_typing = false;
                 // The keys, for every name still in the text.
                 let mentions = mention::mentions_in(&text, &pane.mentions);
-                pane.mentions.clear();
+                let labels = std::mem::take(&mut pane.mentions);
                 // And the files, in the order they were staged.
+                let staged = std::mem::take(&mut pane.staged);
                 let files: Vec<std::path::PathBuf> =
-                    pane.staged.drain(..).map(|s| s.path).collect();
+                    staged.iter().map(|s| s.path.clone()).collect();
+                pane.in_flight.push(Unsent {
+                    token,
+                    composing: text.clone(),
+                    mentions: labels,
+                    staged,
+                    editing,
+                    replying,
+                });
                 self.send_as(
                     Some(at),
                     Cmd::Post(session::Draft {
@@ -4266,6 +4371,7 @@ impl ChatApp {
                         edit: editing,
                         mentions,
                         files,
+                        token,
                     }),
                 );
                 self.send_as(Some(at), Cmd::Typing(false));

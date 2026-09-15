@@ -3061,3 +3061,79 @@ async fn an_edit_keeps_the_reply_and_the_files() {
         bob.state().lines
     );
 }
+
+/// What became of a draft is answered under its token: a message that could
+/// not go says so and why, and one that went says nothing is wrong. This is
+/// what the composer puts a refused message back from.
+#[tokio::test]
+async fn what_became_of_a_draft_is_answered_under_its_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(35);
+    let (b_signer, b_id) = signer(36);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await
+    );
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(until(|| alice.state().open.is_some(), 15).await);
+
+    // A file that is not there: the message cannot go.
+    alice.send(Cmd::Post(session::Draft {
+        text: "with a picture".into(),
+        files: vec![dir.path().join("never-made.png")],
+        token: 7,
+        ..Default::default()
+    }));
+    assert!(
+        until(
+            || alice
+                .state()
+                .posted
+                .as_ref()
+                .is_some_and(|p| p.token == 7 && p.trouble.is_some()),
+            15
+        )
+        .await,
+        "{:?}",
+        alice.state().posted
+    );
+    assert!(
+        alice
+            .state()
+            .lines
+            .iter()
+            .all(|l| l.text != "with a picture"),
+        "nothing was posted: {:?}",
+        alice.state().lines
+    );
+
+    // And one that goes.
+    alice.send(Cmd::Post(session::Draft {
+        text: "just words".into(),
+        token: 8,
+        ..Default::default()
+    }));
+    assert!(
+        until(
+            || alice
+                .state()
+                .posted
+                .as_ref()
+                .is_some_and(|p| p.token == 8 && p.trouble.is_none()),
+            15
+        )
+        .await,
+        "{:?}",
+        alice.state().posted
+    );
+}
