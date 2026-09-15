@@ -1,0 +1,9 @@
+[package]
+name = "sigil-emoji"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The emoji sigil offers, with their Twemoji pictures (CC-BY 4.0, see LICENSE-TWEMOJI)."
+
+[dependencies]
+flate2 = "1"

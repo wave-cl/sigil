@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/sigil",
     "crates/sigil-ui",
+    "crates/sigil-emoji",
     "crates/sigil-net",
     "crates/sigil-platform",
     "crates/sigil-voice",

@@ -5844,6 +5844,7 @@ version = "0.1.16"
 dependencies = [
  "bs58",
  "bytes",
+ "dirs",
  "ed25519-dalek",
  "egui",
  "egui_kittest",
@@ -5857,6 +5858,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "sigil",
+ "sigil-emoji",
  "sigil-net",
  "sigil-ui",
  "sigil-video",
@@ -5870,6 +5872,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "sigil-emoji"
+version = "0.1.16"
+dependencies = [
+ "flate2",
 ]
 
 [[package]]
@@ -5951,6 +5961,7 @@ dependencies = [
  "image",
  "jiff",
  "sigil",
+ "sigil-emoji",
 ]
 
 [[package]]

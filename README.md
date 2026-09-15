@@ -97,3 +97,10 @@ configuring. To see which layer named it:
 ```bash
 cargo run -p sigil-net --example where
 ```
+
+## Credits
+
+Emoji pictures are [Twemoji](https://github.com/jdecked/twemoji), © Twitter
+and contributors, under CC-BY 4.0 (`crates/sigil-emoji/LICENSE-TWEMOJI`).
+egui cannot draw colour fonts, so the picker and the reaction chips draw
+them as images; message text still uses the font.

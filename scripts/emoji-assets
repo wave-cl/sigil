@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+Generate sigil-emoji's table and picture pack from Unicode and Twemoji.
+
+    scripts/emoji-assets                 # fetch both inputs, then generate
+    scripts/emoji-assets DIR             # use DIR/emoji-test.txt and DIR/twemoji-*/
+
+Outputs, both committed so a build needs nothing from the network:
+
+    crates/sigil-emoji/src/table.rs      every emoji the picker offers
+    crates/sigil-emoji/assets/emoji.pack their Twemoji SVGs, concatenated
+                                         and deflated
+
+What is kept: every **fully-qualified** entry of emoji-test.txt that carries no
+skin-tone modifier. Components (the modifiers themselves, hair) are not emoji
+anybody sends. Skin tones would multiply the people group by six and need a
+tone chooser the picker does not have yet. Flags stay: they are ordinary.
+
+Every kept entry must have a picture and must fit the wire — sqex-proto's
+`MAX_EMOJI` is 32 bytes — and the script **stops** on the first that does not.
+A miss written silently is a box on somebody's screen, which is the defect all
+of this replaces.
+"""
+import io
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+import zlib
+
+UNICODE = "https://unicode.org/Public/emoji/16.0/emoji-test.txt"
+TWEMOJI = "https://github.com/jdecked/twemoji/archive/refs/tags/v16.0.1.tar.gz"
+MAX_EMOJI = 32  # sqex-proto::message::MAX_EMOJI, in bytes
+
+GROUPS = [
+    ("Smileys & Emotion", "Smileys"),
+    ("People & Body", "People"),
+    ("Animals & Nature", "Nature"),
+    ("Food & Drink", "Food"),
+    ("Travel & Places", "Travel"),
+    ("Activities", "Activities"),
+    ("Objects", "Objects"),
+    ("Symbols", "Symbols"),
+    ("Flags", "Flags"),
+]
+
+here = os.path.dirname(os.path.abspath(__file__))
+repo = os.path.dirname(here)
+crate = os.path.join(repo, "crates", "sigil-emoji")
+
+
+def fetch(into):
+    test = os.path.join(into, "emoji-test.txt")
+    if not os.path.exists(test):
+        print("fetching", UNICODE, file=sys.stderr)
+        urllib.request.urlretrieve(UNICODE, test)
+    tree = [d for d in os.listdir(into) if d.startswith("twemoji-")]
+    if not tree:
+        print("fetching", TWEMOJI, file=sys.stderr)
+        data = urllib.request.urlopen(TWEMOJI).read()
+        tarfile.open(fileobj=io.BytesIO(data)).extractall(into)
+        tree = [d for d in os.listdir(into) if d.startswith("twemoji-")]
+    return test, os.path.join(into, tree[0])
+
+
+def parse(test):
+    """(codepoints, name, group) for every fully-qualified, untoned entry."""
+    out = []
+    group = None
+    for line in open(test, encoding="utf-8"):
+        if line.startswith("# group:"):
+            group = line.split(":", 1)[1].strip()
+            continue
+        if not line.strip() or line.startswith("#"):
+            continue
+        m = re.match(r"([0-9A-F ]+?)\s*;\s*(\S+)\s*#\s*(\S+)\s*E\d+\.\d+\s+(.*)$", line)
+        if not m:
+            raise SystemExit(f"cannot read: {line!r}")
+        cps = [int(c, 16) for c in m.group(1).split()]
+        if m.group(2) != "fully-qualified":
+            continue
+        if any(0x1F3FB <= c <= 0x1F3FF for c in cps):
+            continue
+        if group == "Component":
+            continue
+        out.append((cps, m.group(4).strip(), group))
+    return out
+
+
+def twemoji_file(svgs, cps):
+    """Twemoji names files by the hex codepoints, dropping U+FE0F outside
+    ZWJ sequences. Try as written, then stripped."""
+    exact = "-".join(f"{c:x}" for c in cps) + ".svg"
+    if exact in svgs:
+        return exact
+    stripped = "-".join(f"{c:x}" for c in cps if c != 0xFE0F) + ".svg"
+    if stripped in svgs:
+        return stripped
+    return None
+
+
+def rust_str(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def main():
+    if len(sys.argv) > 1:
+        test, tree = fetch(sys.argv[1])
+    else:
+        cache = os.path.join(tempfile.gettempdir(), "sigil-emoji-assets")
+        os.makedirs(cache, exist_ok=True)
+        test, tree = fetch(cache)
+    svgdir = os.path.join(tree, "assets", "svg")
+    svgs = set(os.listdir(svgdir))
+
+    entries = parse(test)
+    group_index = {name: i for i, (name, _) in enumerate(GROUPS)}
+    pack = bytearray()
+    rows = []
+    misses = []
+    for cps, name, group in entries:
+        chars = "".join(chr(c) for c in cps)
+        if len(chars.encode("utf-8")) > MAX_EMOJI:
+            raise SystemExit(f"{name} is {len(chars.encode())} bytes; the wire carries {MAX_EMOJI}")
+        f = twemoji_file(svgs, cps)
+        if f is None:
+            misses.append((name, cps))
+            continue
+        data = open(os.path.join(svgdir, f), "rb").read()
+        if not data.lstrip().startswith(b"<svg"):
+            raise SystemExit(f"{f} is not an svg")
+        rows.append((chars, name, group_index[group], len(pack), len(data)))
+        pack += data
+    if misses:
+        for name, cps in misses:
+            print("no picture:", name, " ".join(f"{c:04X}" for c in cps), file=sys.stderr)
+        raise SystemExit(f"{len(misses)} emoji without a picture")
+
+    order = sorted(range(len(rows)), key=lambda i: rows[i][0].encode("utf-8"))
+    for a, b in zip(order, order[1:]):
+        if rows[a][0] == rows[b][0]:
+            raise SystemExit(f"duplicate: {rows[a][1]} / {rows[b][1]}")
+
+    deflated = zlib.compress(bytes(pack), 9)
+    with open(os.path.join(crate, "assets", "emoji.pack"), "wb") as f:
+        f.write(deflated)
+
+    lines = [
+        "// Generated by scripts/emoji-assets — do not edit.",
+        "//",
+        f"// Unicode Emoji 16.0 emoji-test.txt, Twemoji {os.path.basename(tree)}.",
+        "",
+        "use crate::{Emoji, Group};",
+        "",
+        "/// How many bytes the pack inflates to.",
+        f"pub const UNPACKED: usize = {len(pack)};",
+        "",
+        "/// Every emoji the picker offers, in Unicode's own order.",
+        "pub static EMOJI: &[Emoji] = &[",
+    ]
+    for chars, name, g, off, ln in rows:
+        lines.append(
+            f"    Emoji {{ chars: {rust_str(chars)}, name: {rust_str(name)}, "
+            f"group: Group::{GROUPS[g][1]}, offset: {off}, len: {ln} }},"
+        )
+    lines.append("];")
+    lines.append("")
+    lines.append("/// Indices into `EMOJI`, ordered by `chars` bytes, for a binary search.")
+    lines.append("pub static BY_CHARS: &[u16] = &[")
+    for i in range(0, len(order), 16):
+        lines.append("    " + ", ".join(str(x) for x in order[i : i + 16]) + ",")
+    lines.append("];")
+    lines.append("")
+    with open(os.path.join(crate, "src", "table.rs"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    subprocess.run(["rustfmt", "--edition", "2024", os.path.join(crate, "src", "table.rs")], check=False)
+
+    by_group = [0] * len(GROUPS)
+    for r in rows:
+        by_group[r[2]] += 1
+    for (name, _), n in zip(GROUPS, by_group):
+        print(f"{n:5} {name}")
+    print(f"{len(rows)} emoji, {len(pack)} bytes of svg, {len(deflated)} bytes deflated")
+
+
+if __name__ == "__main__":
+    main()
