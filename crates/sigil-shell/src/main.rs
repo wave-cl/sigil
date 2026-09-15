@@ -164,6 +164,14 @@ fn main() -> eframe::Result<()> {
             // "sigil" written across the top of sigil.
             .with_title("Sigil")
             .with_title_shown(false)
+            // Our own mark, set on the running application: without one,
+            // eframe sets its own at launch, and the dock switched from the
+            // bundle's icon to egui's the moment the window came up.
+            .with_icon(egui::IconData {
+                rgba: sigil_platform::mark::icon_rgba(256),
+                width: 256,
+                height: 256,
+            })
             // The bar goes transparent and the content is drawn behind it, so
             // the top of the window is the application's own colour instead of
             // the system's grey. macOS only; on the others the desktop draws

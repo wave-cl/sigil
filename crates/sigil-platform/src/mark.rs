@@ -1,117 +1,162 @@
 //! Sigil's mark, drawn: the same numbers as `packaging/icon.py`.
 //!
-//! A seal: a white S of two arcs, its free ends finished with a point, in
-//! a ring broken where the stroke leaves it, on a rounded square in the
-//! accent -- for the tray and the dock. Two copies of one drawing, in two languages,
-//! because the app icon is made at packaging time by a script with no
-//! dependencies and the tray icon is made at run time by this crate; the
-//! test at the bottom renders both and compares them pixel for pixel, so
-//! the two cannot drift without somebody noticing. Change a number here,
-//! change it there.
-
-/// `#6E8BFF`.
-pub const ACCENT: [u8; 3] = [0x6E, 0x8B, 0xFF];
+//! A white hexagon, pointed left and right, on a black rounded square; in
+//! it, four black arms of one width meet around the centre without
+//! touching, each rounded on one corner where it turns towards the next,
+//! so the white between them winds through the middle -- for the tray and
+//! the dock. Two copies of one drawing, in two languages, because the app
+//! icon is made at packaging time by a script with no dependencies and the
+//! tray icon is made at run time by this crate; the test at the bottom
+//! renders both and compares them pixel for pixel, so the two cannot drift
+//! without somebody noticing. Change a number here, change it there.
 
 const SQUARE: f64 = 0.80;
-const CORNER: f64 = 0.225;
-const RADIUS: f64 = 0.14;
-const STROKE: f64 = 0.075;
-/// Centre x, centre y, from, to -- degrees, anticlockwise, y up.
-const TOP: (f64, f64, f64, f64) = (0.5, 0.5 + RADIUS, 15.0, 270.0);
-const BOTTOM: (f64, f64, f64, f64) = (0.5, 0.5 - RADIUS, -165.0, 90.0);
-/// A sigil's strokes end in a point: a disc at each free end of the S.
-const TERMINAL: f64 = 0.062;
-/// And a seal is drawn in a ring, broken where the S's free ends point out
-/// of it, so the S reads as one stroke leaving the ring and coming back.
-const RING: f64 = 0.355;
-const RING_STROKE: f64 = 0.04;
-const RING_GAPS: [(f64, f64); 2] = [(30.0, 78.0), (210.0, 258.0)];
+const CORNER: f64 = 0.146;
+/// The hexagon: from the centre to a flat side, and its corner radius.
+const HEX: f64 = 0.2706;
+const HEX_CORNER: f64 = 0.037;
+/// The arms: width, and how far from the centre each runs.
+const ARM: f64 = 0.080;
+const ARM_IN: f64 = 0.040;
+const ARM_OUT: f64 = 0.210;
+const ARM_TIP: f64 = 0.012;
 const SAMPLES: u32 = 4;
 
-fn in_arc(deg: f64, start: f64, end: f64) -> bool {
-    let span = (end - start).rem_euclid(360.0);
-    (deg - start).rem_euclid(360.0) <= span
+/// One arm: centre, half width, half height, and a radius per corner in
+/// the order top-right, bottom-right, top-left, bottom-left. The outer
+/// corners are barely rounded; of the inner ones, the corner facing the
+/// next arm anticlockwise is rounded by the arm's whole width and the other
+/// is sharp, where it meets the next arm clockwise corner to corner.
+struct Arm {
+    cx: f64,
+    cy: f64,
+    hw: f64,
+    hh: f64,
+    radii: [f64; 4],
 }
 
-/// Whether (x, y) is on the arc `(cx, cy, from, to)` of `radius`, drawn
-/// `stroke` wide.
-fn on_arc(x: f64, y: f64, arc: (f64, f64, f64, f64), radius: f64, stroke: f64) -> bool {
-    let (cx, cy, start, end) = arc;
-    let (dx, dy) = (x - cx, y - cy);
-    if (dx.hypot(dy) - radius).abs() > stroke / 2.0 {
-        return false;
-    }
-    in_arc(dy.atan2(dx).to_degrees(), start, end)
+fn arms() -> [Arm; 4] {
+    let half = (ARM_OUT - ARM_IN) / 2.0;
+    let mid = ARM_IN + half;
+    [
+        // Up: rounded at its lower left.
+        Arm {
+            cx: 0.5,
+            cy: 0.5 + mid,
+            hw: ARM / 2.0,
+            hh: half,
+            radii: [ARM_TIP, 0.0, ARM_TIP, ARM],
+        },
+        // Right: rounded at its lower left.
+        Arm {
+            cx: 0.5 + mid,
+            cy: 0.5,
+            hw: half,
+            hh: ARM / 2.0,
+            radii: [ARM_TIP, ARM_TIP, 0.0, ARM],
+        },
+        // Down: rounded at its upper right.
+        Arm {
+            cx: 0.5,
+            cy: 0.5 - mid,
+            hw: ARM / 2.0,
+            hh: half,
+            radii: [ARM, ARM_TIP, 0.0, ARM_TIP],
+        },
+        // Left: rounded at its upper right.
+        Arm {
+            cx: 0.5 - mid,
+            cy: 0.5,
+            hw: half,
+            hh: ARM / 2.0,
+            radii: [ARM, 0.0, ARM_TIP, ARM_TIP],
+        },
+    ]
 }
 
-fn end(cx: f64, cy: f64, radius: f64, deg: f64) -> (f64, f64) {
-    (
-        cx + radius * deg.to_radians().cos(),
-        cy + radius * deg.to_radians().sin(),
-    )
+/// Signed distance to a box with a radius per corner: negative inside.
+fn box_margin(x: f64, y: f64, arm: &Arm) -> f64 {
+    let (dx, dy) = (x - arm.cx, y - arm.cy);
+    let [tr, br, tl, bl] = arm.radii;
+    let r = if dx >= 0.0 {
+        if dy >= 0.0 { tr } else { br }
+    } else if dy >= 0.0 {
+        tl
+    } else {
+        bl
+    };
+    let (qx, qy) = (dx.abs() - arm.hw + r, dy.abs() - arm.hh + r);
+    let outside = qx.max(0.0).hypot(qy.max(0.0));
+    let inside = qx.max(qy).min(0.0);
+    outside + inside - r
 }
 
-/// Whether (x, y), in canvas fractions with y up, is on the mark.
-fn glyph_hit(x: f64, y: f64) -> bool {
-    // The S, with a round cap where the two arcs meet and a terminal disc
-    // at each free end: the top arc's start, the bottom arc's end.
-    for (arc, free_is_start) in [(TOP, true), (BOTTOM, false)] {
-        let (cx, cy, start, stop) = arc;
-        if on_arc(x, y, arc, RADIUS, STROKE) {
-            return true;
+/// Signed distance to the rounded hexagon: negative inside.
+fn hex_margin(x: f64, y: f64) -> f64 {
+    // The rounding is applied to a hexagon shrunk by the corner radius, so
+    // the flat sides land where HEX says.
+    let apothem = HEX - HEX_CORNER;
+    let circum = apothem / 30f64.to_radians().cos();
+    let verts: Vec<(f64, f64)> = (0..6)
+        .map(|i| {
+            let a = (60.0 * i as f64).to_radians();
+            (0.5 + circum * a.cos(), 0.5 + circum * a.sin())
+        })
+        .collect();
+    let mut inside = true;
+    let mut nearest = f64::INFINITY;
+    for i in 0..6 {
+        let (ax, ay) = verts[i];
+        let (bx, by) = verts[(i + 1) % 6];
+        let (ex, ey) = (bx - ax, by - ay);
+        // The polygon is anticlockwise, so inside is to the left of each edge.
+        if ex * (y - ay) - ey * (x - ax) < 0.0 {
+            inside = false;
         }
-        for (deg, is_start) in [(start, true), (stop, false)] {
-            let (ex, ey) = end(cx, cy, RADIUS, deg);
-            let r = if is_start == free_is_start {
-                TERMINAL
-            } else {
-                STROKE / 2.0
-            };
-            if (x - ex).hypot(y - ey) <= r {
-                return true;
-            }
-        }
+        let t = (((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+        nearest = nearest.min((x - (ax + t * ex)).hypot(y - (ay + t * ey)));
     }
-    // The ring, less its gaps, with round caps at each break.
-    let (dx, dy) = (x - 0.5, y - 0.5);
-    if (dx.hypot(dy) - RING).abs() <= RING_STROKE / 2.0 {
-        let deg = dy.atan2(dx).to_degrees();
-        if !RING_GAPS.iter().any(|&(a, b)| in_arc(deg, a, b)) {
-            return true;
-        }
-    }
-    for (a, b) in RING_GAPS {
-        for deg in [a, b] {
-            let (ex, ey) = end(0.5, 0.5, RING, deg);
-            if (x - ex).hypot(y - ey) <= RING_STROKE / 2.0 {
-                return true;
-            }
-        }
-    }
-    false
+    (if inside { -nearest } else { nearest }) - HEX_CORNER
 }
 
-/// Whether (x, y) is inside the rounded square.
-fn square_hit(x: f64, y: f64) -> bool {
+fn arms_margin(x: f64, y: f64) -> f64 {
+    arms()
+        .iter()
+        .map(|a| box_margin(x, y, a))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Signed distance to the rounded square: negative inside.
+fn square_margin(x: f64, y: f64) -> f64 {
     let half = SQUARE / 2.0;
     let r = CORNER * SQUARE;
-    let (dx, dy) = ((x - 0.5).abs(), (y - 0.5).abs());
-    if dx > half || dy > half {
-        return false;
-    }
-    if dx <= half - r || dy <= half - r {
-        return true;
-    }
-    (dx - (half - r)).hypot(dy - (half - r)) <= r
+    let (dx, dy) = ((x - 0.5).abs() - (half - r), (y - 0.5).abs() - (half - r));
+    let outside = dx.max(0.0).hypot(dy.max(0.0));
+    let inside = dx.max(dy).min(0.0);
+    outside + inside - r
 }
 
-fn coverage(size: u32, x: u32, y: u32, hit: fn(f64, f64) -> bool) -> f64 {
+/// How much of pixel (x, y) the shape covers, sampled SAMPLES x SAMPLES --
+/// unless the signed distance at the pixel's centre says the whole pixel is
+/// on one side, which it is for all but a thin band along every edge. Every
+/// margin here is an exact distance, so that is safe.
+fn coverage(size: u32, x: u32, y: u32, margin: fn(f64, f64) -> f64) -> f64 {
+    let px = (x as f64 + 0.5) / size as f64;
+    let py = 1.0 - (y as f64 + 0.5) / size as f64;
+    let half_diagonal = 2f64.sqrt() / (2.0 * size as f64);
+    let m = margin(px, py);
+    if m > half_diagonal {
+        return 0.0;
+    }
+    if m < -half_diagonal {
+        return 1.0;
+    }
     let mut hits = 0;
     for sy in 0..SAMPLES {
         for sx in 0..SAMPLES {
             let px = (x as f64 + (sx as f64 + 0.5) / SAMPLES as f64) / size as f64;
             let py = 1.0 - (y as f64 + (sy as f64 + 0.5) / SAMPLES as f64) / size as f64;
-            if hit(px, py) {
+            if margin(px, py) <= 0.0 {
                 hits += 1;
             }
         }
@@ -119,31 +164,36 @@ fn coverage(size: u32, x: u32, y: u32, hit: fn(f64, f64) -> bool) -> f64 {
     hits as f64 / (SAMPLES * SAMPLES) as f64
 }
 
-/// The app icon, `size` square, RGBA: the S on the rounded square.
+/// The white of the emblem at a pixel: the hexagon less the arms, which
+/// lie wholly inside it.
+fn emblem(size: u32, x: u32, y: u32) -> f64 {
+    (coverage(size, x, y, hex_margin) - coverage(size, x, y, arms_margin)).max(0.0)
+}
+
+/// The app icon, `size` square, RGBA: the emblem on the rounded square.
 pub fn icon_rgba(size: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            let g = coverage(size, x, y, glyph_hit);
-            let s = coverage(size, x, y, square_hit);
-            for c in ACCENT {
-                // Ties to even, as Python's `round` does, so the two agree exactly.
-                out.push((c as f64 + (255.0 - c as f64) * g).round_ties_even() as u8);
-            }
+            let g = emblem(size, x, y);
+            let s = coverage(size, x, y, square_margin);
+            // Ties to even, as Python's `round` does, so the two agree exactly.
+            let v = (255.0 * g).round_ties_even() as u8;
+            out.extend_from_slice(&[v, v, v]);
             out.push((255.0 * s).round_ties_even() as u8);
         }
     }
     out
 }
 
-/// The S alone, `size` square, RGBA in `colour` with its coverage as alpha:
-/// for a menu bar that tints a template, or a tray that wants the glyph
-/// without the square.
+/// The emblem alone, `size` square, RGBA in `colour` with its coverage as
+/// alpha: for a menu bar that tints a template, or a tray that wants the
+/// mark without the square.
 pub fn glyph_rgba(size: u32, colour: [u8; 3]) -> Vec<u8> {
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            let g = coverage(size, x, y, glyph_hit);
+            let g = emblem(size, x, y);
             out.extend_from_slice(&colour);
             out.push((255.0 * g).round_ties_even() as u8);
         }
@@ -202,11 +252,11 @@ mod tests {
         compare(&glyph_rgba(32, [0, 0, 0]), &python_png(32, true), 32);
     }
 
-    /// The drawing is not empty, not a disc, and has the S in it: the middle
-    /// row of the icon crosses the stroke, so it has white in it, and the
-    /// corners are transparent while the edges' middles are not.
+    /// The drawing is what it says: a black square with transparent
+    /// corners, a white hexagon in it that does not reach the square's
+    /// corners, and black arms in the hexagon that stop short of the centre.
     #[test]
-    fn the_mark_is_an_s_on_a_rounded_square() {
+    fn the_mark_is_an_emblem_on_a_rounded_square() {
         let size = 64;
         let px = icon_rgba(size);
         let at = |x: u32, y: u32| {
@@ -216,19 +266,17 @@ mod tests {
         assert_eq!(at(0, 0)[3], 0, "the corner is outside the square");
         assert_eq!(at(32, 7)[3], 255, "the top edge's middle is inside it");
         assert_eq!(
-            at(32, 32),
-            [255, 255, 255, 255],
-            "the centre is the S's waist"
+            at(32, 9),
+            [0, 0, 0, 255],
+            "black between square and hexagon"
         );
-        assert_eq!(at(32, 14)[..3], [255, 255, 255], "the top of the S");
-        assert_eq!(at(32, 50)[..3], [255, 255, 255], "the bottom of the S");
-        assert_eq!(at(32, 23)[..3], ACCENT, "the top bowl is open");
-        assert_eq!(at(32, 41)[..3], ACCENT, "and so is the bottom one");
-        assert_eq!(at(32, 9)[..3], [255, 255, 255], "the ring, above the S");
-        assert_eq!(
-            at(54, 20)[..3],
-            ACCENT,
-            "broken where the S's end points out"
-        );
+        assert_eq!(at(9, 9), [0, 0, 0, 255], "the hexagon has no corner there");
+        assert_eq!(at(32, 32), [255, 255, 255, 255], "the centre is white");
+        assert_eq!(at(32, 20)[..3], [0, 0, 0], "the up arm");
+        assert_eq!(at(44, 32)[..3], [0, 0, 0], "the right arm");
+        assert_eq!(at(32, 44)[..3], [0, 0, 0], "the down arm");
+        assert_eq!(at(20, 32)[..3], [0, 0, 0], "the left arm");
+        assert_eq!(at(24, 24)[..3], [255, 255, 255], "white between the arms");
+        assert_eq!(at(14, 32)[..3], [255, 255, 255], "the hexagon's left point");
     }
 }

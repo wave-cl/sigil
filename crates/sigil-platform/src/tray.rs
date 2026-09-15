@@ -73,8 +73,8 @@ impl Tray {
 /// icon file is one more thing to lose between the build and the bundle.
 /// The mark, as `crate::mark` draws it -- the same drawing as the app icon.
 ///
-/// On macOS the S alone, in black, as a template the menu bar tints; on the
-/// others the S on its rounded square, in the accent, at a size the tray
+/// On macOS the emblem alone, in black, as a template the menu bar tints;
+/// on the others the emblem on its rounded square, at a size the tray
 /// scales from. Twice the nominal size so a Retina bar draws it sharp.
 fn icon() -> Icon {
     const SIZE: u32 = 64;
