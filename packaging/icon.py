@@ -57,6 +57,10 @@ ARMS = (
     # Left: rounded at its upper right, meeting the down arm at its lower right.
     (0.5 - _MID, 0.5, _HALF, ARM / 2, (ARM, 0.0, ARM_TIP, ARM_TIP)),
 )
+# The emblem alone is drawn larger: the menu bar gives a template a fixed
+# height and the square's margin around it is wasted there, so the hexagon
+# is scaled to nearly the canvas's width.
+GLYPH_SCALE = 1.55
 SAMPLES = 4
 
 
@@ -111,15 +115,20 @@ def square_margin(x, y):
     return outside + inside - r
 
 
-def coverage(size, x, y, margin):
+def coverage(size, x, y, margin, scale=1.0):
     """How much of pixel (x, y) the shape covers, sampled SAMPLES x SAMPLES
     -- unless the signed distance at the pixel's centre says the whole
     pixel is on one side, which it is for all but a thin band along every
-    edge. Every margin here is an exact distance, so that is safe."""
+    edge. Every margin here is an exact distance, so that is safe. `scale`
+    enlarges the shape about the centre, and the distance with it."""
+
+    def at(px, py):
+        return margin(0.5 + (px - 0.5) / scale, 0.5 + (py - 0.5) / scale) * scale
+
     px = (x + 0.5) / size
     py = 1.0 - (y + 0.5) / size
     half_diagonal = math.sqrt(2.0) / (2.0 * size)
-    m = margin(px, py)
+    m = at(px, py)
     if m > half_diagonal:
         return 0.0
     if m < -half_diagonal:
@@ -129,19 +138,23 @@ def coverage(size, x, y, margin):
         for sx in range(SAMPLES):
             px = (x + (sx + 0.5) / SAMPLES) / size
             py = 1.0 - (y + (sy + 0.5) / SAMPLES) / size
-            if margin(px, py) <= 0.0:
+            if at(px, py) <= 0.0:
                 hits += 1
     return hits / (SAMPLES * SAMPLES)
 
 
 def draw(size, glyph_only=False):
+    scale = GLYPH_SCALE if glyph_only else 1.0
     rows = []
     for y in range(size):
         row = bytearray()
         for x in range(size):
             # The white of the emblem: the hexagon less the arms, which lie
             # wholly inside it.
-            g = max(0.0, coverage(size, x, y, hex_margin) - coverage(size, x, y, arms_margin))
+            g = max(
+                0.0,
+                coverage(size, x, y, hex_margin, scale) - coverage(size, x, y, arms_margin, scale),
+            )
             if glyph_only:
                 row.extend((*BLACK, int(round(255 * g))))
                 continue

@@ -20,6 +20,10 @@ const ARM: f64 = 0.080;
 const ARM_IN: f64 = 0.040;
 const ARM_OUT: f64 = 0.210;
 const ARM_TIP: f64 = 0.012;
+/// The emblem alone is drawn larger: the menu bar gives a template a fixed
+/// height and the square's margin around it is wasted there, so the
+/// hexagon is scaled to nearly the canvas's width.
+const GLYPH_SCALE: f64 = 1.55;
 const SAMPLES: u32 = 4;
 
 /// One arm: centre, half width, half height, and a radius per corner in
@@ -139,12 +143,14 @@ fn square_margin(x: f64, y: f64) -> f64 {
 /// How much of pixel (x, y) the shape covers, sampled SAMPLES x SAMPLES --
 /// unless the signed distance at the pixel's centre says the whole pixel is
 /// on one side, which it is for all but a thin band along every edge. Every
-/// margin here is an exact distance, so that is safe.
-fn coverage(size: u32, x: u32, y: u32, margin: fn(f64, f64) -> f64) -> f64 {
+/// margin here is an exact distance, so that is safe. `scale` enlarges the
+/// shape about the centre, and the distance with it.
+fn coverage(size: u32, x: u32, y: u32, margin: fn(f64, f64) -> f64, scale: f64) -> f64 {
+    let at = |px: f64, py: f64| margin(0.5 + (px - 0.5) / scale, 0.5 + (py - 0.5) / scale) * scale;
     let px = (x as f64 + 0.5) / size as f64;
     let py = 1.0 - (y as f64 + 0.5) / size as f64;
     let half_diagonal = 2f64.sqrt() / (2.0 * size as f64);
-    let m = margin(px, py);
+    let m = at(px, py);
     if m > half_diagonal {
         return 0.0;
     }
@@ -156,7 +162,7 @@ fn coverage(size: u32, x: u32, y: u32, margin: fn(f64, f64) -> f64) -> f64 {
         for sx in 0..SAMPLES {
             let px = (x as f64 + (sx as f64 + 0.5) / SAMPLES as f64) / size as f64;
             let py = 1.0 - (y as f64 + (sy as f64 + 0.5) / SAMPLES as f64) / size as f64;
-            if margin(px, py) <= 0.0 {
+            if at(px, py) <= 0.0 {
                 hits += 1;
             }
         }
@@ -166,8 +172,8 @@ fn coverage(size: u32, x: u32, y: u32, margin: fn(f64, f64) -> f64) -> f64 {
 
 /// The white of the emblem at a pixel: the hexagon less the arms, which
 /// lie wholly inside it.
-fn emblem(size: u32, x: u32, y: u32) -> f64 {
-    (coverage(size, x, y, hex_margin) - coverage(size, x, y, arms_margin)).max(0.0)
+fn emblem(size: u32, x: u32, y: u32, scale: f64) -> f64 {
+    (coverage(size, x, y, hex_margin, scale) - coverage(size, x, y, arms_margin, scale)).max(0.0)
 }
 
 /// The app icon, `size` square, RGBA: the emblem on the rounded square.
@@ -175,8 +181,8 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            let g = emblem(size, x, y);
-            let s = coverage(size, x, y, square_margin);
+            let g = emblem(size, x, y, 1.0);
+            let s = coverage(size, x, y, square_margin, 1.0);
             // Ties to even, as Python's `round` does, so the two agree exactly.
             let v = (255.0 * g).round_ties_even() as u8;
             out.extend_from_slice(&[v, v, v]);
@@ -193,7 +199,7 @@ pub fn glyph_rgba(size: u32, colour: [u8; 3]) -> Vec<u8> {
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            let g = emblem(size, x, y);
+            let g = emblem(size, x, y, GLYPH_SCALE);
             out.extend_from_slice(&colour);
             out.push((255.0 * g).round_ties_even() as u8);
         }
@@ -250,6 +256,24 @@ mod tests {
     #[test]
     fn the_glyph_alone_matches_too() {
         compare(&glyph_rgba(32, [0, 0, 0]), &python_png(32, true), 32);
+    }
+
+    /// The glyph fills its canvas: a menu bar draws a template at a fixed
+    /// height, so a mark drawn with the square's margin around it was two
+    /// thirds the size of every other mark up there.
+    #[test]
+    fn the_glyph_fills_its_canvas() {
+        let size = 64;
+        let px = glyph_rgba(size, [0, 0, 0]);
+        let alpha = |x: u32, y: u32| px[((y * size + x) * 4 + 3) as usize];
+        assert!(alpha(1, 32) > 0, "the left point reaches the edge");
+        assert!(alpha(62, 32) > 0, "and the right");
+        assert_eq!(
+            alpha(32, 3),
+            0,
+            "the flat top does not: a hexagon is wider than it is tall"
+        );
+        assert!(alpha(32, 7) > 0, "but it comes close");
     }
 
     /// The drawing is what it says: a black square with transparent
