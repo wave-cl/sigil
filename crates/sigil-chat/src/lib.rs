@@ -3701,6 +3701,26 @@ impl ChatApp {
                 // time is switching to it.
                 self.send_as(Some(at), Cmd::OpenDm(who));
             }
+            if let Some(m) = &did.mentioned {
+                use sigil_ui::message::MentionDo;
+                match (m.what, m.key.parse::<PubKey>()) {
+                    (MentionDo::Direct, Ok(key)) => self.send_as(Some(at), Cmd::OpenDm(key)),
+                    (MentionDo::CopyKey, _) => ui.ctx().copy_text(m.key.clone()),
+                    (MentionDo::Mention, Ok(key)) => {
+                        // Into the box, the way the picker puts one: the
+                        // name as text, and the key remembered for it.
+                        let pane = self.pane(at);
+                        if !pane.composing.is_empty() && !pane.composing.ends_with(' ') {
+                            pane.composing.push(' ');
+                        }
+                        pane.composing.push('@');
+                        pane.composing.push_str(&m.label);
+                        pane.composing.push(' ');
+                        pane.mentions.push((m.label.clone(), key));
+                    }
+                    (_, Err(_)) => {}
+                }
+            }
             if did.forward {
                 self.pane(at).forwarding = Some(seq);
             }

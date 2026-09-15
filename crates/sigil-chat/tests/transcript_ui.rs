@@ -1589,6 +1589,93 @@ fn a_mention_is_marked_in_the_words_and_its_key_is_a_hover_away() {
     assert!(!said.contains("@Ada") && !said.contains("@me"), "{said}");
 }
 
+/// A press at a point: down and up, as the pointer does it.
+fn press_at(h: &mut Harness<'static>, at: egui::Pos2) {
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+}
+
+/// Pressing a mentioned name opens a card with things to do about them:
+/// a direct message, mentioning them in the box, copying the key. Each
+/// does what it says, and the card is not there until the press.
+#[test]
+fn pressing_a_mentioned_name_offers_a_direct_message_and_more() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].text = "hi @Ada hi".into();
+    state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
+        key: them(),
+        label: "Ada".into(),
+    }];
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state.clone(), asked.clone());
+    h.run();
+    assert!(
+        h.query_by_label("Direct message").is_none(),
+        "not before the press"
+    );
+    let words = h.get_by_label("hi @Ada hi").rect();
+    h.hover_at(words.center());
+    h.run();
+    press_at(&mut h, words.center());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Direct message"),
+        "the press opens the card: {said}"
+    );
+    assert!(
+        said.contains("Mention them here") && said.contains("Copy key"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&them().to_string()),
+        "with the whole key: {said}"
+    );
+    h.get_by_label("Direct message").click();
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains(&format!("OpenDm({:?})", them())),
+        "Direct message opens the conversation with them: {sent}"
+    );
+
+    // Mention them here: into the box, and the send carries the key.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    let words = h.get_by_label("hi @Ada hi").rect();
+    h.hover_at(words.center());
+    h.run();
+    press_at(&mut h, words.center());
+    h.run();
+    h.run();
+    h.get_by_label("Mention them here").click();
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "@Ada ", "{}", text_of(&h));
+    composer(&h).focus();
+    composer(&h).type_text("yes");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Post(") && sent.contains(&format!("{:?}", them())),
+        "{sent}"
+    );
+}
+
 /// The same, looked at: the chips, and the outline on the line that
 /// mentions the reader, which the tree cannot see.
 #[test]

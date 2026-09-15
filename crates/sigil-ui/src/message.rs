@@ -233,6 +233,29 @@ pub struct BubbleAction {
     pub jump: Option<u64>,
     /// Open a direct message with whoever sent this.
     pub direct: bool,
+    /// Something done about somebody the message mentions, from the card
+    /// that opens on their name.
+    pub mentioned: Option<MentionAction>,
+}
+
+/// What the card on a mentioned name offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionAction {
+    /// Their whole key, as text.
+    pub key: String,
+    /// What this client calls them.
+    pub label: String,
+    pub what: MentionDo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MentionDo {
+    /// Open the conversation with them.
+    Direct,
+    /// Put their key on the clipboard.
+    CopyKey,
+    /// Start a message to them here: `@name ` into the composer.
+    Mention,
 }
 
 impl BubbleAction {
@@ -807,7 +830,14 @@ fn words_job(
 /// card with the mark, the name and the whole key on hovering one -- the
 /// key is one gesture away because the name is nobody's to vouch for
 /// (SIP-21). The words stay selectable.
-fn words(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32, wrap: bool) {
+fn words(
+    ui: &mut egui::Ui,
+    b: &Bubble<'_>,
+    theme: &ColorTheme,
+    quiet: egui::Color32,
+    wrap: bool,
+    action: &mut BubbleAction,
+) {
     let spans = mention_spans(b.text, b.mentions);
     if spans.is_empty() {
         let label = egui::Label::new(b.text).selectable(true);
@@ -829,21 +859,87 @@ fn words(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Col
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let response = ui.add(egui::Label::new(galley.clone()).selectable(true));
     // Which name is under the pointer, if any: the galley says which
-    // character, the spans say whose it is.
-    if let Some(pos) = response.hover_pos() {
-        let index = galley.cursor_from_pos(pos - response.rect.min).index.0;
-        let byte = b
-            .text
-            .char_indices()
-            .nth(index)
-            .map(|(i, _)| i)
-            .unwrap_or(b.text.len());
-        if let Some((_, i)) = spans.iter().find(|(r, _)| r.contains(&byte)) {
-            let m = &b.mentions[*i];
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
-            response.on_hover_ui(|ui| mention_card(ui, m, quiet));
+    // character, the spans say whose it is. Hovering it says who they are;
+    // pressing it opens the card with the things to do about them, anchored
+    // on the name. Every name's card is offered every pass, whether or not
+    // the pointer is still on the name -- an open card has to survive the
+    // pointer moving onto it.
+    let under = response
+        .interact_pointer_pos()
+        .or(response.hover_pos())
+        .and_then(|pos| {
+            let index = galley.cursor_from_pos(pos - response.rect.min).index.0;
+            let byte = b
+                .text
+                .char_indices()
+                .nth(index)
+                .map(|(i, _)| i)
+                .unwrap_or(b.text.len());
+            spans.iter().position(|(r, _)| r.contains(&byte))
+        });
+    let chars = |byte: usize| b.text[..byte].chars().count();
+    for (n, (range, i)) in spans.iter().enumerate() {
+        let m = &b.mentions[*i];
+        let start = galley.pos_from_cursor(egui::text::CCursor::new(chars(range.start)));
+        let end = galley.pos_from_cursor(egui::text::CCursor::new(chars(range.end)));
+        let name =
+            egui::Rect::from_min_max(start.min, end.max).translate(response.rect.min.to_vec2());
+        let id = response.id.with(("mention", *i));
+        let here = under == Some(n);
+        if here {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if !egui::Popup::is_id_open(ui.ctx(), id) {
+                response
+                    .clone()
+                    .on_hover_ui(|ui| mention_card(ui, m, quiet));
+            }
         }
+        mention_popup(ui, id, name, m, quiet, here && response.clicked(), action);
     }
+}
+
+/// The card with the things to do about a mentioned name, opened by a
+/// press on it and closed by the next press anywhere.
+fn mention_popup(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    anchor: egui::Rect,
+    m: &Mentioned<'_>,
+    quiet: egui::Color32,
+    open_now: bool,
+    action: &mut BubbleAction,
+) {
+    let theme = ColorTheme::current(ui.ctx());
+    egui::Popup::new(
+        id,
+        ui.ctx().clone(),
+        egui::PopupAnchor::ParentRect(anchor),
+        ui.layer_id(),
+    )
+    .open_memory(open_now.then_some(egui::SetOpenCommand::Bool(true)))
+    .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+    .show(|ui| {
+        ui.set_min_width(220.0);
+        mention_card(ui, m, quiet);
+        ui.separator();
+        let mut did = |what: MentionDo| {
+            action.mentioned = Some(MentionAction {
+                key: m.key.to_string(),
+                label: m.label.to_string(),
+                what,
+            });
+        };
+        if crate::icon_item(ui, crate::Icon::Compose, "Direct message").clicked() {
+            did(MentionDo::Direct);
+        }
+        if crate::icon_item(ui, crate::Icon::Pencil, "Mention them here").clicked() {
+            did(MentionDo::Mention);
+        }
+        if crate::icon_item(ui, crate::Icon::Device, "Copy key").clicked() {
+            did(MentionDo::CopyKey);
+        }
+        let _ = theme;
+    });
 }
 
 /// The card for a mentioned name: the mark, the name and the whole key.
@@ -864,23 +960,36 @@ fn mention_card(ui: &mut egui::Ui, m: &Mentioned<'_>, quiet: egui::Color32) {
 /// The mentions whose name is not in the words, one chip each under them,
 /// so a mention is never invisible: a sender who wrote one name over a
 /// part pointing at somebody else has that somebody named here.
-fn mention_chips(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
+fn mention_chips(
+    ui: &mut egui::Ui,
+    b: &Bubble<'_>,
+    theme: &ColorTheme,
+    quiet: egui::Color32,
+    action: &mut BubbleAction,
+) {
     let spans = mention_spans(b.text, b.mentions);
     let unmatched = unmatched_mentions(b, &spans);
     if unmatched.is_empty() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        for m in unmatched {
-            let chip = ui.label(
-                egui::RichText::new(format!("@{}", m.label))
-                    .strong()
-                    .color(theme.accent),
+        for (i, m) in unmatched.into_iter().enumerate() {
+            let chip = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("@{}", m.label))
+                        .strong()
+                        .color(theme.accent),
+                )
+                .sense(egui::Sense::click()),
             );
             if chip.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            chip.on_hover_ui(|ui| mention_card(ui, m, quiet));
+            let id = chip.id.with(("mention-chip", i));
+            if !egui::Popup::is_id_open(ui.ctx(), id) {
+                chip.clone().on_hover_ui(|ui| mention_card(ui, m, quiet));
+            }
+            mention_popup(ui, id, chip.rect, m, quiet, chip.clicked(), action);
         }
     });
 }
@@ -1007,7 +1116,7 @@ fn body(
                     row,
                     egui::Layout::left_to_right(egui::Align::Max),
                     |ui| {
-                        words(ui, b, theme, quiet, false);
+                        words(ui, b, theme, quiet, false, action);
                         // **Against the right edge**, whatever the bubble's
                         // width came out as. A bubble has a minimum width, and
                         // "ok" does not reach it, so drawn straight after the
@@ -1022,9 +1131,9 @@ fn body(
                 );
             } else {
                 if !b.text.is_empty() {
-                    words(ui, b, theme, quiet, true);
+                    words(ui, b, theme, quiet, true, action);
                 }
-                mention_chips(ui, b, theme, quiet);
+                mention_chips(ui, b, theme, quiet, action);
                 meta_row_beneath(ui, b, theme, quiet);
             }
         });
