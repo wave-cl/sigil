@@ -3981,6 +3981,7 @@ impl ChatApp {
                         reply: replying,
                         edit: editing,
                         mentions,
+                        files: Vec::new(),
                     }),
                 );
                 self.send_as(Some(at), Cmd::Typing(false));

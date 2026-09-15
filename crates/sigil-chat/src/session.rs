@@ -319,6 +319,10 @@ pub struct Draft {
     pub reply: Option<u64>,
     pub edit: Option<u64>,
     pub mentions: Vec<PubKey>,
+    /// Files to carry, uploaded on the way: pictures, clips, anything. No
+    /// more than the wire's four in one message; the composer stops at
+    /// that.
+    pub files: Vec<std::path::PathBuf>,
 }
 
 impl Draft {
@@ -331,9 +335,19 @@ impl Draft {
     }
 
     /// The SIP-19 parts, in the order a reader expects them: the text, the
-    /// reply if any, then each mention once, no more than the wire allows.
+    /// files as `attachments` (already uploaded), the reply if any, then
+    /// each mention once, no more than the wire allows. A message that is
+    /// only files carries no text part: an empty one is not a message.
     pub fn parts(&self) -> Vec<Part> {
-        let mut parts = vec![Part::Text(self.text.clone())];
+        self.parts_with(Vec::new())
+    }
+
+    pub fn parts_with(&self, attachments: Vec<sqex_proto::blob::Attachment>) -> Vec<Part> {
+        let mut parts = Vec::new();
+        if !self.text.is_empty() || attachments.is_empty() {
+            parts.push(Part::Text(self.text.clone()));
+        }
+        parts.extend(attachments.into_iter().map(Part::Attachment));
         if let Some(target) = self.reply {
             parts.push(Part::Reply(target));
         }
@@ -800,6 +814,7 @@ mod draft_tests {
             reply: Some(7),
             edit: None,
             mentions: vec![k(1), k(2), k(1)],
+            files: Vec::new(),
         };
         let parts = full.parts();
         assert!(matches!(&parts[0], Part::Text(t) if t == "@Ada @Bram look"));
@@ -823,6 +838,36 @@ mod draft_tests {
             ..Default::default()
         };
         post.validate().expect("a valid post");
+    }
+
+    /// Files go after the words and before the rest; a message that is only
+    /// files carries no empty text part, and one with words and files
+    /// carries both.
+    #[test]
+    fn a_drafts_files_follow_its_words_and_stand_alone_without_them() {
+        let one = sqex_proto::blob::Attachment {
+            kind: sqex_proto::blob::KIND_IMAGE,
+            blob: [1u8; 32],
+            key: [2u8; 32],
+            size: 3,
+            chunks: 1,
+            mime: "image/png".into(),
+            meta: Vec::new(),
+            preview: Vec::new(),
+        };
+        let silent = Draft::default().parts_with(vec![one.clone(), one.clone()]);
+        assert_eq!(silent.len(), 2, "no empty text part: {silent:?}");
+        assert!(silent.iter().all(|p| matches!(p, Part::Attachment(_))));
+        let spoken = Draft {
+            reply: Some(3),
+            mentions: vec![k(1)],
+            ..Draft::text("look")
+        }
+        .parts_with(vec![one]);
+        assert!(matches!(&spoken[0], Part::Text(t) if t == "look"));
+        assert!(matches!(spoken[1], Part::Attachment(_)));
+        assert!(matches!(spoken[2], Part::Reply(3)));
+        assert!(matches!(spoken[3], Part::Mention(_)));
     }
 }
 
@@ -2648,6 +2693,76 @@ const THUMBNAIL_EDGE: u32 = 96;
 /// them goes without, which the protocol allows and a reader survives.
 /// SIP-18's `meta` for a picture or a video: width and height as u16 big
 /// endian, then for a video its length in milliseconds as u32.
+/// Upload one file to the conversation and describe it: the attachment a
+/// message carries, with the shape and the thumbnail a reader draws before
+/// -- or instead of -- fetching it.
+async fn attach_file(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    channel: &[u8; 32],
+    path: &std::path::Path,
+) -> Result<sqex_proto::blob::Attachment, String> {
+    // **Asked, never assumed.** SIP-18 says a client discovers the chunk
+    // size from the exchange, and a client that guessed 256 KiB against one
+    // on the uniform 64 KiB cap fails its first Put with nothing explaining
+    // why.
+    let limits = chat.blob_limits().await.map_err(|e| e.to_string())?;
+    let prepared = chat
+        .prepare_file(path, limits.chunk as usize)
+        .map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    note(state, format!("Sending {name}…"));
+    let mut attachment = chat
+        .upload(channel, &prepared)
+        .await
+        .map_err(|e| e.to_string())?;
+    // The field SIP-18 has always had and the terminal client always left
+    // empty: "rendering one means decoding the image, and a terminal client
+    // has nothing to show it on. The field exists for a client that does."
+    // This is that client.
+    //
+    // It travels **inside the sealed message**, so it is no more visible to
+    // the exchange than the picture is -- and it is what a reader sees
+    // before the blob has been fetched, or instead of it when the blob is
+    // too big to fetch unasked.
+    if let Some((meta, preview)) = preview_of(path, attachment.effective_kind()) {
+        attachment.meta = meta;
+        attachment.preview = preview;
+    }
+    Ok(attachment)
+}
+
+/// A file's shape (and a clip's length) as SIP-18 meta, and its thumbnail,
+/// by decoding it -- a picture whole, a clip's first frame the same way it
+/// will be played. `None` for a kind that has no picture to show.
+pub fn preview_of(path: &std::path::Path, kind: u8) -> Option<(Vec<u8>, Vec<u8>)> {
+    match kind {
+        sqex_proto::blob::KIND_IMAGE => {
+            let image = image::ImageReader::open(path).ok()?.decode().ok()?;
+            Some((
+                shape_meta(image.width(), image.height(), None),
+                thumbnail_of(&image).unwrap_or_default(),
+            ))
+        }
+        sqex_proto::blob::KIND_VIDEO => {
+            let bytes = std::fs::read(path).ok()?;
+            let (described, first) = sigil_video::still(bytes.into()).ok()?;
+            Some((
+                shape_meta(
+                    described.width,
+                    described.height,
+                    Some(described.duration_ms),
+                ),
+                thumbnail_of(&frame_image(&first)).unwrap_or_default(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn shape_meta(width: u32, height: u32, duration_ms: Option<u64>) -> Vec<u8> {
     let mut m = Vec::with_capacity(8);
     m.extend_from_slice(&(width.min(u16::MAX as u32) as u16).to_be_bytes());
@@ -4055,8 +4170,26 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
         Cmd::Post(draft) => {
             let Some(channel) = desk.open else { return };
+            // The files first, each uploaded and described; one that fails
+            // fails the message, because half a message is not the message.
+            let mut attachments = Vec::with_capacity(draft.files.len());
+            for path in &draft.files {
+                match attach_file(chat, state, &channel, path).await {
+                    Ok(a) => attachments.push(a),
+                    Err(e) => return trouble(state, e),
+                }
+            }
+            let names: Vec<String> = draft
+                .files
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
             let post = sqex_proto::message::Post {
-                parts: draft.parts(),
+                parts: draft.parts_with(attachments),
                 ..Default::default()
             };
             let sent = match draft.edit {
@@ -4068,7 +4201,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 None => chat.send_post(&channel, post).await,
             };
             match sent {
-                Ok(_) => desk.dirty.insert(channel),
+                Ok(_) => {
+                    if !names.is_empty() {
+                        note(state, format!("Sent {}.", names.join(", ")));
+                    }
+                    desk.dirty.insert(channel)
+                }
                 Err(e) => {
                     // The text is not thrown away here; the interface keeps
                     // it in the composer, because retyping a message the
@@ -4299,76 +4437,18 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         },
 
         Cmd::SendFile(path) => {
-            let Some(channel) = desk.open else { return };
-            // **Asked, never assumed.** SIP-18 says a client discovers the
-            // chunk size from the exchange, and a client that guessed 256 KiB
-            // against one on the uniform 64 KiB cap fails its first Put with
-            // nothing explaining why.
-            let limits = match chat.blob_limits().await {
-                Ok(l) => l,
-                Err(e) => return trouble(state, e),
-            };
-            let prepared = match chat.prepare_file(&path, limits.chunk as usize) {
-                Ok(p) => p,
-                Err(e) => return trouble(state, e),
-            };
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            note(state, format!("Sending {name}…"));
-            let mut attachment = match chat.upload(&channel, &prepared).await {
-                Ok(a) => a,
-                Err(e) => return trouble(state, e),
-            };
-            // The field SIP-18 has always had and the terminal client always
-            // left empty: "rendering one means decoding the image, and a
-            // terminal client has nothing to show it on. The field exists for
-            // a client that does." This is that client.
-            //
-            // It travels **inside the sealed message**, so it is no more
-            // visible to the exchange than the picture is — and it is what a
-            // reader sees before the blob has been fetched, or instead of it
-            // when the blob is too big to fetch unasked.
-            match attachment.effective_kind() {
-                sqex_proto::blob::KIND_IMAGE => {
-                    if let Some(image) = image::ImageReader::open(&path)
-                        .ok()
-                        .and_then(|r| r.decode().ok())
-                    {
-                        attachment.meta = shape_meta(image.width(), image.height(), None);
-                        attachment.preview = thumbnail_of(&image).unwrap_or_default();
-                    }
-                }
-                // A video's poster frame is its first picture, decoded here
-                // the same way it will be played; and its shape and length
-                // go in the meta, which is how a reader draws the right box
-                // and says how long it is before fetching forty megabytes.
-                sqex_proto::blob::KIND_VIDEO => {
-                    if let Ok(bytes) = std::fs::read(&path)
-                        && let Ok((described, first)) = sigil_video::still(bytes.into())
-                    {
-                        attachment.meta = shape_meta(
-                            described.width,
-                            described.height,
-                            Some(described.duration_ms),
-                        );
-                        attachment.preview = thumbnail_of(&frame_image(&first)).unwrap_or_default();
-                    }
-                }
-                _ => {}
-            }
-            let post = sqex_proto::message::Post {
-                parts: vec![sqex_proto::message::Part::Attachment(attachment)],
-                ..Default::default()
-            };
-            match chat.send_post(&channel, post).await {
-                Ok(_) => {
-                    desk.dirty.insert(channel);
-                    note(state, format!("Sent {name}."));
-                }
-                Err(e) => trouble(state, e),
-            }
+            // One file, nothing said: the same message the composer makes
+            // with one file staged and no words.
+            Box::pin(apply(
+                chat,
+                Cmd::Post(Draft {
+                    files: vec![path],
+                    ..Default::default()
+                }),
+                state,
+                desk,
+            ))
+            .await;
         }
         Cmd::SaveFile { seq, index, to } => {
             let Some(channel) = desk.open else { return };

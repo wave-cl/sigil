@@ -2795,3 +2795,87 @@ async fn a_mention_reaches_the_person_named_and_reading_clears_it() {
         carol.state().lines
     );
 }
+
+/// Words and several files go as one message: the reader's line has the
+/// text and every attachment, in the order they were given, and each is
+/// fetched. Not four messages for four files.
+#[tokio::test]
+async fn words_and_several_files_are_one_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(31);
+    let (b_signer, b_id) = signer(32);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await
+    );
+
+    // Three pictures, told apart by their bytes.
+    let mut files = Vec::new();
+    for (n, fill) in [1u8, 2, 3].into_iter().enumerate() {
+        let path = dir.path().join(format!("picture-{n}.png"));
+        std::fs::write(&path, vec![fill; 8 * 1024]).unwrap();
+        files.push(path);
+    }
+    alice.send(Cmd::Post(session::Draft {
+        text: "three from the walk".into(),
+        files: files.clone(),
+        ..Default::default()
+    }));
+    let landed = until(
+        || {
+            bob.state().lines.iter().any(|l| {
+                l.text == "three from the walk"
+                    && l.attachments.len() == 3
+                    && l.attachments.iter().all(|a| a.bytes.is_some())
+            })
+        },
+        30,
+    )
+    .await;
+    assert!(landed, "{:?}", bob.state().lines);
+    let line = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| l.text == "three from the walk")
+        .cloned()
+        .unwrap();
+    for (n, a) in line.attachments.iter().enumerate() {
+        let bytes = a.bytes.as_ref().unwrap();
+        assert_eq!(
+            bytes[0],
+            (n + 1) as u8,
+            "the files arrive in the order given"
+        );
+        assert_eq!(bytes.len(), 8 * 1024);
+    }
+    assert_eq!(
+        bob.state()
+            .lines
+            .iter()
+            .filter(|l| !l.attachments.is_empty())
+            .count(),
+        1,
+        "one message, not one per file: {:?}",
+        bob.state().lines
+    );
+}
