@@ -42,6 +42,8 @@ pub struct ConversationRow<'a> {
     pub waiting: bool,
     /// Somebody is typing. Replaces the preview while it is true.
     pub typing: bool,
+    /// One of the unread mentions the reader.
+    pub mentioned: bool,
 }
 
 /// Draw one row. Returns its response, so the caller decides what a click means.
@@ -200,6 +202,13 @@ fn row_body(
                         // truncates rather than pushing anything off the row.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             crate::unread_pill(ui, row.unread);
+                            // Beside the count: not how many, but that one of
+                            // them is for you. `@` is ASCII, so it is in the
+                            // font -- see `glyph_tests`.
+                            if row.mentioned {
+                                ui.colored_label(theme.accent, egui::RichText::new("@").strong())
+                                    .on_hover_text("mentions you");
+                            }
                             ui.colored_label(theme.text_muted, egui::RichText::new(row.at).small());
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),

@@ -173,6 +173,12 @@ pub struct Bubble<'a> {
     /// Offer a direct message with the sender: somebody else, seen in a
     /// conversation that is not already the one with them.
     pub direct: bool,
+    /// Who it mentions, from the message's own parts and not from its words:
+    /// each drawn with the key beside the name (SIP-21), because the name is
+    /// this client's word for the key and the key is the fact.
+    pub mentions: &'a [Mentioned<'a>],
+    /// One of them is the reader.
+    pub mentions_me: bool,
     /// What happened to the message after it was said. Drawn **under** the
     /// bubble rather than inside it: it is not part of what was said, and
     /// having it in there made the bubble taller than its own contents, which
@@ -190,6 +196,15 @@ pub struct Bubble<'a> {
     pub standing: Option<(&'a str, &'a str)>,
     /// Whether that word is the one that is evidence.
     pub alarming: bool,
+}
+
+/// Somebody a message mentions, as the bubble draws them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mentioned<'a> {
+    /// What this client calls them.
+    pub label: &'a str,
+    /// The whole key; the bubble shortens it.
+    pub key: &'a str,
 }
 
 /// What the reader did to a message.
@@ -674,14 +689,64 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     // One line when the words and their furniture sit side by side inside the
     // limit. A picture always gets its own rows; so does a tombstone, whose
     // one word is not the message.
+    // A mention is a chip on a row of its own under the words: the name and
+    // the key, with the gap between. The widest of them is a width the
+    // bubble has to have.
+    let chips = b
+        .mentions
+        .iter()
+        .map(|m| {
+            measure(&format!("@{}", m.label), egui::TextStyle::Body)
+                + gap
+                + measure(&short(m.key), egui::TextStyle::Small)
+        })
+        .fold(0.0f32, f32::max);
     let together = body + gap * 2.0 + meta;
-    let one_line = b.attachments.is_empty() && !b.redacted && together + PAD_X * 2.0 <= limit;
+    // A mention is a row, so a message with one is never one line.
+    let one_line = b.attachments.is_empty()
+        && b.mentions.is_empty()
+        && !b.redacted
+        && together + PAD_X * 2.0 <= limit;
     let content = if one_line { together } else { body.max(meta) };
-    let width = content.max(author).max(reply).max(files) + PAD_X * 2.0;
+    let width = content.max(author).max(reply).max(files).max(chips) + PAD_X * 2.0;
     Fit {
         width: width.clamp(120.0f32.min(limit), limit),
         one_line,
     }
+}
+
+/// Who the message mentions, one chip each: `@name` in the accent and the
+/// short key beside it in monospace. The name is the reader's own word for
+/// the key -- the sender's text is not consulted -- and the key is always
+/// there because the name is nobody's to vouch for (SIP-21).
+fn mention_chips(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
+    if b.mentions.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for m in b.mentions {
+            let chip = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = tokens::SPACING_XS;
+                    ui.label(
+                        egui::RichText::new(format!("@{}", m.label))
+                            .strong()
+                            .color(theme.accent),
+                    );
+                    ui.label(
+                        egui::RichText::new(short(m.key))
+                            .monospace()
+                            .small()
+                            .color(quiet),
+                    );
+                })
+                .response;
+            chip.on_hover_text(format!(
+                "Mentioned. The name is what this client calls the key; the key is {}",
+                m.key
+            ));
+        }
+    });
 }
 
 /// How wide a receipt mark is drawn, so a row can be measured to fit one.
@@ -715,7 +780,15 @@ fn body(
         // two-line bubble reads as a box with the corners taken off; this is
         // the shape a message has.
         .corner_radius(tokens::RADIUS_PILL)
-        .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8));
+        .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8))
+        // A message that names the reader is outlined in the accent: the one
+        // bubble in a room worth finding again. Not on one's own -- naming
+        // oneself is not being addressed.
+        .stroke(if b.mentions_me && !b.mine {
+            egui::Stroke::new(tokens::STROKE_THICK, theme.accent)
+        } else {
+            egui::Stroke::NONE
+        });
     // **Computed here, and given to everything drawn on this bubble.** Every
     // one of these used `text_muted`, which is chosen for a surface and comes
     // out at 1.25 against the accent: the reply being answered and the name of
@@ -815,6 +888,7 @@ fn body(
                 if !b.text.is_empty() {
                     ui.add(egui::Label::new(b.text).wrap().selectable(true));
                 }
+                mention_chips(ui, b, theme, quiet);
                 meta_row_beneath(ui, b, theme, quiet);
             }
         });
@@ -1220,6 +1294,8 @@ mod tests {
             standing: None,
             alarming: false,
             direct: false,
+            mentions: &[],
+            mentions_me: false,
         }
     }
 

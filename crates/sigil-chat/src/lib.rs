@@ -146,6 +146,13 @@ fn shape_of(line: &Line, grouped: bool) -> u64 {
         .as_ref()
         .map(|q| q.who.len() + q.said.len())
         .hash(&mut h);
+    // A mention is a row of chips, and a name changes the row's width.
+    line.me_mentioned.hash(&mut h);
+    line.mentions
+        .iter()
+        .map(|m| m.label.len())
+        .sum::<usize>()
+        .hash(&mut h);
     h.finish()
 }
 
@@ -2761,6 +2768,7 @@ impl ChatApp {
                         group: convo.group,
                         waiting: convo.waiting,
                         typing: convo.typing,
+                        mentioned: convo.mentioned > 0,
                     };
                     if sigil_ui::conversation_row(ui, &row, selected).clicked() {
                         self.send_as(Some(at), Cmd::Show(convo.channel));
@@ -3483,6 +3491,18 @@ impl ChatApp {
                         .then(|| video_view(pane, a, sigil_ui::video::Place::Bubble)),
                 })
                 .collect();
+            // The keys as text, owned here, so the chips can borrow them.
+            let mention_keys: Vec<String> =
+                line.mentions.iter().map(|m| m.key.to_string()).collect();
+            let mentioned: Vec<sigil_ui::message::Mentioned<'_>> = line
+                .mentions
+                .iter()
+                .zip(&mention_keys)
+                .map(|(m, key)| sigil_ui::message::Mentioned {
+                    label: &m.label,
+                    key,
+                })
+                .collect();
             let bubble = sigil_ui::Bubble {
                 key: &key,
                 name: line.name.as_deref(),
@@ -3508,6 +3528,8 @@ impl ChatApp {
                 standing: line.standing.word().zip(line.standing.means()),
                 alarming: line.standing == session::Standing::Fork,
                 direct: !line.mine && !in_direct,
+                mentions: &mentioned,
+                mentions_me: line.me_mentioned,
             };
             // Measured as it is drawn, so the next frame can reserve it.
             DREW.with(|n| n.set(n.get() + 1));

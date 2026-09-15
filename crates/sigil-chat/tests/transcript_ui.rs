@@ -1526,6 +1526,89 @@ fn a_name_never_appears_without_its_key_reachable() {
     );
 }
 
+/// A mention is drawn from the message's parts, with the key beside the
+/// name: the name is this client's word for the key (SIP-21). A line that
+/// mentions nobody draws neither.
+#[test]
+fn a_mention_is_drawn_with_its_key_and_one_of_me_is_marked() {
+    let mut state = a_conversation();
+    // Ada mentions me; I mention Ada.
+    state.lines[0].mentions = vec![sigil_chat::session::Mentioned {
+        key: me(),
+        label: "me".into(),
+    }];
+    state.lines[0].me_mentioned = true;
+    state.lines[1].mentions = vec![sigil_chat::session::Mentioned {
+        key: them(),
+        label: "Ada".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("@me"), "the chip names the key: {said}");
+    assert!(said.contains("@Ada"), "{said}");
+    assert!(
+        said.contains(&short_form(&them())) && said.contains(&short_form(&me())),
+        "and the key is beside every name: {said}"
+    );
+    // The outline on the line that mentions me is a stroke, which the tree
+    // cannot see: it is looked at in the snapshot and not asserted here.
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+    let said = text_of(&h);
+    assert!(!said.contains("@me") && !said.contains("@Ada"), "{said}");
+}
+
+/// The same, looked at: the chips, and the outline on the line that
+/// mentions the reader, which the tree cannot see.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn transcript_mention_dark() {
+    let mut state = a_conversation();
+    // On the lines at the foot, where the bottom-aligned transcript shows
+    // them: Ada's "one" mentions me; her "the second one, then" mentions
+    // Bram, a third person.
+    let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
+        key: me(),
+        label: "me".into(),
+    }];
+    state.lines[one].me_mentioned = true;
+    let second = state
+        .lines
+        .iter()
+        .position(|l| l.text == "the second one, then")
+        .unwrap();
+    state.lines[second].mentions = vec![sigil_chat::session::Mentioned {
+        key: PubKey::new([5u8; 32]),
+        label: "Bram".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    hide_column(&mut h);
+    h.snapshot("transcript_mention_dark");
+}
+
+/// A conversation with a mention of the reader waiting in it is marked in
+/// the list, in the accent, beside the count.
+#[test]
+fn a_conversation_that_mentions_you_is_marked_in_the_list() {
+    let mut state = a_conversation();
+    state.conversations[1].unread = 3;
+    state.conversations[1].mentioned = 1;
+    let mut h = harness_with(state, true);
+    h.run();
+    let mark = h.query_by_label("@");
+    assert!(mark.is_some(), "no mark: {}", text_of(&h));
+    // And not on one with unread but no mention.
+    let mut state = a_conversation();
+    state.conversations[1].unread = 3;
+    state.conversations[1].mentioned = 0;
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(h.query_by_label("@").is_none(), "{}", text_of(&h));
+}
+
 /// The way to another identity is a door, not a roster.
 ///
 /// **Moved here from the shell's rail**, and then cut down to one item. The
