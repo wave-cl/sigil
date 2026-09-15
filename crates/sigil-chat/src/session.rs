@@ -142,6 +142,38 @@ pub struct Line {
     pub me_mentioned: bool,
 }
 
+impl Line {
+    /// This message as a reply to it would quote it: who, a line of what,
+    /// and the first picture's thumbnail. What the composer shows above the
+    /// box while the reply is written, so it is the quote the reply will
+    /// carry and not an approximation of one.
+    pub fn quoted(&self) -> Quoted {
+        let said = if self.redacted {
+            "deleted".to_string()
+        } else if !self.text.is_empty() {
+            stub(&self.text)
+        } else {
+            only_files(self.attachments.iter().map(|a| a.kind))
+        };
+        let preview = (!self.redacted)
+            .then(|| {
+                self.attachments.iter().find(|a| {
+                    (a.kind == sqex_proto::blob::KIND_IMAGE
+                        || a.kind == sqex_proto::blob::KIND_VIDEO)
+                        && !a.preview.is_empty()
+                })
+            })
+            .flatten()
+            .map(|a| a.preview.clone());
+        Quoted {
+            seq: self.seq,
+            who: self.name.clone().unwrap_or_else(|| short(&self.who)),
+            said,
+            preview,
+        }
+    }
+}
+
 /// What a reply quotes, as the fold finds it: who, a line of what, and the
 /// thumbnail of the first picture if there is one.
 type Stub = (PubKey, String, Option<std::sync::Arc<[u8]>>);
@@ -3301,25 +3333,13 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                                 || kind == sqex_proto::blob::KIND_VIDEO
                         })
                         .collect();
-                    let files = m.post.attachments().count();
                     let words = m.post.body_text().unwrap_or_default();
                     let said = if m.redacted {
                         "deleted".to_string()
                     } else if !words.is_empty() {
                         stub(words)
                     } else {
-                        // Only files: say what, since there are no words.
-                        match (pictures.len(), files) {
-                            (1, 1)
-                                if pictures[0].effective_kind() == sqex_proto::blob::KIND_VIDEO =>
-                            {
-                                "a clip".to_string()
-                            }
-                            (1, 1) => "a picture".to_string(),
-                            (n, f) if n == f => format!("{n} pictures"),
-                            (_, 1) => "a file".to_string(),
-                            (_, f) => format!("{f} files"),
-                        }
+                        only_files(m.post.attachments().map(|a| a.effective_kind()))
                     };
                     let preview = (!m.redacted)
                         .then(|| pictures.first())
@@ -3734,6 +3754,27 @@ fn receipt_for(known: &Known, seq: u64, me: &PubKey) -> Receipt {
         Receipt::Delivered
     } else {
         Receipt::Sent
+    }
+}
+
+/// What a message that is only files carries, in words, for a quote of it.
+///
+/// **One wording, wherever a message is quoted.** The composer names what is
+/// about to be answered and the reply then names what was; said in two places
+/// they drifted to "a file" against "a picture" for the same photograph.
+fn only_files(kinds: impl Iterator<Item = u8>) -> String {
+    let kinds: Vec<u8> = kinds.collect();
+    let pictures: Vec<u8> = kinds
+        .iter()
+        .copied()
+        .filter(|&k| k == sqex_proto::blob::KIND_IMAGE || k == sqex_proto::blob::KIND_VIDEO)
+        .collect();
+    match (pictures.len(), kinds.len()) {
+        (1, 1) if pictures[0] == sqex_proto::blob::KIND_VIDEO => "a clip".to_string(),
+        (1, 1) => "a picture".to_string(),
+        (n, f) if n == f => format!("{n} pictures"),
+        (_, 1) => "a file".to_string(),
+        (_, f) => format!("{f} files"),
     }
 }
 

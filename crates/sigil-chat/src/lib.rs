@@ -4043,64 +4043,47 @@ impl ChatApp {
         let replying = self.pane(at).replying;
         let editing = self.pane(at).editing;
         if let Some(target) = editing.or(replying) {
-            let what = if editing.is_some() {
-                "Rewriting"
-            } else {
-                "Replying to"
-            };
-            let line = state.lines.iter().find(|l| l.seq == target);
-            let said = line
-                .map(|l| {
-                    if l.text.is_empty() {
-                        // Only files: say what, as the quote in a bubble does.
-                        match l.attachments.len() {
-                            1 => "a file".to_string(),
-                            n => format!("{n} files"),
-                        }
-                    } else {
-                        sigil_ui::message::preview(&l.text, 48)
-                    }
-                })
-                .unwrap_or_default();
-            // The picture being answered, small, so a reply to a picture is
-            // seen to be one before it is sent.
-            let picture = line.and_then(|l| {
-                l.attachments
-                    .iter()
-                    .find(|a| {
-                        (a.kind == sigil_ui::attachment::IMAGE
-                            || a.kind == sigil_ui::attachment::VIDEO)
-                            && !a.preview.is_empty()
-                    })
-                    .map(|a| (a.id.clone(), a.preview.clone()))
-            });
-            ui.horizontal(|ui| {
-                ui.colored_label(theme.accent, format!("{what}:"));
-                if let Some((id, preview)) = picture {
-                    let side = sigil_ui::message::quote_picture_side(ui);
-                    let (pic, _) =
-                        ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-                    let uri = format!("bytes://{id}-preview");
-                    ui.ctx()
-                        .include_bytes(uri.clone(), egui::load::Bytes::Shared(preview.clone()));
-                    egui::Image::from_bytes(uri, egui::load::Bytes::Shared(preview))
-                        .corner_radius(tokens::RADIUS_SM)
-                        .show_loading_spinner(false)
-                        .paint_at(ui, pic);
+            // The message being answered, as the reply will quote it: the
+            // same head a reply bubble has, with the × in its corner. A
+            // message no longer in the window is quoted by number alone.
+            let quoted = state
+                .lines
+                .iter()
+                .find(|l| l.seq == target)
+                .map(session::Line::quoted)
+                .unwrap_or_else(|| session::Quoted {
+                    seq: target,
+                    who: String::new(),
+                    said: format!("message {target}"),
+                    preview: None,
+                });
+            let head = sigil_ui::message::reply_preview(
+                ui,
+                sigil_ui::Quote {
+                    seq: quoted.seq,
+                    who: &quoted.who,
+                    said: &quoted.said,
+                    preview: quoted.preview.as_ref(),
+                },
+                editing.is_some(),
+            );
+            if head.jump
+                && let Some(channel) = state.open
+            {
+                self.pane(at).jump = Some((channel, target));
+            }
+            if head.cancel {
+                let pane = self.pane(at);
+                pane.replying = None;
+                if pane.editing.take().is_some() {
+                    // An abandoned rewrite must not leave the old text in
+                    // the box, where the next Return would post it again
+                    // as a new message.
+                    pane.composing.clear();
+                    pane.mentions.clear();
                 }
-                ui.colored_label(theme.accent, said);
-                if ui.button("Cancel").clicked() {
-                    let pane = self.pane(at);
-                    pane.replying = None;
-                    if pane.editing.take().is_some() {
-                        // An abandoned rewrite must not leave the old text in
-                        // the box, where the next Return would post it again
-                        // as a new message.
-                        pane.composing.clear();
-                        pane.mentions.clear();
-                    }
-                }
-            });
+            }
+            ui.add_space(tokens::SPACING_XS);
         }
 
         // **`@` offers the room.** While the text ends in `@` and some of a

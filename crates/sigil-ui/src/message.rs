@@ -1383,6 +1383,65 @@ fn reply_stub(ui: &mut egui::Ui, q: Quote<'_>, quiet: egui::Color32, rule: egui:
         .clicked()
 }
 
+/// What the preview above the composer was asked for.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyPreviewAction {
+    /// The × in the corner: stop replying (or rewriting).
+    pub cancel: bool,
+    /// The quote itself: go to the message it names.
+    pub jump: bool,
+}
+
+/// The message about to be answered, above the composer, drawn as the reply
+/// will draw it: the same quote a reply bubble carries, in a bubble of one's
+/// own, with the way out in the top right corner.
+///
+/// **A bubble, not a bar.** "Replying to: lovely [Cancel]" in a row of plain
+/// words looked like a status line, and nothing about it said what the
+/// message would look like once sent. This is that message's head, before the
+/// words are written under it.
+///
+/// A rewrite heads the same way, captioned, since a bare quote reads as a
+/// reply.
+pub fn reply_preview(ui: &mut egui::Ui, q: Quote<'_>, rewriting: bool) -> ReplyPreviewAction {
+    let theme = ColorTheme::current(ui.ctx());
+    let mut action = ReplyPreviewAction::default();
+    // One's own bubble, since the message this heads will be.
+    let fill = theme.accent_muted;
+    let quiet = faded(theme.text_primary, fill);
+    let rule = theme.text_primary;
+    let out = if rewriting {
+        "Cancel rewrite"
+    } else {
+        "Cancel reply"
+    };
+    egui::Frame::NONE
+        .fill(fill)
+        .corner_radius(tokens::RADIUS_PILL)
+        .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8))
+        .show(ui, |ui| {
+            // The × first, so it lands in the corner and the quote takes what
+            // is left rather than pushing it off the side.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if crate::icon_button_named(ui, crate::Icon::Close, out)
+                    .on_hover_text(out)
+                    .clicked()
+                {
+                    action.cancel = true;
+                }
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    if rewriting {
+                        ui.label(egui::RichText::new("Rewriting").small().color(quiet));
+                    }
+                    if reply_stub(ui, q, quiet, rule) {
+                        action.jump = true;
+                    }
+                });
+            });
+        });
+    action
+}
+
 /// One emoji and how many people sent it. Ours is outlined.
 pub fn reaction_chip(ui: &mut egui::Ui, emoji: &str, count: usize, ours: bool) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());

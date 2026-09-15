@@ -2832,9 +2832,88 @@ fn a_message_that_is_not_ascii_can_be_replied_to() {
     h.run();
     h.run();
     h.get_by_label("Reply").click();
-    // The panic was here, drawing the "Replying to" bar.
+    // The panic was here, drawing the quote above the composer.
     h.run();
-    assert!(text_of(&h).contains("Replying to"), "{}", text_of(&h));
+    h.get_by_label_contains("Ada: one — and");
+}
+
+/// A reply being written is headed by the quote the reply will carry -- who
+/// said it and what, as a reply bubble draws them -- with the way out in its
+/// corner, and not by a "Replying to" status line.
+#[test]
+fn a_reply_is_previewed_as_the_quote_it_will_carry() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "shall we?".into();
+    let mut h = harness_with(state, true);
+    h.run();
+    h.get_by_label_contains("shall we?").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    h.run();
+    let quote = h.get_by_label("Ada: shall we?").rect();
+    let out = h.get_by_label("Cancel reply").rect();
+    let seen = text_of(&h);
+    assert!(!seen.contains("Replying to"), "{seen}");
+    assert!(
+        out.left() > quote.right() && (out.top() - quote.top()).abs() < 12.0,
+        "the × is in the corner, right of the quote and level with it: \
+         quote {quote:?}, × {out:?}"
+    );
+    h.get_by_label("Cancel reply").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Ada: shall we?").is_none(),
+        "the quote stays after the reply is cancelled: {}",
+        text_of(&h)
+    );
+    assert!(h.query_by_label("Cancel reply").is_none());
+}
+
+/// Replying to a picture previews the picture: the thumbnail takes its room
+/// before the words, and the words say what is quoted the way the sent
+/// reply will.
+#[test]
+fn a_reply_to_a_picture_is_previewed_with_the_picture() {
+    let words_at = |state: ChatState| {
+        let mut h = harness_with(state, true);
+        h.run();
+        h.run();
+        h.get_by_label("look").hover();
+        h.run();
+        h.run();
+        h.get_by_label("Reply").click();
+        h.run();
+        h.run();
+        h.get_by_label("Ada: look").rect().left()
+    };
+    let mut plain = with_pictures(1);
+    let last = plain.lines.len() - 1;
+    plain.lines[last].attachments.clear();
+    let without = words_at(plain);
+    let with = words_at(with_pictures(1));
+    assert!(
+        with > without + 20.0,
+        "the thumbnail makes room before the words: {without} -> {with}"
+    );
+
+    // Only a picture, and the quote says so, in the words a sent reply uses.
+    let mut wordless = with_pictures(1);
+    wordless.lines[last].text.clear();
+    let mut h = harness_with(wordless, true);
+    h.run();
+    h.run();
+    h.get_by_label("[image 0, 4 KiB]").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    h.run();
+    h.get_by_label("Ada: a picture");
 }
 
 /// Replying and reacting are on the message, not behind a right-click.
@@ -4424,6 +4503,48 @@ fn gallery_dark() {
     }
     hide_column(&mut h);
     h.snapshot("gallery_dark");
+}
+
+/// The reply being written, looked at: the quote of the picture in a bubble
+/// above the box, with the × in its corner.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn reply_preview_dark() {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(with_pictures(1));
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    for _ in 0..10 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("reply_preview_dark");
 }
 
 /// A reply to a picture quotes the picture: the thumbnail sits before the
