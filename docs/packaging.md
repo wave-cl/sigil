@@ -110,6 +110,8 @@ is anything, and the tooltip says it in words. A left press on the mark
 brings the window up on macOS; the library reports no press at all on
 Linux, so there the menu is what a press opens, and **Open Sigil** is its
 first item. The menu also holds **Do not disturb** and **Quit Sigil**.
+Closing the window puts sigil in the tray rather than ending it, where
+there is a tray: Quit is how it ends. Without one, a close is a close.
 
 **The application's own icon.** On macOS the count goes on the Dock tile
 (`NSDockTile`). On Linux there is no standard; sigil sends the

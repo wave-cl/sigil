@@ -22,6 +22,9 @@ struct Stub {
     unopened: bool,
     /// How many times the shell ran its background work.
     updates: std::rc::Rc<std::cell::Cell<u32>>,
+    /// What the background work asks of the shell on the next pass; a
+    /// test puts something here.
+    asks: std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>,
 }
 
 impl Stub {
@@ -32,6 +35,7 @@ impl Stub {
             asks_to_switch: false,
             unopened: false,
             updates: Default::default(),
+            asks: Default::default(),
         }
     }
 }
@@ -42,6 +46,9 @@ impl App for Stub {
     }
     fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
         self.updates.set(self.updates.get() + 1);
+    }
+    fn asked(&mut self) -> Vec<sigil::app::AppAction> {
+        std::mem::take(&mut *self.asks.borrow_mut())
     }
     fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         ui.heading(self.title);
@@ -1329,6 +1336,205 @@ fn the_tray_brings_the_window_up_and_can_quit() {
     h.step();
     assert!(
         window_asks(&h).iter().any(|a| a == "Close"),
+        "{:?}",
+        window_asks(&h)
+    );
+}
+
+/// The shell with one app whose background work can be made to ask for
+/// things, and a hand on the tray.
+fn with_asking_app(
+    asks: std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>,
+    unread: u32,
+) -> Harness<'static> {
+    let mut stub = Stub::named("Chat", unread);
+    stub.asks = asks;
+    let apps: Vec<Box<dyn App>> = vec![Box::new(stub)];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.update_all(&ctx, false);
+            shell.ui(ui);
+        })
+}
+
+/// What an app's background work asks for reaches the window: a ring's
+/// Present shows and focuses it, and a mention's request for attention is
+/// passed on as the desktop's own, without taking focus.
+#[test]
+fn what_background_work_asks_for_reaches_the_window() {
+    use sigil::app::AppAction;
+    let asks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = with_asking_app(asks.clone(), 0);
+    h.run();
+    assert!(window_asks(&h).is_empty(), "{:?}", window_asks(&h));
+
+    asks.borrow_mut().push(AppAction::Present);
+    h.step();
+    let said = window_asks(&h);
+    assert!(
+        said.contains(&"Visible(true)".to_string()) && said.contains(&"Focus".to_string()),
+        "{said:?}"
+    );
+
+    asks.borrow_mut()
+        .push(AppAction::Attention(sigil::Attention::Informational));
+    h.step();
+    let said = window_asks(&h);
+    assert!(
+        said.iter().any(|a| a.starts_with("RequestUserAttention")),
+        "{said:?}"
+    );
+    assert!(
+        !said.contains(&"Focus".to_string()),
+        "attention is not focus: {said:?}"
+    );
+}
+
+/// The rail's icon carries its count as a disc over its top right corner,
+/// and no disc at nought. "99+" past two digits.
+#[test]
+fn the_rail_icon_carries_its_count_on_a_disc() {
+    let asks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = with_asking_app(asks, 7);
+    h.run();
+    let icon = h.get_by_label("Chat (7)").rect();
+    // The disc is painted, not a widget: look at what was painted. Over
+    // the icon's top right corner a small filled shape is there; at nought
+    // it is not.
+    let corner = icon.right_top() + egui::vec2(-4.0, 4.0);
+    assert!(
+        small_fill_at(&h, corner),
+        "a small filled shape over the corner at {corner:?}"
+    );
+
+    let asks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = with_asking_app(asks, 0);
+    h.run();
+    // The heading says "Chat" too; the rail's icon is the leftmost.
+    let icon = h
+        .get_all_by_label("Chat")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.left().total_cmp(&b.left()))
+        .expect("the rail icon");
+    let corner = icon.right_top() + egui::vec2(-4.0, 4.0);
+    assert!(!small_fill_at(&h, corner), "no disc at nought");
+}
+
+/// Whether the last pass painted a small filled rectangle over `at`.
+fn small_fill_at(h: &Harness<'static>, at: egui::Pos2) -> bool {
+    fn walk(shape: &egui::Shape, at: egui::Pos2) -> bool {
+        match shape {
+            egui::Shape::Vec(inner) => inner.iter().any(|s| walk(s, at)),
+            egui::Shape::Rect(r) => {
+                r.rect.contains(at)
+                    && r.fill.a() > 0
+                    && r.rect.width() < 28.0
+                    && r.rect.height() < 28.0
+            }
+            _ => false,
+        }
+    }
+    h.output().shapes.iter().any(|c| walk(&c.shape, at))
+}
+
+/// Closing the window with a tray up hides it rather than quitting, and the
+/// apps are then told they are not in front; Open from the tray brings it
+/// back; Quit from the tray lets the next close through. Without a tray a
+/// close is a close.
+#[test]
+fn closing_the_window_puts_sigil_in_the_tray_and_quit_lets_it_go() {
+    use sigil_platform::tray::TrayAction;
+    let unfocused_seen = std::rc::Rc::new(std::cell::Cell::new(false));
+    struct Watching {
+        seen: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+    impl App for Watching {
+        fn update(&mut self, ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
+            self.seen.set(ctx.unfocused);
+        }
+        fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+            ui.label("watching");
+            AppResponse::default()
+        }
+        fn title(&self) -> &str {
+            "Chat"
+        }
+    }
+    let build = |pretend_tray: bool,
+                 actions: std::rc::Rc<std::cell::RefCell<Vec<TrayAction>>>,
+                 seen: std::rc::Rc<std::cell::Cell<bool>>| {
+        let apps: Vec<Box<dyn App>> = vec![Box::new(Watching { seen })];
+        let mut shell =
+            sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+                sigil::Account::unlocked_for_test([4u8; 32]),
+            ]));
+        if pretend_tray {
+            shell.pretend_tray_for_test();
+        }
+        Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                theme::install(&ctx, theme::light(), theme::dark());
+                shell.tray_actions_for_test(std::mem::take(&mut *actions.borrow_mut()));
+                shell.update_all(&ctx, false);
+                shell.ui(ui);
+            })
+    };
+    let close = |h: &mut Harness<'static>| {
+        h.input_mut()
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("the window")
+            .events
+            .push(egui::ViewportEvent::Close);
+        h.step();
+    };
+
+    // With a tray: hidden, not closed, and the app told.
+    let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = build(true, actions.clone(), unfocused_seen.clone());
+    h.run();
+    assert!(!unfocused_seen.get(), "in front to begin with");
+    close(&mut h);
+    let said = window_asks(&h);
+    assert!(said.contains(&"CancelClose".to_string()), "{said:?}");
+    assert!(said.contains(&"Visible(false)".to_string()), "{said:?}");
+    h.step();
+    assert!(unfocused_seen.get(), "closed to the tray is not in front");
+
+    // Open from the tray: back, and in front.
+    actions.borrow_mut().push(TrayAction::Open);
+    h.step();
+    assert!(window_asks(&h).contains(&"Visible(true)".to_string()));
+    h.step();
+    assert!(!unfocused_seen.get(), "brought back: in front again");
+
+    // Quit from the tray, then a close: let through.
+    actions.borrow_mut().push(TrayAction::Quit);
+    h.step();
+    close(&mut h);
+    assert!(
+        !window_asks(&h).contains(&"CancelClose".to_string()),
+        "{:?}",
+        window_asks(&h)
+    );
+
+    // No tray: a close is a close.
+    let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = build(false, actions, unfocused_seen.clone());
+    h.run();
+    close(&mut h);
+    assert!(
+        !window_asks(&h).contains(&"CancelClose".to_string()),
         "{:?}",
         window_asks(&h)
     );

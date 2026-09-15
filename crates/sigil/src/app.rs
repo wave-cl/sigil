@@ -42,6 +42,15 @@ impl TabNotifications {
     }
 }
 
+/// How hard to ask for attention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attention {
+    /// Once: a mention while away.
+    Informational,
+    /// Until answered: a call.
+    Critical,
+}
+
 /// What an app wants the shell to do about something the user just did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum AppAction {
@@ -52,6 +61,10 @@ pub enum AppAction {
     /// Bring the window forward and focus it. Raised by a ring, so an incoming
     /// call reaches someone who is looking at something else.
     Present,
+    /// Ask for the person's attention without taking it: the Dock icon
+    /// bounces, the taskbar entry lights. For something worth noticing that
+    /// is not worth interrupting for.
+    Attention(Attention),
     /// Go back to the opening screen to choose an identity.
     ///
     /// Not a switch in itself: the choosing happens on that screen, which is
@@ -93,22 +106,14 @@ pub struct AppContext<'a> {
     /// see [`crate::accounts`].
     pub accounts: &'a mut Accounts,
     /// True while the main window is **not in front** — behind another
-    /// window, or on another desktop. It is still on screen and still being
-    /// drawn.
+    /// window, on another desktop, or closed to the tray. What decides
+    /// whether something is said out loud rather than only drawn.
     ///
-    /// **It is not "hidden", whatever it was called.** It is
-    /// `!viewport().focused`, and it was documented as "closed to the tray" —
-    /// which is a different state and the one somebody reaching for this
-    /// actually wants: a window nobody can see is a window with no reason to
-    /// animate. Acting on the wrong one of those stops an animation while
-    /// somebody is watching it, or -- worse -- stops the passes that a call
-    /// depends on. This session nearly gated a call's own repaint on it, which
-    /// would have brought back a microphone that outlived its call.
-    ///
-    /// Nothing here can tell the other state yet: sigil never hides its own
-    /// viewport, so there is no flag to read, and eframe's `logic` runs while
-    /// the window is hidden either way. Anything that needs it must get it
-    /// from the viewport, not from this.
+    /// **Not a reason to stop drawing or to stop passes.** A window behind
+    /// another is still on screen, and a call in a hidden one still needs
+    /// its passes; this once nearly gated a call's own repaint, which would
+    /// have brought back a microphone that outlived its call. It is
+    /// `!viewport().focused`, or the shell having hidden the window.
     pub unfocused: bool,
     /// Somewhere to say something out loud when sigil is not in front.
     ///
@@ -180,6 +185,14 @@ pub trait App {
     /// Background work, run every pass for **every opened app** — including
     /// while the window is hidden. Never draws.
     fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {}
+
+    /// What the background work wants the shell to do, if anything: taken
+    /// once, after each [`update`](App::update). A ring asks to be
+    /// presented; a mention while away asks for attention. Separate from
+    /// `update`'s arguments so an app with nothing to ask changes nothing.
+    fn asked(&mut self) -> Vec<AppAction> {
+        Vec::new()
+    }
 
     /// Whether [`update`](App::update) should run before this app has ever
     /// been looked at.

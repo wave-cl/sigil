@@ -164,6 +164,12 @@ pub struct Shell {
     quiet: bool,
     /// Quit was chosen: the next close of the window is a real one.
     pub quitting: bool,
+    /// The window is closed to the tray: hidden on a close request while
+    /// there is a tray to come back from, cleared when the window is
+    /// brought back; while set, every app is told it is not in front.
+    hidden: bool,
+    /// A tray in all but fact, for tests of closing to it.
+    hideable: bool,
     /// The opening screen's state: which identity is chosen, and what has been
     /// typed at it. See [`Shell::welcome`].
     welcome: Welcome,
@@ -254,6 +260,8 @@ impl Shell {
             tray_actions: Vec::new(),
             quiet: false,
             quitting: false,
+            hidden: false,
+            hideable: false,
             welcome: Welcome::default(),
             remember: true,
             identities: None,
@@ -318,6 +326,18 @@ impl Shell {
     /// [`AppContext::unfocused`], which says what it is not.
     pub fn update_all(&mut self, egui_ctx: &egui::Context, unfocused: bool) {
         self.reconcile_accounts();
+        // **Closing the window puts sigil in the tray**, where there is one:
+        // a telephone that hangs up when its window is closed is not one.
+        // Quit, from the tray's menu, is how it ends; without a tray the
+        // close is the quit, as it always was.
+        if egui_ctx.input(|i| i.viewport().close_requested()) && self.can_hide() && !self.quitting {
+            egui_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hidden = true;
+        }
+        // Closed to the tray is not in front either.
+        let unfocused = unfocused || self.hidden;
+        let mut asked = Vec::new();
         for (i, app) in self.apps.iter_mut().enumerate() {
             if !self.opened[i] {
                 continue;
@@ -330,6 +350,10 @@ impl Shell {
                 connections: &self.connections,
             };
             app.update(&mut ctx, egui_ctx);
+            asked.extend(app.asked());
+        }
+        for action in asked {
+            self.act(action, egui_ctx);
         }
         self.badge();
         self.tray_actions(egui_ctx);
@@ -346,7 +370,7 @@ impl Shell {
         }
         for action in actions {
             match action {
-                TrayAction::Open => present(egui_ctx),
+                TrayAction::Open => self.present(egui_ctx),
                 TrayAction::QuietToggled => {
                     self.quiet = !self.quiet;
                     if let Some(tray) = &self.tray {
@@ -359,6 +383,53 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// What the window is asked to do about something that happened while
+    /// nobody was pressing anything: from a tray action, a notification, or
+    /// an app's background work. The things somebody *did* press are
+    /// answered in `ui`, which has the interface to answer with.
+    fn act(&mut self, action: AppAction, egui_ctx: &egui::Context) {
+        match action {
+            AppAction::Present => self.present(egui_ctx),
+            // Not while in front: the Dock bouncing under somebody who is
+            // looking at the window is a twitch, not a signal.
+            AppAction::Attention(how) => {
+                let kind = match how {
+                    sigil::Attention::Informational => egui::UserAttentionType::Informational,
+                    sigil::Attention::Critical => egui::UserAttentionType::Critical,
+                };
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(kind));
+            }
+            _ => {}
+        }
+    }
+
+    /// Bring the window forward. Both commands, in this order: a window
+    /// closed to the tray is hidden as well as unfocused, and focusing
+    /// something invisible does nothing on any of the three desktops sigil
+    /// targets.
+    pub fn present(&mut self, egui_ctx: &egui::Context) {
+        self.hidden = false;
+        egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Whether the window can be closed to the tray rather than quit: there
+    /// is a tray to come back from.
+    pub fn can_hide(&self) -> bool {
+        self.hideable || self.tray.as_ref().is_some_and(|t| t.support().is_yes())
+    }
+
+    /// Behave as if a tray were up, without one. Tests only.
+    #[doc(hidden)]
+    pub fn pretend_tray_for_test(&mut self) {
+        self.hideable = true;
+    }
+
+    /// Whether the window is closed to the tray.
+    pub fn hidden(&self) -> bool {
+        self.hidden
     }
 
     /// Hand the shell what a tray would have reported. Tests only.
@@ -941,12 +1012,12 @@ impl Shell {
                 let badge = self.apps[i].tab_notifications();
                 let selected = i == active;
                 let theme = ColorTheme::current(ui.ctx());
-                // The count reaches the accessibility tree and the tray, and
-                // is not drawn in the rail. It used to hang under the icon as
-                // a small accent number, which is a poor place for it: it is
-                // not attached to anything, it moves the icons below it as it
-                // appears and goes, and it repeats what the conversation list
-                // says properly one column over.
+                // The count is in the icon's name for the tree, and drawn
+                // **on** the icon: a disc at its top right corner, the way a
+                // Dock or a phone badges an app. It once hung under the icon
+                // as a small number, which is a poor place for it -- not
+                // attached to anything, and moving the icons below it as it
+                // came and went.
                 let said = if badge.is_empty() {
                     title.clone()
                 } else {
@@ -959,6 +1030,9 @@ impl Shell {
                     selected.then_some(theme.accent),
                     selected,
                 );
+                if !badge.is_empty() {
+                    rail_badge(ui, response.rect, badge.count, &theme);
+                }
                 if response.clicked() && !selected {
                     self.navigator.switch_to(AppId(i));
                 }
@@ -993,7 +1067,8 @@ impl Shell {
             // Both commands, in this order. A window closed to the tray is
             // hidden as well as unfocused, and focusing something invisible
             // does nothing on any of the three desktops sigil targets.
-            Some(AppAction::Present) => present(ui.ctx()),
+            Some(AppAction::Present) => self.present(ui.ctx()),
+            Some(AppAction::Attention(how)) => self.act(AppAction::Attention(how), ui.ctx()),
             // Back to the opening screen. Where it came from is remembered
             // here and not there: the screen changes which identity is active
             // as somebody looks through the list, so by the time they cancel
@@ -1092,12 +1167,34 @@ impl Shell {
     }
 }
 
-/// Bring the window forward. Both commands, in this order: a window closed
-/// to the tray is hidden as well as unfocused, and focusing something
-/// invisible does nothing on any of the three desktops sigil targets.
-pub fn present(ctx: &egui::Context) {
-    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+/// The count on a rail icon: a disc in the accent over the icon's top right
+/// corner, the number in it, "99+" past two digits so it never outgrows
+/// the disc.
+fn rail_badge(ui: &mut egui::Ui, icon: egui::Rect, count: u32, theme: &ColorTheme) {
+    let text = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    // White on the accent, as the count on a bubble of one's own is.
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, font, egui::Color32::WHITE);
+    let pad = tokens::SPACING_XS;
+    let height = galley.size().y + pad;
+    let width = (galley.size().x + pad * 2.0).max(height);
+    let rect = egui::Rect::from_center_size(
+        icon.right_top() + egui::vec2(-pad, pad),
+        egui::vec2(width, height),
+    );
+    ui.painter()
+        .rect_filled(rect, tokens::RADIUS_PILL, theme.accent);
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::WHITE,
+    );
 }
 
 #[cfg(test)]

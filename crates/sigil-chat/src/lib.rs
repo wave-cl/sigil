@@ -12,7 +12,7 @@ pub use session::{
 
 use std::collections::{HashMap, HashSet};
 
-use sigil::app::{App, AppContext, AppResponse, TabNotifications};
+use sigil::app::{App, AppAction, AppContext, AppResponse, TabNotifications};
 use sigil::{ColorTheme, tokens};
 use sigil_net::discovery;
 use sqnr::config::Config;
@@ -1033,6 +1033,9 @@ pub struct ChatApp {
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
+    /// What this pass's background work wants of the shell, handed over
+    /// through `App::asked`.
+    asked: Vec<AppAction>,
     /// The emoji this person sends most, for the picker's own row.
     frequent: frequent::Frequent,
 }
@@ -1073,6 +1076,7 @@ impl ChatApp {
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
+            asked: Vec::new(),
             frequent: frequent::Frequent::load(),
         }
     }
@@ -1279,6 +1283,13 @@ impl ChatApp {
     /// The emoji this person sends most. Tests read it; the picker draws it.
     pub fn frequent_for_test(&self) -> Vec<String> {
         self.frequent.top(sigil_ui::emoji::FREQUENT)
+    }
+
+    /// What the background work asked the shell for this pass; see
+    /// `App::asked`.
+    #[doc(hidden)]
+    pub fn asked_of_shell_for_test(&mut self) -> Vec<AppAction> {
+        std::mem::take(&mut self.asked)
     }
 
     /// Everything the interface has asked the session for, as `Debug` writes
@@ -1501,6 +1512,10 @@ impl App for ChatApp {
             }
             .to_string(),
         )
+    }
+
+    fn asked(&mut self) -> Vec<AppAction> {
+        std::mem::take(&mut self.asked)
     }
 
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
@@ -5292,6 +5307,20 @@ impl ChatApp {
                 fresh.push(ring_said(&ring.from, &ring.label, &me, held));
             }
         }
+        self.announce_rings_in(ctx, fresh);
+    }
+
+    /// The deciding half: rings nobody has been told about yet are said,
+    /// and the window is asked for.
+    fn announce_rings_in(&mut self, ctx: &mut AppContext<'_>, fresh: Vec<String>) {
+        if !fresh.is_empty() {
+            // A call reaches somebody looking at something else: the window
+            // comes forward, and where the desktop will not let it, the
+            // icon asks until it is answered.
+            self.asked.push(AppAction::Present);
+            self.asked
+                .push(AppAction::Attention(sigil::Attention::Critical));
+        }
         for said in fresh {
             ctx.notify.post("Incoming call", &said);
         }
@@ -5334,6 +5363,12 @@ impl ChatApp {
                 if ctx.unfocused || !m.in_open {
                     let (summary, body) = mention_said(&m, &me, held);
                     ctx.notify.post(&summary, &body);
+                }
+                // Worth noticing, not worth interrupting for: the icon
+                // bounces once while the window is not in front.
+                if ctx.unfocused {
+                    self.asked
+                        .push(AppAction::Attention(sigil::Attention::Informational));
                 }
             }
         }
@@ -5957,6 +5992,46 @@ mod mention_notice_tests {
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
         app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(3, false)])]);
         assert_eq!(noted.0.borrow().len(), 2);
+    }
+
+    /// A mention while the window is not in front asks for attention --
+    /// the icon bounces once -- and one while in front does not, wherever
+    /// the conversation is: a bounce under somebody looking at the window
+    /// is a twitch. A ring asks to be presented, and for attention until
+    /// answered.
+    #[test]
+    fn a_mention_away_asks_for_attention_and_a_ring_asks_to_be_presented() {
+        let noted = Noted(RefCell::new(Vec::new()));
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(1, true)])]);
+        assert_eq!(
+            app.asked(),
+            vec![AppAction::Attention(sigil::Attention::Informational)]
+        );
+        assert_eq!(app.asked(), vec![], "taken once");
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_mentions_in(&mut c, 1, vec![("me".into(), vec![a_mention(2, false)])]);
+        assert_eq!(app.asked(), vec![], "in front: nothing asked");
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_rings_in(&mut c, vec!["Ada is calling".into()]);
+        assert_eq!(
+            app.asked(),
+            vec![
+                AppAction::Present,
+                AppAction::Attention(sigil::Attention::Critical)
+            ]
+        );
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_rings_in(&mut c, vec![]);
+        assert_eq!(app.asked(), vec![], "no ring, nothing asked");
     }
 
     /// With several identities held, which one was mentioned; with one,
