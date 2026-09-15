@@ -123,6 +123,13 @@ fn field_as(
     ui.add_sized(
         [width, sigil::tokens::FIELD_MD],
         egui::TextEdit::singleline(buf)
+            // **Named by its hint, not by its place.** egui's automatic id is
+            // the widget's position in the pass, so a field under something
+            // that comes and goes -- the mention list above the composer --
+            // was a different field each time, with a fresh caret and no
+            // focus. A hint is what a field is for, and two fields for one
+            // thing on one screen is the case that would clash.
+            .id_salt(hint)
             .password(password)
             .hint_text(hint)
             .margin(egui::Margin::symmetric(

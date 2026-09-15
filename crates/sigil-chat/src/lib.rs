@@ -1,5 +1,6 @@
 //! Messaging, as a sigil app.
 
+pub mod mention;
 pub mod session;
 
 use session::RING_WINDOW;
@@ -602,6 +603,14 @@ struct Pane {
     /// retyping a message the program lost is the worst thing a chat client can
     /// do to somebody.
     composing: String,
+    /// Whom the text mentions so far: each label chosen from the list, and
+    /// the key it stood for. Read at send time against the text, so a name
+    /// deleted from the box is a mention that is not sent.
+    mentions: Vec<(String, PubKey)>,
+    /// Which row of the mention list the keyboard is on.
+    picking: usize,
+    /// Escape closed the list for this `@`; typing reopens it.
+    picker_dismissed: bool,
     /// The key being added as a contact.
     adding: String,
     add_trouble: Option<String>,
@@ -702,6 +711,9 @@ impl Default for Pane {
             whole_screen: false,
             unplayable: HashMap::new(),
             composing: String::new(),
+            mentions: Vec::new(),
+            picking: 0,
+            picker_dismissed: false,
             adding: String::new(),
             add_trouble: None,
             dialog: None,
@@ -3756,9 +3768,95 @@ impl ChatApp {
                         // the box, where the next Return would post it again
                         // as a new message.
                         pane.composing.clear();
+                        pane.mentions.clear();
                     }
                 }
             });
+        }
+
+        // **`@` offers the room.** While the text ends in `@` and some of a
+        // name, the members it could mean are listed above the box, and the
+        // keys that would otherwise go to the box go to the list: Up and
+        // Down move, Enter or Tab choose, Escape closes it for this `@`.
+        // Taken from the input before the field is drawn, so an Enter that
+        // chose a name is not also an Enter that sent the message.
+        let picker = {
+            let pane = self.pane(at);
+            mention::mention_query(&pane.composing)
+                .filter(|_| !pane.picker_dismissed)
+                .map(|q| mention::candidates(q, &state.members, &state.people, state.me))
+                .filter(|c| !c.is_empty())
+        };
+        let mut chosen: Option<String> = None;
+        let mut refocus = false;
+        if let Some(rows) = &picker {
+            let picking = self.pane(at).picking.min(rows.len() - 1);
+            let (up, down, choose, dismiss) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                        || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            let mut picking = picking;
+            if up {
+                picking = picking.saturating_sub(1);
+            }
+            if down {
+                picking = (picking + 1).min(rows.len() - 1);
+            }
+            if choose {
+                chosen = Some(rows[picking].0.clone());
+            }
+            if dismiss {
+                self.pane(at).picker_dismissed = true;
+                // egui surrenders a text field's focus on Escape before any
+                // widget runs, so the field is given it back below: Escape
+                // here means "not that name", not "leave the box".
+                refocus = true;
+            }
+            self.pane(at).picking = picking;
+            egui::Frame::NONE
+                .fill(theme.surface_elevated)
+                .corner_radius(tokens::RADIUS_MD)
+                .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (i, (label, key)) in rows.iter().enumerate() {
+                        let row = ui.horizontal(|ui| {
+                            let pressed = ui
+                                .selectable_label(i == picking, format!("@{label}"))
+                                .clicked();
+                            // The key beside the name, here as everywhere a
+                            // name is: the name is what this client calls
+                            // the key, and two members can share one.
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(sigil_ui::message::short(&key.to_string()))
+                                    .monospace()
+                                    .small(),
+                            );
+                            pressed
+                        });
+                        if row.inner {
+                            chosen = Some(label.clone());
+                        }
+                    }
+                });
+            ui.add_space(tokens::SPACING_XS);
+        }
+        let mut completed = false;
+        if let Some(label) = chosen
+            && let Some(rows) = &picker
+            && let Some((_, key)) = rows.iter().find(|(l, _)| *l == label)
+        {
+            let pane = self.pane(at);
+            mention::complete_mention(&mut pane.composing, &label);
+            pane.mentions.push((label, *key));
+            pane.picking = 0;
+            completed = true;
         }
 
         ui.horizontal(|ui| {
@@ -3770,14 +3868,31 @@ impl ChatApp {
             let field = sigil_ui::field(
                 ui,
                 &mut self.panes.entry(at.clone()).or_default().composing,
-                "write a message, or / for a command",
+                "write a message, @ to mention, or / for a command",
                 width,
             );
+            if refocus {
+                field.request_focus();
+            }
+            // A name was just completed: the caret goes after it, or it sits
+            // where the `@` was and the next word lands inside the name.
+            if completed {
+                let chars = self.pane(at).composing.chars().count();
+                if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), field.id) {
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(chars),
+                    )));
+                    egui::TextEdit::store_state(ui.ctx(), field.id, st);
+                }
+                field.request_focus();
+            }
             // Typing is published from the fact that the text changed, not from
             // the field having focus: a box somebody is sitting in front of and
             // not writing in is not typing, and saying otherwise is a claim
             // about them that they did not make.
             if field.changed() {
+                // Typing again reopens a list Escape closed.
+                self.pane(at).picker_dismissed = false;
                 let writing = !self.pane(at).composing.is_empty();
                 if self.pane(at).announced_typing != writing {
                     self.pane(at).announced_typing = writing;
@@ -3808,13 +3923,16 @@ impl ChatApp {
                 let pane = self.pane(at);
                 let (editing, replying) = (pane.editing.take(), pane.replying.take());
                 pane.announced_typing = false;
+                // The keys, for every name still in the text.
+                let mentions = mention::mentions_in(&text, &pane.mentions);
+                pane.mentions.clear();
                 self.send_as(
                     Some(at),
                     Cmd::Post(session::Draft {
                         text,
                         reply: replying,
                         edit: editing,
-                        mentions: Vec::new(),
+                        mentions,
                     }),
                 );
                 self.send_as(Some(at), Cmd::Typing(false));

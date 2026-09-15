@@ -3807,3 +3807,170 @@ fn a_portrait_video_gets_a_bubble_its_own_width() {
         bubble_right - video.right()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mentions: `@` in the composer.
+// ---------------------------------------------------------------------------
+
+/// The composer's box: the lowest text field on the screen, under the
+/// search box in the column.
+fn composer<'a>(h: &'a Harness<'static>) -> egui_kittest::Node<'a> {
+    h.get_all(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    )
+    .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+    .expect("a composer")
+}
+
+/// What the composer holds, as the tree reports it.
+fn composed(h: &Harness<'static>) -> String {
+    composer(h)
+        .accesskit_node()
+        .value()
+        .map(|v| v.to_string())
+        .unwrap_or_default()
+}
+
+/// The group, open, with Ada in it -- where a mention has somebody to mean.
+fn the_room() -> ChatState {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    state
+}
+
+/// Typing `@` and some of a name offers the room's members by name, with
+/// the key; Enter completes the name into the box; and the send carries the
+/// key for it -- unless the name was deleted from the box first, in which
+/// case there is nothing to carry.
+#[test]
+fn typing_at_offers_the_room_and_the_send_carries_the_key() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(the_room(), asked.clone());
+    h.run();
+    assert!(!text_of(&h).contains("@Ada"), "nothing offered before an @");
+
+    let field = composer(&h);
+    field.focus();
+    field.type_text("@A");
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("@Ada"),
+        "the room's member is offered: {said}"
+    );
+    assert!(
+        said.contains(&short_form(&them())),
+        "with the key beside the name: {said}"
+    );
+    assert!(!said.contains("@me"), "not ourselves: {said}");
+
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(
+        composed(&h),
+        "@Ada ",
+        "Enter completes the name, and does not send"
+    );
+    assert!(
+        !asked.borrow().iter().any(|c| c.starts_with("Post(")),
+        "{:?}",
+        asked.borrow()
+    );
+
+    let field = composer(&h);
+    field.focus();
+    field.type_text("look");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("Post("), "{sent}");
+    assert!(
+        sent.contains(&format!("{:?}", them())),
+        "the mention's key goes with the message: {sent}"
+    );
+}
+
+/// The name deleted from the box is a mention not sent.
+#[test]
+fn a_name_deleted_from_the_box_is_not_a_mention() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(the_room(), asked.clone());
+    h.run();
+    let field = composer(&h);
+    field.focus();
+    field.type_text("@A");
+    h.run();
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "@Ada ");
+    // Five backspaces take "@Ada " away; then a word, then send.
+    composer(&h).focus();
+    for _ in 0..5 {
+        h.key_press(egui::Key::Backspace);
+    }
+    h.run();
+    composer(&h).type_text("hi");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("Post("), "{sent}");
+    assert!(
+        sent.contains("mentions: []"),
+        "a deleted name is not a mention: {sent}"
+    );
+}
+
+/// Escape puts the list away for this `@`, and Enter then sends what is in
+/// the box as it is. Typing again brings the list back.
+#[test]
+fn escape_closes_the_list_and_enter_then_sends() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(the_room(), asked.clone());
+    h.run();
+    let field = composer(&h);
+    field.focus();
+    field.type_text("hi @A");
+    h.run();
+    h.run();
+    assert!(text_of(&h).contains("@Ada"));
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("@Ada"),
+        "Escape closed it: {}",
+        text_of(&h)
+    );
+    // Typing brings it back.
+    composer(&h).focus();
+    composer(&h).type_text("d");
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("@Ada"),
+        "typing reopened it: {}",
+        text_of(&h)
+    );
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Post("),
+        "Enter with the list closed sends: {sent}"
+    );
+    assert!(sent.contains("hi @Ad"), "{sent}");
+    assert!(sent.contains("mentions: []"), "nothing was chosen: {sent}");
+}
