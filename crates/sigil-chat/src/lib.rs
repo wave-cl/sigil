@@ -2047,6 +2047,53 @@ impl ChatApp {
         let Some((seq, index)) = self.pane(at).viewing else {
             return;
         };
+        // **A message's pictures are a set to move through.** Left and
+        // Right go to the previous and next picture or clip in the same
+        // message, from whichever the viewer opened on; the controls in the
+        // picture's dialog do the same. Files that are neither are skipped,
+        // as they are in the gallery.
+        let siblings: Vec<usize> = state
+            .lines
+            .iter()
+            .find(|l| l.seq == seq)
+            .map(|l| {
+                l.attachments
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        a.kind == sigil_ui::attachment::IMAGE
+                            || a.kind == sigil_ui::attachment::VIDEO
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let place = siblings.iter().position(|i| *i == index);
+        let (left, right) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+            )
+        });
+        let step = |place: usize, by: isize| -> Option<usize> {
+            let n = siblings.len() as isize;
+            let to = (place as isize + by).rem_euclid(n.max(1));
+            siblings.get(to as usize).copied()
+        };
+        if let Some(p) = place
+            && siblings.len() > 1
+            && let Some(to) = match (left, right) {
+                (true, _) => step(p, -1),
+                (_, true) => step(p, 1),
+                _ => None,
+            }
+        {
+            self.pane(at).viewing = Some((seq, to));
+            self.pane(at).look = Look::default();
+            // Drawn next pass, on the new one.
+            ui.ctx().request_repaint();
+            return;
+        }
         // Gone from under it — the message was deleted, or the conversation
         // changed — is not an error, it is nothing to show.
         let Some(file) = state
@@ -2152,6 +2199,31 @@ impl ChatApp {
                     }
                     ui.add_space(tokens::SPACING_SM);
                     ui.horizontal(|ui| {
+                        // Where this one is among the message's pictures,
+                        // and the way to the others, when there are others.
+                        if let Some(p) = place
+                            && siblings.len() > 1
+                        {
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Back, "Previous")
+                                .clicked()
+                                && let Some(to) = step(p, -1)
+                            {
+                                self.pane(at).viewing = Some((seq, to));
+                                self.pane(at).look = Look::default();
+                            }
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(format!("{} of {}", p + 1, siblings.len()))
+                                    .small(),
+                            );
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, "Next")
+                                .clicked()
+                                && let Some(to) = step(p, 1)
+                            {
+                                self.pane(at).viewing = Some((seq, to));
+                                self.pane(at).look = Look::default();
+                            }
+                        }
                         ui.colored_label(
                             theme.text_muted,
                             egui::RichText::new(&file.described).small(),

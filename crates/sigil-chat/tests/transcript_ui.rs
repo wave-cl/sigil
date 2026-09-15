@@ -4278,3 +4278,144 @@ fn composer_files_dark() {
     hide_column(&mut h);
     h.snapshot("composer_files_dark");
 }
+
+// ---------------------------------------------------------------------------
+// A gallery: several pictures in one message.
+// ---------------------------------------------------------------------------
+
+/// A one-pixel PNG, so a picture loads rather than draws as a broken mark.
+fn a_png() -> std::sync::Arc<[u8]> {
+    let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 120, 255, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner().into()
+}
+
+/// The room with one message at the foot carrying `n` pictures.
+fn with_pictures(n: usize) -> ChatState {
+    let mut state = the_room();
+    let last = state.lines.len() - 1;
+    state.lines[last].redacted = false;
+    state.lines[last].text = "look".into();
+    state.lines[last].attachments = (0..n)
+        .map(|i| Attached {
+            kind: sigil_ui::attachment::IMAGE,
+            described: format!("[image {i}, 4 KiB]"),
+            size: 4096,
+            preview: a_png(),
+            bytes: Some(a_png()),
+            missing: false,
+            held: false,
+            duration_ms: None,
+            shape: Some((4, 4)),
+            id: format!("pic{i}"),
+        })
+        .collect();
+    state
+}
+
+/// Several pictures in one message are a gallery -- tiles two across --
+/// where one picture is its own row; pressing a tile opens the viewer on
+/// that picture, and the viewer moves through the message's pictures.
+#[test]
+fn several_pictures_are_a_gallery_and_the_viewer_moves_through_them() {
+    let mut h = harness_with(with_pictures(3), true);
+    h.run();
+    h.run();
+    let tiles: Vec<egui::Rect> = (0..3)
+        .map(|i| h.get_by_label(&format!("[image {i}, 4 KiB]")).rect())
+        .collect();
+    assert!(
+        (tiles[0].top() - tiles[1].top()).abs() < 1.0,
+        "the first two share a row: {tiles:?}"
+    );
+    assert!(
+        tiles[2].top() > tiles[0].bottom(),
+        "the third is under them: {tiles:?}"
+    );
+    assert!(
+        (tiles[0].width() - tiles[0].height()).abs() < 1.0,
+        "a tile is square: {tiles:?}"
+    );
+
+    // The second tile opens the viewer on the second picture.
+    press_at(&mut h, tiles[1].center());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("2 of 3"), "{said}");
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.run();
+    assert!(text_of(&h).contains("3 of 3"), "{}", text_of(&h));
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("1 of 3"),
+        "round to the first: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Previous").click();
+    h.run();
+    h.run();
+    assert!(text_of(&h).contains("3 of 3"), "{}", text_of(&h));
+
+    // One picture is not a gallery: no place among others.
+    let mut h = harness_with(with_pictures(1), true);
+    h.run();
+    h.run();
+    let tile = h.get_by_label("[image 0, 4 KiB]").rect();
+    assert!(
+        tile.width() > tile.height() * 1.4,
+        "a lone picture is drawn wide, not as a tile: {tile:?}"
+    );
+    press_at(&mut h, tile.center());
+    h.run();
+    h.run();
+    assert!(!text_of(&h).contains(" of 1"), "{}", text_of(&h));
+}
+
+/// The gallery, looked at: three tiles two across, cropped to fill.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn gallery_dark() {
+    let mut state = with_pictures(3);
+    let last = state.lines.len() - 1;
+    // A clip among them, with its play mark.
+    state.lines[last].attachments[2].kind = sigil_ui::attachment::VIDEO;
+    state.lines[last].attachments[2].described = "[video 2s, 1.2 MiB]".into();
+    state.lines[last].attachments[2].bytes = None;
+    // With the image loaders, which the ordinary harness leaves out: the
+    // tiles are pictures, and this is the snapshot that looks at them.
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    // The pictures are decoded on egui's loader thread; give it a moment.
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("gallery_dark");
+}

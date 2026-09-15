@@ -1070,7 +1070,36 @@ fn body(
             // Before the text: a message is usually a picture *with* a caption
             // rather than a caption with a picture attached.
             if !b.redacted {
+                // Two or more pictures and clips are a gallery; one, or a
+                // file that is neither, is drawn as its own row.
+                let pictures: Vec<(usize, &crate::Attachment<'_>)> = b
+                    .attachments
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        a.kind == crate::attachment::IMAGE || a.kind == crate::attachment::VIDEO
+                    })
+                    .collect();
+                let in_gallery = pictures.len() >= 2;
+                if in_gallery {
+                    let did = crate::gallery(ui, &pictures, fill);
+                    if let Some(i) = did.open {
+                        action.open = Some(i);
+                    }
+                    if let Some(i) = did.play {
+                        action.video = Some((
+                            i,
+                            crate::VideoAction {
+                                open: true,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                }
                 for (i, a) in b.attachments.iter().enumerate() {
+                    if in_gallery && pictures.iter().any(|(j, _)| *j == i) {
+                        continue;
+                    }
                     let did = crate::attachment(ui, a, fill);
                     if did.save {
                         action.save = Some(i);

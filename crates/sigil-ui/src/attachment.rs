@@ -597,3 +597,127 @@ mod tests {
         assert_ne!(whole, preview);
     }
 }
+
+/// What was pressed in a gallery: the index of the picture or clip to
+/// look at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GalleryAction {
+    /// A picture, to look at full size.
+    pub open: Option<usize>,
+    /// A clip, to play in the viewer.
+    pub play: Option<usize>,
+}
+
+/// Two or more pictures and clips in one message, drawn as a grid of
+/// square tiles two across, each cropped to fill its tile -- the whole
+/// picture is one press away, and a wall of letterboxed thumbnails is
+/// not a gallery. A clip carries its play mark. Anything that is not a
+/// picture or a clip is not here; the caller draws it as a row.
+pub fn gallery(
+    ui: &mut egui::Ui,
+    tiles: &[(usize, &Attachment<'_>)],
+    over: egui::Color32,
+) -> GalleryAction {
+    let theme = ColorTheme::current(ui.ctx());
+    let mut action = GalleryAction::default();
+    let gap = tokens::SPACING_XS;
+    let wide = PICTURE.min(ui.available_width().max(160.0));
+    let side = (wide - gap) / 2.0;
+    let quiet = crate::message::faded(theme.text_primary, over);
+    for row in tiles.chunks(2) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (index, a) in row {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Image, true, a.described)
+                });
+                ui.painter()
+                    .rect_filled(rect, tokens::RADIUS_MD, theme.surface_secondary);
+                // The whole picture when it is here, the thumbnail until
+                // then, and the words when there is neither.
+                let (bytes, whole) = match (a.bytes, a.preview.is_empty()) {
+                    (Some(b), _) => (Some(b), true),
+                    (None, false) => (Some(a.preview), false),
+                    (None, true) => (None, false),
+                };
+                match bytes {
+                    Some(bytes) => tile_picture(ui, rect, a.id, whole, bytes),
+                    None => {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            crate::message::preview(a.described, 18),
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            quiet,
+                        );
+                    }
+                }
+                if a.kind == VIDEO {
+                    let r = side * 0.16;
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        r,
+                        egui::Color32::from_black_alpha(140),
+                    );
+                    sigil::icon::draw(
+                        ui.painter(),
+                        egui::Rect::from_center_size(rect.center(), egui::vec2(r, r)),
+                        sigil::Icon::Play,
+                        egui::Color32::WHITE,
+                    );
+                }
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if response.clicked() {
+                    if a.kind == VIDEO {
+                        action.play = Some(*index);
+                    } else {
+                        action.open = Some(*index);
+                    }
+                }
+            }
+        });
+    }
+    action
+}
+
+/// A picture cropped to fill `rect`, keeping its middle: the tile is the
+/// shape, the picture fills it.
+fn tile_picture(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: &str,
+    whole: bool,
+    bytes: &std::sync::Arc<[u8]>,
+) {
+    let uri = format!("bytes://{id}{}", if whole { "" } else { "-preview" });
+    ui.ctx()
+        .include_bytes(uri.clone(), egui::load::Bytes::Shared(bytes.clone()));
+    let image = egui::Image::from_bytes(uri, egui::load::Bytes::Shared(bytes.clone()))
+        .corner_radius(tokens::RADIUS_MD)
+        .show_loading_spinner(false);
+    if let Ok(egui::load::TexturePoll::Ready { texture }) =
+        image.load_for_size(ui.ctx(), rect.size())
+    {
+        let (w, h) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
+        let want = rect.width() / rect.height();
+        // The part of the picture the tile shows, as a fraction of it.
+        let uv = if w / h > want {
+            let f = (h * want) / w;
+            egui::Rect::from_min_max(
+                egui::pos2((1.0 - f) / 2.0, 0.0),
+                egui::pos2((1.0 + f) / 2.0, 1.0),
+            )
+        } else {
+            let f = (w / want) / h;
+            egui::Rect::from_min_max(
+                egui::pos2(0.0, (1.0 - f) / 2.0),
+                egui::pos2(1.0, (1.0 + f) / 2.0),
+            )
+        };
+        image.uv(uv).paint_at(ui, rect);
+    }
+}

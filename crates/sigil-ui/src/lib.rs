@@ -15,7 +15,7 @@ pub mod roster;
 pub mod video;
 pub mod working;
 
-pub use attachment::{Attachment, AttachmentAction, attachment};
+pub use attachment::{Attachment, AttachmentAction, GalleryAction, attachment, gallery};
 pub use clock::{brief, clock, day_label, day_of, stamp};
 pub use conversation_row::{ConversationRow, conversation_row};
 pub use dot::dot;
