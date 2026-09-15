@@ -11,8 +11,8 @@ use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
-    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Quoted, Receipt,
-    Summary, Trouble,
+    Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Posted, Quoted,
+    Receipt, Summary, Trouble,
 };
 use sqnr_core::PubKey;
 
@@ -46,6 +46,7 @@ fn a_conversation() -> ChatState {
         domain: Some("squic.org".into()),
         link: LinkState::Up,
         trouble: None,
+        posted: None,
         conversations: vec![
             Summary {
                 channel,
@@ -2847,9 +2848,88 @@ fn a_message_that_is_not_ascii_can_be_replied_to() {
     h.run();
     h.run();
     h.get_by_label("Reply").click();
-    // The panic was here, drawing the "Replying to" bar.
+    // The panic was here, drawing the quote above the composer.
     h.run();
-    assert!(text_of(&h).contains("Replying to"), "{}", text_of(&h));
+    h.get_by_label_contains("Ada: one — and");
+}
+
+/// A reply being written is headed by the quote the reply will carry -- who
+/// said it and what, as a reply bubble draws them -- with the way out in its
+/// corner, and not by a "Replying to" status line.
+#[test]
+fn a_reply_is_previewed_as_the_quote_it_will_carry() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "shall we?".into();
+    let mut h = harness_with(state, true);
+    h.run();
+    h.get_by_label_contains("shall we?").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    h.run();
+    let quote = h.get_by_label("Ada: shall we?").rect();
+    let out = h.get_by_label("Cancel reply").rect();
+    let seen = text_of(&h);
+    assert!(!seen.contains("Replying to"), "{seen}");
+    assert!(
+        out.left() > quote.right() && (out.top() - quote.top()).abs() < 12.0,
+        "the × is in the corner, right of the quote and level with it: \
+         quote {quote:?}, × {out:?}"
+    );
+    h.get_by_label("Cancel reply").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Ada: shall we?").is_none(),
+        "the quote stays after the reply is cancelled: {}",
+        text_of(&h)
+    );
+    assert!(h.query_by_label("Cancel reply").is_none());
+}
+
+/// Replying to a picture previews the picture: the thumbnail takes its room
+/// before the words, and the words say what is quoted the way the sent
+/// reply will.
+#[test]
+fn a_reply_to_a_picture_is_previewed_with_the_picture() {
+    let words_at = |state: ChatState| {
+        let mut h = harness_with(state, true);
+        h.run();
+        h.run();
+        h.get_by_label("look").hover();
+        h.run();
+        h.run();
+        h.get_by_label("Reply").click();
+        h.run();
+        h.run();
+        h.get_by_label("Ada: look").rect().left()
+    };
+    let mut plain = with_pictures(1);
+    let last = plain.lines.len() - 1;
+    plain.lines[last].attachments.clear();
+    let without = words_at(plain);
+    let with = words_at(with_pictures(1));
+    assert!(
+        with > without + 20.0,
+        "the thumbnail makes room before the words: {without} -> {with}"
+    );
+
+    // Only a picture, and the quote says so, in the words a sent reply uses.
+    let mut wordless = with_pictures(1);
+    wordless.lines[last].text.clear();
+    let mut h = harness_with(wordless, true);
+    h.run();
+    h.run();
+    h.get_by_label("[image 0, 4 KiB]").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    h.run();
+    h.get_by_label("Ada: a picture");
 }
 
 /// Replying and reacting are on the message, not behind a right-click.
@@ -4539,6 +4619,48 @@ fn gallery_dark() {
     h.snapshot("gallery_dark");
 }
 
+/// The reply being written, looked at: the quote of the picture in a bubble
+/// above the box, with the × in its corner.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn reply_preview_dark() {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(with_pictures(1));
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    for _ in 0..10 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("reply_preview_dark");
+}
+
 /// A reply to a picture quotes the picture: the thumbnail sits before the
 /// words in the quote, and takes its room, so the words start further in
 /// than they do in a quote of words alone.
@@ -4612,4 +4734,228 @@ fn reply_to_picture_dark() {
     }
     hide_column(&mut h);
     h.snapshot("reply_to_picture_dark");
+}
+
+/// A rewrite is a whole post, so the mentions the message made come into
+/// the composer with its words: a name left in the text keeps its key on
+/// the rewrite, and a name taken out loses it -- the same rule a fresh
+/// message follows. Without this every rewrite silently un-mentioned
+/// everybody.
+#[test]
+fn rewriting_a_message_keeps_the_mentions_its_words_still_make() {
+    let mine = |text: &str| {
+        let mut state = the_room();
+        let mut last = state.lines[1].clone();
+        last.seq = 99;
+        last.text = text.into();
+        last.reply_to = None;
+        last.reactions.clear();
+        last.mentions = vec![sigil_chat::session::Mentioned {
+            key: them(),
+            label: "Ada".into(),
+        }];
+        state.lines.push(last);
+        state
+    };
+    let rewriting = |text: &str| {
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut h = harness_recording_commands(mine(text), asked.clone());
+        h.run();
+        h.get_by_label_contains("thanks").hover();
+        h.run();
+        h.run();
+        h.get_by_label("More").click();
+        h.run();
+        h.get_by_label("Edit").click();
+        h.run();
+        h.run();
+        assert_eq!(composed(&h), text, "the words come into the box");
+        (h, asked)
+    };
+
+    // The name kept: so is the key.
+    let (mut h, asked) = rewriting("@Ada thanks");
+    composer(&h).focus();
+    composer(&h).type_text("!");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("edit: Some(99)"), "{sent}");
+    assert!(
+        sent.contains(&format!("{:?}", them())),
+        "the mention's key goes with the rewrite: {sent}"
+    );
+
+    // The name taken out: the key goes with it.
+    let (mut h, asked) = rewriting("thanks @Ada");
+    composer(&h).focus();
+    for _ in 0..5 {
+        h.key_press(egui::Key::Backspace);
+    }
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("edit: Some(99)"), "{sent}");
+    assert!(
+        sent.contains("mentions: []"),
+        "a name no longer in the words is no longer mentioned: {sent}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A message the exchange refused comes back.
+// ---------------------------------------------------------------------------
+
+/// The recording harness, with a state that can be replaced between passes:
+/// what the session would publish next.
+fn harness_that_can_be_told(
+    state: ChatState,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    next: std::rc::Rc<std::cell::RefCell<Option<ChatState>>>,
+    staged: Vec<std::path::PathBuf>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    if !staged.is_empty() {
+        app.stage_for_test(me(), "", staged);
+    }
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            if let Some(state) = next.borrow_mut().take() {
+                app.show_state_for_test(state);
+            }
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+            *asked.borrow_mut() = app.asked_for_test().to_vec();
+        })
+}
+
+/// A message the exchange refused comes back into the box whole -- the
+/// words, the file, and what it was replying to -- and one it took does
+/// not. The composer used to empty itself on Send and never look back, so
+/// every refused message was retyped by hand, which three comments said
+/// could not happen.
+#[test]
+fn a_refused_message_comes_back_into_the_box() {
+    let dir = tempfile::tempdir().unwrap();
+    let picture = dir.path().join("walk.png");
+    std::fs::write(&picture, b"not really").unwrap();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let next = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut h = harness_that_can_be_told(the_room(), asked.clone(), next.clone(), vec![picture]);
+    h.run();
+    h.get_by_label("one").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("from the walk");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("token: 1"), "{sent}");
+    assert_eq!(composed(&h), "", "the box empties on Send");
+    assert!(h.query_by_label("Cancel reply").is_none());
+    assert!(h.query_by_label("Remove walk.png").is_none());
+
+    // The exchange says no.
+    let mut refused = the_room();
+    refused.posted = Some(Posted {
+        token: 1,
+        trouble: Some("the exchange said no".into()),
+    });
+    *next.borrow_mut() = Some(refused);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "from the walk", "the words are back");
+    assert!(
+        h.query_by_label("Cancel reply").is_some(),
+        "and what it replied to: {}",
+        text_of(&h)
+    );
+    assert!(
+        h.query_by_label("Remove walk.png").is_some(),
+        "and the file: {}",
+        text_of(&h)
+    );
+    assert!(!text_of(&h).contains("Put it back"), "{}", text_of(&h));
+
+    // Sent again, and taken this time: nothing comes back.
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "");
+    let mut taken = the_room();
+    taken.posted = Some(Posted {
+        token: 2,
+        trouble: None,
+    });
+    *next.borrow_mut() = Some(taken);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "", "a message that went stays gone");
+    assert!(h.query_by_label("Remove walk.png").is_none());
+}
+
+/// A refused message does not write over the next one being typed: it is
+/// offered under the box, to be put back or let go.
+#[test]
+fn a_refused_message_does_not_overwrite_the_next_one() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let next = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut h = harness_that_can_be_told(the_room(), asked.clone(), next.clone(), Vec::new());
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("the first");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("the second, half");
+    h.run();
+
+    let mut refused = the_room();
+    refused.posted = Some(Posted {
+        token: 1,
+        trouble: Some("the exchange said no".into()),
+    });
+    *next.borrow_mut() = Some(refused);
+    h.run();
+    h.run();
+    assert_eq!(
+        composed(&h),
+        "the second, half",
+        "what was being typed stays"
+    );
+    let said = text_of(&h);
+    assert!(said.contains("Not sent"), "{said}");
+    assert!(said.contains("the first"), "{said}");
+    assert!(said.contains("the exchange said no"), "{said}");
+
+    h.get_by_label("Put it back").click();
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "the first");
+    assert!(!text_of(&h).contains("Put it back"), "{}", text_of(&h));
 }

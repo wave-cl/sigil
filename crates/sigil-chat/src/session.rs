@@ -142,6 +142,38 @@ pub struct Line {
     pub me_mentioned: bool,
 }
 
+impl Line {
+    /// This message as a reply to it would quote it: who, a line of what,
+    /// and the first picture's thumbnail. What the composer shows above the
+    /// box while the reply is written, so it is the quote the reply will
+    /// carry and not an approximation of one.
+    pub fn quoted(&self) -> Quoted {
+        let said = if self.redacted {
+            "deleted".to_string()
+        } else if !self.text.is_empty() {
+            stub(&self.text)
+        } else {
+            only_files(self.attachments.iter().map(|a| a.kind))
+        };
+        let preview = (!self.redacted)
+            .then(|| {
+                self.attachments.iter().find(|a| {
+                    (a.kind == sqex_proto::blob::KIND_IMAGE
+                        || a.kind == sqex_proto::blob::KIND_VIDEO)
+                        && !a.preview.is_empty()
+                })
+            })
+            .flatten()
+            .map(|a| a.preview.clone());
+        Quoted {
+            seq: self.seq,
+            who: self.name.clone().unwrap_or_else(|| short(&self.who)),
+            said,
+            preview,
+        }
+    }
+}
+
 /// What a reply quotes, as the fold finds it: who, a line of what, and the
 /// thumbnail of the first picture if there is one.
 type Stub = (PubKey, String, Option<std::sync::Arc<[u8]>>);
@@ -331,6 +363,23 @@ pub struct Draft {
     /// more than the wire's four in one message; the composer stops at
     /// that.
     pub files: Vec<std::path::PathBuf>,
+    /// The composer's own number for this draft, answered in
+    /// [`ChatState::posted`] so the composer can tell which of its sends
+    /// failed and put that one back. Zero for a draft nobody is waiting on.
+    pub token: u64,
+}
+
+/// What became of the last [`Cmd::Post`]: which draft, and why it did not
+/// go, if it did not.
+///
+/// **The composer's, not the reader's.** `trouble` says what is wrong with
+/// the conversation and is rebuilt by every refresh; this says what happened
+/// to one message somebody wrote, and stays until the next one is sent, so
+/// the interface can put the words back in the box rather than lose them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Posted {
+    pub token: u64,
+    pub trouble: Option<String>,
 }
 
 impl Draft {
@@ -439,6 +488,9 @@ pub struct ChatState {
     /// colour on its own is not a message.
     pub link: LinkState,
     pub trouble: Option<String>,
+    /// What became of the last message sent from the composer; see
+    /// [`Posted`].
+    pub posted: Option<Posted>,
     pub conversations: Vec<Summary>,
     /// Which conversation is on screen, and what is in it.
     pub open: Option<[u8; 32]>,
@@ -823,6 +875,7 @@ mod draft_tests {
             edit: None,
             mentions: vec![k(1), k(2), k(1)],
             files: Vec::new(),
+            token: 0,
         };
         let parts = full.parts();
         assert!(matches!(&parts[0], Part::Text(t) if t == "@Ada @Bram look"));
@@ -3301,25 +3354,13 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                                 || kind == sqex_proto::blob::KIND_VIDEO
                         })
                         .collect();
-                    let files = m.post.attachments().count();
                     let words = m.post.body_text().unwrap_or_default();
                     let said = if m.redacted {
                         "deleted".to_string()
                     } else if !words.is_empty() {
                         stub(words)
                     } else {
-                        // Only files: say what, since there are no words.
-                        match (pictures.len(), files) {
-                            (1, 1)
-                                if pictures[0].effective_kind() == sqex_proto::blob::KIND_VIDEO =>
-                            {
-                                "a clip".to_string()
-                            }
-                            (1, 1) => "a picture".to_string(),
-                            (n, f) if n == f => format!("{n} pictures"),
-                            (_, 1) => "a file".to_string(),
-                            (_, f) => format!("{f} files"),
-                        }
+                        only_files(m.post.attachments().map(|a| a.effective_kind()))
                     };
                     let preview = (!m.redacted)
                         .then(|| pictures.first())
@@ -3734,6 +3775,27 @@ fn receipt_for(known: &Known, seq: u64, me: &PubKey) -> Receipt {
         Receipt::Delivered
     } else {
         Receipt::Sent
+    }
+}
+
+/// What a message that is only files carries, in words, for a quote of it.
+///
+/// **One wording, wherever a message is quoted.** The composer names what is
+/// about to be answered and the reply then names what was; said in two places
+/// they drifted to "a file" against "a picture" for the same photograph.
+fn only_files(kinds: impl Iterator<Item = u8>) -> String {
+    let kinds: Vec<u8> = kinds.collect();
+    let pictures: Vec<u8> = kinds
+        .iter()
+        .copied()
+        .filter(|&k| k == sqex_proto::blob::KIND_IMAGE || k == sqex_proto::blob::KIND_VIDEO)
+        .collect();
+    match (pictures.len(), kinds.len()) {
+        (1, 1) if pictures[0] == sqex_proto::blob::KIND_VIDEO => "a clip".to_string(),
+        (1, 1) => "a picture".to_string(),
+        (n, f) if n == f => format!("{n} pictures"),
+        (_, 1) => "a file".to_string(),
+        (_, f) => format!("{f} files"),
     }
 }
 
@@ -4206,15 +4268,36 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 }
             };
         }
-        Cmd::Post(draft) => {
+        Cmd::Post(mut draft) => {
             let Some(channel) = desk.open else { return };
-            // The files first, each uploaded and described; one that fails
-            // fails the message, because half a message is not the message.
+            // **An edit replaces the whole post** (SIP-19), and the composer
+            // holds only the words. What the original carried besides them
+            // -- the message it replied to, the files -- comes back from the
+            // original here, or a rewrite of one word silently unthreads the
+            // message and drops its pictures. The mentions are the composer's:
+            // it loads them with the text, so a name taken out of the words
+            // takes its mention with it, as in a fresh message.
             let mut attachments = Vec::with_capacity(draft.files.len());
+            if let Some(target) = draft.edit
+                && let Some(m) = desk
+                    .channels
+                    .get(&channel)
+                    .and_then(|k| k.timeline.get(target))
+            {
+                if draft.reply.is_none() {
+                    draft.reply = m.post.reply_to();
+                }
+                attachments.extend(m.post.attachments().cloned());
+            }
+            // The files, each uploaded and described; one that fails fails
+            // the message, because half a message is not the message.
             for path in &draft.files {
                 match attach_file(chat, state, &channel, path).await {
                     Ok(a) => attachments.push(a),
-                    Err(e) => return trouble(state, e),
+                    Err(e) => {
+                        trouble(state, &e);
+                        return posted(state, draft.token, Some(e.to_string()));
+                    }
                 }
             }
             let names: Vec<String> = draft
@@ -4243,17 +4326,18 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     if !names.is_empty() {
                         note(state, format!("Sent {}.", names.join(", ")));
                     }
-                    desk.dirty.insert(channel)
+                    posted(state, draft.token, None);
+                    desk.dirty.insert(channel);
                 }
                 Err(e) => {
-                    // The text is not thrown away here; the interface keeps
-                    // it in the composer, because retyping a message the
-                    // program lost is the worst thing a chat client can do
-                    // to somebody.
-                    trouble(state, e);
-                    false
+                    // The interface took the words out of the box to send
+                    // them; this is what tells it to put them back. Retyping
+                    // a message the program lost is the worst thing a chat
+                    // client can do to somebody.
+                    trouble(state, &e);
+                    posted(state, draft.token, Some(e.to_string()));
                 }
-            };
+            }
         }
         Cmd::Redact(target) => {
             let Some(channel) = desk.open else { return };
@@ -4774,6 +4858,11 @@ fn note(state: &watch::Sender<ChatState>, said: String) {
 
 fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {
     state.send_modify(|s| s.trouble = Some(e.to_string()));
+}
+
+/// Say what became of a draft; see [`Posted`].
+fn posted(state: &watch::Sender<ChatState>, token: u64, trouble: Option<String>) {
+    state.send_modify(|s| s.posted = Some(Posted { token, trouble }));
 }
 
 /// Put the open conversation away, without touching it at the exchange.

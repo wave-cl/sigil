@@ -69,6 +69,90 @@ fn an_unknown_string_is_still_a_button_saying_itself() {
     h.get_by_label("\u{1f389} 3");
 }
 
+/// Where the strip goes: off the top corner, and off the bottom one when
+/// the top is at the top of the transcript.
+///
+/// The first message on screen has its top edge at the header, so a strip
+/// off its top corner was half under the header: painted clipped, and —
+/// since a widget outside its clip cannot be pressed — unreachable. Found
+/// by a test that replied to the top message and got no reply.
+fn strip_at(clip_top: f32, mine: bool) -> (egui::Rect, egui::Rect, bool) {
+    let pressed = Arc::new(AtomicBool::new(false));
+    let seen = pressed.clone();
+    // Room on the side the strip reaches into: theirs to the right, one's
+    // own to the left. (Without it the strip is clamped back over the
+    // bubble, which is right on a narrow pane and not what this measures.)
+    let left = if mine { 240.0 } else { 20.0 };
+    let bubble = egui::Rect::from_min_size(egui::pos2(left, 100.0), egui::vec2(160.0, 44.0));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(420.0, 300.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            let clip =
+                egui::Rect::from_min_max(egui::pos2(0.0, clip_top), egui::pos2(420.0, 300.0));
+            let mut action = sigil_ui::BubbleAction::default();
+            let seen = seen.clone();
+            sigil_ui::emoji::strip(
+                ui,
+                sigil_ui::emoji::Strip {
+                    id: egui::Id::new("strip-at"),
+                    bubble,
+                    mine,
+                    clip,
+                    frequent: &[],
+                },
+                &mut action,
+                move |ui, _| {
+                    if sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::Reply, "Reply").clicked() {
+                        seen.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+        });
+    h.run();
+    h.run();
+    let reply = h.get_by_label("Reply").rect();
+    h.get_by_label("Reply").click();
+    h.run();
+    (bubble, reply, pressed.load(Ordering::Relaxed))
+}
+
+#[test]
+fn the_strip_hangs_off_the_top_corner_and_can_be_pressed() {
+    let (bubble, reply, pressed) = strip_at(0.0, false);
+    assert!(
+        reply.top() < bubble.top() && reply.bottom() > bubble.top(),
+        "{reply:?} against {bubble:?}"
+    );
+    assert!(
+        reply.left() > bubble.right(),
+        "theirs: off the right corner, {reply:?} against {bubble:?}"
+    );
+    assert!(pressed, "the strip could not be pressed");
+    let (bubble, reply, _) = strip_at(0.0, true);
+    assert!(
+        reply.right() < bubble.left(),
+        "mine: off the left corner, {reply:?} against {bubble:?}"
+    );
+}
+
+#[test]
+fn at_the_top_of_the_transcript_it_hangs_off_the_bottom_corner_instead() {
+    // The clip begins a little below the bubble's top: the top strip would
+    // be under whatever is above the transcript.
+    let (bubble, reply, pressed) = strip_at(bubble_top() + 4.0, false);
+    assert!(
+        reply.top() < bubble.bottom() && reply.bottom() > bubble.bottom(),
+        "{reply:?} against {bubble:?}"
+    );
+    assert!(pressed, "the strip could not be pressed");
+}
+
+fn bubble_top() -> f32 {
+    100.0
+}
+
 /// The strip and the open picker, drawn with pictures.
 ///
 /// The one place the colour is looked at: everything else asserts labels,

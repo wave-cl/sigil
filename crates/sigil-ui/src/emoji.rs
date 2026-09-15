@@ -182,10 +182,11 @@ pub fn strip_layer(id: egui::Id) -> egui::LayerId {
 /// Hangs off the top-outer corner of `bubble` — the right corner of somebody
 /// else's message, the left of one's own — reaching `OVERLAP` back over it
 /// and out into the space beside, where there is room. Kept inside `clip`
-/// sideways, so a wide bubble does not push it off the pane, and not drawn
-/// at all when the corner is scrolled out of `clip`: a foreground area is
-/// not clipped by the transcript, and a strip floating over the header
-/// for a message that is not on screen is a strip for nothing.
+/// sideways, so a wide bubble does not push it off the pane; dropped to the
+/// bottom corner when the top one is at the top of the transcript; and not
+/// drawn at all when the bubble is scrolled out of `clip`: a foreground
+/// area is not clipped by the transcript, and a strip floating over the
+/// header for a message that is not on screen is a strip for nothing.
 ///
 /// `more` draws the rest of the menu (Reply, More) after the emoji, in the
 /// same row; it is the caller's because what it offers depends on the
@@ -203,7 +204,7 @@ pub fn strip(
     action: &mut BubbleAction,
     more: impl FnOnce(&mut egui::Ui, &mut BubbleAction),
 ) {
-    if bubble.top() < clip.top() - CELL || bubble.top() > clip.bottom() {
+    if bubble.bottom() < clip.top() || bubble.top() > clip.bottom() {
         return;
     }
     let theme = ColorTheme::current(ui.ctx());
@@ -222,7 +223,17 @@ pub fn strip(
     } else {
         clip.left()
     };
-    let pos = egui::pos2(x, bubble.top() - height / 2.0);
+    // Off the top corner — unless the top corner is at the top of the
+    // transcript, where half the strip would be under the header: painted
+    // clipped and, since a widget outside its clip cannot be pressed,
+    // unreachable. The bottom corner then.
+    let y = bubble.top() - height / 2.0;
+    let y = if y < clip.top() {
+        bubble.bottom() - height / 2.0
+    } else {
+        y
+    };
+    let pos = egui::pos2(x, y);
 
     let picker_id = id.with("picker");
     let mut open_picker = false;
