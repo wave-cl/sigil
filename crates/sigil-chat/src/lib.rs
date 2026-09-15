@@ -3472,7 +3472,7 @@ impl ChatApp {
             ui.add_space(tokens::SPACING_SM);
         }
 
-        let mut acted: Option<(u64, String, PubKey, sigil_ui::BubbleAction)> = None;
+        let mut acted: Option<(&Line, sigil_ui::BubbleAction)> = None;
         // Whether this conversation is already somebody's direct message,
         // in which case "direct message" on their bubbles would open the
         // conversation it is in.
@@ -3686,7 +3686,7 @@ impl ChatApp {
                 .tall
                 .insert(line.seq, (shape, width, rect.height()));
             if !did.is_none() {
-                acted = Some((line.seq, line.text.clone(), line.who, did));
+                acted = Some((line, did));
             }
 
             previous_author = Some(line.who);
@@ -3776,7 +3776,8 @@ impl ChatApp {
                 });
         }
 
-        if let Some((seq, text, who, did)) = acted {
+        if let Some((line, did)) = acted {
+            let (seq, who) = (line.seq, line.who);
             if let Some(emoji) = did.react {
                 self.send_as(Some(at), Cmd::React { target: seq, emoji });
             }
@@ -3786,8 +3787,17 @@ impl ChatApp {
             if did.edit {
                 // The text is loaded into the composer so an edit is a
                 // correction of what is there rather than a retyping of it.
-                self.pane(at).editing = Some(seq);
-                self.pane(at).composing = text;
+                let pane = self.pane(at);
+                pane.editing = Some(seq);
+                pane.composing = line.text.clone();
+                // And the names it mentions, so a name left in the words
+                // keeps its key and a name taken out loses it -- the rewrite
+                // is a whole post, not a patch to the words.
+                pane.mentions = line
+                    .mentions
+                    .iter()
+                    .map(|m| (m.label.clone(), m.key))
+                    .collect();
             }
             if did.redact {
                 self.send_as(Some(at), Cmd::Redact(seq));

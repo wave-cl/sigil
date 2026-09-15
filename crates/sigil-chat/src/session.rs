@@ -4247,11 +4247,29 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 }
             };
         }
-        Cmd::Post(draft) => {
+        Cmd::Post(mut draft) => {
             let Some(channel) = desk.open else { return };
-            // The files first, each uploaded and described; one that fails
-            // fails the message, because half a message is not the message.
+            // **An edit replaces the whole post** (SIP-19), and the composer
+            // holds only the words. What the original carried besides them
+            // -- the message it replied to, the files -- comes back from the
+            // original here, or a rewrite of one word silently unthreads the
+            // message and drops its pictures. The mentions are the composer's:
+            // it loads them with the text, so a name taken out of the words
+            // takes its mention with it, as in a fresh message.
             let mut attachments = Vec::with_capacity(draft.files.len());
+            if let Some(target) = draft.edit
+                && let Some(m) = desk
+                    .channels
+                    .get(&channel)
+                    .and_then(|k| k.timeline.get(target))
+            {
+                if draft.reply.is_none() {
+                    draft.reply = m.post.reply_to();
+                }
+                attachments.extend(m.post.attachments().cloned());
+            }
+            // The files, each uploaded and described; one that fails fails
+            // the message, because half a message is not the message.
             for path in &draft.files {
                 match attach_file(chat, state, &channel, path).await {
                     Ok(a) => attachments.push(a),

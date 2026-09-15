@@ -2939,3 +2939,125 @@ async fn words_and_several_files_are_one_message() {
             .map(|l| &l.reply_to)
     );
 }
+
+/// A rewrite is a whole post, and the composer holds only the words: the
+/// reply the message made and the files it carried have to come back from
+/// the original, or correcting one letter unthreads the message and drops
+/// its pictures. Both sides see the rewrite with the quote and the picture
+/// still on it.
+#[tokio::test]
+async fn an_edit_keeps_the_reply_and_the_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(33);
+    let (b_signer, b_id) = signer(34);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await
+    );
+
+    // A picture with a word on it, from Alice.
+    let real = dir.path().join("real.png");
+    let img = image::RgbaImage::from_pixel(64, 48, image::Rgba([30, 200, 30, 255]));
+    image::DynamicImage::ImageRgba8(img).save(&real).unwrap();
+    alice.send(Cmd::Post(session::Draft {
+        text: "look".into(),
+        files: vec![real],
+        ..Default::default()
+    }));
+    let seen =
+        |who: &ChatHandle, text: &str| who.state().lines.iter().find(|l| l.text == text).cloned();
+    assert!(
+        until(
+            || seen(&bob, "look").is_some_and(|l| l.attachments.len() == 1),
+            30
+        )
+        .await,
+        "{:?}",
+        bob.state().lines
+    );
+    let picture = seen(&bob, "look").unwrap().seq;
+
+    // Bob answers it, then corrects his answer -- with a draft that says
+    // nothing about the reply, as the composer's does.
+    bob.send(Cmd::Post(session::Draft {
+        text: "lovley".into(),
+        reply: Some(picture),
+        ..Default::default()
+    }));
+    assert!(
+        until(
+            || seen(&alice, "lovley").is_some_and(|l| l.reply_to.is_some()),
+            30
+        )
+        .await,
+        "{:?}",
+        alice.state().lines
+    );
+    let answer = seen(&bob, "lovley").unwrap().seq;
+    bob.send(Cmd::Post(session::Draft {
+        text: "lovely".into(),
+        edit: Some(answer),
+        ..Default::default()
+    }));
+    let threaded = |l: &session::Line| {
+        l.edited
+            && l.reply_to
+                .as_ref()
+                .is_some_and(|q| q.seq == picture && q.said == "look" && q.preview.is_some())
+    };
+    assert!(
+        until(
+            || seen(&alice, "lovely").is_some_and(|l| threaded(&l))
+                && seen(&bob, "lovely").is_some_and(|l| threaded(&l)),
+            30
+        )
+        .await,
+        "the rewrite still quotes the picture: alice {:?}, bob {:?}",
+        seen(&alice, "lovely").map(|l| l.reply_to),
+        seen(&bob, "lovely").map(|l| l.reply_to)
+    );
+
+    // And Alice corrects her caption: the picture stays on the message.
+    alice.send(Cmd::Post(session::Draft {
+        text: "look here".into(),
+        edit: Some(picture),
+        ..Default::default()
+    }));
+    let captioned = |l: &session::Line| {
+        l.edited && l.attachments.len() == 1 && l.attachments[0].bytes.is_some()
+    };
+    assert!(
+        until(
+            || seen(&bob, "look here").is_some_and(|l| captioned(&l))
+                && seen(&alice, "look here").is_some_and(|l| captioned(&l)),
+            30
+        )
+        .await,
+        "the rewrite still carries the picture: {:?}",
+        seen(&bob, "look here").map(|l| l.attachments)
+    );
+    assert!(
+        seen(&bob, "look").is_none(),
+        "the old words are gone: {:?}",
+        bob.state().lines
+    );
+}

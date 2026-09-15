@@ -4621,3 +4621,73 @@ fn reply_to_picture_dark() {
     hide_column(&mut h);
     h.snapshot("reply_to_picture_dark");
 }
+
+/// A rewrite is a whole post, so the mentions the message made come into
+/// the composer with its words: a name left in the text keeps its key on
+/// the rewrite, and a name taken out loses it -- the same rule a fresh
+/// message follows. Without this every rewrite silently un-mentioned
+/// everybody.
+#[test]
+fn rewriting_a_message_keeps_the_mentions_its_words_still_make() {
+    let mine = |text: &str| {
+        let mut state = the_room();
+        let mut last = state.lines[1].clone();
+        last.seq = 99;
+        last.text = text.into();
+        last.reply_to = None;
+        last.reactions.clear();
+        last.mentions = vec![sigil_chat::session::Mentioned {
+            key: them(),
+            label: "Ada".into(),
+        }];
+        state.lines.push(last);
+        state
+    };
+    let rewriting = |text: &str| {
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut h = harness_recording_commands(mine(text), asked.clone());
+        h.run();
+        h.get_by_label_contains("thanks").hover();
+        h.run();
+        h.run();
+        h.get_by_label("More").click();
+        h.run();
+        h.get_by_label("Edit").click();
+        h.run();
+        h.run();
+        assert_eq!(composed(&h), text, "the words come into the box");
+        (h, asked)
+    };
+
+    // The name kept: so is the key.
+    let (mut h, asked) = rewriting("@Ada thanks");
+    composer(&h).focus();
+    composer(&h).type_text("!");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("edit: Some(99)"), "{sent}");
+    assert!(
+        sent.contains(&format!("{:?}", them())),
+        "the mention's key goes with the rewrite: {sent}"
+    );
+
+    // The name taken out: the key goes with it.
+    let (mut h, asked) = rewriting("thanks @Ada");
+    composer(&h).focus();
+    for _ in 0..5 {
+        h.key_press(egui::Key::Backspace);
+    }
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("edit: Some(99)"), "{sent}");
+    assert!(
+        sent.contains("mentions: []"),
+        "a name no longer in the words is no longer mentioned: {sent}"
+    );
+}
