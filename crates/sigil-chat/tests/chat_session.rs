@@ -2917,13 +2917,22 @@ async fn words_and_several_files_are_one_message() {
         reply: Some(target),
         ..Default::default()
     }));
+    // The thumbnail is named by the blob it is of, so two quotes of two
+    // pictures are never one picture.
+    let blob = bob
+        .state()
+        .lines
+        .iter()
+        .find(|l| l.seq == target)
+        .map(|l| l.attachments[0].id.clone())
+        .unwrap();
     let quoted = until(
         || {
             bob.state().lines.iter().any(|l| {
                 l.text == "lovely"
-                    && l.reply_to
-                        .as_ref()
-                        .is_some_and(|q| q.said == "a picture" && q.preview.is_some())
+                    && l.reply_to.as_ref().is_some_and(|q| {
+                        q.said == "a picture" && q.preview.as_ref().is_some_and(|t| t.id == blob)
+                    })
             })
         },
         30,
@@ -3036,10 +3045,13 @@ async fn an_edit_keeps_the_reply_and_the_files() {
         seen(&bob, "lovely").map(|l| l.reply_to)
     );
 
-    // And Alice corrects her caption: the picture stays on the message.
+    // And Alice corrects her caption, keeping the picture: it stays on
+    // the message.
+    let kept = seen(&alice, "look").unwrap().attachments[0].id.clone();
     alice.send(Cmd::Post(session::Draft {
         text: "look here".into(),
         edit: Some(picture),
+        keep: vec![kept],
         ..Default::default()
     }));
     let captioned = |l: &session::Line| {
@@ -3059,6 +3071,23 @@ async fn an_edit_keeps_the_reply_and_the_files() {
         seen(&bob, "look").is_none(),
         "the old words are gone: {:?}",
         bob.state().lines
+    );
+
+    // A rewrite that leaves the picture out takes it off the message: the
+    // composer showed it as a tile and it was removed.
+    alice.send(Cmd::Post(session::Draft {
+        text: "never mind the picture".into(),
+        edit: Some(picture),
+        ..Default::default()
+    }));
+    assert!(
+        until(
+            || seen(&bob, "never mind the picture").is_some_and(|l| l.attachments.is_empty()),
+            30
+        )
+        .await,
+        "the picture is taken off: {:?}",
+        seen(&bob, "never mind the picture").map(|l| l.attachments)
     );
 }
 

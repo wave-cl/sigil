@@ -164,7 +164,10 @@ impl Line {
                 })
             })
             .flatten()
-            .map(|a| a.preview.clone());
+            .map(|a| Thumb {
+                id: a.id.clone(),
+                bytes: a.preview.clone(),
+            });
         Quoted {
             seq: self.seq,
             who: self.name.clone().unwrap_or_else(|| short(&self.who)),
@@ -176,7 +179,7 @@ impl Line {
 
 /// What a reply quotes, as the fold finds it: who, a line of what, and the
 /// thumbnail of the first picture if there is one.
-type Stub = (PubKey, String, Option<std::sync::Arc<[u8]>>);
+type Stub = (PubKey, String, Option<Thumb>);
 
 /// Somebody a message mentions: the key the part carries, and what to call
 /// it -- ours to decide, and drawn with the key beside it (SIP-21).
@@ -245,7 +248,34 @@ pub struct Quoted {
     pub said: String,
     /// The thumbnail of the first picture or clip it carries, if any: a
     /// quote of a picture shows the picture.
-    pub preview: Option<std::sync::Arc<[u8]>>,
+    pub preview: Option<Thumb>,
+}
+
+/// A thumbnail and the blob it is of.
+///
+/// **The id goes with the bytes** because the interface registers a picture
+/// under a name, and egui keeps the first bytes given for a name: named by
+/// the quoted message's number alone, message 12's picture in one
+/// conversation was drawn on message 12's quote in every other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thumb {
+    pub id: String,
+    pub bytes: std::sync::Arc<[u8]>,
+}
+
+impl Quoted {
+    /// A reply to a message this reader does not hold -- before it joined,
+    /// or pruned. Quoted as what it is rather than silently unthreaded:
+    /// the reply *is* an answer to something, and pressing the quote goes
+    /// looking for it.
+    pub fn unheld(seq: u64) -> Quoted {
+        Quoted {
+            seq,
+            who: String::new(),
+            said: "an earlier message".to_string(),
+            preview: None,
+        }
+    }
 }
 
 /// What SIP-31 verification concluded about one message.
@@ -363,6 +393,10 @@ pub struct Draft {
     /// more than the wire's four in one message; the composer stops at
     /// that.
     pub files: Vec<std::path::PathBuf>,
+    /// On a rewrite: which of the original's files stay on it, by blob id.
+    /// A rewrite is a whole post, so one left out here is taken off the
+    /// message. The composer always fills this from what it showed.
+    pub keep: Vec<String>,
     /// The composer's own number for this draft, answered in
     /// [`ChatState::posted`] so the composer can tell which of its sends
     /// failed and put that one back. Zero for a draft nobody is waiting on.
@@ -895,6 +929,7 @@ mod draft_tests {
             edit: None,
             mentions: vec![k(1), k(2), k(1)],
             files: Vec::new(),
+            keep: Vec::new(),
             token: 0,
         };
         let parts = full.parts();
@@ -3386,7 +3421,10 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         .then(|| pictures.first())
                         .flatten()
                         .filter(|a| !a.preview.is_empty())
-                        .map(|a| a.preview.as_slice().into());
+                        .map(|a| Thumb {
+                            id: bs58::encode(a.blob).into_string(),
+                            bytes: a.preview.as_slice().into(),
+                        });
                     (m.seq, (m.account, said, preview))
                 })
                 .collect();
@@ -3407,16 +3445,19 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         .iter()
                         .map(|(emoji, who)| (emoji.clone(), who.len(), who.contains(&me)))
                         .collect(),
-                    reply_to: m.post.reply_to().and_then(|target| {
-                        stubs.get(&target).map(|(account, said, preview)| Quoted {
-                            seq: target,
-                            who: people
-                                .get(account)
-                                .and_then(|p| p.name.clone())
-                                .unwrap_or_else(|| short(account)),
-                            said: said.clone(),
-                            preview: preview.clone(),
-                        })
+                    reply_to: m.post.reply_to().map(|target| {
+                        stubs
+                            .get(&target)
+                            .map(|(account, said, preview)| Quoted {
+                                seq: target,
+                                who: people
+                                    .get(account)
+                                    .and_then(|p| p.name.clone())
+                                    .unwrap_or_else(|| short(account)),
+                                said: said.clone(),
+                                preview: preview.clone(),
+                            })
+                            .unwrap_or_else(|| Quoted::unheld(target))
                     }),
                     // Only ever on our own. On somebody else's it would be a
                     // claim about our own reading, shown back to us.
@@ -4290,13 +4331,14 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
         Cmd::Post(mut draft) => {
             let Some(channel) = desk.open else { return };
-            // **An edit replaces the whole post** (SIP-19), and the composer
-            // holds only the words. What the original carried besides them
-            // -- the message it replied to, the files -- comes back from the
-            // original here, or a rewrite of one word silently unthreads the
-            // message and drops its pictures. The mentions are the composer's:
-            // it loads them with the text, so a name taken out of the words
-            // takes its mention with it, as in a fresh message.
+            // **An edit replaces the whole post** (SIP-19). What the original
+            // carried besides its words comes back from the original here:
+            // the message it replied to always -- a rewrite of one word must
+            // not unthread it -- and the files the composer said to keep,
+            // which it showed as tiles, so one taken out is taken off the
+            // message. The mentions are the composer's: it loads them with
+            // the text, so a name taken out of the words takes its mention
+            // with it, as in a fresh message.
             let mut attachments = Vec::with_capacity(draft.files.len());
             if let Some(target) = draft.edit
                 && let Some(m) = desk
@@ -4316,7 +4358,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 if draft.reply.is_none() {
                     draft.reply = m.post.reply_to();
                 }
-                attachments.extend(m.post.attachments().cloned());
+                attachments.extend(
+                    m.post
+                        .attachments()
+                        .filter(|a| draft.keep.contains(&bs58::encode(a.blob).into_string()))
+                        .cloned(),
+                );
             }
             // The files, each uploaded and described; one that fails fails
             // the message, because half a message is not the message.

@@ -7,7 +7,7 @@ pub mod session;
 use session::RING_WINDOW;
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, Hit, Line, LinkState,
-    Linked, Member, Person, Posted, Quoted, Receipt, Ring, Standing, Summary, Trouble,
+    Linked, Member, Person, Posted, Quoted, Receipt, Ring, Standing, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -612,7 +612,9 @@ impl Playing {
 
 /// A file in the composer, not yet sent.
 struct Staged {
-    path: std::path::PathBuf,
+    /// A file on this machine, to be uploaded -- or one already on the
+    /// message being rewritten, carried across unless taken out.
+    source: Source,
     name: String,
     /// SIP-18's kind, from the name.
     kind: u8,
@@ -621,8 +623,49 @@ struct Staged {
     preview: Option<std::sync::Arc<[u8]>>,
 }
 
+/// Where a staged file comes from.
+///
+/// **A rewrite is a whole post**, so the files on the original are part of
+/// it: they are staged like new ones, count against the same cap, and go
+/// unless somebody removes them -- which is how a picture is taken off a
+/// message.
+enum Source {
+    File(std::path::PathBuf),
+    /// By blob id; the session picks it out of the original.
+    Carried(String),
+}
+
+impl Staged {
+    /// Loaded from a message being rewritten.
+    fn carried(a: &Attached) -> Staged {
+        Staged {
+            source: Source::Carried(a.id.clone()),
+            name: a.described.clone(),
+            kind: a.kind,
+            preview: (!a.preview.is_empty()).then(|| a.preview.clone()),
+        }
+    }
+
+    /// The URI its thumbnail is registered under: a path or a blob id,
+    /// never a position, so two tiles never share a picture.
+    fn uri(&self) -> String {
+        match &self.source {
+            Source::File(path) => format!("bytes://staged-{}", path.display()),
+            Source::Carried(id) => format!("bytes://{id}-preview"),
+        }
+    }
+}
+
 /// The wire's cap on files in one message (SIP-19).
 const MOST_FILES: usize = sqex_proto::message::MAX_ATTACHMENTS;
+
+/// What was in the box when a rewrite began: the words, their mentions and
+/// the files staged with them.
+struct Stashed {
+    composing: String,
+    mentions: Vec<(String, PubKey)>,
+    staged: Vec<Staged>,
+}
 
 /// Everything the composer held when a message was sent, so the message can
 /// be put back if it does not go.
@@ -630,6 +673,7 @@ struct Unsent {
     token: u64,
     composing: String,
     mentions: Vec<(String, PubKey)>,
+    carried_mentions: Vec<PubKey>,
     staged: Vec<Staged>,
     editing: Option<u64>,
     replying: Option<u64>,
@@ -671,7 +715,11 @@ struct Pane {
     /// What was in the box when a rewrite began, put back when the rewrite
     /// is sent or abandoned. A message half typed is not the price of
     /// correcting an older one.
-    stashed: Option<(String, Vec<(String, PubKey)>)>,
+    stashed: Option<Stashed>,
+    /// Mentions on the message being rewritten whose names are not in its
+    /// words any more (the person was renamed since). Sent with the rewrite
+    /// as they are: nothing this rewrite typed can stand for them.
+    carried_mentions: Vec<PubKey>,
     /// Whom the text mentions so far: each label chosen from the list, and
     /// the key it stood for. Read at send time against the text, so a name
     /// deleted from the box is a mention that is not sent.
@@ -689,6 +737,9 @@ struct Pane {
     picking: usize,
     /// Escape closed the list for this `@`; typing reopens it.
     picker_dismissed: bool,
+    /// The box's widget id, once drawn: what "the box had the keyboard"
+    /// is asked of.
+    field: Option<egui::Id>,
     /// The key being added as a contact.
     adding: String,
     add_trouble: Option<String>,
@@ -713,7 +764,7 @@ struct Pane {
     /// The exchange being added.
     exchange: String,
     /// The message whose file is being forwarded.
-    forwarding: Option<u64>,
+    forwarding: Option<(u64, usize)>,
     /// The picture being looked at full size: a message and which of its
     /// files. Kept per identity like everything else here, so switching away
     /// and back does not leave somebody else's picture over the screen.
@@ -799,22 +850,29 @@ impl Pane {
     /// back when the rewrite is done with.
     fn rewrite(&mut self, line: &Line) {
         self.replying = None;
-        if self.editing.is_none() && !self.composing.trim().is_empty() {
-            self.stashed = Some((
-                std::mem::take(&mut self.composing),
-                std::mem::take(&mut self.mentions),
-            ));
+        if self.editing.is_none() && (!self.composing.trim().is_empty() || !self.staged.is_empty())
+        {
+            self.stashed = Some(Stashed {
+                composing: std::mem::take(&mut self.composing),
+                mentions: std::mem::take(&mut self.mentions),
+                staged: std::mem::take(&mut self.staged),
+            });
         }
         self.editing = Some(line.seq);
         self.composing = line.text.clone();
         // The names it mentions, so a name left in the words keeps its key
         // and a name taken out loses it -- the rewrite is a whole post, not
-        // a patch to the words.
-        self.mentions = line
-            .mentions
-            .iter()
-            .map(|m| (m.label.clone(), m.key))
-            .collect();
+        // a patch to the words. One whose name is no longer in the words as
+        // they stand -- the person has been renamed since -- was not typed
+        // out by this rewrite either, and is carried as it is.
+        let (named, renamed): (Vec<_>, Vec<_>) = line.mentions.iter().partition(|m| {
+            mention::mentions_in(&line.text, &[(m.label.clone(), m.key)]).len() == 1
+        });
+        self.mentions = named.iter().map(|m| (m.label.clone(), m.key)).collect();
+        self.carried_mentions = renamed.iter().map(|m| m.key).collect();
+        // And its files, as tiles beside any new ones.
+        self.staged = line.attachments.iter().map(Staged::carried).collect();
+        self.staging_trouble = None;
     }
 
     /// Abandon a rewrite. The old text must not stay in the box, where the
@@ -824,14 +882,20 @@ impl Pane {
         self.editing = None;
         self.composing.clear();
         self.mentions.clear();
+        self.carried_mentions.clear();
+        // The original's files, and any staged for the rewrite: neither
+        // belongs to the next message.
+        self.staged.clear();
+        self.staging_trouble = None;
         self.unstash();
     }
 
     /// Whatever was set aside for a rewrite, back in the box.
     fn unstash(&mut self) {
-        if let Some((text, mentions)) = self.stashed.take() {
-            self.composing = text;
-            self.mentions = mentions;
+        if let Some(was) = self.stashed.take() {
+            self.composing = was.composing;
+            self.mentions = was.mentions;
+            self.staged = was.staged;
         }
     }
 
@@ -858,6 +922,7 @@ impl Default for Pane {
             next_token: 1,
             put_back: None,
             stashed: None,
+            carried_mentions: Vec::new(),
             mentions: Vec::new(),
             staged: Vec::new(),
             previews: None,
@@ -865,6 +930,7 @@ impl Default for Pane {
             staging_trouble: None,
             picking: 0,
             picker_dismissed: false,
+            field: None,
             adding: String::new(),
             add_trouble: None,
             dialog: None,
@@ -2219,12 +2285,14 @@ impl ChatApp {
             self.pane(at).viewing = None;
             return;
         };
-        let Some(bytes) = file.bytes.clone() else {
-            self.pane(at).viewing = None;
-            return;
-        };
-
-        if file.kind == sigil_ui::attachment::VIDEO {
+        // **Not fetched yet is not nothing to show.** Next onto a picture
+        // still on its way used to shut the viewer; it stays up on the
+        // thumbnail, saying what is happening -- and, for one too big to
+        // come unasked, offering to ask.
+        let bytes = file.bytes.clone();
+        if file.kind == sigil_ui::attachment::VIDEO
+            && let Some(bytes) = bytes.clone()
+        {
             return self.video_viewer_ui(at, ui, theme, seq, index, file, bytes);
         }
 
@@ -2245,71 +2313,76 @@ impl ChatApp {
                     // The same URI the transcript uses, so the decoded texture
                     // is the one already in hand rather than a second copy of
                     // the same picture under another name.
-                    let image = egui::Image::from_bytes(format!("bytes://{}", file.id), bytes)
-                        .corner_radius(tokens::RADIUS_MD);
                     let room = screen * 0.86;
-                    match image.load_for_size(ui.ctx(), room) {
-                        Ok(egui::load::TexturePoll::Ready { texture }) => {
-                            // **The window on the picture stays the size the
-                            // whole picture needs**, and zooming happens
-                            // inside it. A viewer that grows as it zooms
-                            // pushes its own controls off the screen.
-                            let scale = (room.x / texture.size.x)
-                                .min(room.y / texture.size.y)
-                                .min(1.0);
-                            let fitted = texture.size * scale;
-                            let (view, held) = ui.allocate_exact_size(fitted, egui::Sense::click());
-                            let look = self.pane(at).look;
+                    if let Some(bytes) = bytes.clone() {
+                        let image = egui::Image::from_bytes(format!("bytes://{}", file.id), bytes)
+                            .corner_radius(tokens::RADIUS_MD);
+                        match image.load_for_size(ui.ctx(), room) {
+                            Ok(egui::load::TexturePoll::Ready { texture }) => {
+                                // **The window on the picture stays the size the
+                                // whole picture needs**, and zooming happens
+                                // inside it. A viewer that grows as it zooms
+                                // pushes its own controls off the screen.
+                                let scale = (room.x / texture.size.x)
+                                    .min(room.y / texture.size.y)
+                                    .min(1.0);
+                                let fitted = texture.size * scale;
+                                let (view, held) =
+                                    ui.allocate_exact_size(fitted, egui::Sense::click());
+                                let look = self.pane(at).look;
 
-                            if held.clicked() {
-                                // In to the picture's own pixels, or twice its
-                                // size when that is smaller than the window --
-                                // clicking must always do something -- and out
-                                // again from anywhere closer than fitting.
-                                let closest = (1.0 / scale).max(2.0);
-                                let to = if look.zoom > 1.01 { 1.0 } else { closest };
-                                self.pane(at).look = look.zoomed(to, fitted, fitted);
-                            }
+                                if held.clicked() {
+                                    // In to the picture's own pixels, or twice its
+                                    // size when that is smaller than the window --
+                                    // clicking must always do something -- and out
+                                    // again from anywhere closer than fitting.
+                                    let closest = (1.0 / scale).max(2.0);
+                                    let to = if look.zoom > 1.01 { 1.0 } else { closest };
+                                    self.pane(at).look = look.zoomed(to, fitted, fitted);
+                                }
 
-                            // **Moving the pointer looks around it**, with no
-                            // button held: a zoomed picture in a window is a
-                            // thing to look around, and making somebody drag
-                            // it makes them work for it. Only while the
-                            // pointer is over the picture, so it holds still
-                            // when they take it away to press Save.
-                            let look = self.pane(at).look;
-                            if look.zoom > 1.01
-                                && let Some(p) = ui.ctx().pointer_latest_pos()
-                                && view.contains(p)
-                            {
-                                self.pane(at).look =
-                                    look.following(p - view.center(), fitted, fitted);
+                                // **Moving the pointer looks around it**, with no
+                                // button held: a zoomed picture in a window is a
+                                // thing to look around, and making somebody drag
+                                // it makes them work for it. Only while the
+                                // pointer is over the picture, so it holds still
+                                // when they take it away to press Save.
+                                let look = self.pane(at).look;
+                                if look.zoom > 1.01
+                                    && let Some(p) = ui.ctx().pointer_latest_pos()
+                                    && view.contains(p)
+                                {
+                                    self.pane(at).look =
+                                        look.following(p - view.center(), fitted, fitted);
+                                }
+                                let look = self.pane(at).look;
+                                ui.ctx().set_cursor_icon(if look.zoom > 1.01 {
+                                    egui::CursorIcon::ZoomOut
+                                } else {
+                                    egui::CursorIcon::ZoomIn
+                                });
+                                // Clipped to the window, so what is outside it is
+                                // out of sight rather than over the rest of the
+                                // dialog.
+                                let painting = ui.new_child(
+                                    egui::UiBuilder::new().id_salt("picture").max_rect(view),
+                                );
+                                let mut painting = painting;
+                                painting.set_clip_rect(view);
+                                image.paint_at(
+                                    &painting,
+                                    egui::Rect::from_center_size(
+                                        view.center() + look.pan,
+                                        look.size(fitted),
+                                    ),
+                                );
                             }
-                            let look = self.pane(at).look;
-                            ui.ctx().set_cursor_icon(if look.zoom > 1.01 {
-                                egui::CursorIcon::ZoomOut
-                            } else {
-                                egui::CursorIcon::ZoomIn
-                            });
-                            // Clipped to the window, so what is outside it is
-                            // out of sight rather than over the rest of the
-                            // dialog.
-                            let painting = ui.new_child(
-                                egui::UiBuilder::new().id_salt("picture").max_rect(view),
-                            );
-                            let mut painting = painting;
-                            painting.set_clip_rect(view);
-                            image.paint_at(
-                                &painting,
-                                egui::Rect::from_center_size(
-                                    view.center() + look.pan,
-                                    look.size(fitted),
-                                ),
-                            );
+                            _ => {
+                                ui.add(image.max_size(room));
+                            }
                         }
-                        _ => {
-                            ui.add(image.max_size(room));
-                        }
+                    } else {
+                        self.waiting_ui(at, ui, theme, seq, index, file, room);
                     }
                     ui.add_space(tokens::SPACING_SM);
                     ui.horizontal(|ui| {
@@ -2342,7 +2415,9 @@ impl ChatApp {
                             theme.text_muted,
                             egui::RichText::new(&file.described).small(),
                         );
-                        if ui.button("Save…").clicked()
+                        // Nothing to save until it is here.
+                        if bytes.is_some()
+                            && ui.button("Save…").clicked()
                             && let Some(to) = rfd::FileDialog::new().save_file()
                         {
                             self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
@@ -2358,6 +2433,63 @@ impl ChatApp {
         if response.should_close() {
             self.pane(at).viewing = None;
         }
+    }
+
+    /// The viewer on a picture or clip whose bytes have not arrived: its
+    /// thumbnail, as large as it goes, and what is happening under it --
+    /// the same three states the bubble's own row distinguishes, because
+    /// "fetching" over a fetch that will never start is a lie a reader
+    /// waits on.
+    #[allow(clippy::too_many_arguments)]
+    fn waiting_ui(
+        &mut self,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        seq: u64,
+        index: usize,
+        file: &session::Attached,
+        room: egui::Vec2,
+    ) {
+        if !file.preview.is_empty() {
+            let uri = format!("bytes://{}-preview", file.id);
+            ui.ctx()
+                .include_bytes(uri.clone(), egui::load::Bytes::Shared(file.preview.clone()));
+            ui.add(
+                egui::Image::from_bytes(uri, egui::load::Bytes::Shared(file.preview.clone()))
+                    .corner_radius(tokens::RADIUS_MD)
+                    .show_loading_spinner(false)
+                    .max_size(room * 0.6),
+            );
+        }
+        ui.horizontal(|ui| {
+            if file.missing {
+                ui.colored_label(
+                    theme.warning,
+                    egui::RichText::new("preview — could not be fetched").small(),
+                );
+                if ui.small_button("Try again").clicked() {
+                    self.send_as(Some(at), Cmd::Refetch);
+                }
+            } else if file.held {
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(format!(
+                        "preview — {}",
+                        sigil_ui::attachment::human(file.size)
+                    ))
+                    .small(),
+                );
+                if ui.small_button("Fetch").clicked() {
+                    self.send_as(Some(at), Cmd::Fetch { seq, index });
+                }
+            } else {
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new("preview — fetching the full image").small(),
+                );
+            }
+        });
     }
 
     /// A video, as large as the window will take: the one place it plays,
@@ -3773,7 +3905,7 @@ impl ChatApp {
                     seq: q.seq,
                     who: &q.who,
                     said: &q.said,
-                    preview: q.preview.as_ref(),
+                    preview: q.preview.as_ref().map(thumb),
                 }),
                 reactions: &line.reactions,
                 frequent: &frequent,
@@ -3854,7 +3986,7 @@ impl ChatApp {
 
         // Where to forward a file to. A list rather than a key field: the
         // destination is always somewhere you are already in.
-        if let Some(seq) = self.pane(at).forwarding {
+        if let Some((seq, index)) = self.pane(at).forwarding {
             ui.add_space(tokens::SPACING_SM);
             egui::Frame::NONE
                 .fill(theme.surface_elevated)
@@ -3883,7 +4015,7 @@ impl ChatApp {
                                 Some(at),
                                 Cmd::Forward {
                                     seq,
-                                    index: 0,
+                                    index,
                                     to: convo.channel,
                                 },
                             );
@@ -3945,8 +4077,8 @@ impl ChatApp {
                     (_, Err(_)) => {}
                 }
             }
-            if did.forward {
-                self.pane(at).forwarding = Some(seq);
+            if let Some(index) = did.forward {
+                self.pane(at).forwarding = Some((seq, index));
             }
             if let (Some(target), Some(channel)) = (did.jump, state.open) {
                 self.pane(at).jump = Some((channel, target));
@@ -4035,18 +4167,33 @@ impl ChatApp {
         }
         let tx = pane.previews_tx.clone().expect("made above");
         let mut refused = 0;
+        let mut not_files: Vec<String> = Vec::new();
         for path in paths {
-            if pane.staged.len() >= MOST_FILES {
-                refused += 1;
-                continue;
-            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // Found out here, where it can be said beside the tiles, rather
+            // than at the upload, where it failed the whole message.
+            if !path.is_file() {
+                not_files.push(name);
+                continue;
+            }
+            // Once. The same file dropped twice is one file on the message.
+            if pane
+                .staged
+                .iter()
+                .any(|s| matches!(&s.source, Source::File(p) if *p == path))
+            {
+                continue;
+            }
+            if pane.staged.len() >= MOST_FILES {
+                refused += 1;
+                continue;
+            }
             let (kind, _) = sqex_chat::kind_of(&name);
             pane.staged.push(Staged {
-                path: path.clone(),
+                source: Source::File(path.clone()),
                 name,
                 kind,
                 preview: None,
@@ -4059,10 +4206,27 @@ impl ChatApp {
                 wake.request_repaint();
             });
         }
+        let mut said = Vec::new();
         if refused > 0 {
-            pane.staging_trouble = Some(format!(
-                "A message carries up to {MOST_FILES} files; {refused} left out."
-            ));
+            let carried = pane
+                .staged
+                .iter()
+                .filter(|s| matches!(s.source, Source::Carried(_)))
+                .count();
+            said.push(if carried > 0 {
+                format!(
+                    "A message carries up to {MOST_FILES} files, and {carried} are already on \
+                     this one; {refused} left out."
+                )
+            } else {
+                format!("A message carries up to {MOST_FILES} files; {refused} left out.")
+            });
+        }
+        if !not_files.is_empty() {
+            said.push(format!("Not a file: {}.", not_files.join(", ")));
+        }
+        if !said.is_empty() {
+            pane.staging_trouble = Some(said.join(" "));
         }
     }
 
@@ -4077,12 +4241,22 @@ impl ChatApp {
             .map(|rx| rx.try_iter().collect())
             .unwrap_or_default();
         for (path, preview) in landed {
-            if let Some(s) = self.pane(at).staged.iter_mut().find(|s| s.path == path) {
+            if let Some(s) = self
+                .pane(at)
+                .staged
+                .iter_mut()
+                .find(|s| matches!(&s.source, Source::File(p) if *p == path))
+            {
                 s.preview = preview.filter(|p| !p.is_empty()).map(|p| p.into());
             }
         }
         if self.pane(at).staged.is_empty() {
-            self.pane(at).staging_trouble = None;
+            // Nothing staged can still have something to say -- "not a
+            // file" is about what was refused, not about what is there.
+            if let Some(why) = self.pane(at).staging_trouble.clone() {
+                ui.colored_label(theme.warning, egui::RichText::new(why).small());
+                ui.add_space(tokens::SPACING_XS);
+            }
             return;
         }
         const TILE: f32 = 72.0;
@@ -4095,7 +4269,7 @@ impl ChatApp {
                     .rect_filled(rect, tokens::RADIUS_MD, theme.surface_secondary);
                 match &s.preview {
                     Some(bytes) => {
-                        let uri = format!("bytes://staged-{}", s.path.display());
+                        let uri = s.uri();
                         ui.ctx()
                             .include_bytes(uri.clone(), egui::load::Bytes::Shared(bytes.clone()));
                         egui::Image::from_bytes(uri, egui::load::Bytes::Shared(bytes.clone()))
@@ -4152,7 +4326,10 @@ impl ChatApp {
             }
         });
         if let Some(i) = remove {
-            self.pane(at).staged.remove(i);
+            let pane = self.pane(at);
+            pane.staged.remove(i);
+            // Room was made; what was said about there being none is stale.
+            pane.staging_trouble = None;
         }
         if let Some(why) = self.pane(at).staging_trouble.clone() {
             ui.colored_label(theme.warning, egui::RichText::new(why).small());
@@ -4187,6 +4364,7 @@ impl ChatApp {
         if empty {
             pane.composing = this.composing;
             pane.mentions = this.mentions;
+            pane.carried_mentions = this.carried_mentions;
             pane.staged = this.staged;
             pane.editing = this.editing;
             pane.replying = this.replying;
@@ -4217,6 +4395,7 @@ impl ChatApp {
                     // Over what is there: chosen, this time.
                     pane.composing = unsent.composing;
                     pane.mentions = unsent.mentions;
+                    pane.carried_mentions = unsent.carried_mentions;
                     pane.staged = unsent.staged;
                     pane.editing = unsent.editing;
                     pane.replying = unsent.replying;
@@ -4241,19 +4420,14 @@ impl ChatApp {
                 .iter()
                 .find(|l| l.seq == target)
                 .map(session::Line::quoted)
-                .unwrap_or_else(|| session::Quoted {
-                    seq: target,
-                    who: String::new(),
-                    said: format!("message {target}"),
-                    preview: None,
-                });
+                .unwrap_or_else(|| session::Quoted::unheld(target));
             let head = sigil_ui::message::reply_preview(
                 ui,
                 sigil_ui::Quote {
                     seq: quoted.seq,
                     who: &quoted.who,
                     said: &quoted.said,
-                    preview: quoted.preview.as_ref(),
+                    preview: quoted.preview.as_ref().map(thumb),
                 },
                 editing.is_some(),
             );
@@ -4353,6 +4527,25 @@ impl ChatApp {
             completed = true;
         }
 
+        // **Escape does what the × does**, while the box has the keyboard
+        // and no list is up to take the key first. The focus test is of
+        // last pass: egui surrenders a field's focus on Escape before any
+        // widget runs, so by now the box has already let go.
+        if picker.is_none() {
+            let pane = self.pane(at);
+            let armed = pane.editing.or(pane.replying).is_some();
+            let in_the_box = pane
+                .field
+                .is_some_and(|id| ui.memory(|m| m.had_focus_last_frame(id)));
+            if armed
+                && in_the_box
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                pane.cancel_head();
+                refocus = true;
+            }
+        }
+
         self.staged_ui(at, ui, theme);
 
         ui.horizontal(|ui| {
@@ -4367,6 +4560,7 @@ impl ChatApp {
                 "write a message, @ to mention, or / for a command",
                 width,
             );
+            self.pane(at).field = Some(field.id);
             if refocus {
                 field.request_focus();
             }
@@ -4415,6 +4609,9 @@ impl ChatApp {
                 })
                 .clicked();
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // Words, or files -- the original's included, on a rewrite, so
+            // a picture's caption can be taken off and a picture without
+            // one can still be rewritten.
             let something =
                 !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
             if (entered || send) && something {
@@ -4429,21 +4626,32 @@ impl ChatApp {
                 let (editing, replying) = (pane.editing.take(), pane.replying.take());
                 pane.announced_typing = false;
                 // The keys, for every name still in the text.
-                let mentions = mention::mentions_in(&text, &pane.mentions);
+                let mut mentions = mention::mentions_in(&text, &pane.mentions);
                 let labels = std::mem::take(&mut pane.mentions);
+                let carried_mentions = std::mem::take(&mut pane.carried_mentions);
+                mentions.extend(carried_mentions.iter().copied());
                 // A rewrite sent: whatever was being typed before it began
                 // comes back.
                 if editing.is_some() {
                     pane.unstash();
                 }
-                // And the files, in the order they were staged.
+                // And the files, in the order they were staged: the ones
+                // to upload, and the original's to keep on a rewrite.
                 let staged = std::mem::take(&mut pane.staged);
-                let files: Vec<std::path::PathBuf> =
-                    staged.iter().map(|s| s.path.clone()).collect();
+                pane.staging_trouble = None;
+                let mut files = Vec::new();
+                let mut keep = Vec::new();
+                for s in &staged {
+                    match &s.source {
+                        Source::File(path) => files.push(path.clone()),
+                        Source::Carried(id) => keep.push(id.clone()),
+                    }
+                }
                 pane.in_flight.push(Unsent {
                     token,
                     composing: text.clone(),
                     mentions: labels,
+                    carried_mentions,
                     staged,
                     editing,
                     replying,
@@ -4456,6 +4664,7 @@ impl ChatApp {
                         edit: editing,
                         mentions,
                         files,
+                        keep,
                         token,
                     }),
                 );
@@ -4463,6 +4672,14 @@ impl ChatApp {
                 field.request_focus();
             }
         });
+    }
+}
+
+/// A session thumbnail, borrowed for drawing.
+fn thumb(t: &session::Thumb) -> sigil_ui::Thumb<'_> {
+    sigil_ui::Thumb {
+        id: &t.id,
+        bytes: &t.bytes,
     }
 }
 

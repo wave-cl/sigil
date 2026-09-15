@@ -12,7 +12,7 @@ use sigil::navigator::Navigator;
 use sigil::{Account, theme};
 use sigil_chat::{
     Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Posted, Quoted,
-    Receipt, Summary, Trouble,
+    Receipt, Summary, Thumb, Trouble,
 };
 use sqnr_core::PubKey;
 
@@ -2057,16 +2057,18 @@ fn ones_own_message_keeps_its_controls_on_the_left() {
     );
 }
 
-/// The strip reveals itself only once its message has held still.
+/// A message that arrives under the pointer while moving gets no strip
+/// until it has held still; a strip already up follows its message.
 ///
 /// A scroll carries message after message under a pointer that has not
 /// moved, and each one under it got a strip for a frame: a flicker of pills
 /// up the pane, and a new foreground area every frame, which is a sizing
-/// pass and a repaint every frame for as long as the scroll lasted. Pinned
-/// here by hovering and reading after **one** step — the frame in which the
-/// message has just been seen where it is — and then after another.
+/// pass and a repaint every frame for as long as the scroll lasted. But a
+/// strip that hid whenever its own message moved cost a sizing pass every
+/// time the layout shifted under it — the composer growing pushed the
+/// transcript, and a test that pressed Edit ran out of frames.
 #[test]
-fn the_strip_waits_for_the_message_to_hold_still() {
+fn a_moving_message_gets_no_strip_until_it_holds_still_and_an_up_strip_follows() {
     // Enough of a transcript to scroll.
     let mut state = a_conversation();
     let base = state.lines[1].clone();
@@ -2082,41 +2084,61 @@ fn the_strip_waits_for_the_message_to_hold_still() {
     hide_column(&mut h);
     h.run();
     h.run();
-    let before = h.get_by_label("filler 38").rect();
-    // A slow scroll: a little each frame, so the same message stays under
-    // the pointer while it moves. (One big wheel would carry a different
-    // message under the pointer every frame, and a strip that is new every
-    // frame never gets past its sizing pass into the tree — so a test with
-    // one big wheel passes with the rule removed. This one does not.)
-    h.get_by_label("filler 38").hover();
-    for i in 0..5 {
+    let wheel = |h: &mut Harness<'static>, points: f32| {
         h.input_mut().events.push(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
-            delta: egui::vec2(0.0, 6.0),
+            delta: egui::vec2(0.0, points),
             modifiers: egui::Modifiers::NONE,
             phase: egui::TouchPhase::Move,
         });
-        h.step();
-        // A wheel arrives one frame and moves the transcript the next, so
-        // the first frame is a still one and may show the strip; every
-        // frame after it is a moving one and must not.
-        if i > 0 {
-            assert!(
-                !text_of(&h).contains("Reply"),
-                "a strip stayed on a message that was moving (frame {i}): {}",
-                text_of(&h)
-            );
-        }
-    }
-    let after = h.get_by_label("filler 38").rect();
-    assert_ne!(
-        before.top(),
-        after.top(),
-        "the transcript did not scroll, so this tests nothing"
-    );
-    // Let the scroll finish, then hover where the message has come to rest.
-    h.run();
+    };
+
+    // The pointer rests on a message; a wheel carries the transcript under
+    // it. On the frame another message arrives under the pointer, moving,
+    // that message is new there and gets no strip.
+    let pointer = h.get_by_label("filler 38").rect().center();
     h.get_by_label("filler 38").hover();
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Reply"),
+        "at rest, the strip: {}",
+        text_of(&h)
+    );
+    let under = |h: &Harness<'static>| -> Option<(String, f32)> {
+        h.get_all_by_label_contains("filler")
+            .map(|n| {
+                let a = n.accesskit_node();
+                let said = a.label().or_else(|| a.value()).unwrap_or_default();
+                (said.to_string(), n.rect())
+            })
+            .find(|(_, r)| r.contains(pointer))
+            .map(|(l, r)| (l, r.top()))
+    };
+    wheel(&mut h, 240.0);
+    let mut arrived = None;
+    let mut last = under(&h);
+    for _ in 0..12 {
+        h.step();
+        let now = under(&h);
+        if let Some((label, top)) = &now
+            && label != "filler 38"
+            && last.as_ref().is_none_or(|(l, t)| l != label || t != top)
+        {
+            arrived = Some(label.clone());
+            break;
+        }
+        last = now;
+    }
+    let arrived = arrived.expect("no other message came under the pointer, so this tests nothing");
+    assert!(
+        !text_of(&h).contains("Reply"),
+        "a strip appeared on {arrived}, which arrived under the pointer moving: {}",
+        text_of(&h)
+    );
+    // Once it has come to rest, the strip.
+    h.run();
+    h.get_by_label(&arrived).hover();
     h.step();
     h.step();
     h.step();
@@ -2124,6 +2146,33 @@ fn the_strip_waits_for_the_message_to_hold_still() {
         text_of(&h).contains("Reply"),
         "and never appeared once it held still: {}",
         text_of(&h)
+    );
+
+    // The strip is up. The message moves under it — a slow scroll, a
+    // little each frame — and the strip goes with it rather than hiding.
+    let reply = h.get_by_label("Reply").rect();
+    let words = h.get_by_label(&arrived).rect();
+    let at = words.center();
+    // Little enough, in all, that the pointer is still on the bubble.
+    for _ in 0..3 {
+        wheel(&mut h, -5.0);
+        h.step();
+    }
+    let moved = h.get_by_label(&arrived).rect();
+    assert!(
+        moved.expand(8.0).contains(at),
+        "the pointer left the message, so this tests nothing: {moved:?} {at:?}"
+    );
+    assert_ne!(
+        words.top(),
+        moved.top(),
+        "the transcript did not move, so this tests nothing"
+    );
+    let followed = h.get_by_label("Reply").rect();
+    assert_ne!(
+        reply.top(),
+        followed.top(),
+        "the strip did not follow its message: {reply:?}"
     );
 }
 
@@ -4661,12 +4710,57 @@ fn reply_preview_dark() {
     h.snapshot("reply_preview_dark");
 }
 
+/// A rewrite in progress, looked at: the "Rewriting" caption over the
+/// quote, "Cancel rewrite" in its corner, and the message's own picture
+/// staged as a tile with its ×.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn rewrite_preview_dark() {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(mine_with_pictures("look at this one", 1));
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    h.get_by_label("look at this one").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    for _ in 0..10 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    hide_column(&mut h);
+    h.snapshot("rewrite_preview_dark");
+}
+
 /// A reply to a picture quotes the picture: the thumbnail sits before the
 /// words in the quote, and takes its room, so the words start further in
 /// than they do in a quote of words alone.
 #[test]
 fn a_reply_to_a_picture_quotes_the_picture() {
-    let quoted = |preview: Option<std::sync::Arc<[u8]>>| {
+    let quoted = |preview: Option<Thumb>| {
         let mut state = the_room();
         let n = state.lines.len();
         state.lines[n - 1].redacted = false;
@@ -4686,7 +4780,10 @@ fn a_reply_to_a_picture_quotes_the_picture() {
         h.get_by_label("Ada: a picture").rect().left()
     };
     let without = words_at(quoted(None));
-    let with = words_at(quoted(Some(a_png())));
+    let with = words_at(quoted(Some(Thumb {
+        id: "pic0".into(),
+        bytes: a_png(),
+    })));
     assert!(
         with > without + 20.0,
         "the thumbnail makes room before the words: {without} -> {with}"
@@ -4705,7 +4802,10 @@ fn reply_to_picture_dark() {
         seq: 1,
         who: "Ada".into(),
         said: "a picture".into(),
-        preview: Some(a_png()),
+        preview: Some(Thumb {
+            id: "pic0".into(),
+            bytes: a_png(),
+        }),
     });
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
@@ -5096,4 +5196,353 @@ fn a_rewrite_does_not_throw_away_what_was_being_typed() {
     h.run();
     assert!(asked.borrow().join(" | ").contains("edit: Some(99)"));
     assert_eq!(composed(&h), "half a th", "sent: the words come back");
+}
+
+// ---------------------------------------------------------------------------
+// A rewrite is a whole post: its files, its mentions, and the way out.
+// ---------------------------------------------------------------------------
+
+/// A message of mine at the foot of the room, with `n` pictures on it.
+fn mine_with_pictures(text: &str, n: usize) -> ChatState {
+    let mut state = with_mine(text, 60);
+    let last = state.lines.len() - 1;
+    state.lines[last].attachments = with_pictures(n).lines.last().unwrap().attachments.clone();
+    state
+}
+
+/// Rewriting a message shows its files as tiles beside any new ones, each
+/// with its ×; the rewrite keeps the ones left and takes the others off.
+/// And a picture's caption can be cleared: files alone are a message.
+#[test]
+fn a_rewrite_shows_the_files_it_carries_and_keeps_only_those_left() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(mine_with_pictures("look", 2), asked.clone());
+    h.run();
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Remove [image 0, 4 KiB]").is_some()
+            && h.query_by_label("Remove [image 1, 4 KiB]").is_some(),
+        "the original's pictures are tiles: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Remove [image 1, 4 KiB]").click();
+    h.run();
+    assert!(h.query_by_label("Remove [image 1, 4 KiB]").is_none());
+
+    // The caption goes too; the picture left is enough to send.
+    composer(&h).focus();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.key_press(egui::Key::Backspace);
+    h.run();
+    assert_eq!(composed(&h), "");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("text: \"\", reply: None, edit: Some(99)"),
+        "a wordless rewrite goes: {sent}"
+    );
+    assert!(
+        sent.contains("keep: [\"pic0\"]"),
+        "the picture left is kept, the one removed is not: {sent}"
+    );
+    assert!(
+        h.query_by_label("Remove [image 0, 4 KiB]").is_none(),
+        "sent: the tiles are gone"
+    );
+}
+
+/// Dropping a rewrite drops the files staged for it, the original's
+/// included; none of them belongs to the next message. And Escape drops a
+/// reply or a rewrite as the × does, while the box has the keyboard.
+#[test]
+fn dropping_a_rewrite_drops_its_files_and_escape_drops_either() {
+    let mut h = harness_with(mine_with_pictures("look", 1), true);
+    h.run();
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    assert!(h.query_by_label("Remove [image 0, 4 KiB]").is_some());
+    h.get_by_label("Cancel rewrite").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Remove [image 0, 4 KiB]").is_none(),
+        "the tile went with the rewrite: {}",
+        text_of(&h)
+    );
+    assert_eq!(composed(&h), "");
+
+    // Escape, from the box.
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    composer(&h).focus();
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Cancel rewrite").is_none(),
+        "Escape drops the rewrite: {}",
+        text_of(&h)
+    );
+    assert_eq!(composed(&h), "", "and its words");
+
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("Reply").click();
+    h.run();
+    composer(&h).focus();
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Cancel reply").is_none(),
+        "Escape drops the reply: {}",
+        text_of(&h)
+    );
+}
+
+/// A mention whose name has changed since the message was written is not
+/// in the words any more, so no rewrite can find it there -- and no rewrite
+/// typed it out, so it goes as it is rather than being dropped.
+#[test]
+fn a_rewrite_carries_a_mention_whose_name_has_changed() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = with_mine("thanks @Countess", 60);
+    let last = state.lines.len() - 1;
+    state.lines[last].mentions = vec![sigil_chat::session::Mentioned {
+        key: them(),
+        label: "Ada".into(),
+    }];
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    h.get_by_label("thanks @Countess").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("!");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("edit: Some(99)"), "{sent}");
+    assert!(
+        sent.contains(&format!("{:?}", them())),
+        "the renamed mention still goes: {sent}"
+    );
+}
+
+/// A reply to a message this reader does not hold -- from before it joined,
+/// or pruned -- is quoted as what it is, "an earlier message", with no
+/// author's colon in front of it, rather than drawn as no reply at all.
+#[test]
+fn a_reply_to_a_message_not_held_is_quoted_as_an_earlier_message() {
+    let mut state = the_room();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "as I said".into();
+    state.lines[n - 1].reply_to = Some(Quoted::unheld(1));
+    let mut h = harness_with(state, true);
+    h.run();
+    h.run();
+    h.get_by_label("an earlier message");
+    assert!(
+        h.query_by_label_contains(": an earlier message").is_none(),
+        "{}",
+        text_of(&h)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pictures: the viewer waits, every file can be saved, staging is careful.
+// ---------------------------------------------------------------------------
+
+/// Next onto a picture whose bytes have not arrived keeps the viewer up on
+/// its thumbnail and says what is happening, instead of shutting it. One
+/// too big to come unasked offers to fetch it; one the exchange would not
+/// give offers another try.
+#[test]
+fn the_viewer_waits_on_a_picture_not_yet_fetched() {
+    let open_on_second = |state: ChatState, asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>| {
+        let mut h = harness_recording_commands(state, asked);
+        h.run();
+        h.run();
+        let tile = h.get_by_label("[image 0, 4 KiB]").rect();
+        press_at(&mut h, tile.center());
+        h.run();
+        h.run();
+        assert!(text_of(&h).contains("1 of 3"), "{}", text_of(&h));
+        h.get_by_label("Next").click();
+        h.run();
+        h.run();
+        h
+    };
+
+    // Still on its way.
+    let mut state = with_pictures(3);
+    let last = state.lines.len() - 1;
+    state.lines[last].attachments[1].bytes = None;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let h = open_on_second(state, asked);
+    let said = text_of(&h);
+    assert!(said.contains("2 of 3"), "the viewer stays up: {said}");
+    assert!(said.contains("fetching the full image"), "{said}");
+    assert!(
+        h.query_by_label("Save…").is_none(),
+        "nothing to save yet: {said}"
+    );
+
+    // Too big to come unasked: ask.
+    let mut state = with_pictures(3);
+    state.lines[last].attachments[1].bytes = None;
+    state.lines[last].attachments[1].held = true;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = open_on_second(state, asked.clone());
+    h.get_by_label("Fetch").click();
+    h.run();
+    assert!(
+        asked
+            .borrow()
+            .iter()
+            .any(|c| c == "Fetch { seq: 5, index: 1 }"),
+        "{:?}",
+        asked.borrow()
+    );
+
+    // Refused by the exchange: try again.
+    let mut state = with_pictures(3);
+    state.lines[last].attachments[1].bytes = None;
+    state.lines[last].attachments[1].missing = true;
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = open_on_second(state, asked.clone());
+    assert!(
+        text_of(&h).contains("could not be fetched"),
+        "{}",
+        text_of(&h)
+    );
+    h.get_by_label("Try again").click();
+    h.run();
+    assert!(
+        asked.borrow().iter().any(|c| c == "Refetch"),
+        "{:?}",
+        asked.borrow()
+    );
+}
+
+/// A message with several files offers each of them to save and to
+/// forward, by name; "Save file" on a gallery of three said nothing about
+/// which, and always took the first.
+#[test]
+fn each_file_on_a_message_can_be_saved_and_forwarded() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(with_pictures(3), asked.clone());
+    h.run();
+    h.run();
+    h.get_by_label("look").hover();
+    h.run();
+    h.run();
+    h.get_by_label("More").click();
+    h.run();
+    let said = text_of(&h);
+    for i in 0..3 {
+        assert!(
+            said.contains(&format!("Forward [image {i}, 4 KiB]")),
+            "{said}"
+        );
+        assert!(said.contains(&format!("Save [image {i}, 4 KiB]")), "{said}");
+    }
+    assert!(!said.contains("Save file"), "{said}");
+    h.get_by_label("Forward [image 1, 4 KiB]").click();
+    h.run();
+    h.run();
+    // The destination list: the other conversation, lowest of the "Ada"s
+    // on screen -- the list is above the composer, under the transcript.
+    h.get_all_by_label("Ada")
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the direct message")
+        .click();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Forward { seq: 5, index: 1,"),
+        "the second file, not the first: {sent}"
+    );
+}
+
+/// Staging is careful: the same file twice is one tile, a path that is not
+/// a file is refused with its name and does not fail the message later, and
+/// "left out" goes away once room is made.
+#[test]
+fn staging_refuses_duplicates_and_non_files_and_forgets_a_stale_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let make = |n: &str| {
+        let p = dir.path().join(n);
+        std::fs::write(&p, b"not really").unwrap();
+        p
+    };
+    let a = make("a.png");
+    let paths = vec![
+        a.clone(),
+        a.clone(),
+        dir.path().join("never-made.png"),
+        make("b.png"),
+        make("c.png"),
+        make("d.png"),
+        make("e.png"),
+    ];
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let next = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut h = harness_that_can_be_told(the_room(), asked.clone(), next, paths);
+    h.run();
+    h.run();
+    assert_eq!(
+        h.get_all_by_label("Remove a.png").count(),
+        1,
+        "once: {}",
+        text_of(&h)
+    );
+    let said = text_of(&h);
+    assert!(said.contains("Not a file: never-made.png"), "{said}");
+    assert!(
+        said.contains("1 left out"),
+        "a, b, c, d fit; e does not: {said}"
+    );
+    assert!(h.query_by_label("Remove e.png").is_none());
+
+    h.get_by_label("Remove d.png").click();
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("left out"),
+        "room was made: {}",
+        text_of(&h)
+    );
 }
