@@ -668,6 +668,10 @@ struct Pane {
     /// because something else had been typed since. Offered under the box
     /// instead, until it is taken or dismissed.
     put_back: Option<(Unsent, String)>,
+    /// What was in the box when a rewrite began, put back when the rewrite
+    /// is sent or abandoned. A message half typed is not the price of
+    /// correcting an older one.
+    stashed: Option<(String, Vec<(String, PubKey)>)>,
     /// Whom the text mentions so far: each label chosen from the list, and
     /// the key it stood for. Read at send time against the text, so a name
     /// deleted from the box is a mention that is not sent.
@@ -776,6 +780,71 @@ struct Pane {
     looked: bool,
 }
 
+impl Pane {
+    /// Begin answering a message. A rewrite in progress is abandoned first:
+    /// the two are not a pair -- a rewrite that also picked up a reply would
+    /// silently re-thread the message -- and only one of them is shown above
+    /// the box, so only one may be armed.
+    fn reply_to(&mut self, seq: u64) {
+        if self.editing.is_some() {
+            self.stop_rewriting();
+        }
+        self.replying = Some(seq);
+    }
+
+    /// Begin rewriting one of our messages: its words and its mentions come
+    /// into the box, so a rewrite is a correction of what is there rather
+    /// than a retyping of it. A reply being written is dropped, for the
+    /// reason `reply_to` gives; words being typed are kept aside and come
+    /// back when the rewrite is done with.
+    fn rewrite(&mut self, line: &Line) {
+        self.replying = None;
+        if self.editing.is_none() && !self.composing.trim().is_empty() {
+            self.stashed = Some((
+                std::mem::take(&mut self.composing),
+                std::mem::take(&mut self.mentions),
+            ));
+        }
+        self.editing = Some(line.seq);
+        self.composing = line.text.clone();
+        // The names it mentions, so a name left in the words keeps its key
+        // and a name taken out loses it -- the rewrite is a whole post, not
+        // a patch to the words.
+        self.mentions = line
+            .mentions
+            .iter()
+            .map(|m| (m.label.clone(), m.key))
+            .collect();
+    }
+
+    /// Abandon a rewrite. The old text must not stay in the box, where the
+    /// next Return would post it again as a new message; what was being
+    /// typed before comes back instead.
+    fn stop_rewriting(&mut self) {
+        self.editing = None;
+        self.composing.clear();
+        self.mentions.clear();
+        self.unstash();
+    }
+
+    /// Whatever was set aside for a rewrite, back in the box.
+    fn unstash(&mut self) {
+        if let Some((text, mentions)) = self.stashed.take() {
+            self.composing = text;
+            self.mentions = mentions;
+        }
+    }
+
+    /// The × above the box: whichever of the two is armed.
+    fn cancel_head(&mut self) {
+        if self.editing.is_some() {
+            self.stop_rewriting();
+        } else {
+            self.replying = None;
+        }
+    }
+}
+
 impl Default for Pane {
     fn default() -> Self {
         Pane {
@@ -788,6 +857,7 @@ impl Default for Pane {
             in_flight: Vec::new(),
             next_token: 1,
             put_back: None,
+            stashed: None,
             mentions: Vec::new(),
             staged: Vec::new(),
             previews: None,
@@ -3718,6 +3788,7 @@ impl ChatApp {
                 direct: !line.mine && !in_direct,
                 mentions: &mentioned,
                 mentions_me: line.me_mentioned,
+                editable: line.mine && session::rewritable(line.at, now),
             };
             // Measured as it is drawn, so the next frame can reserve it.
             DREW.with(|n| n.set(n.get() + 1));
@@ -3837,22 +3908,10 @@ impl ChatApp {
                 self.send_as(Some(at), Cmd::React { target: seq, emoji });
             }
             if did.reply {
-                self.pane(at).replying = Some(seq);
+                self.pane(at).reply_to(seq);
             }
             if did.edit {
-                // The text is loaded into the composer so an edit is a
-                // correction of what is there rather than a retyping of it.
-                let pane = self.pane(at);
-                pane.editing = Some(seq);
-                pane.composing = line.text.clone();
-                // And the names it mentions, so a name left in the words
-                // keeps its key and a name taken out loses it -- the rewrite
-                // is a whole post, not a patch to the words.
-                pane.mentions = line
-                    .mentions
-                    .iter()
-                    .map(|m| (m.label.clone(), m.key))
-                    .collect();
+                self.pane(at).rewrite(line);
             }
             if did.redact {
                 self.send_as(Some(at), Cmd::Redact(seq));
@@ -4204,15 +4263,7 @@ impl ChatApp {
                 self.pane(at).jump = Some((channel, target));
             }
             if head.cancel {
-                let pane = self.pane(at);
-                pane.replying = None;
-                if pane.editing.take().is_some() {
-                    // An abandoned rewrite must not leave the old text in
-                    // the box, where the next Return would post it again
-                    // as a new message.
-                    pane.composing.clear();
-                    pane.mentions.clear();
-                }
+                self.pane(at).cancel_head();
             }
             ui.add_space(tokens::SPACING_XS);
         }
@@ -4380,6 +4431,11 @@ impl ChatApp {
                 // The keys, for every name still in the text.
                 let mentions = mention::mentions_in(&text, &pane.mentions);
                 let labels = std::mem::take(&mut pane.mentions);
+                // A rewrite sent: whatever was being typed before it began
+                // comes back.
+                if editing.is_some() {
+                    pane.unstash();
+                }
                 // And the files, in the order they were staged.
                 let staged = std::mem::take(&mut pane.staged);
                 let files: Vec<std::path::PathBuf> =

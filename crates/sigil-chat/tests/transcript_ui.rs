@@ -4959,3 +4959,141 @@ fn a_refused_message_does_not_overwrite_the_next_one() {
     assert_eq!(composed(&h), "the first");
     assert!(!text_of(&h).contains("Put it back"), "{}", text_of(&h));
 }
+
+// ---------------------------------------------------------------------------
+// Rewrites: offered only when they can land, and one thing at a time.
+// ---------------------------------------------------------------------------
+
+/// The room with one more message of mine at its foot, `ago` seconds old.
+fn with_mine(text: &str, ago: u64) -> ChatState {
+    let mut state = the_room();
+    let mut last = state.lines[1].clone();
+    last.seq = 99;
+    last.at = NOW - ago;
+    last.text = text.into();
+    last.reply_to = None;
+    last.reactions.clear();
+    state.lines.push(last);
+    state
+}
+
+/// Edit is offered on a message of mine for a day (SIP-19's window) and
+/// not after: past it every reader drops the rewrite, ours included, so
+/// the button would do nothing and say nothing.
+#[test]
+fn edit_is_offered_only_inside_the_window() {
+    let more_on = |state: ChatState| {
+        let mut h = harness_with(state, true);
+        h.run();
+        h.get_by_label("still mine").hover();
+        h.run();
+        h.run();
+        h.get_by_label("More").click();
+        h.run();
+        let said = text_of(&h);
+        assert!(said.contains("Delete"), "the menu is open: {said}");
+        said.contains("Edit")
+    };
+    assert!(more_on(with_mine("still mine", 3600)), "an hour old");
+    assert!(
+        !more_on(with_mine("still mine", 25 * 3600)),
+        "a day and an hour old"
+    );
+}
+
+/// Reply and Edit are not a pair: a rewrite that also picked up a reply
+/// would re-thread the message, and only one of them is shown above the
+/// box. Arming one disarms the other.
+#[test]
+fn reply_and_edit_disarm_each_other() {
+    let arm = |first: &str, then: &str| {
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut h = harness_recording_commands(with_mine("still mine", 60), asked.clone());
+        h.run();
+        for what in [first, then] {
+            // The reply is to a message near the foot of the transcript:
+            // once the rewrite's head is above the box, "one" sits under
+            // the header, where a control beside it cannot be pressed.
+            let (on, item) = match what {
+                "reply" => ("the second one, then", "Reply"),
+                _ => ("still mine", "Edit"),
+            };
+            // The lowest of that name: the column previews it too.
+            h.get_all_by_label(on)
+                .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+                .expect("the message")
+                .hover();
+            h.run();
+            h.run();
+            if item == "Edit" {
+                h.get_by_label("More").click();
+                h.run();
+            }
+            h.get_by_label(item).click();
+            h.run();
+            h.run();
+        }
+        let heads = ["Cancel reply", "Cancel rewrite"]
+            .iter()
+            .filter(|l| h.query_by_label(l).is_some())
+            .count();
+        assert_eq!(heads, 1, "one head above the box: {}", text_of(&h));
+        composer(&h).focus();
+        composer(&h).type_text(" now");
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        h.run();
+        asked.borrow().join(" | ")
+    };
+    let sent = arm("reply", "edit");
+    assert!(
+        sent.contains("reply: None, edit: Some(99)"),
+        "Reply then Edit is a rewrite: {sent}"
+    );
+    let sent = arm("edit", "reply");
+    assert!(
+        sent.contains("reply: Some(4), edit: None"),
+        "Edit then Reply is a reply: {sent}"
+    );
+}
+
+/// Pressing Edit over a message half typed keeps it: the rewrite takes the
+/// box, and what was there comes back when the rewrite is sent or dropped.
+#[test]
+fn a_rewrite_does_not_throw_away_what_was_being_typed() {
+    let begin = || {
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut h = harness_recording_commands(with_mine("still mine", 60), asked.clone());
+        h.run();
+        composer(&h).focus();
+        composer(&h).type_text("half a th");
+        h.run();
+        h.get_by_label("still mine").hover();
+        h.run();
+        h.run();
+        h.get_by_label("More").click();
+        h.run();
+        h.get_by_label("Edit").click();
+        h.run();
+        h.run();
+        assert_eq!(composed(&h), "still mine", "the rewrite takes the box");
+        (h, asked)
+    };
+
+    let (mut h, _) = begin();
+    h.get_by_label("Cancel rewrite").click();
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "half a th", "dropped: the words come back");
+
+    let (mut h, asked) = begin();
+    composer(&h).focus();
+    composer(&h).type_text("!");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert!(asked.borrow().join(" | ").contains("edit: Some(99)"));
+    assert_eq!(composed(&h), "half a th", "sent: the words come back");
+}
