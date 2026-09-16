@@ -118,6 +118,11 @@ does not answer, so sigil adds the answer to it at run time; the
 application being brought to the front (Cmd-Tab) does the same, since an
 application in front with its only window hidden is in front of nothing.
 
+An update's Restart ends the process through the shell rather than by
+closing the window -- `AppAction::Quit`, the same as Quit from the tray
+-- because with a tray up a close is a hide, and the new copy waits for
+a process that never ends.
+
 On Linux the tray is GTK, and GTK wants to be initialised and to run its
 own loop on the thread that owns its objects, while eframe's loop is
 winit's on the main thread. So the icon and its menu are built on a

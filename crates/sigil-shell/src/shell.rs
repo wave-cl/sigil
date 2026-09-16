@@ -424,6 +424,11 @@ impl Shell {
                 };
                 egui_ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(kind));
             }
+            // The same as Quit from the tray: the next close is a close.
+            AppAction::Quit => {
+                self.quitting = true;
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             _ => {}
         }
     }
@@ -1115,6 +1120,7 @@ impl Shell {
             // does nothing on any of the three desktops sigil targets.
             Some(AppAction::Present) => self.present(ui.ctx()),
             Some(AppAction::Attention(how)) => self.act(AppAction::Attention(how), ui.ctx()),
+            Some(AppAction::Quit) => self.act(AppAction::Quit, ui.ctx()),
             // Back to the opening screen. Where it came from is remembered
             // here and not there: the screen changes which identity is active
             // as somebody looks through the list, so by the time they cancel

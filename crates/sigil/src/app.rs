@@ -65,6 +65,10 @@ pub enum AppAction {
     /// bounces, the taskbar entry lights. For something worth noticing that
     /// is not worth interrupting for.
     Attention(Attention),
+    /// End the process: close the window and do not come back to the tray.
+    /// Raised by an update that has a new copy waiting to start. A plain
+    /// close would put sigil in the tray, where an update never finishes.
+    Quit,
     /// Go back to the opening screen to choose an identity.
     ///
     /// Not a switch in itself: the choosing happens on that screen, which is

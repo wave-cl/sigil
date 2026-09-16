@@ -6,7 +6,7 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use sigil::app::{App, AppContext, AppResponse};
+use sigil::app::{App, AppAction, AppContext, AppResponse};
 use sigil::theme;
 
 /// A stand-in app, so this tests the *shell* rather than whatever voice and
@@ -1708,6 +1708,81 @@ fn the_desktop_pane_switches_direct_calls_off_and_says_what_they_disclose() {
         .click();
     h.run();
     assert!(accounts.borrow().prefs.direct_calls, "and on again");
+}
+
+/// An app asking to quit -- an update with a new copy waiting -- ends the
+/// process: the window closes and is not put in the tray, which is what a
+/// plain close would do with a tray up. Found when Restart after an update
+/// left the old copy sitting in the tray and the new one waiting for it.
+#[test]
+fn an_app_asking_to_quit_is_not_put_in_the_tray() {
+    struct Leaving {
+        ask: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+    impl App for Leaving {
+        fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {}
+        fn asked(&mut self) -> Vec<AppAction> {
+            if self.ask.replace(false) {
+                vec![AppAction::Quit]
+            } else {
+                Vec::new()
+            }
+        }
+        fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+            ui.label("leaving");
+            AppResponse::default()
+        }
+        fn title(&self) -> &str {
+            "Chat"
+        }
+    }
+    let ask = std::rc::Rc::new(std::cell::Cell::new(false));
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Leaving { ask: ask.clone() })];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    shell.pretend_tray_for_test();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            shell.update_all(&ctx, false);
+            shell.ui(ui);
+        });
+    h.run();
+    let close = |h: &mut Harness<'static>| {
+        h.input_mut()
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("the window")
+            .events
+            .push(egui::ViewportEvent::Close);
+        h.step();
+    };
+    // The control: with a tray up, a close is a hide.
+    close(&mut h);
+    assert!(
+        window_asks(&h).contains(&"CancelClose".to_string()),
+        "a close with a tray up should hide: {:?}",
+        window_asks(&h)
+    );
+    // Asked to quit: the window is closed, and the close that follows is
+    // let through.
+    ask.set(true);
+    h.step();
+    assert!(
+        window_asks(&h).contains(&"Close".to_string()),
+        "quitting closes the window: {:?}",
+        window_asks(&h)
+    );
+    close(&mut h);
+    assert!(
+        !window_asks(&h).contains(&"CancelClose".to_string()),
+        "the close after a quit was put in the tray: {:?}",
+        window_asks(&h)
+    );
 }
 
 /// Do not disturb from the tray's menu flips the setting the roster holds,

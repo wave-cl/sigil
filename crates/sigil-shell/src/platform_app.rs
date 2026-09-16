@@ -11,7 +11,7 @@
 //! block follows the same rule: a copy that cannot update itself says why,
 //! in the place the button would have been.
 
-use sigil::app::{App, AppContext, AppResponse, TabNotifications};
+use sigil::app::{App, AppAction, AppContext, AppResponse, TabNotifications};
 use sigil::{ColorTheme, tokens};
 use sigil_platform::{Capability, Platform, Support};
 use sigil_update::{Install, UpdateState, Updater, Version};
@@ -77,6 +77,8 @@ pub struct PlatformApp {
     announced: Option<Version>,
     /// Why Restart did not work, when it did not.
     restart_trouble: Option<String>,
+    /// What this app asks of the shell, collected each pass.
+    asked: Vec<AppAction>,
 }
 
 impl PlatformApp {
@@ -107,6 +109,7 @@ impl PlatformApp {
             updater,
             announced: None,
             restart_trouble: None,
+            asked: Vec::new(),
         }
     }
 
@@ -124,6 +127,7 @@ impl PlatformApp {
             updater: None,
             announced: None,
             restart_trouble: None,
+            asked: Vec::new(),
         }
     }
 
@@ -210,13 +214,16 @@ impl PlatformApp {
     }
 
     /// Start the new copy once this one is gone, then go.
-    fn restart(&mut self, ctx: &egui::Context) {
+    fn restart(&mut self) {
         let Some(target) = sigil_update::relaunch::target(&self.report.install) else {
             self.restart_trouble = Some("nothing to start".into());
             return;
         };
         match sigil_update::relaunch::spawn_relaunch(std::process::id(), &target) {
-            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            // Through the shell, not straight to the window: a close on its
+            // own puts sigil in the tray, and the new copy waits for a
+            // process that never ends.
+            Ok(()) => self.asked.push(AppAction::Quit),
             Err(e) => self.restart_trouble = Some(e.to_string()),
         }
     }
@@ -237,8 +244,7 @@ impl PlatformApp {
         } else if matches!(state, UpdateState::Ready { .. })
             && ui.add_enabled(live, egui::Button::new("Restart")).clicked()
         {
-            let ctx = ui.ctx().clone();
-            self.restart(&ctx);
+            self.restart();
         }
         if with_check
             && state.can_check()
@@ -262,6 +268,10 @@ impl App for PlatformApp {
         // The check runs whether or not anybody has looked here; the badge
         // on the tab is how they learn to.
         true
+    }
+
+    fn asked(&mut self) -> Vec<AppAction> {
+        std::mem::take(&mut self.asked)
     }
 
     fn update(&mut self, ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
