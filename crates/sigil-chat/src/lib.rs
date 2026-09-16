@@ -3,6 +3,7 @@
 pub mod command;
 pub mod frequent;
 pub mod mention;
+pub mod presence;
 pub mod session;
 
 use session::RING_WINDOW;
@@ -1116,6 +1117,9 @@ pub struct ChatApp {
     /// roster's, so the count on the tab -- asked for without the roster in
     /// hand -- can leave the muted out.
     quiet: sigil::Quiet,
+    /// What the shell last said about anybody being here, so the sessions
+    /// are told only when it changes.
+    away: bool,
     /// The emoji this person sends most, for the picker's own row.
     frequent: frequent::Frequent,
 }
@@ -1156,6 +1160,7 @@ impl ChatApp {
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
+            away: false,
             asked: Vec::new(),
             quiet: sigil::Quiet::default(),
             frequent: frequent::Frequent::load(),
@@ -1529,7 +1534,14 @@ impl ChatApp {
             ctx.connections.lend(me, &named, session.connection());
             self.started.insert(at.clone(), std::time::Instant::now());
             self.starts += 1;
-            self.sessions.insert(at, session);
+            // A session starts believing somebody is here; one started
+            // while nobody is is told so, or it would beat active until
+            // somebody came back.
+            let away = self.away;
+            self.sessions.insert(at.clone(), session);
+            if away {
+                self.send_as(Some(&at), Cmd::Away(true));
+            }
         }
     }
 
@@ -1625,6 +1637,16 @@ impl App for ChatApp {
         self.reconcile(ctx, egui_ctx);
         if self.quiet != ctx.accounts.quiet {
             self.quiet = ctx.accounts.quiet.clone();
+        }
+        // Nobody here, or somebody again: every session says so to its
+        // exchange at once, since the beat that would say it otherwise is
+        // up to half a minute off.
+        if self.away != ctx.away {
+            self.away = ctx.away;
+            let ats: Vec<At> = self.sessions.keys().cloned().collect();
+            for at in ats {
+                self.send_as(Some(&at), Cmd::Away(ctx.away));
+            }
         }
         self.announce_rings(ctx);
         self.announce_mentions(ctx);
@@ -2038,7 +2060,7 @@ impl ChatApp {
         ui.horizontal(|ui| {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.me_ui(at, state, ui, theme);
+                self.me_ui(at, state, ctx.away, ui, theme);
                 if let Some(c) = open {
                     // A rule between what is yours and what is the
                     // conversation's.
@@ -2203,6 +2225,12 @@ impl ChatApp {
         theme: &ColorTheme,
     ) {
         let dm = open.peer.is_some();
+        // Whether the other person is there, before their name: the one
+        // fact about a direct message that changes while it is open.
+        if let Some(peer) = open.peer {
+            let (seen, hover) = self.presence_of(state, &peer);
+            seen.dot(ui, &hover);
+        }
         let may_rename = state.i_am_admin && !dm;
         let named = ui.scope_builder(
             egui::UiBuilder::new().sense(if may_rename {
@@ -2242,6 +2270,27 @@ impl ChatApp {
                     .truncate(),
             );
         }
+    }
+
+    /// Whether somebody is there, as the interface draws it, with the words
+    /// a pointer learns. Nothing known is offline with nothing to say.
+    fn presence_of(&self, state: &ChatState, who: &PubKey) -> (sigil_ui::Presence, String) {
+        let known = state.presence.get(who).copied().unwrap_or_default();
+        let seen = match known.seen {
+            presence::Seen::Active => sigil_ui::Presence::Active,
+            presence::Seen::Away => sigil_ui::Presence::Away,
+            presence::Seen::Offline => sigil_ui::Presence::Offline,
+        };
+        // Both on the exchange's clock: `last_seen` as recorded, `read_at`
+        // as of the read -- which is within a tick of now, so "last seen
+        // Thu" is said against the right day.
+        let hover = sigil_ui::presence_hover(
+            seen,
+            known.last_seen,
+            known.read_at.max(known.last_seen),
+            &who.to_string(),
+        );
+        (seen, hover)
     }
 
     /// The added exchange name to drop, when this session lost the store lock
@@ -2284,7 +2333,14 @@ impl ChatApp {
     /// is the part that is not negotiable: a name is an assertion attested by
     /// nobody (SIP-21), and the key is what actually identifies you to
     /// somebody who wants to write to you.
-    fn me_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn me_ui(
+        &mut self,
+        at: &At,
+        state: &ChatState,
+        away: bool,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         let me = at.0;
         let key = me.to_string();
 
@@ -2292,30 +2348,33 @@ impl ChatApp {
         // first, then the mark.
         let chevron = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, "Your identity")
             .on_hover_text("Your key, your exchanges, and the other identities you hold");
-        // The mark with the link's state on its corner. **The word appears
-        // when it is worth reading.** A link that is up is the ordinary case
-        // and a filled dot says it. A link that is not is the case where
-        // nothing arriving looks exactly like nobody writing, and no colour
-        // can tell somebody that -- so that one keeps its word, and its way
-        // back. Either way the word is on the mark's hover and in the
-        // accessibility tree, where a colour reaches nobody at all.
-        let colour = match state.link {
-            LinkState::Up => theme.link_up,
-            // Not up, and not yet an outage either.
-            LinkState::Connecting | LinkState::Retrying => theme.link_retrying,
-            LinkState::Gone => theme.link_gone,
-        };
+        // The mark with your presence on its corner: what everybody else
+        // reads of you -- active, or away when nobody has touched this
+        // machine for a while -- and, with the link down, the link's own
+        // word. **The word appears when it is worth reading.** A link that
+        // is up is the ordinary case and the dot says it. A link that is
+        // not is the case where nothing arriving looks exactly like nobody
+        // writing, and no colour can tell somebody that -- so that one
+        // keeps its word, and its way back. Either way the word is on the
+        // mark's hover and in the accessibility tree, where a colour
+        // reaches nobody at all.
         let up = state.link == LinkState::Up;
-        sigil_ui::presence(
-            ui,
-            &key,
-            None,
-            tokens::AVATAR_MD,
-            up,
-            colour,
-            state.link.word(),
-        );
+        let (seen, word) = match (up, away) {
+            (true, false) => (sigil_ui::Presence::Active, "active"),
+            (true, true) => (sigil_ui::Presence::Away, "away"),
+            (false, _) => (sigil_ui::Presence::Offline, state.link.word()),
+        };
+        let hover = if up {
+            format!("{word} — what others see of you\n{key}")
+        } else {
+            format!("{word}\n{key}")
+        };
+        sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
         if !up {
+            let colour = match state.link {
+                LinkState::Gone => theme.link_gone,
+                _ => theme.link_retrying,
+            };
             ui.add_space(tokens::SPACING_XS);
             if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Refresh, "Reconnect").clicked() {
                 self.send_as(Some(at), Cmd::Reconnect);
@@ -3322,7 +3381,7 @@ impl ChatApp {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if identity {
-                    self.me_ui(at, state, ui, theme);
+                    self.me_ui(at, state, ctx.away, ui, theme);
                     ui.add_space(tokens::SPACING_XS);
                 }
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
@@ -3470,6 +3529,7 @@ impl ChatApp {
                         typing: convo.typing,
                         mentioned: convo.mentioned > 0,
                         muted: ctx.accounts.quiet.is_muted(&at.1, &convo.channel),
+                        presence: convo.peer.map(|peer| self.presence_of(state, &peer)),
                     };
                     if sigil_ui::conversation_row(ui, &row, selected).clicked() {
                         self.send_as(Some(at), Cmd::Show(convo.channel));
@@ -5330,7 +5390,27 @@ impl ChatApp {
                         .cloned()
                         .unwrap_or_default();
                     ui.horizontal(|ui| {
-                        sigil_ui::identicon(ui, &key, tokens::AVATAR_SM);
+                        // Whether they are there, on the mark: ours from
+                        // this machine, everybody else's from their beacon.
+                        let (seen, hover) = if member.account == me {
+                            let seen = if ctx.away {
+                                sigil_ui::Presence::Away
+                            } else {
+                                sigil_ui::Presence::Active
+                            };
+                            (seen, format!("{} — you\n{key}", seen.word()))
+                        } else {
+                            self.presence_of(&state, &member.account)
+                        };
+                        sigil_ui::presence(
+                            ui,
+                            &key,
+                            None,
+                            tokens::AVATAR_SM,
+                            seen,
+                            seen.word(),
+                            &hover,
+                        );
                         ui.add_space(tokens::SPACING_SM);
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
@@ -6567,6 +6647,7 @@ mod mention_notice_tests {
             navigator: nav,
             accounts,
             unfocused,
+            away: false,
             notify,
             connections,
         }

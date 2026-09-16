@@ -42,6 +42,7 @@ fn harness(account: Account, dark: bool) -> Harness<'static> {
                         navigator: &mut nav,
                         accounts: &mut accounts,
                         unfocused: false,
+                        away: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };

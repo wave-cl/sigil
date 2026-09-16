@@ -74,6 +74,7 @@ fn build(account: Account, state: Option<ChatState>) -> Harness<'static> {
                                 navigator: &mut nav,
                                 accounts: &mut accounts,
                                 unfocused: false,
+                                away: false,
                                 notify: &sigil::Silent,
                                 connections: &Default::default(),
                             };
@@ -93,6 +94,7 @@ fn build(account: Account, state: Option<ChatState>) -> Harness<'static> {
                         navigator: &mut nav,
                         accounts: &mut accounts,
                         unfocused: false,
+                        away: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };
@@ -177,8 +179,12 @@ fn the_connection_state_is_said_in_words() {
     let mut h = harness(unlocked(dir.path()));
     h.run();
     let said = text_of(&h);
+    // A link that is up is said as presence -- what everybody else reads
+    // of you -- and one that is not is said as the link.
     assert!(
-        said.contains("connected") || said.contains("reconnecting") || said.contains("offline"),
+        ["active", "away", "connecting", "reconnecting", "offline"]
+            .iter()
+            .any(|w| said.contains(w)),
         "the link is named, not merely coloured: {said}"
     );
 }
@@ -404,6 +410,7 @@ fn a_default_that_resolves_to_nothing_is_not_listed() {
                     navigator: &mut nav,
                     accounts: &mut accounts,
                     unfocused: false,
+                    away: false,
                     notify: &sigil::Silent,
                     connections: &Default::default(),
                 };

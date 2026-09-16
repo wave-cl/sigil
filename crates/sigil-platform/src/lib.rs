@@ -17,6 +17,7 @@ pub mod autostart;
 pub mod badge;
 pub mod deeplink;
 pub mod hotkey;
+pub mod idle;
 pub mod instance;
 pub mod mark;
 pub mod notify;

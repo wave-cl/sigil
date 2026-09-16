@@ -168,12 +168,8 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         ),
     ),
     // ---- other services --------------------------------------------------
-    (
-        "POST",
-        "/beacon/beat",
-        NotYet("SIP-4 presence, which sigil does not publish"),
-    ),
-    ("POST", "/beacon/read", NotYet("SIP-4 presence")),
+    ("POST", "/beacon/beat", Chat),
+    ("POST", "/beacon/read", Chat),
     (
         "POST",
         "/rendezvous/introduce",
@@ -342,7 +338,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 58,
+        reached, 60,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

@@ -26,7 +26,7 @@ pub use video::{Standing, Video, VideoAction, video};
 pub use working::working;
 // Re-exported from the host crate, where the `App` trait names one -- see
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.
-pub use identicon::{avatar, identicon, identicon_of, presence};
+pub use identicon::{Presence, avatar, identicon, identicon_of, presence, presence_hover};
 
 /// Teach egui how to decode an image.
 ///

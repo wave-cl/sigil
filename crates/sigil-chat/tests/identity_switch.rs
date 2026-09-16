@@ -40,6 +40,7 @@ fn pass_lending(
         navigator: &mut nav,
         accounts,
         unfocused: true,
+        away: false,
         notify: &Silent,
         connections,
     };

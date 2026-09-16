@@ -35,6 +35,7 @@ fn harness(state: AdminState) -> Harness<'static> {
                         navigator: &mut nav,
                         accounts: &mut accounts,
                         unfocused: false,
+                        away: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };
@@ -199,6 +200,7 @@ fn the_console_follows_the_exchange_chosen_in_the_title_strip() {
             navigator: &mut nav,
             accounts,
             unfocused: false,
+            away: false,
             notify: &sigil::Silent,
             connections: &connections,
         };
@@ -248,6 +250,7 @@ fn the_title_strip_offers_the_exchanges_to_administer() {
                     navigator: &mut nav,
                     accounts: &mut accounts,
                     unfocused: false,
+                    away: false,
                     notify: &sigil::Silent,
                     connections: &Default::default(),
                 };

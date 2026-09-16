@@ -119,6 +119,12 @@ pub struct AppContext<'a> {
     /// have brought back a microphone that outlived its call. It is
     /// `!viewport().focused`, or the shell having hidden the window.
     pub unfocused: bool,
+    /// True while nobody has touched this machine for a while -- five
+    /// minutes, decided by the shell from the desktop's own idle time
+    /// where it has one and from sigil's own input where it does not.
+    /// What an app tells the exchange as *away*: connected, and nobody
+    /// there. Not a reason to do less; a reason to say so.
+    pub away: bool,
     /// Somewhere to say something out loud when sigil is not in front.
     ///
     /// Returns whether it went out, and a caller with nothing else to fall back
@@ -421,6 +427,7 @@ mod tests {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &Silent,
                 connections: &Default::default(),
             };

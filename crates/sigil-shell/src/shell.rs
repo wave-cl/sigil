@@ -24,6 +24,9 @@ use sigil::{ColorTheme, NavStack, tokens};
 /// of nothing beside a column of 34px icons.
 const RAIL_WIDTH: f32 = 52.0;
 
+/// How long without a keypress or a click before this machine is *away*.
+pub const AWAY_AFTER: f64 = 300.0;
+
 /// The opening screen's card. Wide enough for a passphrase somebody actually
 /// chose, and narrow enough to read as one thing to do.
 const CARD_WIDTH: f32 = 420.0;
@@ -169,6 +172,15 @@ pub struct Shell {
     /// there is a tray to come back from, cleared when the window is
     /// brought back; while set, every app is told it is not in front.
     hidden: bool,
+    /// When sigil's own window last saw a keypress or the pointer move, on
+    /// egui's clock. What decides *away* where the desktop cannot say.
+    last_input: f64,
+    /// Nobody at this machine for [`AWAY_AFTER`]. Told to every app each
+    /// pass; the chat app tells the exchange.
+    away: bool,
+    /// Whether to ask the desktop how long since the last input. Off in
+    /// tests, which run on a desktop somebody is typing at.
+    ask_desktop_idle: bool,
     /// A tray in all but fact, for tests of closing to it.
     hideable: bool,
     /// The opening screen's state: which identity is chosen, and what has been
@@ -262,6 +274,9 @@ impl Shell {
             shown_quiet: false,
             quitting: false,
             hidden: false,
+            last_input: 0.0,
+            away: false,
+            ask_desktop_idle: true,
             hideable: false,
             welcome: Welcome::default(),
             remember: true,
@@ -338,6 +353,7 @@ impl Shell {
         }
         // Closed to the tray is not in front either.
         let unfocused = unfocused || self.hidden;
+        self.notice_input(egui_ctx, unfocused);
         let mut asked = Vec::new();
         for (i, app) in self.apps.iter_mut().enumerate() {
             if !self.opened[i] {
@@ -347,6 +363,7 @@ impl Shell {
                 navigator: &mut self.navigator,
                 accounts: &mut self.accounts,
                 unfocused,
+                away: self.away,
                 notify: self.platform.as_ref(),
                 connections: &self.connections,
             };
@@ -361,6 +378,76 @@ impl Shell {
         self.remember_quiet();
         self.tray_actions(egui_ctx);
         self.apply_nav();
+    }
+
+    /// Whether anybody is here, decided once for every app.
+    ///
+    /// **The desktop's word where it has one.** macOS says how long since
+    /// the last keypress or click anywhere; somebody typing in another
+    /// program is not away, and only the desktop knows that. Where it
+    /// cannot say, sigil's own window is the witness: a pass that carried
+    /// input is somebody here, and a window out of front with no input for
+    /// as long is somebody gone.
+    ///
+    /// The flip to away happens on a pass, and nothing prompts a pass while
+    /// nobody is here -- so one is asked for when the time comes, once,
+    /// rather than the window painting itself every second to find out.
+    fn notice_input(&mut self, egui_ctx: &egui::Context, unfocused: bool) {
+        let now = egui_ctx.input(|i| i.time);
+        let touched = egui_ctx.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key { .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::PointerButton { .. }
+                        | egui::Event::PointerMoved(_)
+                        | egui::Event::MouseWheel { .. }
+                        | egui::Event::Touch { .. }
+                )
+            })
+        });
+        if touched {
+            self.last_input = now;
+        }
+        let desktop = if self.ask_desktop_idle {
+            sigil_platform::idle::seconds_since_input()
+        } else {
+            None
+        };
+        let idle = match desktop {
+            Some(secs) => secs,
+            // No desktop to ask: what this window saw. In front with the
+            // pointer resting is not away; out of front for as long is.
+            None => {
+                if unfocused || now - self.last_input >= AWAY_AFTER {
+                    now - self.last_input
+                } else {
+                    0.0
+                }
+            }
+        };
+        let away = idle >= AWAY_AFTER;
+        if away != self.away {
+            self.away = away;
+        }
+        if !away {
+            egui_ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                (AWAY_AFTER - idle).max(1.0),
+            ));
+        }
+    }
+
+    /// Whether nobody has been here for [`AWAY_AFTER`].
+    pub fn away(&self) -> bool {
+        self.away
+    }
+
+    /// Decide away from this window's own input alone, as a desktop that
+    /// cannot say would have it -- for a test, which runs on one somebody
+    /// is typing at.
+    pub fn watch_own_input_only_for_test(&mut self) {
+        self.ask_desktop_idle = false;
     }
 
     /// What was done at the tray since last pass: the window brought up,
@@ -396,6 +483,7 @@ impl Shell {
                     navigator: &mut self.navigator,
                     accounts: &mut self.accounts,
                     unfocused: false,
+                    away: self.away,
                     notify: self.platform.as_ref(),
                     connections: &self.connections,
                 };
@@ -495,6 +583,7 @@ impl Shell {
                 navigator: &mut self.navigator,
                 accounts: &mut self.accounts,
                 unfocused: true,
+                away: self.away,
                 notify: self.platform.as_ref(),
                 connections: &self.connections,
             };
@@ -596,6 +685,7 @@ impl Shell {
                                 navigator: &mut self.navigator,
                                 accounts: &mut self.accounts,
                                 unfocused: false,
+                                away: self.away,
                                 notify: self.platform.as_ref(),
                                 connections: &self.connections,
                             };
@@ -628,6 +718,7 @@ impl Shell {
                             navigator: &mut self.navigator,
                             accounts: &mut self.accounts,
                             unfocused: false,
+                            away: self.away,
                             notify: self.platform.as_ref(),
                             connections: &self.connections,
                         };
@@ -1101,6 +1192,7 @@ impl Shell {
             navigator: &mut self.navigator,
             accounts: &mut self.accounts,
             unfocused: false,
+            away: self.away,
             // The real notifier, not `Silent`. It used to be `Silent` here, so
             // an app could only ever say something out loud from `update` --
             // and a view that had something worth announcing found a notifier
@@ -1161,6 +1253,7 @@ impl Shell {
                         navigator: &mut self.navigator,
                         accounts: &mut self.accounts,
                         unfocused: false,
+                        away: self.away,
                         notify: &sigil::Silent,
                         connections: &self.connections,
                     };

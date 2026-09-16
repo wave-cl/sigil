@@ -46,6 +46,9 @@ pub struct ConversationRow<'a> {
     pub mentioned: bool,
     /// Nothing in it is said out loud, and its count is not on the icon.
     pub muted: bool,
+    /// Whether the other person is there, for a direct message, with the
+    /// words a pointer learns; `None` for a group, which is many people.
+    pub presence: Option<(crate::Presence, String)>,
 }
 
 /// Draw one row. Returns its response, so the caller decides what a click means.
@@ -137,7 +140,22 @@ fn row_body(
                 // Set here, the horizontal layout is that tall and its `Center`
                 // alignment has the whole row to centre in.
                 ui.set_min_height(height);
-                crate::identicon(ui, row.id, tokens::AVATAR_MD);
+                match &row.presence {
+                    Some((seen, hover)) => {
+                        crate::presence(
+                            ui,
+                            row.id,
+                            None,
+                            tokens::AVATAR_MD,
+                            *seen,
+                            seen.word(),
+                            hover,
+                        );
+                    }
+                    None => {
+                        crate::identicon(ui, row.id, tokens::AVATAR_MD);
+                    }
+                }
                 ui.add_space(tokens::SPACING_SM);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {

@@ -222,6 +222,7 @@ fn a_conversation() -> ChatState {
         topic: String::new(),
         ringing: Vec::new(),
         arrivals: Vec::new(),
+        presence: std::collections::HashMap::new(),
         devices: Vec::new(),
         linked: None,
         credential: None,
@@ -270,6 +271,7 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -295,6 +297,7 @@ fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'s
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -327,6 +330,7 @@ fn harness_watching_routes(
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -373,6 +377,7 @@ fn harness_watching_asks(
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -420,6 +425,7 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
                                 navigator: &mut nav,
                                 accounts: &mut accounts,
                                 unfocused: false,
+                                away: false,
                                 notify: &sigil::Silent,
                                 connections: &Default::default(),
                             };
@@ -432,6 +438,7 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -473,6 +480,7 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
                         navigator: &mut nav,
                         accounts: &mut accounts,
                         unfocused: false,
+                        away: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };
@@ -1165,6 +1173,7 @@ fn harness_recording_commands(
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -1265,6 +1274,7 @@ fn harness_of(state: std::rc::Rc<std::cell::RefCell<ChatState>>) -> Harness<'sta
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -1371,11 +1381,10 @@ fn the_conversation_has_one_bar() {
     // says "Ada" -- as do her bubbles, some of them scrolled above the
     // window, and her row in the list. The topmost node on screen with
     // each label is the bar's.
-    let rects: Vec<(&str, egui::Rect)> =
-        ["Ada", "Settings", "Members", "Your identity", "connected"]
-            .into_iter()
-            .map(|l| (l, topmost(&h, l)))
-            .collect();
+    let rects: Vec<(&str, egui::Rect)> = ["Ada", "Settings", "Members", "Your identity", "active"]
+        .into_iter()
+        .map(|l| (l, topmost(&h, l)))
+        .collect();
     let top = rects.iter().map(|(_, r)| r.top()).fold(f32::MAX, f32::min);
     let bottom = rects
         .iter()
@@ -1434,16 +1443,16 @@ fn with_nothing_open_in_a_narrow_window_the_identity_is_in_the_chats_row() {
     );
 }
 
-/// The link's state is on the avatar: a small disc on its corner, and the
-/// word on the same node -- filled and "connected" when up, hollow and
-/// "offline" when not.
+/// Your presence is on your avatar: a small disc on its corner, and the
+/// word on the same node -- filled green and "active" with the link up
+/// and somebody here, hollow and the link's own word when it is down.
 #[test]
 fn the_connection_is_a_dot_on_the_avatar() {
     let colours = theme::dark();
     for (link, word, filled, colour) in [
         (
             sigil_chat::session::LinkState::Up,
-            "connected",
+            "active",
             true,
             colours.link_up,
         ),
@@ -1451,7 +1460,13 @@ fn the_connection_is_a_dot_on_the_avatar() {
             sigil_chat::session::LinkState::Gone,
             "offline",
             false,
-            colours.link_gone,
+            colours.text_muted,
+        ),
+        (
+            sigil_chat::session::LinkState::Retrying,
+            "reconnecting…",
+            false,
+            colours.link_retrying,
         ),
     ] {
         let mut state = a_conversation();
@@ -1573,9 +1588,38 @@ fn transcript_dark() {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn list_dark() {
-    let mut h = harness(true);
+    // Ada is away, so the row's mark carries the amber dot.
+    let mut state = a_conversation();
+    state.presence.insert(
+        them(),
+        sigil_chat::presence::Presence {
+            seen: sigil_chat::presence::Seen::Away,
+            last_seen: NOW - 600,
+            read_at: NOW,
+        },
+    );
+    let mut h = harness_with(state, true);
     h.run();
     h.snapshot("list_dark");
+}
+
+/// The Members view: each mark with its presence -- ours active, Ada
+/// away -- and the whole keys under the names.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn members_dark() {
+    let mut state = a_conversation();
+    state.presence.insert(
+        them(),
+        sigil_chat::presence::Presence {
+            seen: sigil_chat::presence::Seen::Away,
+            last_seen: NOW - 600,
+            read_at: NOW,
+        },
+    );
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    h.snapshot("members_dark");
 }
 
 /// The column while a search stands: the count, and the results in place
@@ -4801,6 +4845,7 @@ fn staged_files_are_shown_removable_and_sent_with_the_words() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -4882,6 +4927,7 @@ fn files_alone_are_a_message() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -4936,6 +4982,7 @@ fn composer_files_dark() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -5077,6 +5124,7 @@ fn gallery_dark() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -5112,6 +5160,7 @@ fn reply_preview_dark() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -5155,6 +5204,7 @@ fn rewrite_preview_dark() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -5208,6 +5258,7 @@ fn reactions_dark() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -5289,6 +5340,7 @@ fn reply_to_picture_dark() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -5405,6 +5457,7 @@ fn harness_that_can_be_told(
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -6245,4 +6298,131 @@ fn a_command_takes_its_argument_and_a_mistake_is_said() {
         sent.contains("Post(") && sent.contains("text: \"/etc/hosts is gone\""),
         "{sent}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Presence: whether the people you talk to are there.
+// ---------------------------------------------------------------------------
+
+fn seen(seen: sigil_chat::presence::Seen, last_seen: u64) -> sigil_chat::presence::Presence {
+    sigil_chat::presence::Presence {
+        seen,
+        last_seen,
+        read_at: NOW,
+    }
+}
+
+/// The other person's presence is on their mark in the list -- the dot in
+/// their state's colour, filled or hollow, and the word on the node -- and
+/// nothing is on a group's, which is many people.
+#[test]
+fn a_direct_messages_row_carries_the_other_persons_presence() {
+    use sigil_chat::presence::Seen;
+    let colours = theme::dark();
+    for (state_of_them, word, filled, colour) in [
+        (Seen::Active, "active", true, colours.link_up),
+        (Seen::Away, "away", true, colours.warning),
+        (Seen::Offline, "offline", false, colours.text_muted),
+    ] {
+        let mut state = a_conversation();
+        // Nothing open, so the only mark on screen with the word is the row's.
+        state.open = None;
+        state.lines = Vec::new();
+        state
+            .presence
+            .insert(them(), seen(state_of_them, NOW - 120));
+        let mut h = harness_with(state, true);
+        h.run();
+        // The row's mark is in the column, at the left; ours is on the bar
+        // at the right, and says "active" whatever Ada is.
+        let mark = h
+            .query_all_by_label(word)
+            .map(|n| n.rect())
+            .find(|r| (r.width() - tokens::AVATAR_MD).abs() < 1.0 && r.left() < 300.0)
+            .unwrap_or_else(|| panic!("{word}: not on the row's mark: {}", text_of(&h)));
+        let corner = mark.right_bottom() - egui::vec2(tokens::SPACING_XS, tokens::SPACING_XS);
+        assert_eq!(
+            small_disc_at(&h, corner, colour),
+            Some(filled),
+            "{word}: no disc in its colour on the row's mark"
+        );
+    }
+    // The group's row has no dot -- a group is many people -- and a person
+    // never read about is offline with nothing to say about when.
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines = Vec::new();
+    let mut h = harness_with(state, true);
+    h.run();
+    let in_column: Vec<egui::Rect> = h
+        .query_all_by_label("offline")
+        .chain(h.query_all_by_label("away"))
+        .chain(h.query_all_by_label("active"))
+        .map(|n| n.rect())
+        .filter(|r| r.left() < 300.0)
+        .collect();
+    assert_eq!(
+        in_column.len(),
+        1,
+        "one direct message, one dot: {}",
+        text_of(&h)
+    );
+}
+
+/// In the Members view each member's mark carries their presence, ours from
+/// this machine and everybody else's from their beacon, with when they
+/// were last there for a pointer.
+#[test]
+fn members_carry_their_presence_and_when_they_were_last_there() {
+    let mut state = a_conversation();
+    state
+        .presence
+        .insert(them(), seen(sigil_chat::presence::Seen::Away, NOW - 3 * 60));
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("away"), "Ada is away: {said}");
+    assert!(said.contains("active"), "we are active: {said}");
+    // And when: on the mark's hover.
+    let mark = h
+        .get_all_by_label("away")
+        .find(|n| (n.rect().width() - tokens::AVATAR_SM).abs() < 1.0)
+        .expect("Ada's mark");
+    mark.hover();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("last active"),
+        "the hover does not say when: {said}"
+    );
+}
+
+/// In a direct message the bar carries the other person's presence as a
+/// dot before their name; a group's bar has none.
+#[test]
+fn the_bar_of_a_direct_message_says_whether_they_are_there() {
+    let mut state = a_conversation();
+    state
+        .presence
+        .insert(them(), seen(sigil_chat::presence::Seen::Away, NOW - 60));
+    let mut h = harness_with(state, true);
+    hide_column(&mut h);
+    h.run();
+    let name = topmost(&h, "Ada");
+    let dot = topmost(&h, "away");
+    assert!(
+        (dot.center().y - name.center().y).abs() < tokens::SPACING_SM && dot.right() <= name.left(),
+        "the dot is not before the name on the bar: dot {dot:?}, name {name:?}"
+    );
+
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let mut h = harness_with(state, true);
+    hide_column(&mut h);
+    h.run();
+    let words = h
+        .query_all_by_label("offline")
+        .chain(h.query_all_by_label("away"))
+        .count();
+    assert_eq!(words, 0, "a group's bar carries no presence");
 }

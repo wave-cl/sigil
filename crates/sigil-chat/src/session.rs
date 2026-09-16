@@ -594,6 +594,10 @@ pub struct ChatState {
     pub note: Option<Note>,
     /// Who is in the open conversation.
     pub members: Vec<Member>,
+    /// Whether the people you talk to are there, by SIP-4 beacon: the
+    /// other party of every direct message and the members of the open
+    /// conversation. Absent is not known.
+    pub presence: HashMap<PubKey, crate::presence::Presence>,
     /// Whether we may rename, invite, remove and rotate here.
     pub i_am_admin: bool,
     /// The open conversation's topic, when it has one.
@@ -1256,6 +1260,10 @@ pub enum Cmd {
     /// Search what this client holds. **Local only** — the exchange cannot
     /// read a sealed entry, so it could not search one if it wanted to.
     Search(String),
+    /// Nobody is at this machine, or somebody is again. Beaten to the
+    /// exchange at once (SIP-4's away bit), so the people you talk to see
+    /// it without waiting for the next beat.
+    Away(bool),
     /// Open a conversation with one of its messages in the window: what a
     /// search result does. [`Show`](Cmd::Show) opens on the last page and a
     /// hit can be anywhere before it; this widens the window so the message
@@ -1834,6 +1842,19 @@ async fn run(
                     }
                 }
                 learn_names(&mut chat, &mut desk).await;
+                // SIP-4: say we are here, and ask about the people we
+                // talk to. Both on the tick and neither in the way of it:
+                // a beat is one request every half minute, and the asking
+                // is spread a few people at a time.
+                if chat.link() == Link::Up {
+                    if desk
+                        .beat_at
+                        .is_none_or(|at| at.elapsed().as_secs() >= u64::from(crate::presence::BEAT_SECS))
+                    {
+                        beat(&mut chat, &mut desk).await;
+                    }
+                    moved |= read_presence(&mut chat, &mut desk, me).await;
+                }
                 // **The conversation before the pictures in it.** A refresh is
                 // what somebody is waiting for; a blob is what they will be
                 // looking at in a moment. Measured the other way round, one
@@ -1987,6 +2008,16 @@ struct Desk {
     /// Whether the exchange has ever answered about the list, this session.
     /// What is on screen before that came off this machine's own disc.
     synced: bool,
+    /// SIP-4: when this client last beat, whether it said away, and
+    /// whether the exchange took the away bit at all -- one from before
+    /// it refuses the bit, and is beaten to plainly from then on.
+    beat_at: Option<std::time::Instant>,
+    away: bool,
+    beats_plainly: bool,
+    /// When each person was last asked about, so the asking is spread.
+    asked_at: HashMap<PubKey, std::time::Instant>,
+    /// What the asking found.
+    presence: HashMap<PubKey, crate::presence::Presence>,
     /// Accounts whose profile an event says has moved on.
     restale: HashSet<PubKey>,
     /// Calls somebody has said they are taking, by (channel, invitation).
@@ -2044,6 +2075,11 @@ impl Default for Desk {
             restructure: true,
             synced: false,
             synced_at: std::time::Instant::now(),
+            beat_at: None,
+            away: false,
+            beats_plainly: false,
+            asked_at: HashMap::new(),
+            presence: HashMap::new(),
         }
     }
 }
@@ -3352,6 +3388,76 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
 }
 
 /// Build what the interface draws from what the task holds.
+/// Beat (SIP-4): this identity is here, or here and away. On the
+/// session's own connection, which carries the identity (SIP-3), so the
+/// exchange records it against us without anything signed.
+///
+/// An exchange from before the away bit refuses a beat that carries it
+/// as reserved; that one is beaten to again without it and from then on
+/// plainly, and the people reading it see active or absent only.
+async fn beat(chat: &mut Chat, desk: &mut Desk) {
+    let Some(mut client) = chat.connection() else {
+        return;
+    };
+    let away = desk.away && !desk.beats_plainly;
+    let beat = sqex_proto::beacon::Beat {
+        interval_secs: crate::presence::BEAT_SECS,
+        withhold: false,
+        away,
+    };
+    desk.beat_at = Some(std::time::Instant::now());
+    match client.post("/beacon/beat", beat.encode()).await {
+        Ok((400, _)) if away => {
+            desk.beats_plainly = true;
+            let plain = sqex_proto::beacon::Beat {
+                away: false,
+                ..beat
+            };
+            let _ = client.post("/beacon/beat", plain.encode()).await;
+        }
+        _ => {}
+    }
+}
+
+/// Ask about a few of the people we talk to (SIP-4 read), and remember
+/// what the exchange said. Returns whether anything changed.
+async fn read_presence(chat: &mut Chat, desk: &mut Desk, me: PubKey) -> bool {
+    let dm_peers = desk.channels.values().filter_map(|k| k.peer);
+    let open_members = desk
+        .open
+        .and_then(|c| desk.channels.get(&c))
+        .map(|k| k.members.iter().map(|m| m.account).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let wanted = crate::presence::wanted(Some(me), dm_peers, open_members);
+    let now = std::time::Instant::now();
+    let due = crate::presence::due(&wanted, &desk.asked_at, now);
+    if due.is_empty() {
+        return false;
+    }
+    let Some(mut client) = chat.connection() else {
+        return false;
+    };
+    let mut moved = false;
+    for key in due {
+        desk.asked_at.insert(key, now);
+        let read = sqex_proto::beacon::Read { key };
+        let Ok((200, body)) = client.post("/beacon/read", read.encode()).await else {
+            continue;
+        };
+        let Ok(reply) = sqex_proto::beacon::Reply::decode(&body) else {
+            continue;
+        };
+        let found = crate::presence::Presence::of(&reply);
+        if desk.presence.insert(key, found) != Some(found) {
+            moved = true;
+        }
+    }
+    // Somebody no longer talked to is no longer asked about, or read.
+    desk.presence.retain(|k, _| wanted.contains(k));
+    desk.asked_at.retain(|k, _| wanted.contains(k));
+    moved
+}
+
 fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
     // Whether what follows is the whole story or only this machine's copy of
     // it. Both are worth drawing; only one of them means "there is nothing
@@ -3873,6 +3979,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(topic, topic);
         set!(ringing, ringing);
         set!(arrivals, arrivals);
+        set!(presence, desk.presence.clone());
         moved
     })
 }
@@ -4615,6 +4722,14 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     );
                 }
                 Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Away(away) => {
+            if desk.away != away {
+                desk.away = away;
+                // Said now, not at the next beat: somebody back at the
+                // keyboard is back.
+                beat(chat, desk).await;
             }
         }
         Cmd::Search(query) => {

@@ -159,24 +159,82 @@ pub fn avatar(
     .on_hover_text(key.to_string())
 }
 
+/// Whether somebody is there, in three words. Drawn as a dot on the
+/// corner of their mark by [`presence`], and, standing alone, by
+/// [`Presence::dot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Presence {
+    /// Connected, and at the keyboard.
+    Active,
+    /// Connected, and nobody there.
+    Away,
+    /// Not connected, or not for long enough to say.
+    #[default]
+    Offline,
+}
+
+impl Presence {
+    /// The word, the one every consumer says.
+    pub fn word(self) -> &'static str {
+        match self {
+            Presence::Active => "active",
+            Presence::Away => "away",
+            Presence::Offline => "offline",
+        }
+    }
+
+    /// Filled, and in what colour; hollow for offline. **Filled versus
+    /// hollow, not one colour versus another**: the state survives
+    /// somebody who cannot tell green from amber.
+    pub fn look(self, theme: &sigil::ColorTheme) -> (bool, egui::Color32) {
+        match self {
+            Presence::Active => (true, theme.link_up),
+            Presence::Away => (true, theme.warning),
+            Presence::Offline => (false, theme.text_muted),
+        }
+    }
+
+    /// The dot alone, with the word and a hover.
+    pub fn dot(self, ui: &mut egui::Ui, hover: &str) -> egui::Response {
+        let theme = sigil::ColorTheme::current(ui.ctx());
+        let (filled, colour) = self.look(&theme);
+        let response = crate::dot(ui, filled, colour, colour, self.word());
+        if hover.is_empty() {
+            response
+        } else {
+            response.on_hover_text(hover)
+        }
+    }
+}
+
 /// An avatar with a status dot on its corner: whose it is, and whether
-/// they are connected, in one mark.
+/// they are there, in one mark.
 ///
 /// The dot is [`dot`](crate::dot)'s -- filled or hollow, so the state
 /// survives somebody who cannot tell the colours apart -- with a ring of
-/// the surface behind it so it reads over a picture, and it carries the
-/// word the same way, on the mark's own accessibility node: "connected",
-/// "reconnecting…", "offline".
+/// the surface behind it so it reads over a picture, and it carries
+/// `word` the same way, on the mark's own accessibility node: the
+/// presence's own word, or the link's for one's own mark with the link
+/// down ("reconnecting…"). `hover` is what a pointer learns -- last seen,
+/// the key.
 pub fn presence(
     ui: &mut egui::Ui,
     key: &str,
     picture: Option<&egui::TextureHandle>,
     size: f32,
-    filled: bool,
-    colour: egui::Color32,
+    seen: Presence,
     word: &str,
+    hover: &str,
 ) -> egui::Response {
     let theme = sigil::ColorTheme::current(ui.ctx());
+    let (filled, colour) = seen.look(&theme);
+    // The link's own colour when the word is the link's: a mark that says
+    // "reconnecting…" in the offline grey would be saying two things.
+    let colour = if seen == Presence::Offline && word != seen.word() {
+        theme.link_retrying
+    } else {
+        colour
+    };
     let response = avatar(ui, key, picture, size);
     let rect = response.rect;
     let radius = tokens::SPACING_XS + 1.0;
@@ -193,7 +251,22 @@ pub fn presence(
     }
     let said = word.to_string();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said));
-    response.on_hover_text(format!("{word} — your key {key}"))
+    response.on_hover_text(hover.to_string())
+}
+
+/// What a pointer learns from a mark: the state, when they were last
+/// there, and the key -- a name is nobody's to vouch for (SIP-21).
+///
+/// `last_seen` is the exchange's clock, `now` this machine's reading of it;
+/// nought is never seen.
+pub fn presence_hover(seen: Presence, last_seen: u64, now: u64, key: &str) -> String {
+    let when = match (seen, last_seen) {
+        (Presence::Active, _) => String::new(),
+        (_, 0) => " — never seen".to_string(),
+        (Presence::Away, at) => format!(" — last active {}", crate::brief(at, now)),
+        (Presence::Offline, at) => format!(" — last seen {}", crate::brief(at, now)),
+    };
+    format!("{}{when}\n{key}", seen.word())
 }
 
 /// A ring drawn round an avatar, for presence or speaking.

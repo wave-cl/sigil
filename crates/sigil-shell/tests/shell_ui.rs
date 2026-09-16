@@ -819,6 +819,7 @@ fn the_desktop_pane_explains_what_is_missing_and_why() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -937,6 +938,7 @@ fn platform_harness_of(report: sigil_shell::Report) -> Harness<'static> {
                         navigator: &mut nav,
                         accounts: &mut accounts,
                         unfocused: false,
+                        away: false,
                         notify: &sigil::Silent,
                         connections: &Default::default(),
                     };
@@ -1659,6 +1661,7 @@ fn the_desktop_pane_switches_direct_calls_off_and_says_what_they_disclose() {
                 navigator: &mut nav,
                 accounts: &mut accounts,
                 unfocused: false,
+                away: false,
                 notify: &sigil::Silent,
                 connections: &Default::default(),
             };
@@ -1783,6 +1786,65 @@ fn an_app_asking_to_quit_is_not_put_in_the_tray() {
         "the close after a quit was put in the tray: {:?}",
         window_asks(&h)
     );
+}
+
+/// Nobody here for five minutes is away, and the apps are told; a touch
+/// of the pointer is somebody back. Time is the harness's, a minute a
+/// step, and the window is the only witness -- as on a desktop that
+/// cannot say how long since the last keypress anywhere.
+#[test]
+fn away_is_five_minutes_without_input_and_a_touch_is_back() {
+    let seen = std::rc::Rc::new(std::cell::Cell::new(false));
+    struct Watching {
+        away: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+    impl App for Watching {
+        fn update(&mut self, ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
+            self.away.set(ctx.away);
+        }
+        fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+            ui.label("watching");
+            AppResponse::default()
+        }
+        fn title(&self) -> &str {
+            "Chat"
+        }
+    }
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Watching { away: seen.clone() })];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    shell.watch_own_input_only_for_test();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .with_step_dt(60.0)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            shell.update_all(&ctx, false);
+            shell.ui(ui);
+        });
+    // A touch to start the clock, then a minute a step until away: the
+    // fifth minute, and not before.
+    // The event is queued; the step that carries it is the touch.
+    h.event(egui::Event::PointerMoved(egui::pos2(100.0, 100.0)));
+    h.step();
+    assert!(!seen.get());
+    let mut minutes = 0;
+    while !seen.get() {
+        h.step();
+        minutes += 1;
+        assert!(minutes <= 10, "never away");
+    }
+    assert_eq!(
+        minutes, 5,
+        "away after five minutes without input, not {minutes}"
+    );
+    // And a touch of the pointer is somebody back, at once.
+    h.event(egui::Event::PointerMoved(egui::pos2(120.0, 100.0)));
+    h.step();
+    assert!(!seen.get(), "back at the pointer's first move");
 }
 
 /// Do not disturb from the tray's menu flips the setting the roster holds,

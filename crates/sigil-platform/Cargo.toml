@@ -33,6 +33,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
 ] }
 block2 = "0.6"
+# How long since the last keypress or click anywhere on this desktop, for
+# saying "away". Already in the lock through the clipboard crate.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGEventSource",
+    "CGEventTypes",
+] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }

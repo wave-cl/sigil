@@ -9,7 +9,9 @@ separately today, and adds what a terminal could not: rendered avatars and
 images, a call you join by clicking, and a phone that actually rings. A call
 between two people goes straight between them when the exchange can introduce
 them, and through the exchange when it cannot; see
-[docs/calls.md](docs/calls.md).
+[docs/calls.md](docs/calls.md). A dot on each person's mark says whether they
+are there -- active, away, or offline -- from SIP-4 beacons; see
+[docs/presence.md](docs/presence.md).
 
 ## Status
 

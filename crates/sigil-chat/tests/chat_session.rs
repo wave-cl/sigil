@@ -3262,3 +3262,124 @@ async fn what_became_of_a_draft_is_answered_under_its_token() {
         alice.state().posted
     );
 }
+
+/// A session says it is here (SIP-4): it beats within its interval of
+/// connecting, at once when told nobody is at the machine and again when
+/// somebody is, and it reads the beacons of the people it talks to into
+/// its state -- active, then away when they say so.
+#[tokio::test]
+async fn a_session_beats_and_reads_the_beacons_of_the_people_it_talks_to() {
+    use sqex_proto::beacon::{Read, Reply};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(61);
+    let (b_signer, b_id) = signer(62);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    // Somebody who is neither: reads what the exchange says of Alice.
+    let mut reader = sqnr::Client::connect(addr, &server_pub).await.unwrap();
+    async fn read_of(c: &mut sqnr::Client, who: PubKey) -> Reply {
+        let (code, body) = c
+            .post("/beacon/read", Read { key: who }.encode())
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        Reply::decode(&body).unwrap()
+    }
+    async fn read_until(
+        c: &mut sqnr::Client,
+        who: PubKey,
+        secs: u64,
+        want: impl Fn(&Reply) -> bool,
+    ) -> Option<Reply> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            let r = read_of(c, who).await;
+            if want(&r) {
+                return Some(r);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    let r = read_until(&mut reader, a_id, 15, |r| r.found)
+        .await
+        .expect("Alice's session did not beat within its interval of connecting");
+    assert_eq!(
+        r.interval_secs,
+        sigil_chat::presence::BEAT_SECS,
+        "the interval the session promises"
+    );
+    assert!(!r.away, "somebody is here to begin with");
+
+    // Told nobody is here: said at once, not at the next beat.
+    alice.send(Cmd::Away(true));
+    assert!(
+        read_until(&mut reader, a_id, 5, |r| r.away).await.is_some(),
+        "away was not beaten at once"
+    );
+    alice.send(Cmd::Away(false));
+    assert!(
+        read_until(&mut reader, a_id, 5, |r| !r.away)
+            .await
+            .is_some(),
+        "back was not beaten at once"
+    );
+
+    // And what Bob sees of Alice, once they talk: active, then away.
+    alice.send(Cmd::OpenDm(b_id));
+    bob.send(Cmd::OpenDm(a_id));
+    let seen = until(
+        || {
+            bob.state()
+                .presence
+                .get(&a_id)
+                .is_some_and(|p| p.seen == sigil_chat::presence::Seen::Active)
+        },
+        20,
+    )
+    .await;
+    assert!(
+        seen,
+        "Bob does not see Alice as active: {:?}",
+        bob.state().presence
+    );
+    alice.send(Cmd::Away(true));
+    let seen = until(
+        || {
+            bob.state()
+                .presence
+                .get(&a_id)
+                .is_some_and(|p| p.seen == sigil_chat::presence::Seen::Away)
+        },
+        // Bob asks again after his read interval.
+        sigil_chat::presence::READ_SECS + 10,
+    )
+    .await;
+    assert!(
+        seen,
+        "Bob does not see Alice as away: {:?}",
+        bob.state().presence
+    );
+    // Bob never reads himself.
+    assert!(!bob.state().presence.contains_key(&b_id));
+
+    alice.stop();
+    bob.stop();
+}

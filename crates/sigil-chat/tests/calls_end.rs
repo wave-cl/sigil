@@ -28,6 +28,7 @@ fn pass(app: &mut ChatApp, accounts: &mut Accounts, egui_ctx: &egui::Context) {
         navigator: &mut nav,
         accounts,
         unfocused: true,
+        away: false,
         notify: &Silent,
         connections: &Default::default(),
     };
@@ -144,6 +145,7 @@ async fn a_call_is_shown_even_while_looking_at_another_identity() {
                     navigator: &mut nav,
                     accounts: &mut accounts,
                     unfocused: false,
+                    away: false,
                     notify: &Silent,
                     connections: &Default::default(),
                 };
@@ -252,6 +254,7 @@ async fn the_call_bar_says_which_way_the_audio_goes() {
                         navigator: &mut nav,
                         accounts: &mut accounts,
                         unfocused: false,
+                        away: false,
                         notify: &Silent,
                         connections: &Default::default(),
                     };
@@ -331,6 +334,7 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
         navigator: &mut nav,
         accounts: &mut accounts,
         unfocused: true,
+        away: false,
         notify: &Silent,
         connections: &Default::default(),
     };
@@ -361,6 +365,7 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
         navigator: &mut nav,
         accounts: &mut accounts,
         unfocused: true,
+        away: false,
         notify: &Silent,
         connections: &Default::default(),
     };

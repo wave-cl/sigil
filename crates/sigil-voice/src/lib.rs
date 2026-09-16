@@ -488,6 +488,7 @@ mod borrow_tests {
             navigator: &mut nav,
             accounts: &mut accounts,
             unfocused: true,
+            away: false,
             notify: &sigil::Silent,
             connections: &nothing,
         };
@@ -504,6 +505,7 @@ mod borrow_tests {
             navigator: &mut nav,
             accounts: &mut accounts,
             unfocused: true,
+            away: false,
             notify: &sigil::Silent,
             connections: &named,
         };
@@ -527,6 +529,7 @@ mod borrow_tests {
             navigator: &mut nav,
             accounts: &mut accounts,
             unfocused: true,
+            away: false,
             notify: &sigil::Silent,
             connections: &others,
         };
