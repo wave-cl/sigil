@@ -91,6 +91,9 @@ pub enum Icon {
     Bell,
     /// This conversation is muted; press to hear about it again.
     BellOff,
+    /// This key was verified: its safety words were compared with its
+    /// owner (SIP-41).
+    Verified,
 }
 
 impl Icon {
@@ -125,6 +128,7 @@ impl Icon {
             Icon::Enlarge => "See it full size",
             Icon::Bell => "Mute this conversation",
             Icon::BellOff => "Unmute this conversation",
+            Icon::Verified => "verified",
         }
     }
 }
@@ -445,6 +449,20 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             line(p(0.24, 0.24), p(0.42, 0.42));
             line(p(0.76, 0.76), p(0.58, 0.58));
         }
+        Icon::Verified => {
+            // A shield with a tick in it: the tick is the comparison, the
+            // shield is what it is for.
+            path(vec![
+                p(0.50, 0.14),
+                p(0.78, 0.26),
+                p(0.78, 0.50),
+                p(0.50, 0.86),
+                p(0.22, 0.50),
+                p(0.22, 0.26),
+                p(0.50, 0.14),
+            ]);
+            path(vec![p(0.36, 0.50), p(0.46, 0.60), p(0.64, 0.38)]);
+        }
         Icon::Public => {
             // A globe: a circle with a meridian and an equator.
             let r = s * 0.30;
@@ -646,6 +664,7 @@ mod tests {
             Icon::Enlarge,
             Icon::Bell,
             Icon::BellOff,
+            Icon::Verified,
         ] {
             let word = icon.word();
             assert!(word.len() > 2, "{icon:?} has no word");

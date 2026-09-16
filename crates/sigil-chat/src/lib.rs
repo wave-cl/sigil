@@ -466,6 +466,8 @@ enum Dialog {
     Exchange,
     /// Claim a SIP-38 name here.
     Name,
+    /// Compare safety words with this key's owner (SIP-41).
+    Verify(PubKey),
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -799,6 +801,8 @@ struct Pane {
     staging_trouble: Option<String>,
     /// Why the last line typed as a command did nothing.
     command_trouble: Option<String>,
+    /// The verify dialog's checkbox: lodge the SIP-27 claim as well.
+    attest_too: bool,
     /// Which row of the mention list the keyboard is on.
     picking: usize,
     /// Escape closed the list for this `@`; typing reopens it.
@@ -1003,6 +1007,7 @@ impl Default for Pane {
             previews_tx: None,
             staging_trouble: None,
             command_trouble: None,
+            attest_too: false,
             picking: 0,
             picker_dismissed: false,
             field: None,
@@ -1585,13 +1590,24 @@ impl App for ChatApp {
         ui: &mut egui::Ui,
         token: &std::rc::Rc<dyn std::any::Any>,
     ) -> AppResponse {
-        match Self::route(token) {
+        let route = Self::route(token);
+        let response = match route {
             Route::Conversations => self.render(ctx, ui),
             Route::Directory => self.directory_view(ctx, ui),
             Route::Members => self.members_view(ctx, ui),
             Route::Settings => self.settings_view(ctx, ui),
             Route::Devices => self.devices_view(ctx, ui),
+        };
+        // A dialog opened from a view -- verifying somebody from Members --
+        // is drawn over that view. `render` draws its own.
+        if route != Route::Conversations
+            && let Some(at) = self.showing_at(ctx)
+        {
+            let theme = ColorTheme::current(ui.ctx());
+            let state = self.state_of(Some(&at));
+            self.dialogs_ui(ctx, &at, &state, ui, &theme);
         }
+        response
     }
 
     fn nav_title(&self, token: &std::rc::Rc<dyn std::any::Any>) -> Option<String> {
@@ -2263,6 +2279,11 @@ impl ChatApp {
             if response.clicked() {
                 ctx.navigator.push_here(Route::Settings);
             }
+        }
+        if let Some(peer) = open.peer
+            && state.verified.contains_key(&peer)
+        {
+            sigil_ui::verified_mark(ui);
         }
         if !state.topic.is_empty() {
             ui.add(
@@ -2992,6 +3013,7 @@ impl ChatApp {
                     Dialog::Profile => self.profile_dialog(at, ui, theme),
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
+                    Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
                 }
             });
         if response.should_close() {
@@ -3219,6 +3241,110 @@ impl ChatApp {
                 let pane = self.pane(at);
                 pane.naming.clear();
                 pane.dialog = None;
+            }
+        });
+    }
+
+    /// The safety words for us and `who`, and the code a camera reads, with
+    /// the one question that matters: did they match. Nothing here decides
+    /// it; the two people do, by a channel the exchange is not in.
+    fn verify_dialog(
+        &mut self,
+        at: &At,
+        state: &ChatState,
+        who: PubKey,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let me = at.0;
+        let label = state
+            .people
+            .get(&who)
+            .map(|p| p.label(&who))
+            .unwrap_or_else(|| sigil_ui::message::short(&who.to_string()));
+        ui.heading(format!("Verify {label}"));
+        ui.add_space(tokens::SPACING_SM);
+        ui.colored_label(
+            theme.text_secondary,
+            "Read these six words to each other, or scan the code. They are the same \
+             on both screens or they are not, and only the two of you can tell.",
+        );
+        ui.add_space(tokens::SPACING_MD);
+        let words = sqex_proto::safety::words_for(&me, &who);
+        // Large, in two rows of three: read at speaking speed, not squinted at.
+        for row in words.chunks(3) {
+            ui.horizontal(|ui| {
+                for word in row {
+                    ui.label(egui::RichText::new(*word).heading().strong());
+                    ui.add_space(tokens::SPACING_MD);
+                }
+            });
+        }
+        ui.add_space(tokens::SPACING_MD);
+        let code = sqex_proto::safety::code(&me, &who);
+        ui.horizontal(|ui| {
+            sigil_ui::qr(ui, &code, 132.0);
+            ui.add_space(tokens::SPACING_SM);
+            ui.vertical(|ui| {
+                ui.colored_label(theme.text_muted, egui::RichText::new("their key").small());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(who.to_string()).monospace().small())
+                        .wrap()
+                        .selectable(true),
+                );
+            });
+        });
+        ui.add_space(tokens::SPACING_MD);
+        let verified_at = state.verified.get(&who).copied();
+        if let Some(at_secs) = verified_at {
+            ui.horizontal(|ui| {
+                sigil_ui::verified_mark(ui);
+                ui.colored_label(
+                    theme.text_secondary,
+                    format!("Verified {}", sigil_ui::brief(at_secs, self.now())),
+                );
+            });
+            ui.add_space(tokens::SPACING_SM);
+        }
+        let pane = self.panes.entry(at.clone()).or_default();
+        ui.checkbox(
+            &mut pane.attest_too,
+            "Say at the exchange that we compared them",
+        )
+        .on_hover_text(
+            "A signed statement others may read and must not act on. It tells the \
+             exchange, and anyone who asks, that the two of you spoke.",
+        );
+        ui.add_space(tokens::SPACING_SM);
+        ui.horizontal(|ui| {
+            if verified_at.is_none() {
+                if ui.button("They match").clicked() {
+                    let attest = self.pane(at).attest_too;
+                    self.pane(at).attest_too = false;
+                    self.pane(at).dialog = None;
+                    self.send_as(Some(at), Cmd::Verify(who));
+                    if attest {
+                        self.send_as(Some(at), Cmd::Attest(who));
+                    }
+                }
+                if ui.button("Not yet").clicked() {
+                    self.pane(at).attest_too = false;
+                    self.pane(at).dialog = None;
+                }
+            } else {
+                if ui
+                    .button("Withdraw")
+                    .on_hover_text("Take your mark back.")
+                    .clicked()
+                {
+                    self.pane(at).attest_too = false;
+                    self.pane(at).dialog = None;
+                    self.send_as(Some(at), Cmd::Unverify(who));
+                }
+                if ui.button("Close").clicked() {
+                    self.pane(at).attest_too = false;
+                    self.pane(at).dialog = None;
+                }
             }
         });
     }
@@ -3530,6 +3656,7 @@ impl ChatApp {
                         mentioned: convo.mentioned > 0,
                         muted: ctx.accounts.quiet.is_muted(&at.1, &convo.channel),
                         presence: convo.peer.map(|peer| self.presence_of(state, &peer)),
+                        verified: convo.peer.is_some_and(|p| state.verified.contains_key(&p)),
                     };
                     if sigil_ui::conversation_row(ui, &row, selected).clicked() {
                         self.send_as(Some(at), Cmd::Show(convo.channel));
@@ -4176,6 +4303,7 @@ impl ChatApp {
                 direct: !line.mine && !in_direct,
                 mentions: &mentioned,
                 mentions_me: line.me_mentioned,
+                verified: !line.mine && state.verified.contains_key(&line.who),
                 editable: line.mine && session::rewritable(line.at, now),
             };
             // Measured as it is drawn, so the next frame can reserve it.
@@ -4342,6 +4470,9 @@ impl ChatApp {
                 match (m.what, m.key.parse::<PubKey>()) {
                     (MentionDo::Direct, Ok(key)) => self.send_as(Some(at), Cmd::OpenDm(key)),
                     (MentionDo::CopyKey, _) => ui.ctx().copy_text(m.key.clone()),
+                    (MentionDo::Verify, Ok(key)) => {
+                        self.pane(at).dialog = Some(Dialog::Verify(key));
+                    }
                     (MentionDo::Mention, Ok(key)) => {
                         // Into the box, the way the picker puts one: the
                         // name as text, and the key remembered for it.
@@ -4359,6 +4490,9 @@ impl ChatApp {
             }
             if let Some(index) = did.forward {
                 self.pane(at).forwarding = Some((seq, index));
+            }
+            if did.verify {
+                self.pane(at).dialog = Some(Dialog::Verify(line.who));
             }
             if let (Some(target), Some(channel)) = (did.jump, state.open) {
                 self.pane(at).jump = Some((channel, target));
@@ -5172,6 +5306,13 @@ impl ChatApp {
                     .map_err(|_| format!("{key} is not a key. /invite takes a base58 key."))?;
                 self.send_as(Some(at), Cmd::Invite(key));
             }
+            Command::Verify => {
+                let c = here()?;
+                let peer = c
+                    .peer
+                    .ok_or("Safety words are for two people: open a direct message.")?;
+                self.pane(at).dialog = Some(Dialog::Verify(peer));
+            }
             Command::Members => {
                 here()?;
                 self.send_as(Some(at), Cmd::Blocked);
@@ -5431,6 +5572,9 @@ impl ChatApp {
                                 if member.account == me {
                                     ui.colored_label(theme.text_muted, "you");
                                 }
+                                if state.verified.contains_key(&member.account) {
+                                    sigil_ui::verified_mark(ui);
+                                }
                             });
                             // In full. This is the only thing that identifies
                             // them; everything above it is a claim.
@@ -5439,10 +5583,29 @@ impl ChatApp {
                                     .selectable(true),
                             );
                         });
-                        if state.i_am_admin && member.account != me {
+                        if member.account != me {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    // Anybody may compare words with anybody;
+                                    // the rest is an admin's.
+                                    let verified = state.verified.contains_key(&member.account);
+                                    if ui
+                                        .button(if verified { "Verified" } else { "Verify" })
+                                        .on_hover_text(if verified {
+                                            "You compared safety words with them. Open to see \
+                                             them again, or to take the mark back."
+                                        } else {
+                                            "Compare six words with them, in person or over a \
+                                             call, and mark their key as theirs."
+                                        })
+                                        .clicked()
+                                    {
+                                        self.pane(at).dialog = Some(Dialog::Verify(member.account));
+                                    }
+                                    if !state.i_am_admin {
+                                        return;
+                                    }
                                     if ui
                                         .button("Remove")
                                         .on_hover_text(

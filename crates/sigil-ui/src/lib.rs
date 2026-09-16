@@ -12,6 +12,7 @@ pub mod exchange;
 pub mod gif;
 pub mod identicon;
 pub mod message;
+pub mod qr;
 pub mod roster;
 pub mod search_hit;
 pub mod video;
@@ -142,8 +143,9 @@ fn field_as(
 }
 pub use message::{
     Bubble, BubbleAction, Quote, Receipt, Thumb, bubble, day_separator, reaction_chip, short,
-    system_line, unread_divider, unread_pill,
+    system_line, unread_divider, unread_pill, verified_mark,
 };
+pub use qr::qr;
 pub use roster::{Row, roster};
 pub use search_hit::{SearchHit, search_hit};
 pub use sigil::icon;

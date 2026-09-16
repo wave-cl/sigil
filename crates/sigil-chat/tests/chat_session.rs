@@ -3383,3 +3383,85 @@ async fn a_session_beats_and_reads_the_beacons_of_the_people_it_talks_to() {
     alice.stop();
     bob.stop();
 }
+
+/// A mark made is in the state and survives a restart of the session; taken
+/// back, it is gone; and saying so lodges a SIP-27 claim of the right kind
+/// that anybody can read -- and only when asked.
+#[tokio::test]
+async fn a_verified_mark_is_kept_here_and_said_only_when_asked() {
+    use sqex_proto::attest::{CLAIM_VERIFIED_IN_PERSON, Held, Query};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(71);
+    let (_, b_id) = signer(72);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(until(|| alice.state().me == Some(a_id), 15).await);
+    assert!(alice.state().verified.is_empty());
+
+    alice.send(Cmd::Verify(b_id));
+    assert!(
+        until(|| alice.state().verified.contains_key(&b_id), 10).await,
+        "the mark is not in the state: {:?}",
+        alice.state().verified
+    );
+    // Nothing was said at the exchange for it.
+    let mut reader = sqnr::Client::connect(addr, &server_pub).await.unwrap();
+    let query = Query {
+        subject: b_id,
+        issuer: Some(a_id),
+    };
+    let (code, body) = reader.post("/attest/read", query.encode()).await.unwrap();
+    assert_eq!(code, 200);
+    let held = Held::decode(&body).unwrap();
+    assert!(held.attestations.is_empty(), "a mark is local: {held:?}");
+
+    // Restarted, the mark is still there: it is this machine's.
+    alice.stop();
+    let (a_signer, _) = signer(71);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| alice.state().verified.contains_key(&b_id), 15).await,
+        "the mark did not survive a restart"
+    );
+
+    // Said, when asked to be.
+    alice.send(Cmd::Attest(b_id));
+    assert!(
+        until(
+            || alice
+                .state()
+                .note
+                .as_ref()
+                .is_some_and(|n| n.said.contains("compared the words")),
+            10
+        )
+        .await,
+        "{:?} {:?}",
+        alice.state().note,
+        alice.state().trouble
+    );
+    let (code, body) = reader.post("/attest/read", query.encode()).await.unwrap();
+    assert_eq!(code, 200);
+    let held = Held::decode(&body).unwrap();
+    assert_eq!(held.attestations.len(), 1);
+    let a = &held.attestations[0];
+    assert_eq!(a.claim, CLAIM_VERIFIED_IN_PERSON);
+    assert!(a.body.is_empty());
+    assert!(
+        a.readable(),
+        "the claim is one this build knows, empty-bodied"
+    );
+    assert_eq!((a.issuer, a.subject), (a_id, b_id));
+
+    alice.send(Cmd::Unverify(b_id));
+    assert!(
+        until(|| !alice.state().verified.contains_key(&b_id), 10).await,
+        "the mark was not taken back"
+    );
+    alice.stop();
+}

@@ -223,6 +223,7 @@ fn a_conversation() -> ChatState {
         ringing: Vec::new(),
         arrivals: Vec::new(),
         presence: std::collections::HashMap::new(),
+        verified: std::collections::HashMap::new(),
         devices: Vec::new(),
         linked: None,
         credential: None,
@@ -253,6 +254,37 @@ fn harness(dark: bool) -> Harness<'static> {
 }
 
 /// A harness showing one of the app's inner routes, through `render_nav` —
+/// `harness_at`, recording what the app asks of its session each pass.
+fn harness_at_recording(
+    state: ChatState,
+    route: sigil_chat::Route,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
+            *asked.borrow_mut() = app.asked_for_test().to_vec();
+        })
+}
+
 /// the same path the shell takes, so a route that draws nothing fails here.
 fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
     let mut app = ChatApp::new();
@@ -6425,4 +6457,130 @@ fn the_bar_of_a_direct_message_says_whether_they_are_there() {
         .chain(h.query_all_by_label("away"))
         .count();
     assert_eq!(words, 0, "a group's bar carries no presence");
+}
+
+// ---------------------------------------------------------------------------
+// Verified contacts (SIP-41).
+// ---------------------------------------------------------------------------
+
+/// Verify, from the Members view: the dialog shows the six words SIP-41
+/// derives for the two keys and the code a camera reads, and "They match"
+/// asks the session to keep the mark -- and, with the box ticked, to say so.
+#[test]
+fn verifying_shows_the_words_for_the_pair_and_they_match_keeps_the_mark() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_at_recording(a_conversation(), sigil_chat::Route::Members, asked.clone());
+    h.run();
+    h.get_by_label("Verify").click();
+    h.run();
+    let said = text_of(&h);
+    let words = sqex_proto::safety::words_for(&me(), &them());
+    for w in words {
+        assert!(said.contains(w), "the word {w:?} is not shown: {said}");
+    }
+    assert!(
+        said.contains(&sqex_proto::safety::code(&me(), &them())),
+        "the code a camera reads is not on the picture: {said}"
+    );
+    assert!(
+        said.contains(&them().to_string()),
+        "their whole key: {said}"
+    );
+    // Not our own words with somebody else.
+    let other = sqex_proto::safety::words_for(&me(), &PubKey::new([9u8; 32]));
+    assert!(!said.contains(other[0]) || words.contains(&other[0]));
+
+    h.get_by_label("They match").click();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains(&format!("Verify({:?})", them())), "{sent}");
+    assert!(
+        !sent.contains("Attest("),
+        "nothing is said at the exchange unasked: {sent}"
+    );
+
+    // With the box ticked, the claim goes too.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_at_recording(a_conversation(), sigil_chat::Route::Members, asked.clone());
+    h.run();
+    h.get_by_label("Verify").click();
+    h.run();
+    h.get_by_label("Say at the exchange that we compared them")
+        .click();
+    h.run();
+    h.get_by_label("They match").click();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains(&format!("Attest({:?})", them())), "{sent}");
+}
+
+/// A verified key wears the mark: on the row, on the bar of the direct
+/// message, beside the name on their messages, and in Members -- and an
+/// unverified one wears none.
+#[test]
+fn a_verified_key_wears_the_mark_everywhere_and_an_unverified_one_nowhere() {
+    let mut state = a_conversation();
+    let mut h = harness_with(state.clone(), true);
+    h.run();
+    assert!(
+        h.query_by_label("verified").is_none(),
+        "nothing is verified yet: {}",
+        text_of(&h)
+    );
+    state.verified.insert(them(), NOW - 3600);
+    let mut h = harness_with(state.clone(), true);
+    h.run();
+    let marks = h.query_all_by_label("verified").count();
+    // The row, the bar, and Ada's bubbles that carry a name.
+    assert!(
+        marks >= 3,
+        "the mark is not everywhere: {marks} of them: {}",
+        text_of(&h)
+    );
+    let row = h
+        .query_all_by_label("verified")
+        .map(|n| n.rect())
+        .filter(|r| r.left() < 300.0)
+        .count();
+    assert_eq!(row, 1, "one on Ada's row");
+    let bar = topmost(&h, "verified");
+    let name = topmost(&h, "Ada");
+    assert!(
+        (bar.center().y - name.center().y).abs() < tokens::SPACING_SM,
+        "beside the name on the bar"
+    );
+
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    assert!(
+        h.query_by_label("verified").is_some(),
+        "in Members: {}",
+        text_of(&h)
+    );
+    assert!(
+        h.query_by_label("Verified").is_some(),
+        "and the button says so"
+    );
+}
+
+/// The verify dialog: the six words, the code, the key.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn verify_dark() {
+    let mut h = harness_at(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.get_by_label("Verify").click();
+    h.run();
+    h.snapshot("verify_dark");
+}
+
+/// A verified contact: the mark on the row, on the bar and on the bubbles.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn verified_dark() {
+    let mut state = a_conversation();
+    state.verified.insert(them(), NOW - 3600);
+    let mut h = harness_with(state, true);
+    h.run();
+    h.snapshot("verified_dark");
 }

@@ -12,6 +12,9 @@ image = { workspace = true }
 jiff = "0.2"
 sigil = { path = "../sigil" }
 sigil-emoji = { path = "../sigil-emoji" }
+# A QR for the safety code (SIP-41), painted from the matrix; no image
+# output, so no features.
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }

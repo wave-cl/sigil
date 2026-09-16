@@ -215,6 +215,10 @@ pub struct Bubble<'a> {
     pub mentions: &'a [Mentioned<'a>],
     /// One of them is the reader.
     pub mentions_me: bool,
+    /// The author's key was verified: this reader compared its safety words
+    /// with them (SIP-41). Drawn as a mark beside the name -- the one mark a
+    /// name may carry, since it is the reader's own and not anybody's claim.
+    pub verified: bool,
     /// Ours, and still inside the window in which a rewrite lands. Past it
     /// every reader drops the rewrite (SIP-19), so offering one would be
     /// offering a button that does nothing.
@@ -276,6 +280,8 @@ pub struct BubbleAction {
     /// Something done about somebody the message mentions, from the card
     /// that opens on their name.
     pub mentioned: Option<MentionAction>,
+    /// Compare safety words with the author (SIP-41).
+    pub verify: bool,
 }
 
 /// What the card on a mentioned name offers.
@@ -296,6 +302,8 @@ pub enum MentionDo {
     CopyKey,
     /// Start a message to them here: `@name ` into the composer.
     Mention,
+    /// Compare safety words with them (SIP-41).
+    Verify,
 }
 
 impl BubbleAction {
@@ -637,6 +645,11 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
                 action.direct = true;
                 ui.close();
             }
+            // Somebody else's key, to compare words with; ours needs none.
+            if !b.mine && ui.button("Compare safety words").clicked() {
+                action.verify = true;
+                ui.close();
+            }
             // Saving lives here rather than on the picture: it is the one
             // action nobody takes often, and it had the loudest place on
             // the bubble. One entry per file when there are several --
@@ -746,6 +759,10 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
         (false, false, Some(name)) => measure(name, egui::TextStyle::Body),
         (false, false, None) => measure(&short(b.key), egui::TextStyle::Body),
         _ => 0.0,
+    } + if b.verified && !b.grouped && !b.mine {
+        gap + ui.text_style_height(&egui::TextStyle::Body)
+    } else {
+        0.0
     };
     // The rule down its left and the gap after it are part of the line.
     // Left out, the bubble was measured too narrow for what it then drew, and
@@ -997,6 +1014,9 @@ fn mention_popup(
         }
         if crate::icon_item(ui, crate::Icon::Device, "Copy key").clicked() {
             did(MentionDo::CopyKey);
+        }
+        if crate::icon_item(ui, crate::Icon::Verified, "Compare safety words").clicked() {
+            did(MentionDo::Verify);
         }
         let _ = theme;
     });
@@ -1375,10 +1395,32 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
             .monospace()
             .color(theme.accent),
     };
-    let line = ui.label(text);
-    if let Some(title) = b.title {
-        line.on_hover_text(format!("{title} — self-declared, verified by nobody"));
+    // One row: the name, and the mark beside it when there is one -- a
+    // vertical would put the shield on a line of its own under the name.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = tokens::SPACING_XS;
+        let line = ui.label(text);
+        if let Some(title) = b.title {
+            line.on_hover_text(format!("{title} — self-declared, verified by nobody"));
+        }
+        if b.verified {
+            verified_mark(ui);
+        }
+    });
+}
+
+/// The mark beside a verified name: the shield, in the accent, with the
+/// word on it. The reader's own comparison and nobody's claim, which is why
+/// it is the one thing a name may wear (SIP-21 forbids the others).
+pub fn verified_mark(ui: &mut egui::Ui) -> egui::Response {
+    let theme = ColorTheme::current(ui.ctx());
+    let size = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        sigil::icon::draw(ui.painter(), rect, crate::Icon::Verified, theme.accent);
     }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "verified"));
+    response.on_hover_text("You compared safety words with them, and they matched.")
 }
 
 /// What a message is replying to: a bar, a name, and a line of the words.
@@ -1736,6 +1778,7 @@ mod tests {
             direct: false,
             mentions: &[],
             mentions_me: false,
+            verified: false,
             editable: false,
         }
     }

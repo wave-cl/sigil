@@ -79,6 +79,11 @@ pub const COMMANDS: &[Spec] = &[
         what: "Bring somebody in, by their key",
     },
     Spec {
+        name: "verify",
+        arg: "",
+        what: "Compare safety words with the person you are writing to",
+    },
+    Spec {
         name: "members",
         arg: "",
         what: "Who is here",
@@ -132,6 +137,7 @@ pub enum Command {
     Topic(String),
     Name(String),
     Invite(String),
+    Verify,
     Members,
     Settings,
     Devices,
@@ -211,6 +217,7 @@ pub fn parse(text: &str) -> Result<Option<Command>, String> {
         "topic" => Command::Topic(needs("<text>")?),
         "name" => Command::Name(needs("<text>")?),
         "invite" => Command::Invite(needs("<key>")?),
+        "verify" => Command::Verify,
         "members" => Command::Members,
         "settings" => Command::Settings,
         "devices" => Command::Devices,

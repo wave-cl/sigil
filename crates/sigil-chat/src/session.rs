@@ -598,6 +598,10 @@ pub struct ChatState {
     /// other party of every direct message and the members of the open
     /// conversation. Absent is not known.
     pub presence: HashMap<PubKey, crate::presence::Presence>,
+    /// The keys this person verified (SIP-41): their safety words were
+    /// compared with their owner. By key, with when. From this machine's
+    /// store and nowhere else.
+    pub verified: HashMap<PubKey, u64>,
     /// Whether we may rename, invite, remove and rotate here.
     pub i_am_admin: bool,
     /// The open conversation's topic, when it has one.
@@ -1264,6 +1268,14 @@ pub enum Cmd {
     /// exchange at once (SIP-4's away bit), so the people you talk to see
     /// it without waiting for the next beat.
     Away(bool),
+    /// This person compared the safety words with the owner of this key
+    /// and they matched (SIP-41). A fact they established; kept here.
+    Verify(PubKey),
+    /// Take the mark back. Theirs to take; nobody else's.
+    Unverify(PubKey),
+    /// Say, to the exchange, that the words were compared: a SIP-27 claim
+    /// others may read and must not act on. Never sent without asking.
+    Attest(PubKey),
     /// Open a conversation with one of its messages in the window: what a
     /// search result does. [`Show`](Cmd::Show) opens on the last page and a
     /// hit can be anywhere before it; this widens the window so the message
@@ -1601,7 +1613,10 @@ async fn run(
     let knock: sqex_chat::events::Wake = Arc::new(tokio::sync::Notify::new());
     chat.wake_on_events(knock.clone());
 
-    let mut desk = Desk::default();
+    let mut desk = Desk {
+        seed,
+        ..Desk::default()
+    };
     // **Before the exchange is asked anything.** Everything below this point
     // is a round trip -- prekeys, then the list, then a fetch per channel --
     // and none of it is needed to draw what this machine already holds. The
@@ -2018,6 +2033,10 @@ struct Desk {
     asked_at: HashMap<PubKey, std::time::Instant>,
     /// What the asking found.
     presence: HashMap<PubKey, crate::presence::Presence>,
+    /// The identity's seed, for what is signed from here (a SIP-27 claim).
+    /// The chat client holds the same bytes; this is not a second secret,
+    /// it is the same one where a command can reach it.
+    seed: [u8; 32],
     /// Accounts whose profile an event says has moved on.
     restale: HashSet<PubKey>,
     /// Calls somebody has said they are taking, by (channel, invitation).
@@ -2080,6 +2099,7 @@ impl Default for Desk {
             beats_plainly: false,
             asked_at: HashMap::new(),
             presence: HashMap::new(),
+            seed: [0; 32],
         }
     }
 }
@@ -3458,7 +3478,41 @@ async fn read_presence(chat: &mut Chat, desk: &mut Desk, me: PubKey) -> bool {
     moved
 }
 
+/// A key this person verified whose handle, as this client knows it, is
+/// `name` -- and is not `resolved`. The one case a name must not be
+/// followed (SIP-41).
+fn verified_holder_of(chat: &Chat, name: &str, resolved: &PubKey) -> Option<PubKey> {
+    let verified = chat
+        .store()
+        .verified()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, _)| k);
+    verified_holder(name, resolved, verified, |k| chat.handle(k))
+}
+
+/// The rule, over plain data: among the keys verified, one that is not
+/// what the name resolved to today and whose handle is that name.
+pub fn verified_holder(
+    name: &str,
+    resolved: &PubKey,
+    verified: impl IntoIterator<Item = PubKey>,
+    handle_of: impl Fn(&PubKey) -> Option<String>,
+) -> Option<PubKey> {
+    let wanted = name.trim().to_lowercase();
+    verified
+        .into_iter()
+        .filter(|k| k != resolved)
+        .find(|k| handle_of(k).is_some_and(|h| h.to_lowercase() == wanted))
+}
+
 fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
+    let verified: HashMap<PubKey, u64> = chat
+        .store()
+        .verified()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     // Whether what follows is the whole story or only this machine's copy of
     // it. Both are worth drawing; only one of them means "there is nothing
     // here", and saying that during the other is how a conversation somebody
@@ -3980,6 +4034,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(ringing, ringing);
         set!(arrivals, arrivals);
         set!(presence, desk.presence.clone());
+        set!(verified, verified);
         moved
     })
 }
@@ -4685,6 +4740,20 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::Blocked => refresh_blocked(chat, state).await,
         Cmd::OpenByName(name) => match chat.resolve_name(&name).await {
             Ok(who) => {
+                // **A name this person verified that now resolves elsewhere
+                // is said, not followed** (SIP-41). The mark is on the key;
+                // the name is the exchange's word, and today it is a
+                // different word.
+                if let Some(held) = verified_holder_of(chat, &name, &who) {
+                    return trouble(
+                        state,
+                        format!(
+                            "{name} is a different key from the one you verified. Verified: \
+                             {held}. Now: {who}. Write to the key you verified, or compare \
+                             the words again."
+                        ),
+                    );
+                }
                 Box::pin(apply(chat, Cmd::OpenDm(who), state, desk)).await;
             }
             Err(e) => trouble(state, e),
@@ -4721,6 +4790,52 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                         "Forwarded. Whoever is there can now open the file.".into(),
                     );
                 }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Verify(who) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Err(e) = chat.store().verify(&who, now) {
+                return trouble(state, e);
+            }
+            let me = chat.me;
+            let _ = publish(chat, state, desk, me);
+        }
+        Cmd::Unverify(who) => {
+            if let Err(e) = chat.store().unverify(&who) {
+                return trouble(state, e);
+            }
+            let me = chat.me;
+            let _ = publish(chat, state, desk, me);
+        }
+        Cmd::Attest(who) => {
+            let Some(mut client) = chat.connection() else {
+                return trouble(state, "not connected");
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let a = sqex_proto::attest::Attestation::sign(
+                &desk.seed,
+                &who,
+                sqex_proto::attest::CLAIM_VERIFIED_IN_PERSON,
+                Vec::new(),
+                now,
+                now + 365 * 86_400,
+            );
+            match client.post("/attest/lodge", a.encode()).await {
+                Ok((200, _)) => note(
+                    state,
+                    "Said, at this exchange, that you compared the words.".into(),
+                ),
+                Ok((code, _)) => trouble(
+                    state,
+                    format!("the exchange refused the statement ({code})"),
+                ),
                 Err(e) => trouble(state, e),
             }
         }
@@ -5502,5 +5617,44 @@ mod searching_tests {
         assert_eq!(find_ignoring_case("go", "gone"), None);
         assert_eq!(find_ignoring_case("anything", ""), None);
         assert_eq!(find_ignoring_case("", "a"), None);
+    }
+}
+
+#[cfg(test)]
+mod verified_tests {
+    use super::verified_holder;
+    use sqnr_core::PubKey;
+
+    /// A name that resolves to the key it was verified as is fine; one that
+    /// resolves elsewhere names the key that was verified; and a name never
+    /// verified is nobody's business.
+    #[test]
+    fn a_verified_name_resolving_elsewhere_is_caught() {
+        let k = |b: u8| PubKey::new([b; 32]);
+        let handle = |key: &PubKey| match key.as_bytes()[0] {
+            1 => Some("ada@squic.org".to_string()),
+            2 => Some("bob@squic.org".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            verified_holder("ada@squic.org", &k(1), [k(1), k(2)], handle),
+            None,
+            "resolves to the verified key"
+        );
+        assert_eq!(
+            verified_holder("Ada@Squic.org", &k(9), [k(1), k(2)], handle),
+            Some(k(1)),
+            "resolves elsewhere: the verified key is named, case aside"
+        );
+        assert_eq!(
+            verified_holder("carol@squic.org", &k(9), [k(1), k(2)], handle),
+            None,
+            "never verified"
+        );
+        assert_eq!(
+            verified_holder("ada@squic.org", &k(9), [k(2)], handle),
+            None,
+            "ada was never verified, only bob"
+        );
     }
 }

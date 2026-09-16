@@ -49,6 +49,8 @@ pub struct ConversationRow<'a> {
     /// Whether the other person is there, for a direct message, with the
     /// words a pointer learns; `None` for a group, which is many people.
     pub presence: Option<(crate::Presence, String)>,
+    /// The other person's key was verified (SIP-41): the mark after the name.
+    pub verified: bool,
 }
 
 /// Draw one row. Returns its response, so the caller decides what a click means.
@@ -259,6 +261,9 @@ fn row_body(
                                         egui::Label::new(egui::RichText::new(row.label).strong())
                                             .truncate(),
                                     );
+                                    if row.verified {
+                                        crate::message::verified_mark(ui);
+                                    }
                                 },
                             );
                         });
