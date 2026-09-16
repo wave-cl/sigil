@@ -113,6 +113,16 @@ first item. The menu also holds **Do not disturb** and **Quit Sigil**.
 Closing the window puts sigil in the tray rather than ending it, where
 there is a tray: Quit is how it ends. Without one, a close is a close.
 
+On Linux the tray is GTK, and GTK wants to be initialised and to run its
+own loop on the thread that owns its objects, while eframe's loop is
+winit's on the main thread. So the icon and its menu are built on a
+thread of their own that runs `gtk::main()` for as long as the process
+does, and every change to them from the interface is handed to that loop
+as an idle callback. Without this the first menu built panicked with "GTK
+has not been initialized", at launch, on every Linux desktop. With no
+display to initialise GTK against, the tray is reported unavailable with
+GTK's reason.
+
 **The application's own icon.** On macOS the count goes on the Dock tile
 (`NSDockTile`). On Linux there is no standard; sigil sends the
 `com.canonical.Unity.LauncherEntry.Update` signal on the session bus,
