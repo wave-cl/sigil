@@ -1423,6 +1423,70 @@ fn list_dark() {
     h.snapshot("list_dark");
 }
 
+/// The column while a search stands: the count, and the results in place
+/// of the list, one of them chosen.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn search_dark() {
+    let mut state = a_conversation();
+    state.searched_messages = true;
+    let long = format!(
+        "{}so the release check moves to Thursday, bring the notes",
+        "and another thing, ".repeat(6)
+    );
+    let deep = long.find("release").unwrap();
+    state.hits = vec![
+        Hit {
+            channel: [9u8; 32],
+            seq: 7,
+            label: "release check".into(),
+            who: "Ada".into(),
+            text: "the release is Thursday".into(),
+            found: 4..11,
+            at: NOW - 120,
+        },
+        Hit {
+            channel: [9u8; 32],
+            seq: 3,
+            label: "release check".into(),
+            who: "You".into(),
+            text: long,
+            found: deep..deep + 7,
+            at: NOW - 86_400,
+        },
+        Hit {
+            channel: [8u8; 32],
+            seq: 40,
+            label: "Grace".into(),
+            who: "Grace".into(),
+            text: "no release without the notes\nand the notes are late".into(),
+            found: 3..10,
+            at: NOW - 3 * 86_400,
+        },
+    ];
+    let mut h = harness_with(state, true);
+    h.run();
+    let field = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .expect("the search box");
+    field.focus();
+    field.type_text("release");
+    h.run();
+    let second = h.get_by_label_contains("You: …").rect();
+    press_at(&mut h, second.center());
+    h.event(egui::Event::PointerMoved(egui::pos2(900.0, 600.0)));
+    // Steps: the transcript went to the message and is washing it, which
+    // repaints until the wash has faded.
+    for _ in 0..10 {
+        h.step();
+    }
+    h.snapshot("search_dark");
+}
+
 /// The same list with the pointer on a row.
 ///
 /// The fill under the pointer is the whole of what says a row can be pressed,
@@ -3407,7 +3471,9 @@ fn a_search_result_is_chosen_by_pressing_its_words() {
         channel: [8u8; 32],
         seq: 3,
         label: "release check".into(),
+        who: "Ada".into(),
         text: "the thing that was said".into(),
+        found: 19..23,
         at: NOW - 60,
     }];
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -3437,15 +3503,188 @@ fn a_search_result_is_chosen_by_pressing_its_words() {
     }
     h.step();
 
-    // **The hit's own channel, not any `Show` at all.** With nothing open the
-    // app opens the latest conversation by itself on the first pass, so
-    // `starts_with("Show")` passed with the click six hundred pixels off the
-    // row -- a test of the fixture rather than of the press.
-    let wanted = format!("Show({:?})", [8u8; 32]);
+    // **The hit's own channel and message, not any `Show` at all.** With
+    // nothing open the app opens the latest conversation by itself on the
+    // first pass, so `starts_with("Show")` passed with the click six hundred
+    // pixels off the row -- a test of the fixture rather than of the press.
+    // And `ShowAt`, not `Show`: the result goes to the message, not to the
+    // bottom of the conversation it is in.
+    let wanted = format!("ShowAt {{ channel: {:?}, seq: 3 }}", [8u8; 32]);
     assert!(
         asked.borrow().contains(&wanted),
-        "pressing a search result did not open it: {:?}",
+        "pressing a search result did not go to it: {:?}",
         asked.borrow()
+    );
+    // And the row says it was the one chosen: with the pointer gone from
+    // it -- hovering fills a row too -- the chosen row is still filled.
+    h.event(egui::Event::PointerMoved(egui::pos2(900.0, 600.0)));
+    h.run();
+    let words = h.get_by_label_contains("the thing that was said").rect();
+    assert!(
+        wide_fill_at(&h, words.center(), false),
+        "the chosen result is not drawn as chosen"
+    );
+}
+
+/// Whether the last pass painted a wide, row-tall filled rectangle over
+/// `at` -- a row's ground, or a message's wash; not a glyph or a panel -- and, with `translucent`,
+/// only one that can be seen through, which a bubble's own fill cannot.
+fn wide_fill_at(h: &Harness<'static>, at: egui::Pos2, translucent: bool) -> bool {
+    fn walk(shape: &egui::Shape, at: egui::Pos2, translucent: bool) -> bool {
+        match shape {
+            egui::Shape::Vec(inner) => inner.iter().any(|s| walk(s, at, translucent)),
+            egui::Shape::Rect(r) => {
+                r.rect.contains(at)
+                    && r.fill.a() > 0
+                    && (!translucent || r.fill.a() < 255)
+                    && r.rect.width() > 100.0
+                    // A row or a bubble, not a panel's ground.
+                    && r.rect.height() < 100.0
+            }
+            _ => false,
+        }
+    }
+    h.output()
+        .shapes
+        .iter()
+        .any(|c| walk(&c.shape, at, translucent))
+}
+
+/// The search box answers to the keyboard: Enter goes to the newest result
+/// as pressing it would, and Escape clears the search and brings the list
+/// back.
+#[test]
+fn enter_chooses_the_newest_result_and_escape_clears_the_search() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines = Vec::new();
+    state.searched_messages = true;
+    let hit = |seq: u64, text: &str, at: u64| Hit {
+        channel: [8u8; 32],
+        seq,
+        label: "release check".into(),
+        who: "Ada".into(),
+        text: text.into(),
+        found: 0..4,
+        at,
+    };
+    // Newest first, as the session sorts them.
+    state.hits = vec![
+        hit(7, "said last", NOW - 60),
+        hit(3, "said first", NOW - 600),
+    ];
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    let field = h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    );
+    field.focus();
+    field.type_text("said");
+    h.run();
+    h.get_by_label_contains("said last");
+    asked.borrow_mut().clear();
+
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let wanted = format!("ShowAt {{ channel: {:?}, seq: 7 }}", [8u8; 32]);
+    assert!(
+        asked.borrow().contains(&wanted),
+        "Enter did not go to the newest result: {:?}",
+        asked.borrow()
+    );
+    assert!(
+        !asked.borrow().iter().any(|c| c.contains("seq: 3")),
+        "Enter went to the older one as well: {:?}",
+        asked.borrow()
+    );
+
+    // Escape: the box empties, the search is withdrawn, the list is back.
+    h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+    )
+    .focus();
+    h.run();
+    asked.borrow_mut().clear();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(
+        asked.borrow().contains(&"Search(\"\")".to_string()),
+        "Escape did not withdraw the search: {:?}",
+        asked.borrow()
+    );
+    assert!(
+        h.query_by_label_contains("said last").is_none(),
+        "the results are still up after Escape: {}",
+        text_of(&h)
+    );
+}
+
+/// Arriving at the message a search result named, the transcript washes it
+/// in the accent for a moment, and the wash is gone a few seconds later.
+/// Sixty messages and a result naming the fifth, which is off screen.
+#[test]
+fn the_message_a_result_goes_to_is_washed_and_the_wash_fades() {
+    let mut state = a_page(0, 60);
+    state.searched_messages = true;
+    state.hits = vec![Hit {
+        channel: state.open.unwrap(),
+        seq: 5,
+        label: "release check".into(),
+        who: "Ada".into(),
+        text: "message 4".into(),
+        found: 0..7,
+        at: NOW - 600,
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    h.run();
+    // The box is the first text field; the composer is the other.
+    let field = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .expect("the search box");
+    field.focus();
+    field.type_text("message 4");
+    h.run();
+    // The result, in the column: the bubble's own words are off screen, so
+    // by position -- the lowest node with those words is the bubble, if it
+    // is laid out at all; the result is the one inside the column.
+    let result = h
+        .get_all_by_label_contains("message 4")
+        .map(|n| n.rect())
+        .filter(|r| r.right() < 300.0)
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the result row");
+    press_at(&mut h, result.center());
+    // Steps, not runs: the wash asks to be repainted until it has faded,
+    // and a step here is a quarter of a second.
+    for _ in 0..3 {
+        h.step();
+    }
+    // The bubble is on screen, and washed.
+    let bubble = h
+        .get_all_by_label("message 4")
+        .map(|n| n.rect())
+        .find(|r| r.left() > 300.0 && r.top() >= 0.0 && r.bottom() <= 620.0)
+        .unwrap_or_else(|| panic!("the message was not brought on screen: {}", text_of(&h)));
+    assert!(
+        wide_fill_at(&h, bubble.center(), true),
+        "the message the result went to is not marked"
+    );
+    // Three seconds on, it is not.
+    for _ in 0..12 {
+        h.step();
+    }
+    assert!(
+        !wide_fill_at(&h, bubble.center(), true),
+        "the wash did not fade"
     );
 }
 
@@ -3856,10 +4095,12 @@ fn pressing_a_quote_scrolls_to_the_message_it_quotes() {
         "the quoted message is already on screen, so this tests nothing"
     );
 
-    // The quote, which reads "Ada: message 4".
+    // The quote, which reads "Ada: message 4". Steps rather than runs:
+    // the message arrived at is washed, and the wash repaints until it
+    // has faded.
     h.get_by_label_contains("Ada: message 4").click();
-    for _ in 0..6 {
-        h.run();
+    for _ in 0..12 {
+        h.step();
     }
 
     assert!(
@@ -3943,8 +4184,8 @@ fn a_kept_ask_is_answered_when_the_page_arrives() {
         preview: None,
     });
     *shown.borrow_mut() = whole;
-    for _ in 0..8 {
-        h.run();
+    for _ in 0..12 {
+        h.step();
     }
 
     let on_screen = h

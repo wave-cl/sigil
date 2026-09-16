@@ -654,7 +654,13 @@ pub struct Hit {
     pub seq: u64,
     /// What the conversation it was found in is called.
     pub label: String,
+    /// Who said it, as the transcript would name them; "You" for our own.
+    pub who: String,
     pub text: String,
+    /// Where in `text` the first match is, so the result can show that part
+    /// of the message and mark the word. Always a real span: the same
+    /// comparison decides the hit and places this.
+    pub found: std::ops::Range<usize>,
     pub at: u64,
 }
 
@@ -1239,6 +1245,15 @@ pub enum Cmd {
     /// Search what this client holds. **Local only** — the exchange cannot
     /// read a sealed entry, so it could not search one if it wanted to.
     Search(String),
+    /// Open a conversation with one of its messages in the window: what a
+    /// search result does. [`Show`](Cmd::Show) opens on the last page and a
+    /// hit can be anywhere before it; this widens the window so the message
+    /// is drawn, with half a page above it, in one hop rather than a page at
+    /// a time. Never narrows a conversation that is already open wider.
+    ShowAt {
+        channel: [u8; 32],
+        seq: u64,
+    },
     /// SIP-35: let another exchange carry a copy of this channel, or stop it.
     Replicate {
         exchange: PubKey,
@@ -3959,6 +3974,39 @@ mod stub_tests {
 /// rather than written again. Two of them put `3Kj9mNpQ` in one column and
 /// `3Kj9...VfeR` in another, and a reader comparing the two has to work out
 /// whether they are looking at one person or at two.
+/// Where `needle` first occurs in `text`, letter case aside; `needle` is
+/// already lowercase. The byte range is in `text` as written -- not in a
+/// lowercased copy, whose bytes need not line up with the original ("İ"
+/// lowercases to two characters) -- so it can mark the word in the message.
+///
+/// Compared a character at a time from each character boundary, which is
+/// quadratic in the worst case and fine for a message: the alternative,
+/// searching a lowercased copy, gives an index into the wrong string.
+fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let same = |a: char, b: char| a.to_lowercase().eq(b.to_lowercase());
+    for (start, _) in text.char_indices() {
+        let mut rest = text[start..].char_indices();
+        let mut wanted = needle.chars();
+        let mut end = start;
+        loop {
+            match (wanted.next(), rest.next()) {
+                (None, _) => return Some(start..end),
+                (Some(_), None) => return None,
+                (Some(n), Some((i, c))) => {
+                    if !same(c, n) {
+                        break;
+                    }
+                    end = start + i + c.len_utf8();
+                }
+            }
+        }
+    }
+    None
+}
+
 fn short(key: &PubKey) -> String {
     sigil_ui::short(&key.to_string())
 }
@@ -4209,6 +4257,24 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             // for as long as the exchange took to answer -- on every open,
             // including the one sigil does for you on the way in. The history
             // is already folded and sitting in `desk`.
+            let me = chat.me;
+            let _ = publish(chat, state, desk, me);
+        }
+        Cmd::ShowAt { channel, seq } => {
+            if desk.open != Some(channel) {
+                open(desk, state, channel);
+            }
+            if let Some(known) = desk.channels.get_mut(&channel) {
+                let place = known.timeline.messages().position(|m| m.seq == seq);
+                // Not in the fold -- redacted since, or a hit from before a
+                // wipe -- and there is nothing to widen towards: opened as
+                // `Show` would have.
+                if let Some(place) = place {
+                    let counted = known.timeline.messages().count();
+                    known.wanted = known.wanted.max(counted - place + PAGE / 2);
+                }
+                desk.dirty.insert(channel);
+            }
             let me = chat.me;
             let _ = publish(chat, state, desk, me);
         }
@@ -4549,10 +4615,13 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 let people = people_of(chat, desk);
                 for (channel, known) in &desk.channels {
                     for m in known.timeline.messages() {
-                        let text = m.post.body_text().unwrap_or_default();
-                        if m.redacted || !text.to_lowercase().contains(&needle) {
+                        if m.redacted {
                             continue;
                         }
+                        let text = m.post.body_text().unwrap_or_default();
+                        let Some(found) = find_ignoring_case(text, &needle) else {
+                            continue;
+                        };
                         hits.push(Hit {
                             channel: *channel,
                             seq: m.seq,
@@ -4560,7 +4629,19 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                                 Some(peer) => name_for(&people, &peer, &known.label),
                                 None => known.label.clone(),
                             },
+                            // Named as the transcript names them, and ours
+                            // as the reader's own: "You" is what a bubble on
+                            // the right-hand side says without a name.
+                            who: if m.account == chat.me {
+                                "You".to_string()
+                            } else {
+                                people
+                                    .get(&m.account)
+                                    .and_then(|p| p.name.clone())
+                                    .unwrap_or_else(|| short(&m.account))
+                            },
                             text: text.to_string(),
+                            found,
                             at: m.posted,
                         });
                     }
@@ -5246,5 +5327,47 @@ mod naming_tests {
     #[test]
     fn an_empty_desk_asks_about_nobody() {
         assert!(wanted_names(&Desk::default(), key(1)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod searching_tests {
+    use super::find_ignoring_case;
+
+    /// The span is in the text as written, whatever case the word was said
+    /// in, and it is the first one.
+    #[test]
+    fn a_word_is_found_whatever_its_case_and_the_span_is_in_the_original() {
+        assert_eq!(
+            find_ignoring_case("the Release check", "release"),
+            Some(4..11)
+        );
+        assert_eq!(find_ignoring_case("RELEASE release", "release"), Some(0..7));
+        assert_eq!(
+            find_ignoring_case("said twice, said again", "said"),
+            Some(0..4),
+            "the first"
+        );
+        assert_eq!(&"the Release check"[4..11], "Release");
+    }
+
+    /// Letters outside ASCII fold too, and the span counts their bytes.
+    #[test]
+    fn letters_outside_ascii_fold_and_count_their_bytes() {
+        let text = "wir gehen Über die Brücke";
+        let found = find_ignoring_case(text, "über").unwrap();
+        assert_eq!(&text[found.clone()], "Über");
+        assert_eq!(found, 10..15, "Ü is two bytes");
+    }
+
+    /// Nothing there, a word longer than the text, and nothing asked for
+    /// are all no hit -- an empty needle in particular must not match every
+    /// message.
+    #[test]
+    fn what_is_not_there_is_not_found() {
+        assert_eq!(find_ignoring_case("the release check", "rebase"), None);
+        assert_eq!(find_ignoring_case("go", "gone"), None);
+        assert_eq!(find_ignoring_case("anything", ""), None);
+        assert_eq!(find_ignoring_case("", "a"), None);
     }
 }

@@ -697,6 +697,18 @@ impl Staged {
 /// The wire's cap on files in one message (SIP-19).
 const MOST_FILES: usize = sqex_proto::message::MAX_ATTACHMENTS;
 
+/// How long the wash on a message the transcript went to takes to fade, in
+/// seconds, and how strong it starts. Long enough to be found, short enough
+/// that the message is not marked when the next thing is read.
+const WASH_FOR: f64 = 1.5;
+const WASH: f32 = 0.35;
+
+/// How much of the wash is left at `now`, from 1 at `since` to 0 at
+/// [`WASH_FOR`] later.
+fn wash_left(since: f64, now: f64) -> f32 {
+    (1.0 - (now - since) / WASH_FOR).clamp(0.0, 1.0) as f32
+}
+
 /// What was in the box when a rewrite began: the words, their mentions and
 /// the files staged with them.
 struct Stashed {
@@ -861,6 +873,14 @@ struct Pane {
     /// meaningful in one, and the conversation on screen can change before
     /// the message is found.
     jump: Option<([u8; 32], u64)>,
+    /// The message a jump landed on, and when, so it can be washed in the
+    /// accent for a moment: a transcript that has scrolled to one bubble
+    /// among fifty alike gives no sign of which, and the reader who chose a
+    /// search result is left looking for the word again.
+    marked: Option<(u64, f64)>,
+    /// The search result last chosen, drawn as chosen in the results while
+    /// the search stands, so the list says which one the transcript went to.
+    chosen: Option<([u8; 32], u64)>,
     /// Whether the first look has happened for this identity.
     ///
     /// Opening the newest conversation is something sigil does **once**, on
@@ -992,6 +1012,8 @@ impl Default for Pane {
             saw: (None, 0),
             tall: HashMap::new(),
             jump: None,
+            marked: None,
+            chosen: None,
             scrolled: (0.0, 0.0),
             looked: false,
             // The protocol's own default, not zero: a retention field starting
@@ -3041,6 +3063,78 @@ impl ChatApp {
         });
     }
 
+    /// What a search turned up, in place of the list.
+    fn hits_ui(
+        &mut self,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        now: u64,
+    ) {
+        // Said every time, in the count and again on hovering it, not once
+        // in a help page: an empty result here means "not in what this
+        // client has opened", which is a different fact from "never said",
+        // and only this client can tell them apart.
+        const ONLY_HERE: &str = "Searches what this client has opened. The exchange holds \
+                                 ciphertext and cannot search it.";
+        if state.hits.is_empty() {
+            ui.colored_label(
+                theme.text_secondary,
+                if state.searched_messages {
+                    "Nothing here matched."
+                } else {
+                    "…"
+                },
+            );
+            if state.searched_messages {
+                ui.colored_label(theme.text_muted, egui::RichText::new(ONLY_HERE).small());
+            }
+            return;
+        }
+        let n = state.hits.len();
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(format!(
+                "{n} result{} in what this client holds",
+                if n == 1 { "" } else { "s" }
+            ))
+            .small(),
+        )
+        .on_hover_text(ONLY_HERE);
+        ui.add_space(tokens::SPACING_XS);
+        let chosen = self.pane(at).chosen;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for hit in &state.hits {
+                    let row = sigil_ui::SearchHit {
+                        label: &hit.label,
+                        who: &hit.who,
+                        text: &hit.text,
+                        found: hit.found.clone(),
+                        at: &sigil_ui::brief(hit.at, now),
+                    };
+                    let selected = chosen == Some((hit.channel, hit.seq));
+                    if sigil_ui::search_hit(ui, &row, selected).clicked() {
+                        self.choose_hit(at, hit.channel, hit.seq);
+                    }
+                }
+            });
+    }
+
+    /// Go to a search result: open its conversation with the message in the
+    /// window, and scroll to it once it is drawn. `ShowAt` rather than
+    /// `Show`, which opens on the last page: a hit carried its sequence
+    /// number and for a while nothing used it, so the result opened the
+    /// conversation at the bottom with the message somewhere above.
+    fn choose_hit(&mut self, at: &At, channel: [u8; 32], seq: u64) {
+        self.send_as(Some(at), Cmd::ShowAt { channel, seq });
+        let pane = self.pane(at);
+        pane.jump = Some((channel, seq));
+        pane.chosen = Some((channel, seq));
+    }
+
     /// The conversation list.
     fn list_ui(
         &mut self,
@@ -3099,14 +3193,27 @@ impl ChatApp {
             );
             if field.changed() {
                 let query = self.pane(at).searching.clone();
+                self.pane(at).chosen = None;
                 self.send_as(Some(at), Cmd::Search(query));
             }
             let searching = !self.pane(at).searching.is_empty();
+            // Enter chooses the newest result, as pressing it would; Escape
+            // clears the search. Escape has already taken the focus by the
+            // time this pass runs, so the box is asked whether it *had* it.
+            let entered =
+                searching && field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let escaped = searching
+                && ui.memory(|m| m.had_focus_last_frame(field.id))
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            if entered && let Some(hit) = state.hits.first() {
+                self.choose_hit(at, hit.channel, hit.seq);
+            }
             // The control tells you what it will do: clear the search while
             // there is one, and otherwise say what the box is for.
             if searching {
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() || escaped {
                     self.pane(at).searching.clear();
+                    self.pane(at).chosen = None;
                     self.send_as(Some(at), Cmd::Search(String::new()));
                 }
             } else if sigil_ui::icon_button(ui, sigil_ui::Icon::Search).clicked() {
@@ -3121,66 +3228,7 @@ impl ChatApp {
         // A search replaces the list while there is one. The list is still
         // there underneath, and clearing the box brings it back.
         if !self.pane(at).searching.trim().is_empty() {
-            // Said every time, not once in a help page: an empty result here
-            // means "not in what this client has opened", which is a different
-            // fact from "never said", and only this client can tell them apart.
-            ui.colored_label(
-                theme.text_muted,
-                egui::RichText::new(
-                    "Searches what this client has opened. The exchange holds ciphertext \
-                     and cannot search it.",
-                )
-                .small(),
-            );
-            if state.hits.is_empty() {
-                ui.colored_label(
-                    theme.text_secondary,
-                    if state.searched_messages {
-                        "Nothing here matched."
-                    } else {
-                        "…"
-                    },
-                );
-                return;
-            }
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for hit in &state.hits {
-                        let response = ui.vertical(|ui| {
-                            // Nothing here is selectable text, or the labels
-                            // take the press and the row below them never
-                            // hears it -- and a search result is *entirely*
-                            // words, so there is no ground beside them to hit.
-                            // The same hole the conversation list had; see
-                            // `sigil_ui::conversation_row`.
-                            ui.style_mut().interaction.selectable_labels = false;
-                            ui.label(egui::RichText::new(&hit.label).strong().small());
-                            ui.colored_label(
-                                theme.text_secondary,
-                                // A preview, not eight characters: a search
-                                // result you cannot read is a result you have
-                                // to open to reject.
-                                egui::RichText::new(sigil_ui::message::preview(&hit.text, 64))
-                                    .small(),
-                            );
-                            ui.colored_label(
-                                theme.text_muted,
-                                egui::RichText::new(sigil_ui::brief(hit.at, now)).small(),
-                            );
-                        });
-                        if response.response.interact(egui::Sense::click()).clicked() {
-                            self.send_as(Some(at), Cmd::Show(hit.channel));
-                            // And to the message itself, once the conversation
-                            // is open. A hit carried its sequence number and
-                            // nothing used it: the result opened the
-                            // conversation at the bottom, and the message that
-                            // matched was somewhere above.
-                            self.pane(at).jump = Some((hit.channel, hit.seq));
-                        }
-                        ui.separator();
-                    }
-                });
+            self.hits_ui(at, state, ui, theme, now);
             return;
         }
 
@@ -3571,6 +3619,7 @@ impl ChatApp {
                     // A remembered height is about one message in one
                     // conversation, and `seq` starts again in the next.
                     self.pane(at).tall.clear();
+                    self.pane(at).marked = None;
                 }
                 self.pane(at).saw = (state.open, state.earlier);
                 if !paged {
@@ -3874,6 +3923,7 @@ impl ChatApp {
             .filter(|(channel, _)| Some(*channel) == state.open)
             .map(|(_, seq)| seq);
         let mut landed: Option<egui::Rect> = None;
+        let marked = self.pane(at).marked;
         let mut previous_day: Option<String> = None;
         let mut previous_author: Option<PubKey> = None;
         let mut previous_at: u64 = 0;
@@ -4030,6 +4080,11 @@ impl ChatApp {
             };
             // Measured as it is drawn, so the next frame can reserve it.
             DREW.with(|n| n.set(n.get() + 1));
+            // Reserved before the bubble and painted after it, so the wash
+            // a landed message wears goes *under* the bubble.
+            let wash = marked
+                .filter(|(seq, _)| *seq == line.seq)
+                .map(|(_, since)| (ui.painter().add(egui::Shape::Noop), since));
             let drawn = ui.scope(|ui| sigil_ui::bubble(ui, &bubble));
             let did = drawn.inner;
             let rect = drawn.response.rect;
@@ -4038,6 +4093,22 @@ impl ChatApp {
             drop(files);
             if jump == Some(line.seq) {
                 landed = Some(rect);
+            }
+            if let Some((shape, since)) = wash {
+                let left = wash_left(since, ui.input(|i| i.time));
+                ui.painter().set(
+                    shape,
+                    egui::epaint::RectShape::filled(
+                        rect.expand(tokens::SPACING_XS),
+                        tokens::RADIUS_MD,
+                        theme.accent.gamma_multiply(WASH * left),
+                    ),
+                );
+                if left > 0.0 {
+                    ui.ctx().request_repaint();
+                } else {
+                    self.pane(at).marked = None;
+                }
             }
             self.pane(at)
                 .tall
@@ -4074,7 +4145,10 @@ impl ChatApp {
             if let Some(rect) = landed {
                 ui.scroll_to_rect(rect, Some(egui::Align::Center));
                 ui.ctx().request_repaint();
-                self.pane(at).jump = None;
+                let now = ui.input(|i| i.time);
+                let pane = self.pane(at);
+                pane.jump = None;
+                pane.marked = Some((target, now));
             } else if state.lines.first().is_some_and(|l| l.seq > target) && state.earlier > 0 {
                 if !self.pane(at).asking {
                     self.pane(at).asking = true;

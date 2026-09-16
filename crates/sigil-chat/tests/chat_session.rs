@@ -1286,6 +1286,53 @@ async fn a_long_conversation_opens_on_a_page_and_reaches_back() {
         alice.state().earlier
     );
 
+    // A search result reaches its message in one hop. Back to one page
+    // first, so there is something to reach past.
+    let channel = alice.state().open.unwrap();
+    alice.send(Cmd::Show(channel));
+    assert!(
+        until(
+            || alice.state().earlier == sent - sigil_chat::session::PAGE,
+            20
+        )
+        .await,
+        "reopening should put the window back to a page: {} behind",
+        alice.state().earlier
+    );
+    alice.send(Cmd::Search("MESSAGE 5".into()));
+    assert!(
+        until(|| alice.state().searched_messages, 20).await,
+        "the search should answer"
+    );
+    let hits = alice.state().hits.clone();
+    let hit = hits
+        .iter()
+        .find(|h| h.text == "message 5")
+        .unwrap_or_else(|| panic!("the fifth message is held and should match: {hits:?}"))
+        .clone();
+    assert_eq!(hit.who, "You", "our own message is ours");
+    assert_eq!(&hit.text[hit.found.clone()], "message 5", "case aside");
+    assert!(
+        !alice.state().lines.iter().any(|l| l.seq == hit.seq),
+        "the fifth message must be behind the page for this to test anything"
+    );
+    alice.send(Cmd::ShowAt {
+        channel: hit.channel,
+        seq: hit.seq,
+    });
+    let reached = until(|| alice.state().lines.iter().any(|l| l.seq == hit.seq), 20).await;
+    assert!(
+        reached,
+        "going to a search result should widen the window to it, without \
+         being asked for pages: {} behind",
+        alice.state().earlier
+    );
+    assert_eq!(
+        alice.state().open,
+        Some(channel),
+        "and it is the same conversation, still open"
+    );
+
     alice.stop();
     bob.stop();
 }

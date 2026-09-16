@@ -13,6 +13,7 @@ pub mod gif;
 pub mod identicon;
 pub mod message;
 pub mod roster;
+pub mod search_hit;
 pub mod video;
 pub mod working;
 
@@ -144,5 +145,6 @@ pub use message::{
     system_line, unread_divider, unread_pill,
 };
 pub use roster::{Row, roster};
+pub use search_hit::{SearchHit, search_hit};
 pub use sigil::icon;
 pub use sigil::icon::{Icon, icon_button, icon_button_named, icon_button_tinted, icon_item};
