@@ -6118,3 +6118,131 @@ fn the_channel_settings_carry_the_mute() {
         checkbox.accesskit_node().toggled()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Commands: `/` in the composer.
+// ---------------------------------------------------------------------------
+
+/// Typing `/` lists the commands with what each does; more of a word
+/// narrows the list; Enter on one that takes nothing runs it, at once, and
+/// the box is empty afterwards -- nothing was posted.
+#[test]
+fn typing_a_slash_offers_the_commands_and_enter_runs_one() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    // A private group: the one kind that can be called.
+    let mut state = the_room();
+    for c in &mut state.conversations {
+        c.public = Some(false);
+    }
+    let mut h = harness_recording_commands(state, asked.clone());
+    h.run();
+    assert!(
+        !text_of(&h).contains("/call"),
+        "nothing offered before a slash"
+    );
+
+    let field = composer(&h);
+    field.focus();
+    field.type_text("/");
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("/call") && said.contains("/topic <text>"),
+        "{said}"
+    );
+    assert!(
+        said.contains("Ring this conversation"),
+        "each says what it does: {said}"
+    );
+
+    composer(&h).type_text("ca");
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("/call"), "{said}");
+    assert!(
+        !said.contains("/topic"),
+        "narrowed by what was typed: {said}"
+    );
+
+    asked.borrow_mut().clear();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Call {"),
+        "Enter on /call did not call: {sent}"
+    );
+    assert!(
+        !sent.contains("Post("),
+        "a command was posted as a message: {sent}"
+    );
+    assert_eq!(composed(&h), "", "the box is emptied");
+}
+
+/// A command with an argument is completed by the list and run by Enter
+/// once the argument is typed; a word that is no command stays in the box
+/// and is said to be none; and `//` sends a message that begins with `/`.
+#[test]
+fn a_command_takes_its_argument_and_a_mistake_is_said() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(the_room(), asked.clone());
+    h.run();
+
+    let field = composer(&h);
+    field.focus();
+    field.type_text("/to");
+    h.run();
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(composed(&h), "/topic ", "completed, with room for the text");
+    assert!(
+        !asked.borrow().iter().any(|c| c.starts_with("SetTopic")),
+        "run before its argument was typed"
+    );
+    composer(&h).focus();
+    composer(&h).type_text("release day");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("SetTopic(\"release day\")"), "{sent}");
+    assert_eq!(composed(&h), "");
+
+    // Not a command: kept, and said, and nothing asked of the session.
+    composer(&h).focus();
+    composer(&h).type_text("/frobnicate");
+    h.run();
+    let before = asked.borrow().len();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(
+        composed(&h),
+        "/frobnicate",
+        "the line is kept for correcting"
+    );
+    assert!(text_of(&h).contains("is not a command"), "{}", text_of(&h));
+    assert_eq!(asked.borrow().len(), before, "{:?}", asked.borrow());
+
+    // Two slashes: a message that starts with one.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(the_room(), asked.clone());
+    h.run();
+    composer(&h).focus();
+    composer(&h).type_text("//etc/hosts is gone");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("Post(") && sent.contains("text: \"/etc/hosts is gone\""),
+        "{sent}"
+    );
+}

@@ -1,5 +1,6 @@
 //! Messaging, as a sigil app.
 
+pub mod command;
 pub mod frequent;
 pub mod mention;
 pub mod session;
@@ -795,6 +796,8 @@ struct Pane {
     previews_tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, Option<Vec<u8>>)>>,
     /// Why not every file picked was staged.
     staging_trouble: Option<String>,
+    /// Why the last line typed as a command did nothing.
+    command_trouble: Option<String>,
     /// Which row of the mention list the keyboard is on.
     picking: usize,
     /// Escape closed the list for this `@`; typing reopens it.
@@ -998,6 +1001,7 @@ impl Default for Pane {
             previews: None,
             previews_tx: None,
             staging_trouble: None,
+            command_trouble: None,
             picking: 0,
             picker_dismissed: false,
             field: None,
@@ -3537,7 +3541,7 @@ impl ChatApp {
                         ..Default::default()
                     }),
             )
-            .show(ui, |ui| self.composer_ui(at, state, ui, theme));
+            .show(ui, |ui| self.composer_ui(ctx, at, state, ui, theme));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -4589,7 +4593,14 @@ impl ChatApp {
         }
     }
 
-    fn composer_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn composer_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         self.took_back(at, state);
         // A refused message that could not go straight back: said, with
         // its first words, and the way to have it back or to let it go.
@@ -4674,23 +4685,7 @@ impl ChatApp {
         let mut chosen: Option<String> = None;
         let mut refocus = false;
         if let Some(rows) = &picker {
-            let picking = self.pane(at).picking.min(rows.len() - 1);
-            let (up, down, choose, dismiss) = ui.input_mut(|i| {
-                (
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                        || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-                )
-            });
-            let mut picking = picking;
-            if up {
-                picking = picking.saturating_sub(1);
-            }
-            if down {
-                picking = (picking + 1).min(rows.len() - 1);
-            }
+            let (picking, choose, dismiss) = picker_keys(ui, self.pane(at).picking, rows.len());
             if choose {
                 chosen = Some(rows[picking].0.clone());
             }
@@ -4743,11 +4738,73 @@ impl ChatApp {
             completed = true;
         }
 
+        // **`/` offers the commands.** While the box holds a slash and some
+        // of a word, the commands it could be are listed above it with what
+        // each does, and the keys go to the list as they do for `@`. One
+        // that takes nothing more is run the moment it is chosen; one that
+        // does is completed, and the argument is typed after it.
+        let commands = {
+            let pane = self.pane(at);
+            command::command_query(&pane.composing)
+                .filter(|_| !pane.picker_dismissed)
+                .map(command::candidates)
+                .filter(|c| !c.is_empty())
+        };
+        let mut run: Option<command::Command> = None;
+        if let Some(rows) = &commands {
+            let (picking, choose, dismiss) = picker_keys(ui, self.pane(at).picking, rows.len());
+            let mut pick: Option<&command::Spec> = choose.then(|| rows[picking]);
+            if dismiss {
+                self.pane(at).picker_dismissed = true;
+                refocus = true;
+            }
+            self.pane(at).picking = picking;
+            egui::Frame::NONE
+                .fill(theme.surface_elevated)
+                .corner_radius(tokens::RADIUS_MD)
+                .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (i, spec) in rows.iter().enumerate() {
+                        let row = ui.horizontal(|ui| {
+                            let word = if spec.arg.is_empty() {
+                                format!("/{}", spec.name)
+                            } else {
+                                format!("/{} {}", spec.name, spec.arg)
+                            };
+                            let pressed = ui.selectable_label(i == picking, word).clicked();
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(spec.what).small(),
+                            );
+                            pressed
+                        });
+                        if row.inner {
+                            pick = Some(spec);
+                        }
+                    }
+                });
+            ui.add_space(tokens::SPACING_XS);
+            if let Some(spec) = pick {
+                let pane = self.pane(at);
+                command::complete(&mut pane.composing, spec);
+                pane.picking = 0;
+                if spec.arg.is_empty() {
+                    run = command::parse(&pane.composing).ok().flatten();
+                } else {
+                    completed = true;
+                }
+            }
+        }
+        if let Some(why) = self.pane(at).command_trouble.clone() {
+            ui.colored_label(theme.warning, egui::RichText::new(why).small());
+        }
+
         // **Escape does what the × does**, while the box has the keyboard
         // and no list is up to take the key first. The focus test is of
         // last pass: egui surrenders a field's focus on Escape before any
         // widget runs, so by now the box has already let go.
-        if picker.is_none() {
+        if picker.is_none() && commands.is_none() {
             let pane = self.pane(at);
             let armed = pane.editing.or(pane.replying).is_some();
             let in_the_box = pane
@@ -4797,8 +4854,10 @@ impl ChatApp {
             // not writing in is not typing, and saying otherwise is a claim
             // about them that they did not make.
             if field.changed() {
-                // Typing again reopens a list Escape closed.
+                // Typing again reopens a list Escape closed, and what was
+                // said about the last command is about the last command.
                 self.pane(at).picker_dismissed = false;
+                self.pane(at).command_trouble = None;
                 let writing = !self.pane(at).composing.is_empty();
                 if self.pane(at).announced_typing != writing {
                     self.pane(at).announced_typing = writing;
@@ -4830,7 +4889,33 @@ impl ChatApp {
             // one can still be rewritten.
             let something =
                 !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
-            if (entered || send) && something {
+            // A line that begins with a slash is asked of this client, not
+            // posted -- unless it begins with two, which is a message that
+            // begins with one.
+            let line = self.pane(at).composing.clone();
+            let mut trouble = None;
+            let is_command = command::as_message(line.trim()).is_none() && !line.trim().is_empty();
+            if (entered || send) && is_command {
+                match command::parse(&line) {
+                    Ok(Some(cmd)) => run = Some(cmd),
+                    Ok(None) => {}
+                    Err(why) => trouble = Some(why),
+                }
+                field.request_focus();
+            }
+            if let Some(why) = trouble {
+                self.pane(at).command_trouble = Some(why);
+            }
+            if let Some(cmd) = run.take() {
+                let pane = self.pane(at);
+                pane.composing.clear();
+                pane.command_trouble = None;
+                if let Err(why) = self.run_command(ctx, at, state, cmd, ui.ctx()) {
+                    self.pane(at).command_trouble = Some(why);
+                }
+                field.request_focus();
+            }
+            if (entered || send) && something && !is_command {
                 // Taken, and kept: the box is emptied for the next message,
                 // and everything that was in it goes into `in_flight` under
                 // the draft's token until the session says whether it went.
@@ -4839,6 +4924,8 @@ impl ChatApp {
                 let token = pane.next_token;
                 pane.next_token += 1;
                 let text = std::mem::take(&mut pane.composing);
+                // `//x` was typed to send `/x`.
+                let text = command::as_message(text.trim()).unwrap_or(text);
                 let (editing, replying) = (pane.editing.take(), pane.replying.take());
                 pane.announced_typing = false;
                 // The keys, for every name still in the text.
@@ -4888,6 +4975,175 @@ impl ChatApp {
                 field.request_focus();
             }
         });
+    }
+}
+
+/// The keys a list above the box takes while it is up: Up and Down move,
+/// Enter or Tab choose, Escape dismisses. Taken from the input before the
+/// field is drawn, so an Enter that chose is not also an Enter that sent.
+/// Returns where the keyboard is now, and whether a choice or a dismissal
+/// was made.
+fn picker_keys(ui: &egui::Ui, picking: usize, len: usize) -> (usize, bool, bool) {
+    let mut picking = picking.min(len.saturating_sub(1));
+    let (up, down, choose, dismiss) = ui.input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        )
+    });
+    if up {
+        picking = picking.saturating_sub(1);
+    }
+    if down {
+        picking = (picking + 1).min(len.saturating_sub(1));
+    }
+    (picking, choose, dismiss)
+}
+
+impl ChatApp {
+    /// Do what a line beginning with a slash asked. Each command is the
+    /// same thing its control does -- the Call button, the bell, the
+    /// Answer button -- by the same path, so there is one way each thing
+    /// happens and the command cannot drift from the control. `Err` is
+    /// for the person: the command made sense and cannot be done here.
+    fn run_command(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        cmd: command::Command,
+        egui_ctx: &egui::Context,
+    ) -> Result<(), String> {
+        use command::Command;
+        let me = at.0;
+        let open = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open);
+        let here = || open.ok_or_else(|| "Nothing is open.".to_string());
+        let ringing_here = || {
+            state
+                .ringing
+                .iter()
+                .find(|r| Some(r.channel) == state.open && !r.mine && !r.answered)
+                .cloned()
+                .ok_or_else(|| "Nothing is ringing here.".to_string())
+        };
+        match cmd {
+            Command::Call => {
+                let c = here()?;
+                if c.public != Some(false) {
+                    return Err("Only a private conversation can be called.".into());
+                }
+                if self.calls.contains_key(&me) || state.ringing.iter().any(|r| r.mine) {
+                    return Err("You are already in a call, or placing one.".into());
+                }
+                let direct = ctx.accounts.prefs.direct_calls;
+                self.send_as(Some(at), Cmd::Call { direct });
+            }
+            Command::Answer => {
+                let ring = ringing_here()?;
+                self.send_as(
+                    Some(at),
+                    Cmd::Answer {
+                        channel: ring.channel,
+                        seq: ring.seq,
+                    },
+                );
+                self.join_call(ctx, at, &ring, egui_ctx);
+            }
+            Command::Decline => {
+                let ring = ringing_here()?;
+                self.send_as(
+                    Some(at),
+                    Cmd::Decline {
+                        channel: ring.channel,
+                        seq: ring.seq,
+                    },
+                );
+            }
+            Command::Hangup => {
+                if let Some((channel, seq, seconds)) = self.leave_call(me) {
+                    self.send_as(
+                        Some(at),
+                        Cmd::Hangup {
+                            channel,
+                            seq,
+                            seconds,
+                        },
+                    );
+                } else if let Some(ring) = state.ringing.iter().find(|r| r.mine) {
+                    self.send_as(
+                        Some(at),
+                        Cmd::Hangup {
+                            channel: ring.channel,
+                            seq: ring.seq,
+                            seconds: 0,
+                        },
+                    );
+                } else {
+                    return Err("You are not in a call.".into());
+                }
+            }
+            Command::Mute | Command::Unmute => {
+                let c = here()?;
+                ctx.accounts
+                    .quiet
+                    .set_muted(&at.1, &c.channel, matches!(cmd, Command::Mute));
+            }
+            Command::Topic(text) => {
+                here()?;
+                self.send_as(Some(at), Cmd::SetTopic(text));
+            }
+            Command::Name(text) => {
+                let c = here()?;
+                if c.peer.is_some() {
+                    return Err("A direct message is named after the person in it.".into());
+                }
+                self.send_as(Some(at), Cmd::SetName(text));
+            }
+            Command::Invite(key) => {
+                here()?;
+                let key: PubKey = key
+                    .parse()
+                    .map_err(|_| format!("{key} is not a key. /invite takes a base58 key."))?;
+                self.send_as(Some(at), Cmd::Invite(key));
+            }
+            Command::Members => {
+                here()?;
+                self.send_as(Some(at), Cmd::Blocked);
+                ctx.navigator.push_here(Route::Members);
+            }
+            Command::Settings => {
+                here()?;
+                ctx.navigator.push_here(Route::Settings);
+            }
+            Command::Devices => {
+                self.send_as(Some(at), Cmd::Devices);
+                ctx.navigator.push_here(Route::Devices);
+            }
+            Command::Search(text) => {
+                self.columns_open = true;
+                self.pane(at).searching = text.clone();
+                self.pane(at).chosen = None;
+                self.send_as(Some(at), Cmd::Search(text));
+            }
+            Command::New => {
+                self.pane(at).dialog = Some(Dialog::Compose);
+            }
+            Command::Profile => self.open_profile(at, state),
+            Command::Reconnect => self.send_as(Some(at), Cmd::Reconnect),
+            Command::Help => {
+                // The list is the help: a lone slash shows all of it.
+                let pane = self.pane(at);
+                pane.composing = "/".into();
+                pane.picker_dismissed = false;
+            }
+        }
+        Ok(())
     }
 }
 
