@@ -1581,7 +1581,7 @@ async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
         "this test no longer proves the event path"
     );
 
-    alice.send(Cmd::Call);
+    alice.send(Cmd::Call { direct: true });
     let rang = until(
         || {
             bob.state()
@@ -1607,6 +1607,17 @@ async fn a_call_rings_in_the_conversation_and_declining_is_recorded() {
     // The invitation carries the room secret, and that is the whole of what
     // joining the audio needs — which is also why it is a bearer capability.
     assert_ne!(ring.secret, [0u8; 32], "the invitation carries a room");
+    // And that the caller will ask for an introduction, and who the other
+    // person is -- which is who a direct connection would be made to.
+    assert!(
+        ring.direct,
+        "the invitation says the caller will ask to be introduced"
+    );
+    assert_eq!(
+        ring.peer,
+        Some(a_id),
+        "a direct message names its other party"
+    );
 
     // Alice sees her own as outgoing rather than as something to answer.
     assert!(
@@ -1776,7 +1787,7 @@ async fn an_answered_call_stops_ringing_for_the_caller() {
         "and the callee should know the conversation exists"
     );
 
-    alice.send(Cmd::Call);
+    alice.send(Cmd::Call { direct: false });
     assert!(
         until(
             || bob
@@ -1796,6 +1807,8 @@ async fn an_answered_call_stops_ringing_for_the_caller() {
         .into_iter()
         .find(|r| r.from == a_id)
         .unwrap();
+    // A caller that will not ask to be introduced says so by saying nothing.
+    assert!(!ring.direct, "no introduction was offered");
 
     bob.send(Cmd::Answer {
         channel: ring.channel,

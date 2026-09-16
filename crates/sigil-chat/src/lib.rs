@@ -3405,7 +3405,11 @@ impl ChatApp {
                     && !state.ringing.iter().any(|r| r.mine)
                     && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked()
                 {
-                    self.send_as(Some(at), Cmd::Call);
+                    // Say in the invitation whether this side will ask for
+                    // an introduction, so the other side is not left
+                    // waiting on one that is never asked for.
+                    let direct = ctx.accounts.prefs.direct_calls;
+                    self.send_as(Some(at), Cmd::Call { direct });
                 }
 
                 // Whatever is left is the name's, and it truncates rather than
@@ -5332,13 +5336,25 @@ impl ChatApp {
             return;
         };
         let wake = egui_ctx.clone();
-        let handle = sigil_net::spawn_room(
-            reach,
-            signer,
-            sigil_net::RoomId::new(ring.secret),
-            Default::default(),
-            move || wake.request_repaint(),
-        );
+        let room = sigil_net::RoomId::new(ring.secret);
+        // A direct message goes straight to the other person when both
+        // sides will ask for an introduction -- the invitation says the
+        // caller will, and the setting says this side may -- and through
+        // the room otherwise. A group is a room.
+        let handle = match ring.peer {
+            Some(peer) => sigil_net::spawn_dm_call(
+                reach,
+                signer,
+                peer,
+                room,
+                ring.direct && ctx.accounts.prefs.direct_calls,
+                Default::default(),
+                move || wake.request_repaint(),
+            ),
+            None => sigil_net::spawn_room(reach, signer, room, Default::default(), move || {
+                wake.request_repaint()
+            }),
+        };
         self.calls.insert(
             me,
             Live {
@@ -5842,6 +5858,35 @@ impl ChatApp {
                         theme.text_muted,
                         format!("{:02}:{:02}", seconds / 60, seconds % 60),
                     );
+                    // Which way the audio is going, once that is settled.
+                    // Said in a word because it is the one fact about a
+                    // call a person can do something about -- and, for a
+                    // while, the one the field test needs to read.
+                    match call.path {
+                        Some(sigil_net::Path::Direct) => {
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new("direct").small(),
+                            )
+                            .on_hover_text(
+                                "Connected straight to them: the exchange introduced you \
+                                     and is not carrying the call.",
+                            );
+                        }
+                        Some(sigil_net::Path::Relayed) => {
+                            ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new("via exchange").small(),
+                            )
+                            .on_hover_text(format!(
+                                "Relayed by the exchange: {}.",
+                                call.why
+                                    .as_deref()
+                                    .unwrap_or("no introduction was asked for")
+                            ));
+                        }
+                        None => {}
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // The struck-through handset, in the destructive
                         // colour. It carries the word "Hang up" for anything
@@ -6801,6 +6846,8 @@ mod joining_tests {
             secret: [3u8; 32],
             answered,
             label: "somebody".into(),
+            direct: false,
+            peer: None,
         }
     }
 

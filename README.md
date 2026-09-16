@@ -6,7 +6,10 @@ and Linux.
 
 It brings together what `sqex-voice` (a CLI) and `sqex-chat` (a terminal UI) do
 separately today, and adds what a terminal could not: rendered avatars and
-images, a call you join by clicking, and a phone that actually rings.
+images, a call you join by clicking, and a phone that actually rings. A call
+between two people goes straight between them when the exchange can introduce
+them, and through the exchange when it cannot; see
+[docs/calls.md](docs/calls.md).
 
 ## Status
 

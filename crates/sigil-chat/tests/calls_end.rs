@@ -201,6 +201,86 @@ async fn a_call_is_shown_even_while_looking_at_another_identity() {
     );
 }
 
+/// The bar says which way the audio is going: "direct" once the exchange
+/// has introduced the two, "via exchange" when it is relayed, and nothing
+/// while that is not yet settled.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_call_bar_says_which_way_the_audio_goes() {
+    use egui_kittest::Harness;
+
+    for (path, why, word, absent) in [
+        (
+            Some(sigil_net::Path::Direct),
+            None,
+            Some("direct"),
+            "via exchange",
+        ),
+        (
+            Some(sigil_net::Path::Relayed),
+            Some("the other side did not ask to be introduced".to_string()),
+            Some("via exchange"),
+            "direct",
+        ),
+        (None, None, None, "via exchange"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let egui_ctx = egui::Context::default();
+        let mut app = app_at(dir.path().to_path_buf());
+        let one = Account::unlocked_for_test([1u8; 32]);
+        let me = one.unlocked().expect("an open account").me();
+        let mut accounts = Accounts::of(vec![one]);
+        pass(&mut app, &mut accounts, &egui_ctx);
+
+        let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+            phase: sigil_net::Phase::Live,
+            path,
+            why: why.clone(),
+            me: Some(me),
+            ..Default::default()
+        });
+        app.hold_call_for_test(me, [3u8; 32], 9, handle);
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 620.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+                ctx.set_theme(egui::Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+            });
+        harness.run_steps(3);
+        let said = labels(&harness);
+        assert!(
+            said.iter().any(|l| l == "In a call"),
+            "the call is not on screen: {said:?}"
+        );
+        match word {
+            Some(word) => assert!(
+                said.iter().any(|l| l == word),
+                "{path:?}: the bar does not say {word:?}: {said:?}"
+            ),
+            None => assert!(
+                !said.iter().any(|l| l == "direct"),
+                "nothing is settled yet, and the bar says direct: {said:?}"
+            ),
+        }
+        assert!(
+            !said.iter().any(|l| l == absent),
+            "{path:?}: the bar says {absent:?} as well: {said:?}"
+        );
+    }
+}
+
 /// Every piece of text on screen, labels and values alike.
 ///
 /// A plain `Label` carries its text as the node's *value* and has no label at

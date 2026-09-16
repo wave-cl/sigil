@@ -1633,6 +1633,83 @@ fn a_pressed_notification_opens_the_app_it_came_from() {
     );
 }
 
+/// The Desktop pane's switch for direct calls flips the preference the
+/// roster holds -- on by default, off when pressed, and marked as changed
+/// so the shell writes it -- and says what turning it on discloses.
+#[test]
+fn the_desktop_pane_switches_direct_calls_off_and_says_what_they_disclose() {
+    use egui_kittest::kittest::Queryable;
+    use sigil_platform::Platform;
+    use sigil_shell::PlatformApp;
+
+    let mut app = PlatformApp::new(&Platform::new(), "http://127.0.0.1:1", || {});
+    let accounts = std::rc::Rc::new(std::cell::RefCell::new(sigil::accounts::Accounts::of(
+        vec![sigil::Account::unlocked_for_test([4u8; 32])],
+    )));
+    let shared = accounts.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = sigil::navigator::Navigator::default();
+            let mut accounts = shared.borrow_mut();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    h.run();
+    assert!(accounts.borrow().prefs.direct_calls, "on by default");
+    assert!(
+        !accounts.borrow().prefs.take_changed(),
+        "nothing changed yet"
+    );
+
+    let switch = h.get_by_label("Connect calls directly when possible");
+    switch.hover();
+    h.run();
+    let said = {
+        fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
+            let n = node.accesskit_node();
+            if let Some(l) = n.label() {
+                out.push(l.to_string());
+            }
+            if let Some(v) = n.value() {
+                out.push(v.to_string());
+            }
+            for c in node.children() {
+                walk(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        walk(h.root(), &mut found);
+        found.join(" | ")
+    };
+    assert!(
+        said.contains("learns your address"),
+        "the switch does not say what it discloses: {said}"
+    );
+
+    h.get_by_label("Connect calls directly when possible")
+        .click();
+    h.run();
+    assert!(!accounts.borrow().prefs.direct_calls, "pressed off");
+    assert!(
+        accounts.borrow().prefs.take_changed(),
+        "and marked as changed, so it is written"
+    );
+    h.get_by_label("Connect calls directly when possible")
+        .click();
+    h.run();
+    assert!(accounts.borrow().prefs.direct_calls, "and on again");
+}
+
 /// Do not disturb from the tray's menu flips the setting the roster holds,
 /// which the Desktop pane and every app read; and back again.
 #[test]

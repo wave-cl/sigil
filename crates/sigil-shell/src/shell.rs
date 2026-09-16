@@ -526,6 +526,9 @@ impl Shell {
         if self.accounts.quiet.take_changed() && self.remember {
             self.accounts.quiet.save();
         }
+        if self.accounts.prefs.take_changed() && self.remember {
+            self.accounts.prefs.save();
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {

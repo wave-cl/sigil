@@ -345,6 +345,21 @@ impl App for PlatformApp {
         {
             ctx.accounts.quiet.set_dnd(dnd);
         }
+        // How a call connects. A direct call discloses this machine's
+        // address to the other person, which is why it is a switch and not
+        // only a default.
+        let mut direct = ctx.accounts.prefs.direct_calls;
+        if ui
+            .checkbox(&mut direct, "Connect calls directly when possible")
+            .on_hover_text(
+                "The exchange introduces the two of you and the call goes straight \
+                 between you; the other person learns your address. Off, every call \
+                 is relayed by the exchange.",
+            )
+            .changed()
+        {
+            ctx.accounts.prefs.set_direct_calls(direct);
+        }
         ui.add_space(tokens::SPACING_SM);
         let starts = self.report.autostart_enabled;
         let can = self.report.autostart.is_yes() && self.autostart.is_some();

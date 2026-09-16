@@ -2378,6 +2378,8 @@ fn a_ring_shows_the_callers_key_in_full() {
         secret: [3u8; 32],
         answered: false,
         label: "Ada".into(),
+        direct: false,
+        peer: None,
     }];
     let mut h = harness_with(state, true);
     h.run();
@@ -2405,6 +2407,8 @@ fn our_own_call_is_shown_as_ringing_out_not_as_an_incoming_ring() {
         secret: [3u8; 32],
         answered: false,
         label: "Ada".into(),
+        direct: false,
+        peer: None,
     }];
     let mut h = harness_with(state, true);
     h.run();
@@ -2441,6 +2445,8 @@ fn cancel_is_centred_against_the_call_it_would_stop() {
         secret: [3u8; 32],
         answered: false,
         label: "Ada".into(),
+        direct: false,
+        peer: None,
     }];
     let mut h = harness_with(state, true);
     h.run();

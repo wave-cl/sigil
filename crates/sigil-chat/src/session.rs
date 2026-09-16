@@ -36,8 +36,8 @@ use sqex_proto::channel::{
 };
 use sqex_proto::events::Event;
 use sqex_proto::message::{
-    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, CALL_FAILED, CALL_MISSED, MEDIA_AUDIO, Part,
-    RING_ACCEPTED, RING_DECLINED, RING_ENDED, RING_RINGING,
+    CALL_ANSWERED, CALL_CANCELLED, CALL_DECLINED, CALL_FAILED, CALL_MISSED, MEDIA_AUDIO,
+    MEDIA_DIRECT, Part, RING_ACCEPTED, RING_DECLINED, RING_ENDED, RING_RINGING,
 };
 use sqex_proto::timeline::{Timeline, Verdict};
 use sqnr_core::{PubKey, SoftwareSigner};
@@ -748,6 +748,12 @@ pub struct Ring {
     pub answered: bool,
     /// What the conversation this rang in is called.
     pub label: String,
+    /// The caller said it will ask for a SIP-25 introduction (SIP-36's
+    /// `MEDIA_DIRECT`), so a willing callee asks too.
+    pub direct: bool,
+    /// The other person, when this is a direct message -- who a direct
+    /// connection would be made to. `None` in a group, which is relayed.
+    pub peer: Option<PubKey>,
 }
 
 /// A public channel the directory turned up.
@@ -1157,8 +1163,13 @@ pub enum Cmd {
     Typing(bool),
 
     // ---- calls (SIP-36) -------------------------------------------------
-    /// Ring everybody in the open conversation.
-    Call,
+    /// Ring everybody in the open conversation. `direct`: say in the
+    /// invitation that this side will ask the exchange for a SIP-25
+    /// introduction once answered, so the call can go straight between the
+    /// two people (SIP-36's `MEDIA_DIRECT`).
+    Call {
+        direct: bool,
+    },
     /// Take a call. Signals that we have, so the caller stops seeing "ringing"
     /// — answering posts **no entry**, so a caller watching only the log would
     /// go on ringing and then derive *missed* of a call being spoken on.
@@ -3771,6 +3782,8 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     Some(peer) => name_for(&people, &peer, &known.label),
                     None => known.label.clone(),
                 },
+                direct: call.media & MEDIA_DIRECT != 0,
+                peer: known.peer,
             });
         }
     }
@@ -4812,9 +4825,14 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             };
         }
 
-        Cmd::Call => {
+        Cmd::Call { direct } => {
             let Some(channel) = desk.open else { return };
-            match chat.call(&channel, MEDIA_AUDIO, RING_SECS).await {
+            let media = if direct {
+                MEDIA_AUDIO | MEDIA_DIRECT
+            } else {
+                MEDIA_AUDIO
+            };
+            match chat.call(&channel, media, RING_SECS).await {
                 Ok((posted, _secret)) => {
                     // The signal says it is ringing *now*; the entry is what
                     // says it happened. Both, because neither does the other's

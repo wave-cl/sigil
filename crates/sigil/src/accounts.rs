@@ -97,6 +97,9 @@ pub struct Accounts {
     /// this machine, like the roster does. Loaded with the remembered
     /// roster and empty with a fixed one; written by the shell.
     pub quiet: crate::quiet::Quiet,
+    /// What this machine prefers otherwise -- how a call connects. Loaded
+    /// and written as `quiet` is.
+    pub prefs: crate::prefs::Prefs,
 }
 
 impl Accounts {
@@ -126,6 +129,7 @@ impl Accounts {
             generation: 0,
             shown: Default::default(),
             quiet: Default::default(),
+            prefs: Default::default(),
         }
     }
 
@@ -498,6 +502,7 @@ impl Accounts {
             generation: 0,
             shown: Default::default(),
             quiet: crate::quiet::Quiet::load(),
+            prefs: crate::prefs::Prefs::load(),
         }
     }
 

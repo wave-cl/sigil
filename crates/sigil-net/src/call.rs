@@ -51,10 +51,28 @@ pub enum Phase {
     Ended,
 }
 
+/// How a call's media travels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Path {
+    /// Straight between the two parties, after the exchange introduced them
+    /// (SIP-25).
+    Direct,
+    /// Through the exchange (SIP-12). Either nobody asked for an
+    /// introduction, or one was made and led nowhere; `CallState::why` says
+    /// which.
+    Relayed,
+}
+
 /// Everything the interface needs to draw a call, and nothing it does not.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CallState {
     pub phase: Phase,
+    /// How the media travels, once that is settled. `None` while it is not
+    /// -- during the introduction, or for a call that never asked.
+    pub path: Option<Path>,
+    /// Why the call is relayed when a direct connection was wanted: the
+    /// peer did not ask, or the punch failed and this says how.
+    pub why: Option<String>,
     /// Who the exchange thinks we are. Shown in full somewhere reachable: a
     /// name is an assertion, a key is not (SIP-21).
     pub me: Option<PubKey>,
@@ -127,6 +145,11 @@ impl Report for Bridge {
                 s.present = peers.clone();
                 s.connecting = *connecting;
             }
+            Event::Direct { .. } => s.path = Some(Path::Direct),
+            Event::Relayed { why } => {
+                s.path = Some(Path::Relayed);
+                s.why = Some(why.clone());
+            }
             // The rest are narrative: they say what happened, not what is true.
             // `Moved` is SIP-40: the exchange's pinned key changed hands and
             // the pin followed a signed handover. Like `Pinned`, it is said
@@ -146,6 +169,9 @@ impl Report for Bridge {
             // simply not answering -- so this only ever arrives as something to
             // say, not as a state to hold.
             | Event::Declined { .. }
+            // The path closing under the call ends it; the task's epilogue
+            // records the ending, and this only says why.
+            | Event::Closed { .. }
             | Event::Device(_) => {}
         });
         // A closed receiver means the interface has gone; the call carries on
@@ -479,6 +505,126 @@ pub fn spawn_room(
         task,
         ending: hanging_up,
         wake: hanging_up_wake,
+    }
+}
+
+/// A direct-message call: straight to the peer if both sides are
+/// introduced, and through the exchange's room otherwise.
+///
+/// The room is what SIP-36 hands both sides, and it is where they meet when
+/// the introduction fails on either side -- a room tolerates the two
+/// arriving at different moments, which they will when one's dial timed out
+/// and the other's accept did. `direct` is the caller's `MEDIA_DIRECT` bit
+/// and this side's own setting, both: the bit says the other side will ask,
+/// and asking without them costs the wait for nothing.
+///
+/// The introduction needs the exchange's address, so a borrowed connection
+/// lends its endpoint as well; a dialled one resolves it first, as a room
+/// does.
+pub fn spawn_dm_call(
+    dial: impl Into<Dial>,
+    signer: SoftwareSigner,
+    peer: PubKey,
+    room: RoomId,
+    direct: bool,
+    opts: CallOpts,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> CallHandle {
+    let (state_tx, state_rx) = watch::channel(CallState {
+        phase: Phase::Connecting,
+        peer: Some(peer),
+        room: Some(room),
+        ..CallState::default()
+    });
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let wake = Arc::new(wake);
+    let dial = dial.into();
+
+    let ending = state_tx.clone();
+    let ending_wake = wake.clone();
+    let hanging_up = state_tx.clone();
+    let hanging_up_wake = wake.clone();
+    let task = tokio::spawn(async move {
+        let mut bridge = Bridge {
+            state: state_tx,
+            events: events_tx,
+            wake,
+        };
+        let result = async {
+            let (client, endpoint) = match dial {
+                Dial::On(held) => {
+                    let (client, endpoint) = held.now().ok_or("not connected to the exchange")?;
+                    (engine::adopt(client, &signer, &mut bridge)?, endpoint)
+                }
+                Dial::At(e) => (engine::connect(e, &signer, &mut bridge).await?, e),
+                Dial::Discover(layers) => {
+                    let e = engine::resolve(&layers[..], &mut bridge).await?;
+                    (engine::connect(e, &signer, &mut bridge).await?, e)
+                }
+            };
+            if direct {
+                match sqex_voice::direct::connect(
+                    endpoint,
+                    &signer.seed(),
+                    peer,
+                    sqex_voice::direct::Budget::default(),
+                    &mut bridge,
+                )
+                .await
+                {
+                    Ok(Some((conn, session, id))) => {
+                        return engine::call(conn, session, id, opts, &mut bridge).await;
+                    }
+                    Ok(None) => bridge.event(Event::Relayed {
+                        why: "the other side did not ask to be introduced".into(),
+                    }),
+                    Err(why) => bridge.event(Event::Relayed { why }),
+                }
+            } else {
+                bridge.event(Event::Relayed {
+                    why: "no introduction was asked for".into(),
+                });
+            }
+            engine::room_call(client, &signer, room, opts, &mut bridge).await
+        }
+        .await;
+
+        ending.send_modify(|s| {
+            s.phase = Phase::Ended;
+            s.present.clear();
+            s.connecting = 0;
+            if let Err(e) = &result {
+                s.trouble = Some(e.clone());
+            }
+        });
+        (ending_wake)();
+        result
+    });
+
+    CallHandle {
+        state: state_rx,
+        events: events_rx,
+        task,
+        ending: hanging_up,
+        wake: hanging_up_wake,
+    }
+}
+
+impl CallHandle {
+    /// A handle whose call is whatever `state` says, for drawing one
+    /// without placing one. The task behind it does nothing and ends when
+    /// hung up.
+    pub fn for_test(state: CallState) -> CallHandle {
+        let (state_tx, state_rx) = watch::channel(state);
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending());
+        CallHandle {
+            state: state_rx,
+            events: events_rx,
+            task,
+            ending: state_tx,
+            wake: Arc::new(|| {}),
+        }
     }
 }
 
