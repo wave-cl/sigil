@@ -154,6 +154,12 @@ dismissed, which is the only shape either desktop's library offers, so no
 more than 32 are watched at once and the rest lead nowhere. On Linux the
 press is the daemon's `default` action, which not every daemon delivers.
 
+**The exchanges an exchange federates with** (SIP-46) are read once per
+connection and offered in *Add an exchange*, each one press away: pressing
+one puts its domain in the box, and Add takes it through the same DNSSEC
+discovery as a domain typed by hand, which refuses it if the key found is
+not the one listed. A listing is the exchange's hint; the pin is the fact.
+
 **Quiet.** A conversation can be muted -- the bell in its header, or the
 switch in its channel settings: nothing in it is said out loud or asks for
 attention, and its waiting messages are left off the count on the icons;

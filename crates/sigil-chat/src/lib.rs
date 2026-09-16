@@ -3380,6 +3380,58 @@ impl ChatApp {
         if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
             ui.colored_label(theme.destructive, trouble);
         }
+        // **What this exchange federates with** (SIP-46), each one press
+        // away -- through the same path as a domain typed by hand, which
+        // discovers it and pins the key it finds. A listing is a hint the
+        // exchange gave; the pin is the fact. Only peers with a domain: a
+        // key alone is not something the roster can dial.
+        let state = self.state_of(Some(at));
+        let held = ctx
+            .accounts
+            .held(which)
+            .map(|h| h.exchanges())
+            .unwrap_or_default();
+        let offered: Vec<(PubKey, String)> = state
+            .peers
+            .iter()
+            .filter(|(_, d)| {
+                !d.is_empty()
+                    && state.domain.as_deref() != Some(d.as_str())
+                    && !held.iter().any(|h| h.eq_ignore_ascii_case(d))
+            })
+            .cloned()
+            .collect();
+        if !offered.is_empty() {
+            ui.add_space(tokens::SPACING_SM);
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!(
+                    "{} federates with",
+                    state.domain.as_deref().unwrap_or("This exchange")
+                ))
+                .small(),
+            );
+            for (key, domain) in offered {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(&domain)
+                        .on_hover_text(format!(
+                            "Add {domain}. It is discovered over DNSSEC and refused if its key \
+                             is not {key}."
+                        ))
+                        .clicked()
+                    {
+                        self.pane(at).exchange = domain.clone();
+                    }
+                    ui.colored_label(
+                        theme.text_muted,
+                        egui::RichText::new(sigil_ui::message::short(&key.to_string()))
+                            .monospace()
+                            .small(),
+                    );
+                });
+            }
+        }
         ui.add_space(tokens::SPACING_SM);
         ui.horizontal(|ui| {
             if ui.button("Add").clicked() {

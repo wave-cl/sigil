@@ -26,14 +26,26 @@ async fn server_with(
     dir: &Path,
     names: &str,
 ) -> (SocketAddr, [u8; 32], tokio::task::JoinHandle<()>) {
+    server_peering(dir, names, &[]).await
+}
+
+/// The same, seeded with exchanges it federates with (SIP-39's list, which
+/// SIP-46 reads back).
+async fn server_peering(
+    dir: &Path,
+    names: &str,
+    peers: &[PubKey],
+) -> (SocketAddr, [u8; 32], tokio::task::JoinHandle<()>) {
     let key_path = dir.join("host_key");
     let (server_sk, _) = squic::generate_keypair();
     std::fs::write(&key_path, hex::encode(server_sk.to_bytes())).unwrap();
+    let seeded: Vec<String> = peers.iter().map(|k| format!("\"{k}\"")).collect();
     let config_toml = format!(
         "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
-         welcome_channel = \"\"\nname_registration = \"{names}\"\n",
+         welcome_channel = \"\"\nname_registration = \"{names}\"\nseed_relay_peers = [{}]\n",
         key_path.to_string_lossy(),
         dir.join("sqex.state").to_string_lossy(),
+        seeded.join(", "),
     );
     let config_path = dir.join("sqexd.toml");
     std::fs::write(&config_path, &config_toml).unwrap();
@@ -3463,5 +3475,34 @@ async fn a_verified_mark_is_kept_here_and_said_only_when_asked() {
         until(|| !alice.state().verified.contains_key(&b_id), 10).await,
         "the mark was not taken back"
     );
+    alice.stop();
+}
+
+/// What the exchange federates with is in the state once connected (SIP-46):
+/// the seeded peer by key, with no domain since a seed carries none.
+#[tokio::test]
+async fn the_exchanges_this_one_federates_with_are_in_the_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, trunk) = signer(81);
+    let (addr, server_pub, _h) = server_peering(dir.path(), "off", &[trunk]).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(82);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(until(|| alice.state().me == Some(a_id), 15).await);
+    assert!(
+        until(|| alice.state().peers.iter().any(|(k, _)| *k == trunk), 15).await,
+        "the peer is not in the state: {:?}",
+        alice.state().peers
+    );
+    let (_, domain) = alice
+        .state()
+        .peers
+        .into_iter()
+        .find(|(k, _)| *k == trunk)
+        .unwrap();
+    assert_eq!(domain, "", "a seeded peer has no domain");
     alice.stop();
 }

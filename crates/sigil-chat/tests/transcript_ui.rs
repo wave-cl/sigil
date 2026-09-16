@@ -223,6 +223,7 @@ fn a_conversation() -> ChatState {
         ringing: Vec::new(),
         arrivals: Vec::new(),
         presence: std::collections::HashMap::new(),
+        peers: Vec::new(),
         verified: std::collections::HashMap::new(),
         devices: Vec::new(),
         linked: None,
@@ -3169,6 +3170,55 @@ fn the_exchange_control_offers_to_add_a_domain() {
     assert!(
         text_of(&h).contains("Add an exchange"),
         "the dialog did not open: {}",
+        text_of(&h)
+    );
+}
+
+/// The dialog offers what this exchange federates with (SIP-46): a peer
+/// with a domain, one press away; not one known by key alone, not one
+/// already held, and not the exchange itself. Pressing one puts its domain
+/// in the box, and Add takes it through the same path as one typed.
+#[test]
+fn the_dialog_offers_the_exchanges_this_one_federates_with() {
+    let mut state = a_conversation();
+    state.peers = vec![
+        (PubKey::new([5u8; 32]), "trunk.exchange".into()),
+        (PubKey::new([6u8; 32]), String::new()),
+        (PubKey::new([7u8; 32]), "indra.org".into()),
+        (PubKey::new([8u8; 32]), "squic.org".into()),
+    ];
+    let mut h = harness_at_exchanges(state, &["indra.org"]);
+    h.run();
+    open_exchanges(&mut h);
+    h.get_by_label("Add a domain…").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("federates with"), "{said}");
+    assert!(
+        h.query_by_label("trunk.exchange").is_some(),
+        "offered: {said}"
+    );
+    assert!(
+        h.query_by_label("indra.org").is_none(),
+        "already held, not offered again: {said}"
+    );
+    assert!(
+        !said.contains(&sigil_ui::message::short(
+            &PubKey::new([6u8; 32]).to_string()
+        )),
+        "a peer without a domain cannot be dialled and is not offered: {said}"
+    );
+    // The current exchange is squic.org; it is not offered to itself.
+    let offers = h.query_all_by_label("squic.org").count();
+    assert_eq!(offers, 0, "{said}");
+
+    h.get_by_label("trunk.exchange").click();
+    h.run();
+    h.get_by_label("Add").click();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Add an exchange"),
+        "the dialog stays open, so the add did not go through: {}",
         text_of(&h)
     );
 }

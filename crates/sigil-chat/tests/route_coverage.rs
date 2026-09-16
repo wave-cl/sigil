@@ -167,6 +167,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
              is admitted, which is a different question from whether the exchange is up",
         ),
     ),
+    ("GET", "/exchange/peers", Chat),
     // ---- other services --------------------------------------------------
     ("POST", "/beacon/beat", Chat),
     ("POST", "/beacon/read", Chat),
@@ -329,16 +330,16 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 80,
+        total, 81,
         "the exchange serves a different number of routes"
     );
     assert_eq!(peer, 5, "SIP-35 peering routes, which no client calls");
     assert_eq!(
-        client, 75,
+        client, 76,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 60,
+        reached, 61,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

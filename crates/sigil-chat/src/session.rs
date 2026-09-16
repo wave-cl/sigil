@@ -598,6 +598,10 @@ pub struct ChatState {
     /// other party of every direct message and the members of the open
     /// conversation. Absent is not known.
     pub presence: HashMap<PubKey, crate::presence::Presence>,
+    /// The exchanges this one federates with (SIP-46): each by key and,
+    /// where recorded, the domain it is reached by. A hint; sigil reaches
+    /// one only by discovering its domain and refusing a different key.
+    pub peers: Vec<(PubKey, String)>,
     /// The keys this person verified (SIP-41): their safety words were
     /// compared with their owner. By key, with when. From this machine's
     /// store and nowhere else.
@@ -1652,6 +1656,8 @@ async fn run(
         if chat.link() != lent {
             lent = chat.link();
             holds.set(chat.connection().map(|c| (c, endpoint)));
+            // A new connection may be to a redeployed exchange: ask again.
+            desk.peers_read = false;
         }
         // **Pictures still waiting come first, and at once.** The fetch just
         // done was the pacing; a wait here on top of it -- seven hundred
@@ -1862,6 +1868,10 @@ async fn run(
                 // a beat is one request every half minute, and the asking
                 // is spread a few people at a time.
                 if chat.link() == Link::Up {
+                    if !desk.peers_read {
+                        desk.peers_read = true;
+                        moved |= read_peers(&mut chat, &mut desk).await;
+                    }
                     if desk
                         .beat_at
                         .is_none_or(|at| at.elapsed().as_secs() >= u64::from(crate::presence::BEAT_SECS))
@@ -2033,6 +2043,9 @@ struct Desk {
     asked_at: HashMap<PubKey, std::time::Instant>,
     /// What the asking found.
     presence: HashMap<PubKey, crate::presence::Presence>,
+    /// SIP-46: what this exchange federates with, read once per connection.
+    peers: Vec<(PubKey, String)>,
+    peers_read: bool,
     /// The identity's seed, for what is signed from here (a SIP-27 claim).
     /// The chat client holds the same bytes; this is not a second secret,
     /// it is the same one where a command can reach it.
@@ -2099,6 +2112,8 @@ impl Default for Desk {
             beats_plainly: false,
             asked_at: HashMap::new(),
             presence: HashMap::new(),
+            peers: Vec::new(),
+            peers_read: false,
             seed: [0; 32],
         }
     }
@@ -3408,6 +3423,31 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
 }
 
 /// Build what the interface draws from what the task holds.
+/// SIP-46: ask the exchange what it federates with. An exchange from
+/// before the directory answers 404, which is an empty directory here.
+async fn read_peers(chat: &mut Chat, desk: &mut Desk) -> bool {
+    let Some(mut client) = chat.connection() else {
+        return false;
+    };
+    let peers = match client.get("/exchange/peers").await {
+        Ok((200, body)) => sqex_proto::exchange::Peers::decode(&body)
+            .map(|p| {
+                p.peers
+                    .into_iter()
+                    .map(|e| (e.key, e.domain))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if desk.peers != peers {
+        desk.peers = peers;
+        true
+    } else {
+        false
+    }
+}
+
 /// Beat (SIP-4): this identity is here, or here and away. On the
 /// session's own connection, which carries the identity (SIP-3), so the
 /// exchange records it against us without anything signed.
@@ -4034,6 +4074,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(ringing, ringing);
         set!(arrivals, arrivals);
         set!(presence, desk.presence.clone());
+        set!(peers, desk.peers.clone());
         set!(verified, verified);
         moved
     })
