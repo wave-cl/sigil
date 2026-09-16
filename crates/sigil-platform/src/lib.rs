@@ -20,6 +20,8 @@ pub mod hotkey;
 pub mod instance;
 pub mod mark;
 pub mod notify;
+#[cfg(target_os = "macos")]
+pub mod reopen;
 pub mod support;
 pub mod tray;
 
@@ -62,6 +64,10 @@ pub struct Platform {
     pub badge: Badge,
     pub hotkeys: Hotkeys,
     pub autostart: Autostart,
+    /// Whether a press on the Dock icon, or the application being brought
+    /// to the front, reaches the window (macOS; elsewhere the launcher has
+    /// no such press to report, and the tray's Open is the way back).
+    pub reopen: Support,
     session: Session,
 }
 
@@ -79,6 +85,10 @@ impl Platform {
             badge: Badge::new(),
             hotkeys: Hotkeys::new(),
             autostart: Autostart::new(),
+            #[cfg(target_os = "macos")]
+            reopen: reopen::watch(),
+            #[cfg(not(target_os = "macos"))]
+            reopen: Support::no("only the Dock reports a press on the icon"),
             session: Session::detect(),
         }
     }

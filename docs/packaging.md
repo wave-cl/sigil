@@ -111,7 +111,12 @@ brings the window up on macOS; the library reports no press at all on
 Linux, so there the menu is what a press opens, and **Open Sigil** is its
 first item. The menu also holds **Do not disturb** and **Quit Sigil**.
 Closing the window puts sigil in the tray rather than ending it, where
-there is a tray: Quit is how it ends. Without one, a close is a close.
+there is a tray: Quit is how it ends. Without one, a close is a close. On
+macOS the Dock icon stays, and a press on it brings the window back --
+AppKit asks the application delegate on a Dock press, winit's delegate
+does not answer, so sigil adds the answer to it at run time; the
+application being brought to the front (Cmd-Tab) does the same, since an
+application in front with its only window hidden is in front of nothing.
 
 On Linux the tray is GTK, and GTK wants to be initialised and to run its
 own loop on the thread that owns its objects, while eframe's loop is

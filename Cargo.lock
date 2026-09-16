@@ -5913,6 +5913,7 @@ name = "sigil-platform"
 version = "0.1.21"
 dependencies = [
  "auto-launch",
+ "block2 0.6.2",
  "ed25519-dalek",
  "global-hotkey",
  "gtk",

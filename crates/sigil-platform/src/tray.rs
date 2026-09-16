@@ -52,7 +52,7 @@ const QUIT: &str = "sigil-quit";
 /// and ask the interface to look, and the interface drains it each pass.
 static PENDING: Mutex<Vec<TrayAction>> = Mutex::new(Vec::new());
 
-fn report(action: TrayAction) {
+pub(crate) fn report(action: TrayAction) {
     if let Ok(mut pending) = PENDING.lock() {
         pending.push(action);
     }
@@ -292,6 +292,21 @@ impl Tray {
     }
 }
 
+/// Held by every test that reports through [`PENDING`], which is one
+/// queue for the process: two such tests running at once would read each
+/// other's reports.
+#[cfg(test)]
+pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Everything reported and not yet collected, for a test of what reports.
+#[cfg(test)]
+pub(crate) fn drain_for_test() -> Vec<TrayAction> {
+    PENDING
+        .lock()
+        .map(|mut p| std::mem::take(&mut *p))
+        .unwrap_or_default()
+}
+
 impl Tray {
     pub fn support(&self) -> &Support {
         &self.support
@@ -393,6 +408,8 @@ mod tests {
     /// then handed over once.
     #[test]
     fn tray_events_are_held_until_asked_and_handed_over_once() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = drain_for_test();
         let tray = Tray {
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             built: None,
