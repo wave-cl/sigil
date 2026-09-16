@@ -1684,6 +1684,7 @@ async fn run(
             || !desk.dirty.is_empty()
             || desk.restructure
             || still_live(&desk).is_some()
+            || desk.siblings.live.is_some()
             || state.borrow().note.is_some();
         let want = if quick { busy } else { every };
         let until = want.saturating_sub(ticked.elapsed());
@@ -1879,6 +1880,10 @@ async fn run(
                         beat(&mut chat, &mut desk).await;
                     }
                     moved |= read_presence(&mut chat, &mut desk, me).await;
+                    // SIP-42: history between this account's devices. An
+                    // open kept toward each sibling, and a sync run a step
+                    // a tick with whichever has turned up.
+                    moved |= sync_siblings(&mut chat, &state, &mut desk).await;
                 }
                 // **The conversation before the pictures in it.** A refresh is
                 // what somebody is waiting for; a blob is what they will be
@@ -2046,6 +2051,9 @@ struct Desk {
     /// SIP-46: what this exchange federates with, read once per connection.
     peers: Vec<(PubKey, String)>,
     peers_read: bool,
+    /// SIP-42: this account's other devices, the open kept toward each,
+    /// and the sync running with one when it has turned up.
+    siblings: crate::siblings::Siblings,
     /// The identity's seed, for what is signed from here (a SIP-27 claim).
     /// The chat client holds the same bytes; this is not a second secret,
     /// it is the same one where a command can reach it.
@@ -2114,6 +2122,7 @@ impl Default for Desk {
             presence: HashMap::new(),
             peers: Vec::new(),
             peers_read: false,
+            siblings: crate::siblings::Siblings::default(),
             seed: [0; 32],
         }
     }
@@ -2880,8 +2889,115 @@ async fn refresh_blocked(chat: &mut Chat, state: &watch::Sender<ChatState>) {
     }
 }
 
+/// SIP-42, one tick's worth: step the sync that is running, or open toward
+/// the siblings that are due. Returns whether something on screen moved.
+async fn sync_siblings(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk) -> bool {
+    use sqex_chat::sync::Phase;
+    let now = std::time::Instant::now();
+    // A sync under way: one step, and the reckoning when it ends.
+    if let Some(live) = desk.siblings.live.as_mut() {
+        let more = match live.sync.step(chat, &mut live.link).await {
+            Ok(more) => more,
+            Err(e) => {
+                tracing::warn!(peer = %live.peer, "sync with the other device ended: {e}");
+                false
+            }
+        };
+        if more {
+            return false;
+        }
+        let Some(mut over) = desk.siblings.over(now) else {
+            return false;
+        };
+        over.link.close().await;
+        let p = &over.sync.progress;
+        match over.sync.phase() {
+            Phase::Finished => {
+                tracing::info!(
+                    peer = %over.peer,
+                    took = p.entries_in,
+                    keys = p.keys_in,
+                    files = p.blobs_in,
+                    gave = p.entries_out,
+                    "synced with the other device"
+                );
+                // What arrived is in the store, below the cursor, where no
+                // poll will find it: the conversations it touched are folded
+                // again from the disc, as they were on the way in. Read on
+                // the other device, so not unread here.
+                for channel in &p.channels_in {
+                    if let Some(known) = desk.channels.get_mut(channel) {
+                        let admins = if known.admins.is_empty() {
+                            chat.store()
+                                .channels()
+                                .ok()
+                                .and_then(|all| all.into_iter().find(|c| c.channel == *channel))
+                                .map(|c| c.admins)
+                                .unwrap_or_default()
+                        } else {
+                            known.admins.clone()
+                        };
+                        known.timeline = chat.history(channel, &admins).unwrap_or_default();
+                        known.seen = known.timeline.messages().count();
+                        known.last_at = known
+                            .timeline
+                            .messages()
+                            .last()
+                            .map(|m| m.posted)
+                            .unwrap_or(known.last_at);
+                    }
+                    desk.dirty.insert(*channel);
+                }
+                desk.restructure = true;
+                if let Some(said) = crate::siblings::said(p) {
+                    note(state, said);
+                    return true;
+                }
+            }
+            _ => tracing::warn!(
+                peer = %over.peer,
+                "sync with the other device did not finish: {}",
+                over.sync.why.as_deref().unwrap_or("no reason given")
+            ),
+        }
+        return false;
+    }
+    // Nothing running: who the siblings are, then an open toward each due.
+    if desk.siblings.list_due(now) {
+        let this = chat.device();
+        match chat.my_devices().await {
+            Ok(devices) => {
+                let siblings = devices
+                    .into_iter()
+                    .map(|d| d.device)
+                    .filter(|d| *d != this)
+                    .collect();
+                desk.siblings.listed(siblings, now);
+            }
+            Err(e) => tracing::debug!("could not list this account's devices: {e}"),
+        }
+    }
+    for (sibling, ephemeral) in desk.siblings.to_open(now) {
+        match chat.meet_sibling(&ephemeral, &sibling).await {
+            Ok(Some((link, session))) => {
+                tracing::info!(peer = %sibling, "met the other device; syncing history");
+                let sync = sqex_chat::sync::Sync::new(session, sibling);
+                desk.siblings.met(sibling, sync, link, now);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(peer = %sibling, "could not open toward the other device: {e}")
+            }
+        }
+    }
+    false
+}
+
 /// Re-read who this account's devices are, and whether we are still one.
-async fn refresh_devices(chat: &mut Chat, state: &watch::Sender<ChatState>) {
+async fn refresh_devices(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk) {
+    // Whoever the siblings are now, SIP-42 opens toward them next tick.
+    desk.siblings.relist();
     let this = chat.device();
     let devices = match chat.my_devices().await {
         Ok(devices) => devices
@@ -4956,8 +5072,35 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
 
-        Cmd::Devices => refresh_devices(chat, state).await,
+        Cmd::Devices => refresh_devices(chat, state, desk).await,
         Cmd::LinkDevice { device, days } => {
+            // This client registers itself first, and it has to. An account
+            // with no registered devices is its own device; the moment one
+            // is registered that fallback stops applying and everything
+            // seals to the registered set only -- so linking without this
+            // would cut *this* client out of every epoch minted afterwards,
+            // and out of SIP-42, which admits only a listed device.
+            let listed = match chat.my_devices().await {
+                Ok(devices) => devices.iter().any(|d| d.device == chat.me),
+                Err(e) => {
+                    trouble(state, e);
+                    return;
+                }
+            };
+            if !listed {
+                let own = match chat.issue_credential(&chat.me, days * 24 * 60 * 60) {
+                    Ok(own) => own,
+                    Err(e) => {
+                        trouble(state, e);
+                        return;
+                    }
+                };
+                if let Err(e) = chat.register_self(&own).await {
+                    trouble(state, e);
+                    return;
+                }
+                refresh_devices(chat, state, desk).await;
+            }
             match chat.issue_credential(&device, days * 24 * 60 * 60) {
                 Ok(credential) => {
                     let encoded = bs58::encode(credential.encode()).into_string();
@@ -4984,7 +5127,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Err(e) => trouble(state, e),
                 Ok(credential) => match chat.register_self(&credential).await {
                     Ok(()) => {
-                        refresh_devices(chat, state).await;
+                        refresh_devices(chat, state, desk).await;
                         note(
                             state,
                             "This device acts for the account now. It holds no epoch keys \
@@ -4999,7 +5142,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
         Cmd::RevokeDevice(device) => match chat.revoke_device(&device).await {
             Ok(()) => {
-                refresh_devices(chat, state).await;
+                refresh_devices(chat, state, desk).await;
                 note(
                     state,
                     "Revoked. Rotate the key in any conversation that device could read: \

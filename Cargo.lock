@@ -5861,6 +5861,7 @@ dependencies = [
  "http",
  "image",
  "quinn",
+ "rand_core 0.6.4",
  "rfd",
  "serde_json",
  "sigil",
@@ -5879,6 +5880,7 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "tracing",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -6266,8 +6268,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-chat"
-version = "0.62.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.62.0#59a28c7ecf2fe41551cd0346247004ddd3531116"
+version = "0.63.3"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.63.3#e06287e0af4c7c965c7046d189de70aebd363125"
 dependencies = [
  "bs58",
  "chacha20poly1305",
@@ -6295,8 +6297,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-discovery"
-version = "0.62.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.62.0#59a28c7ecf2fe41551cd0346247004ddd3531116"
+version = "0.63.3"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.63.3#e06287e0af4c7c965c7046d189de70aebd363125"
 dependencies = [
  "bs58",
  "dirs",
@@ -6309,8 +6311,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-proto"
-version = "0.62.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.62.0#59a28c7ecf2fe41551cd0346247004ddd3531116"
+version = "0.63.3"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.63.3#e06287e0af4c7c965c7046d189de70aebd363125"
 dependencies = [
  "bs58",
  "bytes",
@@ -6332,8 +6334,8 @@ dependencies = [
 
 [[package]]
 name = "sqex-voice"
-version = "0.62.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.62.0#59a28c7ecf2fe41551cd0346247004ddd3531116"
+version = "0.63.3"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.63.3#e06287e0af4c7c965c7046d189de70aebd363125"
 dependencies = [
  "bytes",
  "clap",
@@ -6355,8 +6357,8 @@ dependencies = [
 
 [[package]]
 name = "sqexd"
-version = "0.62.0"
-source = "git+https://github.com/wave-cl/sqex?tag=v0.62.0#59a28c7ecf2fe41551cd0346247004ddd3531116"
+version = "0.63.3"
+source = "git+https://github.com/wave-cl/sqex?tag=v0.63.3#e06287e0af4c7c965c7046d189de70aebd363125"
 dependencies = [
  "bs58",
  "bytes",

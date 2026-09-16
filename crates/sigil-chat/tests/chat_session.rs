@@ -3506,3 +3506,160 @@ async fn the_exchanges_this_one_federates_with_are_in_the_state() {
     assert_eq!(domain, "", "a seeded peer has no domain");
     alice.stop();
 }
+
+/// SIP-42: a device linked to an account gets the history its sibling holds,
+/// from the sibling, and is told how much came.
+///
+/// The phone reads a conversation; the laptop is linked afterwards with an
+/// empty store and nobody reseals a key to it. Both keep an open toward
+/// each other, meet through the exchange, and the laptop ends up with the
+/// messages -- read from its own store, since it holds the key now -- and a
+/// note saying so.
+#[tokio::test]
+async fn a_linked_device_is_handed_the_history_its_sibling_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (phone_signer, phone_key) = signer(44);
+    let (laptop_signer, laptop_key) = signer(45);
+    let (bob_signer, bob_key) = signer(46);
+    let phone = start_at(endpoint, phone_signer, &dir.path().join("phone.db"));
+    let bob = start_at(endpoint, bob_signer, &dir.path().join("bob.db"));
+    assert!(
+        until(
+            || phone.state().me == Some(phone_key) && bob.state().me == Some(bob_key),
+            15
+        )
+        .await
+    );
+    bob.send(Cmd::OpenDm(phone_key));
+    phone.send(Cmd::OpenDm(bob_key));
+    assert!(
+        until(
+            || phone.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await
+    );
+    for text in ["one", "two", "three"] {
+        phone.send(Cmd::Send(text.into()));
+        assert!(
+            until(|| bob.state().lines.iter().any(|l| l.text == text), 20).await,
+            "{text} never reached bob"
+        );
+    }
+    assert!(
+        until(
+            || phone.state().lines.iter().filter(|l| l.mine).count() == 3,
+            20
+        )
+        .await,
+        "the phone has not read its own conversation back"
+    );
+    // The exchange forgets all but its newest entry. From here the phone's
+    // disk is the only copy of the conversation, which is the case SIP-42
+    // exists for -- and the control: a laptop that reads the messages got
+    // them from its sibling, because nowhere else has them.
+    phone.send(Cmd::SetRetention {
+        secs: sqex_proto::channel::MIN_RETENTION,
+        max_entries: 1,
+    });
+    assert!(
+        until(
+            || phone
+                .state()
+                .note
+                .is_some_and(|n| n.said.starts_with("Retention set")),
+            20
+        )
+        .await,
+        "{:?}",
+        phone.state().trouble
+    );
+
+    // The laptop comes up as its own key, then presents the credential.
+    let laptop = start_at(endpoint, laptop_signer, &dir.path().join("laptop.db"));
+    assert!(until(|| laptop.state().me == Some(laptop_key), 15).await);
+    phone.send(Cmd::LinkDevice {
+        device: laptop_key,
+        days: 90,
+    });
+    assert!(until(|| phone.state().credential.is_some(), 20).await);
+    let credential = phone.state().credential.expect("checked above");
+    laptop.send(Cmd::RegisterSelf(credential));
+    assert!(
+        until(
+            || laptop
+                .state()
+                .note
+                .is_some_and(|n| n.said.contains("acts for the account")),
+            20
+        )
+        .await,
+        "{:?}",
+        laptop.state().trouble
+    );
+    // Linking registered the phone itself first: the listed set is both.
+    phone.send(Cmd::Devices);
+    assert!(
+        until(
+            || {
+                let d = phone.state().devices;
+                d.iter().any(|d| d.device == phone_key) && d.iter().any(|d| d.device == laptop_key)
+            },
+            20
+        )
+        .await,
+        "the phone is not among its own account's devices: {:?}",
+        phone.state().devices
+    );
+
+    // Neither is told to do anything. They find each other.
+    let synced = until(
+        || {
+            laptop
+                .state()
+                .note
+                .is_some_and(|n| n.said.starts_with("Synced 3 messages"))
+        },
+        60,
+    )
+    .await;
+    assert!(
+        synced,
+        "the laptop was not handed the history: note {:?}, trouble {:?}",
+        laptop.state().note,
+        laptop.state().trouble
+    );
+    // The phone had nothing to learn, so it was told nothing.
+    assert!(
+        phone
+            .state()
+            .note
+            .is_none_or(|n| !n.said.starts_with("Synced")),
+        "{:?}",
+        phone.state().note
+    );
+
+    // And the conversation reads on the laptop.
+    let channel = phone.state().open.expect("the phone has it open");
+    laptop.send(Cmd::Show(channel));
+    let readable = until(
+        || {
+            let lines = laptop.state().lines;
+            ["one", "two", "three"]
+                .iter()
+                .all(|t| lines.iter().any(|l| l.text == *t && l.mine))
+        },
+        30,
+    )
+    .await;
+    assert!(readable, "{:?}", laptop.state().lines);
+
+    phone.stop();
+    laptop.stop();
+    bob.stop();
+}

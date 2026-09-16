@@ -5,6 +5,7 @@ pub mod frequent;
 pub mod mention;
 pub mod presence;
 pub mod session;
+pub mod siblings;
 
 use session::RING_WINDOW;
 pub use session::{
