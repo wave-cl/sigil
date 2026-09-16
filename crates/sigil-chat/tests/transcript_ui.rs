@@ -220,6 +220,7 @@ fn a_conversation() -> ChatState {
         ],
         i_am_admin: true,
         topic: String::new(),
+        home: None,
         ringing: Vec::new(),
         arrivals: Vec::new(),
         presence: std::collections::HashMap::new(),
@@ -6633,4 +6634,32 @@ fn verified_dark() {
     let mut h = harness_with(state, true);
     h.run();
     h.snapshot("verified_dark");
+}
+
+/// SIP-43: a conversation that lives at another exchange says so in the
+/// bar; one that lives here says nothing.
+#[test]
+fn a_conversation_that_lives_elsewhere_says_where() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Conversations);
+    h.run();
+    assert!(
+        !text_of(&h).contains("lives at"),
+        "a conversation at this exchange claimed to live elsewhere"
+    );
+
+    state.home = Some((PubKey::new([7; 32]), "origin.example".into()));
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("lives at origin.example"), "{said}");
+
+    // Known by key alone: the key's head, since there is nothing else.
+    state.home = Some((PubKey::new([7; 32]), String::new()));
+    let mut h = harness_at(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    let key = PubKey::new([7; 32]).to_string();
+    assert!(said.contains(&format!("lives at {}", &key[..8])), "{said}");
 }

@@ -610,6 +610,11 @@ pub struct ChatState {
     pub i_am_admin: bool,
     /// The open conversation's topic, when it has one.
     pub topic: String,
+    /// SIP-43: where the open conversation lives, when that is not the
+    /// exchange this session is connected to -- the origin's key and, when
+    /// the operator recorded one, the domain it is reached by. Posts made
+    /// here are carried there and ordered there.
+    pub home: Option<(PubKey, String)>,
     /// Every device registered to this account.
     ///
     /// **First class, not buried.** An epoch key arrives sealed against a
@@ -4151,6 +4156,9 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     let topic = open
         .map(|(_, k)| k.timeline.topic.clone())
         .unwrap_or_default();
+    let home = open
+        .and_then(|(channel, _)| chat.homed_elsewhere(&channel))
+        .map(|h| (h.origin, h.domain.clone()));
     let link = LinkState::from(chat.link());
 
     // **Published only where it differs, and it says whether it did.**
@@ -4187,6 +4195,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(members, members);
         set!(i_am_admin, i_am_admin);
         set!(topic, topic);
+        set!(home, home);
         set!(ringing, ringing);
         set!(arrivals, arrivals);
         set!(presence, desk.presence.clone());

@@ -2292,6 +2292,24 @@ impl ChatApp {
                     .truncate(),
             );
         }
+        // SIP-43: a conversation that lives at another exchange says so, in
+        // the bar, once and quietly. What is said here is carried there.
+        if let Some((origin, domain)) = &state.home {
+            let at = if domain.is_empty() {
+                let key = origin.to_string();
+                format!("lives at {}…", &key[..key.len().min(8)])
+            } else {
+                format!("lives at {domain}")
+            };
+            ui.add(
+                egui::Label::new(egui::RichText::new(at).small().color(theme.text_secondary))
+                    .truncate(),
+            )
+            .on_hover_text(format!(
+                "This conversation is ordered by another exchange ({origin}). \
+                 What you write here is carried there and comes back with its place."
+            ));
+        }
     }
 
     /// Whether somebody is there, as the interface draws it, with the words

@@ -168,6 +168,9 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         ),
     ),
     ("GET", "/exchange/peers", Chat),
+    // SIP-43: asked with a channel's first `info`, so the session signs and
+    // verifies under the exchange that orders it.
+    ("POST", "/channel/home", Chat),
     // ---- other services --------------------------------------------------
     ("POST", "/beacon/beat", Chat),
     ("POST", "/beacon/read", Chat),
@@ -187,6 +190,8 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/peer/envelopes", NotAClientRoute),
     ("POST", "/peer/blobs", NotAClientRoute),
     ("POST", "/peer/records", NotAClientRoute),
+    ("POST", "/peer/channel", NotAClientRoute),
+    ("POST", "/peer/forward", NotAClientRoute),
 ];
 
 /// Where sqexd's dispatch lives -- asked of cargo, never assumed.
@@ -330,16 +335,19 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 81,
+        total, 84,
         "the exchange serves a different number of routes"
     );
-    assert_eq!(peer, 5, "SIP-35 peering routes, which no client calls");
     assert_eq!(
-        client, 76,
+        peer, 7,
+        "SIP-35 and SIP-43 peering routes, which no client calls"
+    );
+    assert_eq!(
+        client, 77,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 61,
+        reached, 62,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

@@ -3663,3 +3663,266 @@ async fn a_linked_device_is_handed_the_history_its_sibling_holds() {
     laptop.stop();
     bob.stop();
 }
+
+/// A second exchange that replicates `channel` from the origin every second
+/// and serves it, naming the origin's domain.
+async fn server_replicating(
+    dir: &Path,
+    origin: PubKey,
+    origin_addr: SocketAddr,
+    channel: [u8; 32],
+) -> (SocketAddr, [u8; 32], tokio::task::JoinHandle<()>) {
+    let key_path = dir.join("host_key");
+    let config_toml = format!(
+        "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
+         welcome_channel = \"\"\n\n[[replicate]]\norigin = {:?}\naddr = {:?}\n\
+         channels = [{:?}]\ninterval_secs = 1\ndomain = \"origin.example\"\n",
+        key_path.to_string_lossy(),
+        dir.join("sqex.state").to_string_lossy(),
+        origin.to_string(),
+        origin_addr.to_string(),
+        bs58::encode(channel).into_string(),
+    );
+    let config_path = dir.join("sqexd.toml");
+    std::fs::write(&config_path, &config_toml).unwrap();
+    let file: FileConfig = toml::from_str(&config_toml).unwrap();
+    let config = file.resolve().unwrap();
+    let (signing_key, _pub) =
+        squic::load_keypair(&std::fs::read_to_string(&config.key_file).unwrap()).unwrap();
+    let bound = sqexd::bind(config, Some(config_path), signing_key)
+        .await
+        .unwrap();
+    let addr = bound.local_addr;
+    let server_pub = bound.public_key.to_bytes();
+    let handle = tokio::spawn(async move {
+        let _ = sqexd::serve(bound).await;
+    });
+    (addr, server_pub, handle)
+}
+
+/// SIP-43: a member posts at the exchange they are connected to, and the
+/// channel lives at another. Bob joins the square at the origin, then moves
+/// home to an exchange that only replicates it; what he says there is
+/// ordered at the origin and read by Alice, who never left it -- and his
+/// bar says where the conversation lives.
+#[tokio::test]
+async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
+    let origin_dir = tempfile::tempdir().unwrap();
+    let replica_dir = tempfile::tempdir().unwrap();
+    let (replica_sk, replica_pub) = squic::generate_keypair();
+    std::fs::write(
+        replica_dir.path().join("host_key"),
+        hex::encode(replica_sk.to_bytes()),
+    )
+    .unwrap();
+    let replica_key = PubKey::new(replica_pub);
+
+    // The origin serves the replica as a peer.
+    let key_path = origin_dir.path().join("host_key");
+    let (server_sk, _) = squic::generate_keypair();
+    std::fs::write(&key_path, hex::encode(server_sk.to_bytes())).unwrap();
+    let config_toml = format!(
+        "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
+         welcome_channel = \"\"\nreplication_peers = [{:?}]\n",
+        key_path.to_string_lossy(),
+        origin_dir.path().join("sqex.state").to_string_lossy(),
+        replica_key.to_string(),
+    );
+    let config_path = origin_dir.path().join("sqexd.toml");
+    std::fs::write(&config_path, &config_toml).unwrap();
+    let file: FileConfig = toml::from_str(&config_toml).unwrap();
+    let config = file.resolve().unwrap();
+    let (signing_key, _pub) =
+        squic::load_keypair(&std::fs::read_to_string(&config.key_file).unwrap()).unwrap();
+    let bound = sqexd::bind(config, Some(config_path), signing_key)
+        .await
+        .unwrap();
+    let origin_addr = bound.local_addr;
+    let origin_pub = bound.public_key.to_bytes();
+    let origin = PubKey::new(origin_pub);
+    tokio::spawn(async move {
+        let _ = sqexd::serve(bound).await;
+    });
+    let at_origin = Endpoint {
+        address: origin_addr,
+        server: origin,
+    };
+
+    let (alice_signer, alice_key) = signer(47);
+    let (_, bob_key) = signer(48);
+    let alice = start_at(at_origin, alice_signer, &origin_dir.path().join("alice.db"));
+    assert!(until(|| alice.state().me == Some(alice_key), 15).await);
+    alice.send(Cmd::NewPublic {
+        name: "the square".into(),
+        topic: String::new(),
+    });
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.public == Some(true)),
+            15
+        )
+        .await
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.public == Some(true))
+        .unwrap()
+        .channel;
+    alice.send(Cmd::Show(channel));
+    assert!(until(|| alice.state().open == Some(channel), 15).await);
+    alice.send(Cmd::Send("welcome".into()));
+    assert!(
+        until(
+            || alice.state().lines.iter().any(|l| l.text == "welcome"),
+            20
+        )
+        .await
+    );
+
+    // Bob joins at the origin -- a join is not forwarded -- and leaves.
+    let bob_store = origin_dir.path().join("bob.db");
+    {
+        let bob = start_at(at_origin, signer(48).0, &bob_store);
+        assert!(until(|| bob.state().me == Some(bob_key), 15).await);
+        bob.send(Cmd::Find("square".into()));
+        assert!(
+            until(
+                || bob.state().found.iter().any(|f| f.name == "the square"),
+                15
+            )
+            .await
+        );
+        let found = bob
+            .state()
+            .found
+            .into_iter()
+            .find(|f| f.name == "the square")
+            .unwrap();
+        bob.send(Cmd::Join {
+            channel: found.channel,
+            instance: found.instance,
+        });
+        assert!(
+            until(
+                || bob
+                    .state()
+                    .conversations
+                    .iter()
+                    .any(|c| c.channel == channel),
+                15
+            )
+            .await
+        );
+        bob.stop();
+    }
+
+    // Alice, an admin, authorises the replica; it comes up and catches up.
+    alice.send(Cmd::Replicate {
+        exchange: replica_key,
+        on: true,
+    });
+    assert!(
+        until(
+            || alice
+                .state()
+                .note
+                .as_ref()
+                .is_some_and(|n| n.said.contains("carry a copy")),
+            20
+        )
+        .await,
+        "{:?} / {:?}",
+        alice.state().note,
+        alice.state().trouble
+    );
+    let (replica_addr, _, _rh) =
+        server_replicating(replica_dir.path(), origin, origin_addr, channel).await;
+    let at_replica = Endpoint {
+        address: replica_addr,
+        server: replica_key,
+    };
+
+    // Bob comes home to the replica, with the store he joined with.
+    let bob = start_at(at_replica, signer(48).0, &bob_store);
+    assert!(until(|| bob.state().me == Some(bob_key), 15).await);
+    let listed = until(
+        || {
+            bob.state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel)
+        },
+        30,
+    )
+    .await;
+    assert!(
+        listed,
+        "the replica never listed the square for its member: {:?}",
+        bob.state().conversations
+    );
+    bob.send(Cmd::Show(channel));
+    assert!(
+        until(|| bob.state().lines.iter().any(|l| l.text == "welcome"), 30).await,
+        "the copy did not read at the replica: {:?}",
+        bob.state().trouble
+    );
+    // His bar says where it lives.
+    assert!(
+        until(
+            || bob
+                .state()
+                .home
+                .as_ref()
+                .is_some_and(|(k, d)| *k == origin && d == "origin.example"),
+            15
+        )
+        .await,
+        "{:?}",
+        bob.state().home
+    );
+    // Alice's does not: it lives with her.
+    assert_eq!(alice.state().home, None);
+
+    // What Bob says at the replica is ordered at the origin and read there.
+    bob.send(Cmd::Send("hello from the other side".into()));
+    let heard = until(
+        || {
+            alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "hello from the other side" && l.who == bob_key)
+        },
+        30,
+    )
+    .await;
+    assert!(
+        heard,
+        "the origin never got Bob's post: bob {:?} / alice {:?}",
+        bob.state().trouble,
+        alice.state().trouble
+    );
+    // And Bob reads it back where he wrote it, as his own.
+    assert!(
+        until(
+            || bob
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "hello from the other side" && l.mine),
+            30
+        )
+        .await,
+        "{:?}",
+        bob.state().lines
+    );
+
+    alice.stop();
+    bob.stop();
+}

@@ -15,7 +15,10 @@ are there -- active, away, or offline -- from SIP-4 beacons; see
 and mark their key as theirs -- a fact you established, not the exchange's
 word; see [docs/verified.md](docs/verified.md). Two of your own devices
 hand each other the history the exchange has since forgotten, through a
-session it cannot read; see [docs/devices.md](docs/devices.md).
+session it cannot read; see [docs/devices.md](docs/devices.md). A
+conversation that lives at another exchange can be written to from the copy
+you are reading; the bar says where it lives, and what you write is ordered
+there; see [docs/homes.md](docs/homes.md).
 
 ## Status
 
