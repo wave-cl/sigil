@@ -159,6 +159,43 @@ pub fn avatar(
     .on_hover_text(key.to_string())
 }
 
+/// An avatar with a status dot on its corner: whose it is, and whether
+/// they are connected, in one mark.
+///
+/// The dot is [`dot`](crate::dot)'s -- filled or hollow, so the state
+/// survives somebody who cannot tell the colours apart -- with a ring of
+/// the surface behind it so it reads over a picture, and it carries the
+/// word the same way, on the mark's own accessibility node: "connected",
+/// "reconnecting…", "offline".
+pub fn presence(
+    ui: &mut egui::Ui,
+    key: &str,
+    picture: Option<&egui::TextureHandle>,
+    size: f32,
+    filled: bool,
+    colour: egui::Color32,
+    word: &str,
+) -> egui::Response {
+    let theme = sigil::ColorTheme::current(ui.ctx());
+    let response = avatar(ui, key, picture, size);
+    let rect = response.rect;
+    let radius = tokens::SPACING_XS + 1.0;
+    // On the corner, half inside the mark: a dot wholly inside is lost in
+    // a busy picture, and one wholly outside belongs to nothing.
+    let at = rect.right_bottom() - egui::vec2(radius, radius);
+    ui.painter()
+        .circle_filled(at, radius + tokens::STROKE_MEDIUM, theme.surface_primary);
+    if filled {
+        ui.painter().circle_filled(at, radius, colour);
+    } else {
+        ui.painter()
+            .circle_stroke(at, radius, egui::Stroke::new(tokens::STROKE_MEDIUM, colour));
+    }
+    let said = word.to_string();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said));
+    response.on_hover_text(format!("{word} — your key {key}"))
+}
+
 /// A ring drawn round an avatar, for presence or speaking.
 pub fn ring(ui: &egui::Ui, around: egui::Rect, colour: egui::Color32) {
     ui.painter().circle_stroke(

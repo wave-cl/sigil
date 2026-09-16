@@ -20,6 +20,18 @@ use sigil_net::discovery;
 use sqnr::config::Config;
 use sqnr_core::PubKey;
 
+/// What the bar over a pane is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bar {
+    /// A conversation's name and controls, and the identity at the right.
+    /// `back`: the list is not on screen, so Back to it is the leftmost
+    /// control.
+    Conversation { back: bool },
+    /// The identity alone: nothing is connected, and the chevron is the
+    /// way to another identity.
+    Identity,
+}
+
 /// Where you are inside the chat app.
 ///
 /// These go into the shell's global history as `Rc<dyn Any>` tokens, so back
@@ -1661,7 +1673,7 @@ impl App for ChatApp {
             // identity that does work, and nothing on it reflected an exchange
             // being added either. The one instruction it gave pointed at a
             // corner that was empty.
-            self.session_bar_ui(ctx, at, &none, ui, &theme);
+            self.bar_ui(ctx, at, &none, ui, &theme, Bar::Identity);
             self.unconnected_ui(ctx, at, ui, &theme);
             // **Here too.** The identity menu is on this screen as well, and
             // it is the screen somebody is most likely to want to leave: an
@@ -1718,18 +1730,20 @@ impl App for ChatApp {
                 // two unusable columns are worse than one usable one.
                 match state.open {
                     None => {
-                        // One pane and nothing open: the bar has nowhere else
-                        // to be, and the list is the whole window.
-                        self.session_bar_ui(ctx, at, &state, ui, &theme);
-                        self.list_ui(ctx, at, &state, ui, &theme);
+                        // One pane and nothing open: the list is the whole
+                        // window, and the identity sits in its heading row
+                        // rather than in a bar with nothing else on it.
+                        self.list_ui(ctx, at, &state, ui, &theme, true);
                     }
                     Some(_) => {
-                        ui.horizontal(|ui| {
-                            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
-                                self.send_as(Some(at), Cmd::Close);
-                            }
-                        });
-                        self.session_bar_ui(ctx, at, &state, ui, &theme);
+                        self.bar_ui(
+                            ctx,
+                            at,
+                            &state,
+                            ui,
+                            &theme,
+                            Bar::Conversation { back: true },
+                        );
                         self.transcript_ui(ctx, at, &state, ui, &theme);
                     }
                 }
@@ -1747,7 +1761,7 @@ impl App for ChatApp {
                             right: tokens::SPACING_LG as i8,
                             ..Default::default()
                         }))
-                        .show(ui, |ui| self.list_ui(ctx, at, &state, ui, &theme));
+                        .show(ui, |ui| self.list_ui(ctx, at, &state, ui, &theme, false));
                 }
                 // The conversation gets a margin of its own. Without one the
                 // messages start hard against the divider and the composer
@@ -1759,7 +1773,14 @@ impl App for ChatApp {
                         ..Default::default()
                     }))
                     .show(ui, |ui| {
-                        self.session_bar_ui(ctx, at, &state, ui, &theme);
+                        self.bar_ui(
+                            ctx,
+                            at,
+                            &state,
+                            ui,
+                            &theme,
+                            Bar::Conversation { back: false },
+                        );
                         self.transcript_ui(ctx, at, &state, ui, &theme);
                     });
             }
@@ -1973,77 +1994,105 @@ impl ChatApp {
         });
     }
 
-    /// The one row about this session: whether the link is up, and who you are.
+    /// The one row over the conversation: what it is and everything that
+    /// can be done about it, and at its right end who you are and whether
+    /// the link is up.
+    ///
+    /// **One row, where there were two.** The session -- the dot, the
+    /// avatar, the name over the handle, the chevron -- had a bar of its
+    /// own above the conversation's, and a narrow window put Back on a
+    /// third. Seventy pixels of "here is where you are" above every
+    /// transcript. The identity is now the avatar with the dot on its
+    /// corner and the chevron; the name and handle are the head of the
+    /// chevron's menu, which already held the key and the exchange.
     ///
     /// **Over the conversation and not over the whole window.** It used to
-    /// span both, which cost the conversation column its top and made the list
-    /// start under a bar that has nothing to do with it. The column is the
-    /// full height of the application now, the way every client with a sidebar
-    /// draws one, and this belongs to the pane it sits over.
-    fn session_bar_ui(
+    /// span both, which cost the conversation column its top and made the
+    /// list start under a bar that has nothing to do with it.
+    fn bar_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
         at: &At,
         state: &ChatState,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
+        bar: Bar,
     ) {
-        // One row, laid out from the right: who you are, and beside it whether
-        // the link is up. Both are facts about *this session* rather than
-        // about any conversation, so they share a corner.
+        let me = at.0;
+        let open = match bar {
+            Bar::Conversation { .. } => state
+                .conversations
+                .iter()
+                .find(|c| Some(c.channel) == state.open),
+            Bar::Identity => None,
+        };
+        // **The controls are laid out first, from the right.** Given the
+        // name first, a long one takes the row and the controls wrap onto a
+        // second line -- which is what this did, and it moved the header
+        // about as a member count appeared. Whatever is left is the name's,
+        // and it truncates rather than pushing anything off the row.
         ui.horizontal(|ui| {
-            // Only when there is nothing to bring back does this appear, so
-            // the bar is not carrying a control that does nothing.
-            if !self.columns_open
-                && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Show the chats").clicked()
-            {
-                self.columns_open = true;
-            }
-            let colour = match state.link {
-                LinkState::Up => theme.link_up,
-                // Not up, and not yet an outage either.
-                LinkState::Connecting | LinkState::Retrying => theme.link_retrying,
-                LinkState::Gone => theme.link_gone,
-            };
-            let up = state.link == LinkState::Up;
+            ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.me_ui(at, state, ui, theme);
-                ui.add_space(tokens::SPACING_SM);
-                // **The word appears when it is worth reading.** A link that
-                // is up is the ordinary case and a green dot says it. A link
-                // that is not is the case where nothing arriving looks exactly
-                // like nobody writing, and no colour can tell somebody that --
-                // so that one keeps its word, and its way back.
-                //
-                // Either way the word is on the dot's hover and in the
-                // accessibility tree, where a colour reaches nobody at all.
-                if !up {
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Refresh, "Reconnect")
-                        .clicked()
-                    {
-                        self.send_as(Some(at), Cmd::Reconnect);
-                    }
-                    ui.colored_label(colour, state.link.word());
+                if let Some(c) = open {
+                    // A rule between what is yours and what is the
+                    // conversation's.
+                    let (gap, _) = ui.allocate_exact_size(
+                        egui::vec2(tokens::SPACING_MD, tokens::AVATAR_MD),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().vline(
+                        gap.center().x,
+                        gap.y_range(),
+                        egui::Stroke::new(tokens::STROKE_THIN, theme.border_default),
+                    );
+                    self.conversation_controls_ui(ctx, at, state, c, ui, theme);
                 }
-                sigil_ui::dot(ui, up, colour, colour, state.link.word());
-
-                // Whatever was just done, at the other end of the row. It was
-                // above the transcript, where it pushed every message down by
-                // a line for a moment and then let them back up.
-                //
-                // A note is about an **action** and a trouble is about a
-                // state; the state is rebuilt every refresh, so merging them
-                // would put each confirmation on screen for less than a tick.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    if let Some(note) = &state.note {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&note.said).color(theme.success))
-                                .truncate(),
-                        );
+                    // The one way out at the left end, and never two: back
+                    // to the list where the list is not on screen, or the
+                    // column back where it was put away. Only when there is
+                    // something to bring back does either appear, so the
+                    // bar is not carrying a control that does nothing.
+                    match bar {
+                        Bar::Conversation { back: true } => {
+                            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                                self.send_as(Some(at), Cmd::Close);
+                            }
+                        }
+                        _ if !self.columns_open
+                            && sigil_ui::icon_button_named(
+                                ui,
+                                sigil_ui::Icon::Menu,
+                                "Show the chats",
+                            )
+                            .clicked() =>
+                        {
+                            self.columns_open = true;
+                        }
+                        _ => {}
+                    }
+                    if let Some(c) = open {
+                        self.conversation_name_ui(ctx, at, state, c, ui, theme);
                     }
                 });
             });
         });
+        // Under the row, each only while there is something to say, so the
+        // row itself stays one clean line.
+        //
+        // Whatever was just done. It was above the transcript, where it
+        // pushed every message down by a line for a moment and then let
+        // them back up. A note is about an **action** and a trouble is about
+        // a state; the state is rebuilt every refresh, so merging them would
+        // put each confirmation on screen for less than a tick.
+        if let Some(note) = &state.note {
+            ui.add(
+                egui::Label::new(egui::RichText::new(&note.said).small().color(theme.success))
+                    .truncate(),
+            );
+        }
         // A lock this identity's *own* other session is holding reads, from
         // the store's point of view, exactly like a second program. It is not
         // one, and saying so sends somebody hunting for a client that is not
@@ -2061,7 +2110,7 @@ impl ChatApp {
                     let which = ctx.accounts.active_index();
                     if ui.button("Remove it").clicked() {
                         ctx.accounts.drop_exchange(which, &spare);
-                        ctx.accounts.show_exchange(at.0, None);
+                        ctx.accounts.show_exchange(me, None);
                     }
                 });
             }
@@ -2072,6 +2121,123 @@ impl ChatApp {
             }
         }
         ui.separator();
+    }
+
+    /// The conversation's controls, from the right: Settings, the bell,
+    /// Devices, Members with their count, Call.
+    fn conversation_controls_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        open: &session::Summary,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let me = at.0;
+        let dm = open.peer.is_some();
+        // **No calling a public channel.** SIP-36 confines calls to
+        // private channels: a public channel's invitation is in the clear,
+        // and the room secret in it is a bearer capability, so posting one
+        // there hands the call to anybody who can read the channel. Only
+        // when the exchange has said it is private: `None` is "not yet
+        // answered", and offering a call on a guess is offering the wrong
+        // thing to the wrong room.
+        let callable = open.public == Some(false);
+        if sigil_ui::icon_button(ui, sigil_ui::Icon::Settings).clicked() {
+            ctx.navigator.push_here(Route::Settings);
+        }
+        // Muted or not, in the header where the conversation is named:
+        // the one control about *this* conversation that is not about
+        // its members or its settings.
+        let channel = open.channel;
+        let muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
+        let bell = if muted {
+            sigil_ui::Icon::BellOff
+        } else {
+            sigil_ui::Icon::Bell
+        };
+        if sigil_ui::icon_button(ui, bell).clicked() {
+            ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
+        }
+        if sigil_ui::icon_button(ui, sigil_ui::Icon::Device).clicked() {
+            self.send_as(Some(at), Cmd::Devices);
+            ctx.navigator.push_here(Route::Devices);
+        }
+        // How many, beside the way to see who. Not for a direct message:
+        // two people is what one is, and "2" beside it says nothing.
+        let members = state.members.len();
+        if members > 0 && !dm {
+            ui.colored_label(theme.text_muted, members.to_string());
+        }
+        if sigil_ui::icon_button(ui, sigil_ui::Icon::People).clicked() {
+            self.send_as(Some(at), Cmd::Blocked);
+            ctx.navigator.push_here(Route::Members);
+        }
+        if callable
+            && !self.calls.contains_key(&me)
+            && !state.ringing.iter().any(|r| r.mine)
+            && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked()
+        {
+            // Say in the invitation whether this side will ask for an
+            // introduction, so the other side is not left waiting on one
+            // that is never asked for.
+            let direct = ctx.accounts.prefs.direct_calls;
+            self.send_as(Some(at), Cmd::Call { direct });
+        }
+    }
+
+    /// The conversation's name, and its topic beside it; both truncate.
+    /// An admin's name is the way to rename it.
+    fn conversation_name_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        _at: &At,
+        state: &ChatState,
+        open: &session::Summary,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let dm = open.peer.is_some();
+        let may_rename = state.i_am_admin && !dm;
+        let named = ui.scope_builder(
+            egui::UiBuilder::new().sense(if may_rename {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            }),
+            |ui| {
+                ui.style_mut().interaction.selectable_labels = false;
+                let response = ui.response();
+                let mut text = egui::RichText::new(&open.label).heading();
+                if may_rename && response.hovered() {
+                    text = text.color(theme.accent);
+                }
+                ui.add(egui::Label::new(text).truncate());
+            },
+        );
+        if may_rename {
+            let response = named.response;
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            // Only for the word: a public channel and a private group are
+            // renamed by the same route.
+            let response = response.on_hover_text(if open.public == Some(true) {
+                "Rename this channel"
+            } else {
+                "Rename this group"
+            });
+            if response.clicked() {
+                ctx.navigator.push_here(Route::Settings);
+            }
+        }
+        if !state.topic.is_empty() {
+            ui.add(
+                egui::Label::new(egui::RichText::new(&state.topic).color(theme.text_secondary))
+                    .truncate(),
+            );
+        }
     }
 
     /// The added exchange name to drop, when this session lost the store lock
@@ -2119,97 +2285,39 @@ impl ChatApp {
         let key = me.to_string();
 
         // Laid out from the right, which is where this sits: the chevron
-        // first, then the name, then the picture.
+        // first, then the mark.
         let chevron = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, "Your identity")
             .on_hover_text("Your key, your exchanges, and the other identities you hold");
-        // Wide enough for the two lines and no wider, right-aligned inside it.
-        //
-        // A bare `vertical` takes all the space left on the row, so in a
-        // right-to-left layout it began at the far left and drew the name
-        // straight over the connection state. A fixed width fixed that and
-        // left the picture stranded 200px from its own name, so the width is
-        // measured instead.
-        let label = state.mine.label(&me);
-        // Whatever the second line will actually say, so the block is wide
-        // enough for it. Measured against an empty string when there is no
-        // handle, "unregistered" wrapped onto a third line and the block grew
-        // downwards instead of leftwards.
-        let second = state
-            .mine
-            .handle
-            .clone()
-            .unwrap_or_else(|| UNREGISTERED.to_string());
-        let measure = |text: &str, style: egui::TextStyle| {
-            ui.ctx()
-                .fonts_mut(|f| {
-                    f.layout_no_wrap(
-                        text.to_string(),
-                        style.resolve(ui.style()),
-                        theme.text_primary,
-                    )
-                })
-                .rect
-                .width()
+        // The mark with the link's state on its corner. **The word appears
+        // when it is worth reading.** A link that is up is the ordinary case
+        // and a filled dot says it. A link that is not is the case where
+        // nothing arriving looks exactly like nobody writing, and no colour
+        // can tell somebody that -- so that one keeps its word, and its way
+        // back. Either way the word is on the mark's hover and in the
+        // accessibility tree, where a colour reaches nobody at all.
+        let colour = match state.link {
+            LinkState::Up => theme.link_up,
+            // Not up, and not yet an outage either.
+            LinkState::Connecting | LinkState::Retrying => theme.link_retrying,
+            LinkState::Gone => theme.link_gone,
         };
-        let width = measure(&label, egui::TextStyle::Body)
-            .max(measure(&second, egui::TextStyle::Small))
-            .clamp(60.0, 220.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, tokens::AVATAR_MD),
-            egui::Layout::top_down(egui::Align::Max),
-            |ui| {
-                // **A control, not a caption.** What is drawn here is your
-                // name, or -- with no name published -- the first characters
-                // of your key, and in both cases the thing somebody wants on
-                // seeing it is to set the name. It was a label, and the only
-                // way in was a menu item two clicks behind a chevron.
-                let name = ui
-                    .add(
-                        egui::Label::new(egui::RichText::new(&label).strong())
-                            .truncate()
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text("Set your name and title");
-                if name.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if name.clicked() {
-                    self.open_profile(at, state);
-                }
-                match &state.mine.handle {
-                    Some(handle) => {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(handle)
-                                    .small()
-                                    .color(theme.text_secondary),
-                            )
-                            .truncate(),
-                        );
-                    }
-                    None => {
-                        // A control, not a note. "You have no name here" is
-                        // only useful beside the way to get one, and the way
-                        // to get one is a claim at this exchange.
-                        if ui
-                            .add(
-                                egui::Label::new(
-                                    egui::RichText::new(UNREGISTERED)
-                                        .small()
-                                        .color(theme.text_muted),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_text("Claim a name at this exchange")
-                            .clicked()
-                        {
-                            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Name);
-                        }
-                    }
-                }
-            },
+        let up = state.link == LinkState::Up;
+        sigil_ui::presence(
+            ui,
+            &key,
+            None,
+            tokens::AVATAR_MD,
+            up,
+            colour,
+            state.link.word(),
         );
-        sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
+        if !up {
+            ui.add_space(tokens::SPACING_XS);
+            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Refresh, "Reconnect").clicked() {
+                self.send_as(Some(at), Cmd::Reconnect);
+            }
+            ui.colored_label(colour, state.link.word());
+        }
 
         egui::Popup::menu(&chevron).show(|ui| {
             ui.set_min_width(320.0);
@@ -2220,6 +2328,58 @@ impl ChatApp {
     /// What used to be the top of the column, behind the chevron.
     fn identity_menu(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         let me = at.0;
+
+        // The head: your name, or -- with no name published -- the first
+        // characters of your key, and under it the name this exchange knows
+        // you by. **Controls, not captions.** On seeing the name the thing
+        // somebody wants is to set it; on seeing "unregistered" it is to
+        // claim one, and the way to one is a claim at this exchange. These
+        // were the two lines beside the avatar on the bar; the bar is one
+        // row now and they are the first thing behind its chevron.
+        let name = ui
+            .add(
+                egui::Label::new(egui::RichText::new(state.mine.label(&me)).strong())
+                    .truncate()
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text("Set your name and title");
+        if name.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if name.clicked() {
+            self.open_profile(at, state);
+            ui.close();
+        }
+        match &state.mine.handle {
+            Some(handle) => {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(handle)
+                            .small()
+                            .color(theme.text_secondary),
+                    )
+                    .truncate(),
+                );
+            }
+            None => {
+                if ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(UNREGISTERED)
+                                .small()
+                                .color(theme.text_muted),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Claim a name at this exchange")
+                    .clicked()
+                {
+                    self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Name);
+                    ui.close();
+                }
+            }
+        }
+        ui.separator();
 
         // In full, selectable, and wrapped rather than clipped. A name is an
         // assertion (SIP-21) and this is not -- it is the only thing that
@@ -3136,6 +3296,9 @@ impl ChatApp {
     }
 
     /// The conversation list.
+    /// `identity`: the identity sits in the heading row -- one pane, nothing
+    /// open, no bar for it to be in. In the wide layouts it is in the bar
+    /// over the transcript and this is false.
     fn list_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
@@ -3143,13 +3306,21 @@ impl ChatApp {
         state: &ChatState,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
+        identity: bool,
     ) {
         let now = self.now();
         // The heading carries the two things you do *to* the list, rather
         // than each having a row of its own below it. Both are icons: a word
         // in a heading row reads as part of the heading, not as a control.
         ui.horizontal(|ui| {
+            // As tall as the bar over the transcript, so the two line up
+            // across the divider.
+            ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if identity {
+                    self.me_ui(at, state, ui, theme);
+                    ui.add_space(tokens::SPACING_XS);
+                }
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
                     .on_hover_text("Write to somebody, or start a group or a channel")
                     .clicked()
@@ -3312,7 +3483,6 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
-        let me = at.0;
         let now = self.now();
 
         if state.open.is_none() {
@@ -3334,148 +3504,8 @@ impl ChatApp {
             return;
         }
 
-        // The header: what this conversation is, and the way into everything
-        // that can be done about it. One row, and it stays one row -- the
-        // controls wrapped onto a second line as soon as a count appeared
-        // beside them, which made the header jump about as members arrived.
-        ui.horizontal(|ui| {
-            let open = state
-                .conversations
-                .iter()
-                .find(|c| Some(c.channel) == state.open);
-            let label = open.map(|c| c.label.clone()).unwrap_or_default();
-            // A direct message has two people in it and cannot have any other
-            // number, so the count is a fact about the kind of conversation
-            // and not about this one.
-            let dm = open.is_some_and(|c| c.peer.is_some());
-            // **No calling a public channel.** Anybody may join one, so the
-            // ring would go to a membership nobody chose and the room secret
-            // — a bearer capability, SIP-36 — would be handed to whoever
-            // turned up next. There is nothing to fix about that at the point
-            // somebody presses it, so the control is not there.
-            // **Only when the exchange has said it is private.** A kind
-            // nobody has answered yet is not a licence to offer the call: the
-            // list restores from this machine's own copy on the way in, and
-            // the store knows a group from a direct message but not a public
-            // channel from a private one.
-            let callable = open.is_some_and(|c| c.public == Some(false));
-            // Only for the word in the tooltip: a public channel and a private
-            // group are renamed by the same route.
-            let public = open.is_some_and(|c| c.public == Some(true));
-
-            // **The controls are laid out first, from the right.** Given the
-            // name first, a long one takes the row and the controls wrap onto
-            // a second line -- which is what this did, and it moved the header
-            // about as a member count appeared.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::Settings).clicked() {
-                    ctx.navigator.push_here(Route::Settings);
-                }
-                // Muted or not: a conversation muted is not said out loud
-                // and not counted on the icon; its own row still says.
-                if let Some(channel) = state.open {
-                    let muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
-                    let bell = if muted {
-                        sigil_ui::Icon::BellOff
-                    } else {
-                        sigil_ui::Icon::Bell
-                    };
-                    if sigil_ui::icon_button(ui, bell).clicked() {
-                        ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
-                    }
-                }
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::Device).clicked() {
-                    self.send_as(Some(at), Cmd::Devices);
-                    ctx.navigator.push_here(Route::Devices);
-                }
-                // The one that keeps a number beside it: an icon can say
-                // "members" and cannot say "four of them", and the count is
-                // half of what somebody wants from this control. Not in a
-                // direct message, where it is always two and says nothing.
-                let members = state.members.len();
-                if members > 0 && !dm {
-                    ui.colored_label(theme.text_muted, members.to_string());
-                }
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::People).clicked() {
-                    self.send_as(Some(at), Cmd::Blocked);
-                    ctx.navigator.push_here(Route::Members);
-                }
-                if callable
-                    && !self.calls.contains_key(&me)
-                    && !state.ringing.iter().any(|r| r.mine)
-                    && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked()
-                {
-                    // Say in the invitation whether this side will ask for
-                    // an introduction, so the other side is not left
-                    // waiting on one that is never asked for.
-                    let direct = ctx.accounts.prefs.direct_calls;
-                    self.send_as(Some(at), Cmd::Call { direct });
-                }
-
-                // Whatever is left is the name's, and it truncates rather than
-                // pushing anything off the row.
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    // **The name is the way to change the name**, for somebody
-                    // who may change it. It was a caption, and renaming lived
-                    // behind the settings icon at the other end of the row --
-                    // which is a long way from the thing being renamed.
-                    //
-                    // Not in a direct message: its "name" is a person, and a
-                    // direct message's two members are *both* admins of the
-                    // channel that carries it, so `i_am_admin` alone would
-                    // offer to rename somebody.
-                    let may_rename = state.i_am_admin && !dm;
-                    let named = ui.scope_builder(
-                        egui::UiBuilder::new().sense(if may_rename {
-                            egui::Sense::click()
-                        } else {
-                            egui::Sense::hover()
-                        }),
-                        |ui| {
-                            // Or the label takes the press for its own text
-                            // selection and the scope never hears it; see
-                            // `sigil_ui::conversation_row`.
-                            ui.style_mut().interaction.selectable_labels = false;
-                            let hovered = may_rename && ui.response().hovered();
-                            let text = egui::RichText::new(&label).heading();
-                            // Said in the name itself, because a tooltip only
-                            // answers somebody who already waited to ask. The
-                            // accent is what everything pressable here is.
-                            let text = if hovered {
-                                text.color(theme.accent)
-                            } else {
-                                text
-                            };
-                            ui.add(egui::Label::new(text).truncate());
-                        },
-                    );
-                    if may_rename {
-                        let named = named.response;
-                        if named.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if named
-                            .on_hover_text(if public {
-                                "Rename this channel"
-                            } else {
-                                "Rename this group"
-                            })
-                            .clicked()
-                        {
-                            ctx.navigator.push_here(Route::Settings);
-                        }
-                    }
-                    if !state.topic.is_empty() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&state.topic).color(theme.text_secondary),
-                            )
-                            .truncate(),
-                        );
-                    }
-                });
-            });
-        });
+        // The header is the bar above, drawn by whoever placed this pane;
+        // the transcript starts with what is happening in it.
         if self.ringing_ui(ctx, at, state, ui, theme) {
             ui.add_space(tokens::SPACING_SM);
         }

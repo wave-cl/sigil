@@ -9,7 +9,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
-use sigil::{Account, theme};
+use sigil::{Account, theme, tokens};
 use sigil_chat::{
     Attached, ChatApp, ChatState, Happened, Hit, Line, LinkState, Member, Person, Posted, Quoted,
     Receipt, Summary, Thumb, Trouble,
@@ -1357,6 +1357,161 @@ fn a_dialog_outlives_the_column_it_was_opened_from() {
     );
 }
 
+/// One bar over the conversation: its name, its controls and the identity
+/// share one row no taller than the avatar, and nothing sits above it.
+///
+/// There were two -- the session's, then the conversation's -- and a narrow
+/// window put Back on a third.
+#[test]
+fn the_conversation_has_one_bar() {
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+    let band = tokens::AVATAR_MD + tokens::SPACING_XS;
+    // The conversation open is the direct message with Ada, so the heading
+    // says "Ada" -- as do her bubbles, some of them scrolled above the
+    // window, and her row in the list. The topmost node on screen with
+    // each label is the bar's.
+    let rects: Vec<(&str, egui::Rect)> =
+        ["Ada", "Settings", "Members", "Your identity", "connected"]
+            .into_iter()
+            .map(|l| (l, topmost(&h, l)))
+            .collect();
+    let top = rects.iter().map(|(_, r)| r.top()).fold(f32::MAX, f32::min);
+    let bottom = rects
+        .iter()
+        .map(|(_, r)| r.bottom())
+        .fold(f32::MIN, f32::max);
+    assert!(
+        bottom - top <= band,
+        "the bar is more than one row ({top}..{bottom}): {rects:?}"
+    );
+    // Nothing above it but the window's margin: the bar is the first thing.
+    assert!(
+        top < 2.0 * tokens::SPACING_LG + band,
+        "something sits above the bar: {top}"
+    );
+    // And the name is left of the controls, which are left of the identity.
+    let x = |l: &str| rects.iter().find(|(n, _)| *n == l).unwrap().1.left();
+    assert!(x("Ada") < x("Members") && x("Members") < x("Your identity"));
+}
+
+/// In a narrow window Back is the first thing in the bar, not a row above
+/// it.
+#[test]
+fn in_a_narrow_window_back_is_in_the_bar() {
+    let mut h = harness_with(a_conversation(), true);
+    h.set_size(egui::vec2(420.0, 620.0));
+    h.run();
+    h.run();
+    let back = h.get_by_label("Back").rect();
+    let identity = h.get_by_label("Your identity").rect();
+    assert!(
+        (back.center().y - identity.center().y).abs() < tokens::SPACING_SM,
+        "Back is on a row of its own: back {back:?}, identity {identity:?}"
+    );
+    assert!(back.left() < identity.left(), "Back is the leftmost");
+    // The name is beside it, on the same row.
+    let name = topmost(&h, "Ada");
+    assert!((name.center().y - back.center().y).abs() < tokens::SPACING_SM);
+}
+
+/// With nothing open in a narrow window the identity is in the Chats row,
+/// rather than on a bar with nothing else on it.
+#[test]
+fn with_nothing_open_in_a_narrow_window_the_identity_is_in_the_chats_row() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines = Vec::new();
+    let mut h = harness_with(state, true);
+    h.set_size(egui::vec2(420.0, 620.0));
+    h.run();
+    h.run();
+    let chats = h.get_by_label("Chats").rect();
+    let identity = h.get_by_label("Your identity").rect();
+    assert!(
+        (chats.center().y - identity.center().y).abs() < tokens::SPACING_SM,
+        "the identity is not level with the Chats heading: {chats:?} {identity:?}"
+    );
+}
+
+/// The link's state is on the avatar: a small disc on its corner, and the
+/// word on the same node -- filled and "connected" when up, hollow and
+/// "offline" when not.
+#[test]
+fn the_connection_is_a_dot_on_the_avatar() {
+    let colours = theme::dark();
+    for (link, word, filled, colour) in [
+        (
+            sigil_chat::session::LinkState::Up,
+            "connected",
+            true,
+            colours.link_up,
+        ),
+        (
+            sigil_chat::session::LinkState::Gone,
+            "offline",
+            false,
+            colours.link_gone,
+        ),
+    ] {
+        let mut state = a_conversation();
+        state.link = link;
+        let mut h = harness_with(state, true);
+        h.run();
+        // The word is on the avatar -- and, when the link is down, on the
+        // coloured word beside it as well; the avatar is the square one.
+        let mark = h
+            .get_all_by_label(word)
+            .map(|n| n.rect())
+            .find(|r| (r.width() - tokens::AVATAR_MD).abs() < 1.0)
+            .unwrap_or_else(|| panic!("{word} is not on the avatar"));
+        let corner = mark.right_bottom() - egui::vec2(tokens::SPACING_XS, tokens::SPACING_XS);
+        // In the link's colour: the surface-coloured ring behind the dot is
+        // a circle on the corner too, and is not the dot.
+        assert_eq!(
+            small_disc_at(&h, corner, colour),
+            Some(filled),
+            "{word}: no disc in the link's colour on the avatar's corner"
+        );
+    }
+}
+
+/// The topmost node on screen with this label.
+fn topmost(h: &Harness<'static>, label: &str) -> egui::Rect {
+    h.get_all_by_label(label)
+        .map(|n| n.rect())
+        .filter(|r| r.top() >= 0.0)
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .unwrap_or_else(|| panic!("{label} is not on screen"))
+}
+
+/// Whether a small circle in `colour` is painted over `at`, and whether it
+/// is filled (`Some(true)`) or a ring (`Some(false)`); `None` if absent.
+fn small_disc_at(h: &Harness<'static>, at: egui::Pos2, colour: egui::Color32) -> Option<bool> {
+    fn walk(shape: &egui::Shape, at: egui::Pos2, colour: egui::Color32) -> Option<bool> {
+        match shape {
+            egui::Shape::Vec(inner) => inner.iter().rev().find_map(|s| walk(s, at, colour)),
+            egui::Shape::Circle(c)
+                if c.radius < tokens::SPACING_MD && c.center.distance(at) <= c.radius + 1.0 =>
+            {
+                if c.fill == colour {
+                    Some(true)
+                } else if c.stroke.color == colour {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+    h.output()
+        .shapes
+        .iter()
+        .rev()
+        .find_map(|c| walk(&c.shape, at, colour))
+}
+
 /// Nobody calls a public channel.
 ///
 /// Anybody may join one, so the ring would go to a membership nobody chose,
@@ -1909,13 +2064,21 @@ fn a_conversation_still_being_fetched_says_so_rather_than_that_it_is_empty() {
 ///
 /// "You have no name at this exchange" is only useful beside the way to get
 /// one. It is one word now, too: the sentence it replaced wrapped onto a
-/// second line in a corner block and pushed it down rather than out.
+/// second line in a corner block and pushed it down rather than out. It is
+/// the head of the identity menu, where the name and handle went when the
+/// bar became one row.
 #[test]
 fn having_no_name_offers_the_way_to_claim_one() {
     let mut state = a_conversation();
     state.mine.handle = None;
     let mut h = harness_with(state, true);
     h.run();
+    assert!(
+        !text_of(&h).contains("unregistered"),
+        "the bar is one row and carries no second line: {}",
+        text_of(&h)
+    );
+    open_identity(&mut h);
     assert!(
         text_of(&h).contains("unregistered"),
         "nothing says the exchange knows no name here: {}",
@@ -3260,8 +3423,8 @@ fn short_form(key: &PubKey) -> String {
 
 /// Your own name is a control, because setting it is the thing to do about it.
 ///
-/// The only way in was a menu item two clicks behind a chevron, which is a
-/// long way for the one control that fixes what the header is saying.
+/// It is the head of the identity menu -- one press behind the chevron, on
+/// the one row the bar is now -- and pressing it opens the profile.
 #[test]
 fn clicking_your_own_name_opens_your_profile() {
     let mut h = harness_with(a_conversation(), true);
@@ -3270,7 +3433,12 @@ fn clicking_your_own_name_opens_your_profile() {
         !text_of(&h).contains("Your profile"),
         "the profile is open before anybody asked for it"
     );
+    assert!(
+        h.query_by_label("me").is_none(),
+        "the name is on the bar, which is one row and has no room for it"
+    );
 
+    open_identity(&mut h);
     h.get_by_label("me").click();
     h.run();
     assert!(
@@ -3289,14 +3457,19 @@ fn clicking_your_own_name_opens_your_profile() {
 fn your_profile_opens_on_the_name_you_have() {
     let mut h = harness_with(a_conversation(), true);
     h.run();
+    open_identity(&mut h);
     h.get_by_label("me").click();
     h.run();
-    // The field carries the published name as its value, so the name appears
-    // twice on screen: once in the header, once in the box.
-    let said = text_of(&h);
+    // The field carries the published name as its value.
+    let field = h.get(
+        egui_kittest::kittest::by()
+            .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput"))
+            .value("me"),
+    );
     assert!(
-        said.matches("me").count() > 1,
-        "the profile opened without the name it is meant to be editing: {said}"
+        field.rect().height() > 0.0,
+        "the profile opened without the name it is meant to be editing: {}",
+        text_of(&h)
     );
 }
 
@@ -3312,14 +3485,17 @@ fn with_no_name_the_header_is_a_short_key_that_opens_the_profile() {
     state.mine = Person::default();
     let mut h = harness_with(state, true);
     h.run();
+    open_identity(&mut h);
 
     let said = text_of(&h);
     assert!(
         said.contains(&short_form(&me())),
         "nothing on screen names this identity at all: {said}"
     );
+    // The whole key is in the menu -- under "You", where it belongs -- and
+    // not where the name goes, which comes first.
     assert!(
-        !said.contains(&me().to_string()),
+        said.find(&short_form(&me())) < said.find(&me().to_string()),
         "the whole key is drawn where a name goes: {said}"
     );
 
