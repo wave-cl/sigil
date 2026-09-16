@@ -3528,10 +3528,12 @@ impl ChatApp {
                     // panel draws on its own top edge is a line between two
                     // things, and a line with the box against it reads as the
                     // box's own border rather than as the end of the
-                    // transcript.
+                    // transcript. Below it the window's own margin is already
+                    // there, so this adds almost nothing: every pixel here is
+                    // one the transcript does not get.
                     .inner_margin(egui::Margin {
-                        top: tokens::SPACING_XL as i8,
-                        bottom: tokens::SPACING_LG as i8,
+                        top: tokens::SPACING_MD as i8,
+                        bottom: tokens::SPACING_XS as i8,
                         ..Default::default()
                     }),
             )
