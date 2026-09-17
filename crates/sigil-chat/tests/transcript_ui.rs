@@ -633,7 +633,11 @@ fn on_a_phone_the_devices_pane_fits_its_width() {
 /// the shell narrows it.
 #[test]
 fn on_a_phone_the_conversation_bar_fits_beside_the_rail() {
-    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    let mut state = a_conversation();
+    for c in state.conversations.iter_mut() {
+        c.label = "general".into();
+    }
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
     let width = 412.0 - sigil::tokens::RAIL_TOUCH;
     h.set_size(egui::vec2(width, 915.0));
     h.run();
@@ -650,6 +654,15 @@ fn on_a_phone_the_conversation_bar_fits_beside_the_rail() {
     assert!(
         bubble.left() >= 0.0,
         "the transcript spilled left: {bubble:?}"
+    );
+    // The name has room to be read whole: a seven-letter name in the
+    // heading size, not "ge…" beside a chevron that said what the mark
+    // beside it says.
+    let name = topmost(&h, "general");
+    assert!(name.width() > 60.0, "the name is cut short: {name:?}");
+    assert!(
+        name.right() <= identity.left(),
+        "{name:?} runs into {identity:?}"
     );
     // The rest of the controls are behind More, and come out of it.
     assert!(

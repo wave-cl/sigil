@@ -2123,7 +2123,7 @@ impl ChatApp {
         ui.horizontal(|ui| {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.me_ui(at, state, ctx.away, ui, theme);
+                self.me_ui(at, state, ctx.away, ui, theme, narrow);
                 if let Some(c) = open {
                     // A rule between what is yours and what is the
                     // conversation's.
@@ -2475,14 +2475,20 @@ impl ChatApp {
         away: bool,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
+        compact: bool,
     ) {
         let me = at.0;
         let key = me.to_string();
 
         // Laid out from the right, which is where this sits: the chevron
-        // first, then the mark.
-        let chevron = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, "Your identity")
-            .on_hover_text("Your key, your exchanges, and the other identities you hold");
+        // first, then the mark. On a narrow bar there is no chevron and
+        // the mark is the button: beside a mark that opens the menu, a
+        // chevron said the same thing again for a button's width, which
+        // is the width the conversation's name was short of.
+        let chevron = (!compact).then(|| {
+            sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, "Your identity")
+                .on_hover_text("Your key, your exchanges, and the other identities you hold")
+        });
         // The mark with your presence on its corner: what everybody else
         // reads of you -- active, or away when nobody has touched this
         // machine for a while -- and, with the link down, the link's own
@@ -2504,7 +2510,20 @@ impl ChatApp {
         } else {
             format!("{word}\n{key}")
         };
-        sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
+        let mark = if compact {
+            let mark = ui
+                .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                    sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
+                })
+                .response;
+            mark.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Your identity")
+            });
+            Some(mark)
+        } else {
+            sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
+            None
+        };
         if !up {
             let colour = match state.link {
                 LinkState::Gone => theme.link_gone,
@@ -2517,7 +2536,8 @@ impl ChatApp {
             ui.colored_label(colour, state.link.word());
         }
 
-        egui::Popup::menu(&chevron).show(|ui| {
+        let anchor = chevron.or(mark).expect("the chevron or the mark");
+        egui::Popup::menu(&anchor).show(|ui| {
             let screen = ui.ctx().content_rect().width();
             ui.set_min_width(320.0f32.min(screen - 2.0 * tokens::SPACING_LG).max(200.0));
             self.identity_menu(at, state, ui, theme);
@@ -3697,7 +3717,7 @@ impl ChatApp {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if identity {
-                    self.me_ui(at, state, ctx.away, ui, theme);
+                    self.me_ui(at, state, ctx.away, ui, theme, false);
                     ui.add_space(tokens::SPACING_XS);
                 }
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
