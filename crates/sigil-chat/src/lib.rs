@@ -360,6 +360,18 @@ impl Look {
 
     /// The same picture at a different zoom, still over the window it is seen
     /// through.
+    /// Moved by a drag, kept within the picture.
+    fn panned(self, by: egui::Vec2, view: egui::Vec2, fitted: egui::Vec2) -> Self {
+        let room = self.room(view, fitted);
+        Look {
+            zoom: self.zoom,
+            pan: egui::vec2(
+                (self.pan.x + by.x).clamp(-room.x, room.x),
+                (self.pan.y + by.y).clamp(-room.y, room.y),
+            ),
+        }
+    }
+
     fn zoomed(self, to: f32, view: egui::Vec2, fitted: egui::Vec2) -> Self {
         let now = Look { zoom: to, ..self };
         let room = now.room(view, fitted);
@@ -484,6 +496,15 @@ enum Dialog {
 /// the key is not known until something dials it, and a session has to exist
 /// before it can find out.
 type At = (PubKey, String);
+
+/// A field's width in a row that has a control after it: what it asked
+/// for, or what is left once the control has its room. Width-driven, so a
+/// narrow desktop window and a phone get the same answer.
+fn field_width(ui: &egui::Ui, want: f32) -> f32 {
+    /// Room for the button that follows the field.
+    const CONTROL: f32 = 130.0;
+    want.min((ui.available_width() - CONTROL).max(120.0))
+}
 
 /// What is being typed, per identity.
 ///
@@ -2440,7 +2461,8 @@ impl ChatApp {
         }
 
         egui::Popup::menu(&chevron).show(|ui| {
-            ui.set_min_width(320.0);
+            let screen = ui.ctx().content_rect().width();
+            ui.set_min_width(320.0f32.min(screen - 2.0 * tokens::SPACING_LG).max(200.0));
             self.identity_menu(at, state, ui, theme);
         });
     }
@@ -2722,8 +2744,9 @@ impl ChatApp {
                                     .min(1.0);
                                 let fitted = texture.size * scale;
                                 let (view, held) =
-                                    ui.allocate_exact_size(fitted, egui::Sense::click());
+                                    ui.allocate_exact_size(fitted, egui::Sense::click_and_drag());
                                 let look = self.pane(at).look;
+                                let touched = ui.ctx().input(|i| i.has_touch_screen());
 
                                 if held.clicked() {
                                     // In to the picture's own pixels, or twice its
@@ -2741,8 +2764,25 @@ impl ChatApp {
                                 // it makes them work for it. Only while the
                                 // pointer is over the picture, so it holds still
                                 // when they take it away to press Save.
+                                //
+                                // **A finger drags and pinches instead.** It has no
+                                // position when it is not touching, so following it
+                                // would jump the picture to wherever it last was.
                                 let look = self.pane(at).look;
-                                if look.zoom > 1.01
+                                if touched {
+                                    if held.dragged() && look.zoom > 1.01 {
+                                        self.pane(at).look =
+                                            look.panned(held.drag_delta(), fitted, fitted);
+                                    }
+                                    if let Some(pinch) =
+                                        ui.input(|i| i.multi_touch().map(|m| m.zoom_delta))
+                                        && (pinch - 1.0).abs() > 0.001
+                                    {
+                                        let look = self.pane(at).look;
+                                        let to = (look.zoom * pinch).clamp(1.0, 8.0);
+                                        self.pane(at).look = look.zoomed(to, fitted, fitted);
+                                    }
+                                } else if look.zoom > 1.01
                                     && let Some(p) = ui.ctx().pointer_latest_pos()
                                     && view.contains(p)
                                 {
@@ -2996,7 +3036,9 @@ impl ChatApp {
             self.saving = Some((at.clone(), seq, index, files::save_file("")));
             egui_ctx.request_repaint();
         }
-        if done.fullscreen {
+        // A phone's viewer already fills the screen, and a window command
+        // there is a command to nothing.
+        if done.fullscreen && !sigil::Form::of(&egui_ctx).is_phone() {
             let whole = !self.pane(at).whole_screen;
             self.pane(at).whole_screen = whole;
             egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(whole));
@@ -3043,7 +3085,10 @@ impl ChatApp {
         let response = egui::Modal::new(egui::Id::new(("chat-dialog", &at.0, &at.1)))
             .frame(frame)
             .show(&egui_ctx, |ui| {
-                ui.set_width(360.0);
+                // As wide as a dialog likes, or as wide as the screen has
+                // once a margin is kept: a phone is narrower than a dialog.
+                let screen = ui.ctx().content_rect().width();
+                ui.set_width(360.0f32.min(screen - 2.0 * tokens::SPACING_XL).max(200.0));
                 match which {
                     Dialog::Compose => self.compose_dialog(at, ui, theme),
                     Dialog::Profile => self.profile_dialog(at, ui, theme),
@@ -5522,11 +5567,12 @@ impl ChatApp {
 
         ui.horizontal(|ui| {
             let pane = self.panes.entry(at.clone()).or_default();
+            let width = field_width(ui, 320.0);
             let field = sigil_ui::field(
                 ui,
                 &mut pane.query,
                 "name a channel, or leave empty for everything",
-                320.0,
+                width,
             );
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if entered || ui.button("Search").clicked() {
@@ -5630,11 +5676,12 @@ impl ChatApp {
             ui.add_space(tokens::SPACING_SM);
             ui.horizontal(|ui| {
                 ui.label("Invite");
+                let width = field_width(ui, 280.0);
                 sigil_ui::field(
                     ui,
                     &mut self.panes.entry(at.clone()).or_default().inviting,
                     "paste their key, or type name@domain",
-                    280.0,
+                    width,
                 );
                 if ui.button("Add").clicked() {
                     let typed = self.pane(at).inviting.trim().to_string();
@@ -5853,11 +5900,12 @@ impl ChatApp {
         ui.add_enabled_ui(state.i_am_admin, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Name");
+                let width = field_width(ui, 280.0);
                 sigil_ui::field(
                     ui,
                     &mut self.panes.entry(at.clone()).or_default().channel_name,
                     "what this channel is called",
-                    280.0,
+                    width,
                 );
                 if ui.button("Set").clicked() {
                     let name = self.pane(at).channel_name.clone();
@@ -5866,11 +5914,12 @@ impl ChatApp {
             });
             ui.horizontal(|ui| {
                 ui.label("Topic");
+                let width = field_width(ui, 280.0);
                 sigil_ui::field(
                     ui,
                     &mut self.panes.entry(at.clone()).or_default().channel_topic,
                     "a line about what it is for",
-                    280.0,
+                    width,
                 );
                 if ui.button("Set").clicked() {
                     let topic = self.pane(at).channel_topic.clone();
@@ -6699,11 +6748,12 @@ impl ChatApp {
         );
         ui.horizontal(|ui| {
             ui.label("Its key");
+            let width = field_width(ui, 300.0);
             sigil_ui::field(
                 ui,
                 &mut self.panes.entry(at.clone()).or_default().linking,
                 "the new device's key, in base58",
-                300.0,
+                width,
             );
             if ui.button("Write credential").clicked() {
                 // A phone shows its key as `sqx-device:<key>` (SIP-47), and

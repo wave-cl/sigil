@@ -593,7 +593,10 @@ fn icon_button_inner(
     selected: bool,
 ) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
-    let size = egui::vec2(tokens::BUTTON_MD, tokens::BUTTON_MD);
+    // A finger's target on a phone, a pointer's on a desktop; the mark
+    // inside is the same size on both.
+    let side = crate::Form::of(ui.ctx()).button_size();
+    let size = egui::vec2(side, side);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, word)

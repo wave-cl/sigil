@@ -330,6 +330,67 @@ fn with_inset(points: f32) -> Harness<'static> {
         })
 }
 
+/// A phone: the shell told what it is, and what the system draws over it.
+fn with_phone(insets: sigil::Insets) -> Harness<'static> {
+    let apps: Vec<Box<dyn App>> = vec![
+        Box::new(Stub::named("Calls", 0)),
+        Box::new(Stub::named("Chat", 3)),
+    ];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    Harness::builder()
+        .with_size(egui::vec2(412.0, 915.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.set_insets(insets);
+            shell.ui(ui);
+        })
+}
+
+/// On a phone the status bar lies over the top of the surface and the app
+/// bar sits under it, so the rail starts below both; a keyboard or gesture
+/// bar at the bottom takes its room the same way. The desktop's strip is
+/// drawn *behind* the window's buttons; the phone's is drawn *below* the
+/// system's bar, so the whole inset moves things, not the part past the
+/// strip.
+#[test]
+fn on_a_phone_the_rail_starts_under_the_status_bar_and_the_app_bar() {
+    let mut bare = with_phone(sigil::Insets::NONE);
+    bare.run();
+    let without = bare.get_by_label("Chat (3)").rect().top();
+    assert!(
+        without >= sigil::tokens::BUTTON_LG,
+        "the app bar is a finger tall, and the rail starts under it: {without}"
+    );
+
+    let insets = sigil::Insets {
+        top: 24.0,
+        bottom: 48.0,
+        ..sigil::Insets::NONE
+    };
+    let mut below = with_phone(insets);
+    below.run();
+    let with = below.get_by_label("Chat (3)").rect().top();
+    assert!(
+        (with - without - insets.top).abs() < 0.5,
+        "the rail moved down by {}, and the status bar is {}",
+        with - without,
+        insets.top
+    );
+    // The rail's icon is bigger under a finger than under a pointer.
+    let icon = below.get_by_label("Chat (3)").rect();
+    assert!(
+        icon.height() >= sigil::tokens::BUTTON_LG - 0.5,
+        "a phone's rail icon is {} tall",
+        icon.height()
+    );
+}
+
 /// Double-clicking the top strip fills the screen, and again puts it back.
 ///
 /// That strip **is** the title bar -- sigil draws behind a transparent one --
@@ -451,6 +512,18 @@ fn the_windows_own_buttons_leave_the_rail_alone() {
          strip already gave {already}",
         with - without
     );
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn shell_phone() {
+    let mut h = with_phone(sigil::Insets {
+        top: 24.0,
+        bottom: 48.0,
+        ..sigil::Insets::NONE
+    });
+    h.run();
+    h.snapshot("shell_phone");
 }
 
 #[test]

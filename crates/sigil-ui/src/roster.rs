@@ -41,6 +41,10 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
         return;
     }
 
+    // A full key and an eighty-point meter beside it do not fit a phone's
+    // width; there the key is shortened -- the full one is still the row's
+    // name for the tree, and the tooltip -- and the meter takes a share.
+    let narrow = ui.available_width() < tokens::NARROW_WIDTH;
     for row in rows {
         ui.horizontal(|ui| {
             crate::dot(
@@ -50,10 +54,23 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
                 theme.text_muted,
                 if row.speaking { "speaking" } else { "silent" },
             );
-            ui.add(egui::Label::new(egui::RichText::new(&row.key).monospace()).selectable(true));
+            if narrow {
+                ui.add(egui::Label::new(
+                    egui::RichText::new(crate::short(&row.key)).monospace(),
+                ))
+                .on_hover_text(&row.key);
+            } else {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&row.key).monospace()).selectable(true),
+                );
+            }
             ui.add(
                 egui::ProgressBar::new(row.level.clamp(0.0, 1.0))
-                    .desired_width(tokens::AVATAR_XL)
+                    .desired_width(if narrow {
+                        tokens::AVATAR_XL.min(ui.available_width() * 0.3)
+                    } else {
+                        tokens::AVATAR_XL
+                    })
                     .fill(if row.speaking {
                         theme.speaking
                     } else {

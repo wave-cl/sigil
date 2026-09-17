@@ -270,7 +270,41 @@ pub fn install(ctx: &egui::Context, light_theme: ColorTheme, dark_theme: ColorTh
         d.insert_temp(egui::Id::new(STASH_LIGHT), light_theme);
         d.insert_temp(egui::Id::new(STASH_DARK), dark_theme);
     });
-    ctx.all_styles_mut(custom_style);
+    // The form the host installed before this, if any. A desktop installs
+    // none and gets the style it always had; a phone gets the touch scale.
+    let form = crate::Form::of(ctx);
+    ctx.all_styles_mut(|style| {
+        custom_style(style);
+        if form.is_phone() {
+            phone_style(style);
+        }
+    });
+}
+
+/// What a finger needs that a pointer does not, and a text scale to match
+/// a screen held at arm's length: taller controls, more padding, more slop
+/// around a target, a scroll bar that stays out of the way, and body text a
+/// size up. Only ever applied on [`crate::Form::Phone`].
+fn phone_style(style: &mut Style) {
+    use egui::{FontFamily, FontId, TextStyle};
+    style.spacing.interact_size.y = tokens::BUTTON_LG;
+    style.spacing.button_padding = egui::vec2(tokens::SPACING_MD, tokens::SPACING_SM + 2.0);
+    style.interaction.interact_radius = 8.0;
+    style.spacing.scroll = egui::style::ScrollStyle::floating();
+    for (text_style, size) in [
+        (TextStyle::Body, 15.0),
+        (TextStyle::Button, 15.0),
+        (TextStyle::Small, 12.0),
+        (TextStyle::Heading, 20.0),
+    ] {
+        style
+            .text_styles
+            .insert(text_style, FontId::new(size, FontFamily::Proportional));
+    }
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(13.0, FontFamily::Monospace),
+    );
 }
 
 /// Style that is not colour: animation speed, and the spacing rhythm.

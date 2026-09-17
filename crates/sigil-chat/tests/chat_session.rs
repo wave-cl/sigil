@@ -42,7 +42,7 @@ async fn server_peering(
     let seeded: Vec<String> = peers.iter().map(|k| format!("\"{k}\"")).collect();
     let config_toml = format!(
         "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
-         welcome_channel = \"\"\nname_registration = \"{names}\"\nseed_relay_peers = [{}]\n",
+         welcome_channel = \"\"\nlimits = {{ posts = [0, 0], signals = [0, 0], joins = [0, 0], creates = [0, 0], uploads = [0, 0] }}\nname_registration = \"{names}\"\nseed_relay_peers = [{}]\n",
         key_path.to_string_lossy(),
         dir.join("sqex.state").to_string_lossy(),
         seeded.join(", "),
@@ -3675,7 +3675,7 @@ async fn server_replicating(
     let key_path = dir.join("host_key");
     let config_toml = format!(
         "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
-         welcome_channel = \"\"\n\n[[replicate]]\norigin = {:?}\naddr = {:?}\n\
+         welcome_channel = \"\"\nlimits = {{ posts = [0, 0], signals = [0, 0], joins = [0, 0], creates = [0, 0], uploads = [0, 0] }}\n\n[[replicate]]\norigin = {:?}\naddr = {:?}\n\
          channels = [{:?}]\ninterval_secs = 1\ndomain = \"origin.example\"\n",
         key_path.to_string_lossy(),
         dir.join("sqex.state").to_string_lossy(),
@@ -3723,7 +3723,7 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
     std::fs::write(&key_path, hex::encode(server_sk.to_bytes())).unwrap();
     let config_toml = format!(
         "listen = \"127.0.0.1:0\"\nkey_file = {:?}\nstate_file = {:?}\nadmins = []\n\
-         welcome_channel = \"\"\nreplication_peers = [{:?}]\n",
+         welcome_channel = \"\"\nlimits = {{ posts = [0, 0], signals = [0, 0], joins = [0, 0], creates = [0, 0], uploads = [0, 0] }}\nreplication_peers = [{:?}]\n",
         key_path.to_string_lossy(),
         origin_dir.path().join("sqex.state").to_string_lossy(),
         replica_key.to_string(),

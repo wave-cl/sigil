@@ -15,6 +15,7 @@ pub mod account;
 pub mod accounts;
 pub mod app;
 pub mod deck;
+pub mod form;
 pub mod icon;
 pub mod nav;
 pub mod navigator;
@@ -30,6 +31,7 @@ pub use app::{
     TabNotifications, Target,
 };
 pub use deck::{Layout, layout};
+pub use form::{Form, Insets};
 pub use icon::{Icon, icon_button, icon_button_named, icon_button_tinted};
 pub use nav::{Discarded, NavStack};
 pub use navigator::{ActiveEntry, AppId, NavEntry, NavRequest, Navigator};

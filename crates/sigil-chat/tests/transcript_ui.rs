@@ -529,6 +529,218 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
         })
 }
 
+/// A phone: 412 by 915 points, told what it is, with a status bar and a
+/// gesture bar over it. The same app, drawn the way the shell draws it
+/// there -- the route reached through `render_nav`, as the shell does.
+fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
+    Harness::builder()
+        .with_size(egui::vec2(412.0, 915.0))
+        // A tap is a press and a release within egui's click duration; at
+        // the harness's default quarter-second per frame, a `run` between
+        // the two can outlast it. See `with_inset` in the shell's tests.
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_MD as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &sigil::Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
+                });
+        })
+}
+
+/// A finger: the touch event egui-winit would forward, and the pointer it
+/// emulates from it -- the harness feeds raw input, so both are supplied.
+fn finger_down(h: &mut Harness<'static>, at: egui::Pos2) {
+    let input = h.input_mut();
+    input.events.push(egui::Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase: egui::TouchPhase::Start,
+        pos: at,
+        force: None,
+    });
+    input.events.push(egui::Event::PointerMoved(at));
+    input.events.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+}
+
+fn finger_up(h: &mut Harness<'static>, at: egui::Pos2) {
+    let input = h.input_mut();
+    input.events.push(egui::Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase: egui::TouchPhase::End,
+        pos: at,
+        force: None,
+    });
+    input.events.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    input.events.push(egui::Event::PointerGone);
+}
+
+/// On a phone every field and its button fit the width: the key field in
+/// Devices asked for 300 points and got them whether or not the pane had
+/// them, and the button after it fell off the screen.
+#[test]
+fn on_a_phone_the_devices_pane_fits_its_width() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let button = h.get_by_label("Write credential").rect();
+    assert!(
+        button.right() <= 412.0,
+        "the button after the key field is off the screen: {button:?}"
+    );
+    assert!(button.left() > 0.0);
+}
+
+/// A dialog on a phone is as wide as the screen has, not 360 points.
+#[test]
+fn on_a_phone_a_dialog_fits_the_screen() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("New conversation").click();
+    h.run();
+    h.run();
+    // The compose dialog's field takes the dialog's width; both must be
+    // inside the screen with the margin the dialog keeps.
+    let field = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .map(|n| n.rect())
+        .fold(None::<egui::Rect>, |acc, r| {
+            Some(acc.map_or(r, |a| a.union(r)))
+        })
+        .expect("the dialog has a field");
+    assert!(field.right() <= 412.0 && field.left() >= 0.0, "{field:?}");
+}
+
+/// Under a finger, a tap on a message reveals its actions and a tap
+/// elsewhere puts them away; under a pointer that has never been a finger,
+/// nothing is revealed by a click.
+#[test]
+fn a_tap_reveals_a_messages_actions_and_a_second_tap_hides_them() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "nothing is revealed before anybody touches"
+    );
+    // A tap: down, a frame, up.
+    finger_down(&mut h, bubble.center());
+    h.run();
+    finger_up(&mut h, bubble.center());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_some(),
+        "a tap on the message reveals its strip"
+    );
+    // Tap beside the bubble -- it is ours, so it sits at the right and the
+    // left of its row is empty -- and it goes away. Below it is another
+    // message, and a tap there would reveal that one instead.
+    let away = egui::pos2((bubble.left() - 60.0).max(8.0), bubble.center().y);
+    finger_down(&mut h, away);
+    h.run();
+    finger_up(&mut h, away);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "a tap elsewhere puts the strip away"
+    );
+}
+
+/// A press held still on a message opens a menu of its actions where the
+/// finger is, once, and holding on does not open it again.
+#[test]
+fn a_long_press_on_a_message_opens_its_menu() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    assert!(h.query_by_label("Copy key").is_none());
+    finger_down(&mut h, bubble.center());
+    // Held: twenty steps of a twentieth of a second is a second, and a long
+    // press is eight tenths.
+    h.run_steps(20);
+    assert!(
+        h.query_by_label("Copy key").is_some(),
+        "a held press opens the actions menu"
+    );
+    h.run_steps(10);
+    assert_eq!(
+        h.get_all_by_label("Copy key").count(),
+        1,
+        "the press still held opens no second menu"
+    );
+    finger_up(&mut h, bubble.center());
+    h.run();
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_conversation() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_conversation");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_chats() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_chats");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_devices() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    h.snapshot("phone_devices");
+}
+
 /// Put the conversation list away.
 ///
 /// It is **on screen from the start**: signing in lands on the chats with the

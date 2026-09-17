@@ -479,7 +479,15 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
     // more: what used to sit there hangs off its corner now, on its own
     // layer, and takes no room in the row.
     let available = ui.available_width();
-    let limit = (available * WIDEST).max(160.0);
+    // More of a narrow pane: three quarters of a phone's width is a column
+    // of short lines, and the far side of the bubble has nothing to share
+    // the row with.
+    let widest = if available < tokens::NARROW_WIDTH {
+        WIDEST_NARROW
+    } else {
+        WIDEST
+    };
+    let limit = (available * widest).max(160.0);
     if b.mine {
         // Measured, not filled. A frame in a top-down layout takes the width
         // it is given, so capping at the limit made every message the same
@@ -589,12 +597,89 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     let up = ui
         .ctx()
         .memory(|m| m.areas().visible_last_frame(&crate::emoji::strip_layer(id)));
+    // **Under a finger there is no hover.** A tap on the bubble reveals the
+    // strip and a tap anywhere else puts it away; a press held still opens
+    // a menu of the same actions where the finger is. Neither happens under
+    // a pointer, where hover already does it. Keyed on whether a finger has
+    // ever been seen, so a desktop with a touchscreen gets it too.
+    let me = b.id;
+    let touched = ui.ctx().input(|i| i.has_touch_screen());
+    let revealed = egui::Id::new("sigil-message-revealed");
+    let mut shown = ui.ctx().data(|d| d.get_temp::<egui::Id>(revealed)) == Some(me);
+    let menu = id.with("long-press");
+    if touched && !b.redacted {
+        let (tap, at, long, press) = ui.input(|i| {
+            let p = &i.pointer;
+            let press = p.press_start_time();
+            // Held, and held still: egui counts a press held past its click
+            // duration as "decidedly dragging" whether or not it moved, so
+            // stillness is measured from where the press began.
+            let still = p
+                .press_origin()
+                .zip(p.latest_pos())
+                .is_some_and(|(began, now)| began.distance(now) < LONG_PRESS_SLOP);
+            let long = p.primary_down()
+                && still
+                && press.is_some_and(|began| i.time - began > LONG_PRESS_SECS);
+            (p.primary_clicked(), p.interact_pos(), long, press)
+        });
+        let inside = at.is_some_and(|p| reach.contains(p));
+        if tap {
+            if inside && !shown {
+                ui.ctx().data_mut(|d| d.insert_temp(revealed, me));
+                shown = true;
+            } else if shown {
+                ui.ctx().data_mut(|d| d.remove::<egui::Id>(revealed));
+                shown = false;
+            }
+        }
+        // Once per press: the press that opened the menu goes on being
+        // held, and must not open it again every frame.
+        let fired = id.with("long-press-fired");
+        let already = ui.ctx().data(|d| d.get_temp::<f64>(fired));
+        if long && inside && already != press {
+            if let Some(began) = press {
+                ui.ctx().data_mut(|d| d.insert_temp(fired, began));
+            }
+            // Where the finger is, remembered: the menu is drawn there for
+            // as long as it is open, and the finger will have gone.
+            if let Some(p) = at {
+                ui.ctx().data_mut(|d| d.insert_temp(menu.with("at"), p));
+            }
+            egui::Popup::open_id(ui.ctx(), menu);
+        }
+    }
     let over = (still || up)
-        && (ui.rect_contains_pointer(reach)
+        && (shown
+            || ui.rect_contains_pointer(reach)
             || ui
                 .ctx()
                 .pointer_hover_pos()
                 .is_some_and(|p| ui.ctx().layer_id_at(p) == Some(crate::emoji::strip_layer(id))));
+
+    // The long-press menu, drawn where the finger was, for as long as it is
+    // open. The same actions the strip's More menu offers, plus Reply, so
+    // nothing needs the small icons to be reached.
+    if touched
+        && egui::Popup::is_id_open(ui.ctx(), menu)
+        && let Some(at) = ui.ctx().data(|d| d.get_temp::<egui::Pos2>(menu.with("at")))
+    {
+        egui::Popup::new(
+            menu,
+            ui.ctx().clone(),
+            egui::PopupAnchor::Position(at),
+            ui.layer_id(),
+        )
+        .kind(egui::PopupKind::Menu)
+        .open_memory(None)
+        .show(|ui| {
+            if ui.button("Reply").clicked() {
+                action.reply = true;
+                ui.close();
+            }
+            more_menu(ui, b, action);
+        });
+    }
 
     // **A menu opened from the strip keeps it up.**
     //
@@ -607,7 +692,6 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     // One slot in memory rather than a flag per message: only one message
     // can be under the pointer at a time, so remembering *which* is enough.
     let slot = egui::Id::new("sigil-message-controls");
-    let me = b.id;
     if over {
         ui.ctx().data_mut(|d| d.insert_temp(slot, me));
     }
@@ -629,7 +713,21 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
             action.reply = true;
         }
         let more = crate::emoji::cell_icon(ui, crate::Icon::More, "More");
-        egui::Popup::menu(&more).show(|ui| {
+        egui::Popup::menu(&more).show(|ui| more_menu(ui, b, action));
+    });
+}
+
+/// How long a finger holds still before it is a long press and not a tap.
+/// egui's own click duration, which it does not expose.
+const LONG_PRESS_SECS: f64 = 0.8;
+/// How far a finger may wander and still be holding still: egui's own
+/// click distance.
+const LONG_PRESS_SLOP: f32 = 6.0;
+
+/// The More menu's items: on the strip, and on the long-press menu.
+fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
+    {
+        {
             if b.editable && ui.button("Edit").clicked() {
                 action.edit = true;
                 ui.close();
@@ -692,8 +790,8 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
                     }
                 }
             }
-        });
-    });
+        }
+    }
 }
 
 /// The widest a bubble may be, as a share of the pane it is in.
@@ -702,6 +800,8 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
 /// an ordinary window came to about two thirds, and a short message still
 /// took two lines because the time was always drawn under the text.
 const WIDEST: f32 = 0.75;
+/// The same, below `tokens::NARROW_WIDTH`.
+const WIDEST_NARROW: f32 = 0.85;
 
 /// How wide a bubble wants to be, and whether one line is enough.
 struct Fit {

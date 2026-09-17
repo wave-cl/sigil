@@ -60,7 +60,13 @@ pub fn conversation_row(
     selected: bool,
 ) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
-    let height = tokens::AVATAR_MD + tokens::SPACING_MD;
+    // Taller under a finger than under a pointer.
+    let height = tokens::AVATAR_MD
+        + if sigil::Form::of(ui.ctx()).is_phone() {
+            tokens::SPACING_LG
+        } else {
+            tokens::SPACING_MD
+        };
 
     // **The row is the target, not the words in it.** A `Frame` sizes itself
     // to its contents and answers for that rectangle, so the gaps -- beside a

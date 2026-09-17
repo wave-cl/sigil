@@ -16,13 +16,11 @@ use sigil::accounts::Accounts;
 use sigil::app::Notify;
 use sigil::app::{App, AppAction, AppContext};
 use sigil::navigator::{AppId, NavEntry, NavRequest, Navigator};
-use sigil::{ColorTheme, NavStack, tokens};
+use sigil::{ColorTheme, Form, Insets, NavStack, tokens};
 
-/// Wide enough for one icon and its hit target, and no wider.
-///
-/// It was 104px, which was right for a column of words and is most of an inch
-/// of nothing beside a column of 34px icons.
-const RAIL_WIDTH: f32 = 52.0;
+// The rail's width is `tokens::RAIL_WIDTH`, chosen by `Form::rail_width`: it
+// was 104px, which was right for a column of words and is most of an inch of
+// nothing beside a column of 34px icons.
 
 /// How long without a keypress or a click before this machine is *away*.
 pub const AWAY_AFTER: f64 = 300.0;
@@ -223,7 +221,7 @@ pub struct Shell {
     /// the content, which is where the rail and the chats column's own
     /// controls are. So the top of the window is left empty by this much.
     /// Zero everywhere but macOS, where nothing is drawn behind the bar.
-    top_inset: f32,
+    insets: Insets,
 }
 
 impl Shell {
@@ -282,17 +280,24 @@ impl Shell {
             remember: true,
             identities: None,
             choosing: None,
-            top_inset: 0.0,
+            insets: Insets::NONE,
         }
     }
 
-    /// How much of the top the window's own chrome sits over. See
-    /// [`Shell::top_inset`].
+    /// How much of the top the window's own chrome sits over.
     ///
     /// Set every pass by the host, which is the only thing holding a window
-    /// handle to ask. Tests set it directly to check the room is left.
+    /// handle to ask. Tests set it directly to check the room is left. The
+    /// desktop's form of [`set_insets`](Self::set_insets): only the top.
     pub fn set_top_inset(&mut self, points: f32) {
-        self.top_inset = points.max(0.0);
+        self.insets = Insets::top(points);
+    }
+
+    /// What the system draws over the surface, all four sides: a phone's
+    /// status bar and gesture bar, its keyboard while it is up, a cutout.
+    /// Set every pass by the host; the shell keeps everything clear of them.
+    pub fn set_insets(&mut self, insets: Insets) {
+        self.insets = insets.clamped();
     }
 
     /// Start with a particular identity, rather than whatever `~/.sqnr` holds.
@@ -660,8 +665,26 @@ impl Shell {
         //
         // First, and outside the sealed-identity branch below, so the opening
         // screen is not under the buttons either.
-        let strip = self.top_inset.max(tokens::BUTTON_SM);
+        let form = Form::of(ui.ctx());
         let app_on_screen = self.accounts.active().is_unlocked() && self.choosing.is_none();
+        // **On a phone the strip is the app bar.** The system's status bar
+        // lies over the top of the surface, so the bar starts under it; it
+        // is a finger tall; the app's corner control is where it always is;
+        // and there is no drag region, since there is no window to drag.
+        // The top inset on a desktop is the window's own buttons, which the
+        // strip is drawn *behind*; on a phone it is a bar of the system's,
+        // drawn over, so the strip is drawn *below* it.
+        let strip = match form {
+            Form::Desktop => self.insets.top.max(tokens::BUTTON_SM),
+            Form::Phone => tokens::BUTTON_LG,
+        };
+        if form.is_phone() && self.insets.top > 0.0 {
+            egui::Panel::top("sigil_inset_top")
+                .resizable(false)
+                .exact_size(self.insets.top)
+                .frame(egui::Frame::NONE.fill(theme.surface_primary))
+                .show(ui, |_| {});
+        }
         egui::Panel::top("sigil_window_chrome")
             .resizable(false)
             .exact_size(strip)
@@ -675,12 +698,33 @@ impl Shell {
                 // a click in that region goes to one place, so if egui was
                 // given it, macOS's own zoom was not.
                 let whole = ui.max_rect();
-                let bar = ui.allocate_rect(whole, egui::Sense::click());
-                if bar.double_clicked() {
-                    let full = ui.ctx().input(|i| i.viewport().maximized);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
-                        !full.unwrap_or(false),
-                    ));
+                if !form.is_phone() {
+                    let bar = ui.allocate_rect(whole, egui::Sense::click());
+                    if bar.double_clicked() {
+                        let full = ui.ctx().input(|i| i.viewport().maximized);
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                            !full.unwrap_or(false),
+                        ));
+                    }
+                }
+                // On a phone the bar also says where you are: the app's own
+                // title for the view on screen, at the left, the way every
+                // phone's app bar does. A desktop has the tab strip for that.
+                if form.is_phone() && app_on_screen {
+                    let entry = self.nav.top().clone();
+                    let active = self.active();
+                    let title = self.apps[active]
+                        .nav_title(&entry.token)
+                        .unwrap_or_else(|| self.apps[active].title().to_string());
+                    let left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(left)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.label(egui::RichText::new(title).heading());
+                        },
+                    );
                 }
                 // The app's corner of it, drawn **over** the drag region --
                 // a later widget wins the press -- from the right edge in, and
@@ -738,6 +782,31 @@ impl Shell {
                     }
                 });
         }
+        // What the system draws over the bottom and the sides: a gesture
+        // bar, the keyboard while it is up, a cutout. Empty panels rather
+        // than margins, because a keyboard is three hundred points tall and
+        // a margin is an `i8`. The keyboard's is what lifts a composer above
+        // it: an edge-to-edge window is never resized for the keyboard, and
+        // the composer is the bottom panel of whatever is left.
+        for (side, size) in [
+            ("sigil_inset_bottom", self.insets.bottom),
+            ("sigil_inset_left", self.insets.left),
+            ("sigil_inset_right", self.insets.right),
+        ] {
+            if size <= 0.0 {
+                continue;
+            }
+            let panel = match side {
+                "sigil_inset_left" => egui::Panel::left(side),
+                "sigil_inset_right" => egui::Panel::right(side),
+                _ => egui::Panel::bottom(side),
+            };
+            panel
+                .resizable(false)
+                .exact_size(size)
+                .frame(egui::Frame::NONE.fill(theme.surface_primary))
+                .show(ui, |_| {});
+        }
         // Nothing sealed gets a rail. Every app behind it would be a tab onto
         // an identity that cannot do anything, and offering four of those is
         // offering a choice that does not exist yet.
@@ -746,7 +815,7 @@ impl Shell {
                 .frame(
                     egui::Frame::NONE
                         .fill(theme.surface_primary)
-                        .inner_margin(egui::Margin::same(tokens::SPACING_LG as i8)),
+                        .inner_margin(egui::Margin::same(form.body_margin() as i8)),
                 )
                 .show(ui, |ui| self.welcome(ui, &theme));
             return;
@@ -757,7 +826,7 @@ impl Shell {
         if self.chrome_visible {
             egui::Panel::left("sigil_rail")
                 .resizable(false)
-                .exact_size(RAIL_WIDTH)
+                .exact_size(form.rail_width())
                 .frame(
                     egui::Frame::NONE
                         .fill(theme.surface_secondary)
@@ -772,7 +841,7 @@ impl Shell {
             .frame(
                 egui::Frame::NONE
                     .fill(theme.surface_primary)
-                    .inner_margin(egui::Margin::same(tokens::SPACING_LG as i8)),
+                    .inner_margin(egui::Margin::same(form.body_margin() as i8)),
             )
             .show(ui, |ui| self.body(ui));
 
@@ -803,6 +872,7 @@ impl Shell {
     /// default: an unsealed identity file is a private key sitting in a folder
     /// in the clear.
     fn making_ui(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let card = CARD_WIDTH.min(ui.available_width());
         // Optional, and said so: the first identity is just `identity`, and
         // a name is for telling a second one from it.
         let first = self
@@ -817,7 +887,7 @@ impl Shell {
             } else {
                 "work, phone, the-other-one"
             },
-            CARD_WIDTH,
+            card,
         );
         // The keyboard lands in the first box, the same way it lands in the
         // passphrase box on the way in. Once, not every pass, or nothing else
@@ -833,10 +903,10 @@ impl Shell {
             ui,
             &mut self.welcome.new_passphrase,
             "something you will not lose",
-            CARD_WIDTH,
+            card,
         );
         ui.add_space(tokens::SPACING_SM);
-        let again = sigil_ui::password_field(ui, &mut self.welcome.new_again, "again", CARD_WIDTH);
+        let again = sigil_ui::password_field(ui, &mut self.welcome.new_again, "again", card);
         // Return in the last box is the form, the same as Return in the
         // passphrase box on the way in: the next thing after typing it twice
         // is Create, and reaching for the mouse to say so is a step nobody
@@ -851,7 +921,7 @@ impl Shell {
         ui.add_space(tokens::SPACING_MD);
 
         if ui
-            .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Create"))
+            .add_sized([card, tokens::BUTTON_LG], egui::Button::new("Create"))
             .clicked()
             || entered
         {
@@ -859,7 +929,7 @@ impl Shell {
         }
         ui.add_space(tokens::SPACING_SM);
         if ui
-            .add_sized([CARD_WIDTH, tokens::BUTTON_MD], egui::Button::new("Cancel"))
+            .add_sized([card, tokens::BUTTON_MD], egui::Button::new("Cancel"))
             .clicked()
         {
             // The name and both passphrases go with it. What was typed towards
@@ -936,6 +1006,8 @@ impl Shell {
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui, theme: &ColorTheme) {
+        // As wide as it likes on a desktop, as wide as there is on a phone.
+        let card = CARD_WIDTH.min(ui.available_width());
         let found = Accounts::found();
         let active = self.accounts.active_index();
         let chosen = self.accounts.active().path().to_path_buf();
@@ -948,7 +1020,7 @@ impl Shell {
             // two gaps stacked read as one large one, and the card sat low.
             ui.add_space(ui.available_height() * 0.05);
             ui.allocate_ui_with_layout(
-                egui::vec2(CARD_WIDTH, 0.0),
+                egui::vec2(card, 0.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     // **The identity's own mark**, over the middle of the
@@ -1017,8 +1089,8 @@ impl Shell {
                     // them and repeating it eight times says nothing.
                     let label = name_of(&chosen);
                     egui::ComboBox::from_id_salt("sigil_welcome_identity")
-                        .width(CARD_WIDTH)
-                        .height(320.0)
+                        .width(card)
+                        .height(320.0f32.min(ui.available_height() * 0.5))
                         .selected_text(label)
                         .show_ui(ui, |ui| {
                             for path in &found {
@@ -1065,7 +1137,7 @@ impl Shell {
                             ui,
                             &mut self.welcome.passphrase,
                             "the passphrase that seals this identity",
-                            CARD_WIDTH,
+                            card,
                         );
                         // Typing works from the moment the window opens. This
                         // is the only thing on screen and the only thing to do
@@ -1079,7 +1151,7 @@ impl Shell {
                             field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.add_space(tokens::SPACING_SM);
                         let go = ui
-                            .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Unlock"))
+                            .add_sized([card, tokens::BUTTON_LG], egui::Button::new("Unlock"))
                             .clicked();
                         if entered || go {
                             let passphrase = std::mem::take(&mut self.welcome.passphrase);
@@ -1101,7 +1173,7 @@ impl Shell {
                     // thing left to do.
                     if self.choosing.is_some() && self.accounts.active().is_unlocked() {
                         if ui
-                            .add_sized([CARD_WIDTH, tokens::BUTTON_LG], egui::Button::new("Open"))
+                            .add_sized([card, tokens::BUTTON_LG], egui::Button::new("Open"))
                             .clicked()
                         {
                             self.choosing = None;
@@ -1113,7 +1185,7 @@ impl Shell {
                     // would otherwise have to unlock their way out of it.
                     if let Some(previous) = self.choosing
                         && ui
-                            .add_sized([CARD_WIDTH, tokens::BUTTON_MD], egui::Button::new("Cancel"))
+                            .add_sized([card, tokens::BUTTON_MD], egui::Button::new("Cancel"))
                             .clicked()
                     {
                         self.accounts.switch_to(previous);
@@ -1127,7 +1199,7 @@ impl Shell {
                     ui.add_space(tokens::SPACING_MD);
                     if ui
                         .add_sized(
-                            [CARD_WIDTH, tokens::BUTTON_MD],
+                            [card, tokens::BUTTON_MD],
                             egui::Button::new("Create a new identity"),
                         )
                         .clicked()

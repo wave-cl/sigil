@@ -51,6 +51,11 @@ pub const BUTTON_SM: f32 = 28.0;
 pub const BUTTON_MD: f32 = 34.0;
 pub const BUTTON_LG: f32 = 44.0;
 
+/// The rail: one icon and its hit target, and no wider. On a phone the
+/// target is a finger's, so the rail is wider by the same amount.
+pub const RAIL_WIDTH: f32 = 52.0;
+pub const RAIL_TOUCH: f32 = 64.0;
+
 pub const OPACITY_DISABLED: f32 = 0.38;
 pub const OPACITY_MUTED: f32 = 0.60;
 pub const OPACITY_OVERLAY: f32 = 0.50;
@@ -66,7 +71,8 @@ pub const COLUMN_MIN_WIDTH: f32 = 320.0;
 /// flush against each other or the window edge.
 pub const COLUMN_GUTTER: f32 = 30.0;
 
-/// Below this window width the deck collapses to a single column and the
-/// typography drops to the compact scale. A *runtime* check, not a platform
-/// one: narrowing a desktop window must collapse the layout live.
+/// Below this window width the deck collapses to a single column. A
+/// *runtime* check, not a platform one: narrowing a desktop window must
+/// collapse the layout live. (Typography does not follow width; a phone's
+/// larger scale comes from [`crate::Form`], through the theme.)
 pub const NARROW_WIDTH: f32 = 550.0;
