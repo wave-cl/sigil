@@ -3888,6 +3888,25 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
     );
     // Alice's does not: it lives with her.
     assert_eq!(alice.state().home, None);
+    // And the two are told apart by name: hers is "the square", his is
+    // "the square@origin.example".
+    let label_at = |h: &ChatHandle| {
+        h.state()
+            .conversations
+            .iter()
+            .find(|c| c.channel == channel)
+            .map(|c| c.label.clone())
+    };
+    assert!(
+        until(
+            || label_at(&bob).as_deref() == Some("the square@origin.example"),
+            15
+        )
+        .await,
+        "{:?}",
+        label_at(&bob)
+    );
+    assert_eq!(label_at(&alice).as_deref(), Some("the square"));
 
     // What Bob says at the replica is ordered at the origin and read there.
     bob.send(Cmd::Send("hello from the other side".into()));
@@ -3936,7 +3955,11 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
     carol.send(Cmd::Find("square".into()));
     assert!(
         until(
-            || carol.state().found.iter().any(|f| f.name == "the square"),
+            || carol
+                .state()
+                .found
+                .iter()
+                .any(|f| f.name.starts_with("the square")),
             20
         )
         .await,
@@ -3947,8 +3970,8 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
         .state()
         .found
         .into_iter()
-        .find(|f| f.name == "the square")
-        .unwrap();
+        .find(|f| f.name == "the square@origin.example")
+        .expect("the directory at a copy names the room with where it lives");
     carol.send(Cmd::Join {
         channel: found.channel,
         instance: found.instance,

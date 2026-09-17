@@ -2351,7 +2351,16 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
         entry.peer = peer.map(|(a, _)| a);
         entry.public = Some(public);
         entry.group = group;
-        entry.label = label;
+        // SIP-43: a conversation that lives at another exchange is named
+        // with where it lives -- `general@trunk.exchange` -- so two rooms
+        // called the same thing on two exchanges read as two rooms. The
+        // store keeps the bare name; the home is learned afresh each session.
+        entry.label = match chat.homed_elsewhere(&m.channel) {
+            Some(home) if entry.peer.is_none() && !label.is_empty() => {
+                format!("{label}@{}", at_home(home))
+            }
+            _ => label,
+        };
         entry.admins = admins;
         if !roster.is_empty() {
             entry.members = roster;
@@ -2887,6 +2896,17 @@ async fn refresh(
 }
 
 /// Re-read who we are blocking.
+/// SIP-43: what a channel that lives elsewhere is said to live at -- the
+/// domain the operator recorded, or the head of the origin's key.
+fn at_home(home: &sqex_proto::channel::Home) -> String {
+    if home.domain.is_empty() {
+        let key = home.origin.to_string();
+        format!("{}…", &key[..key.len().min(8)])
+    } else {
+        home.domain.clone()
+    }
+}
+
 async fn refresh_blocked(chat: &mut Chat, state: &watch::Sender<ChatState>) {
     match chat.blocked().await {
         Ok(blocked) => state.send_modify(|s| s.blocked = blocked),
@@ -5327,17 +5347,26 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         },
         Cmd::Find(query) => match chat.find(&query, 0).await {
             Ok(listing) => {
-                let found = listing
-                    .channels
-                    .into_iter()
-                    .map(|c| Found {
+                let mut found = Vec::with_capacity(listing.channels.len());
+                for c in listing.channels {
+                    // SIP-43: a copy of a room from elsewhere is listed with
+                    // where it lives. A public channel's home is answered to
+                    // anyone at a copy; at its origin a non-member is refused
+                    // and the room is named plainly, which is right.
+                    let name = match chat.home(&c.channel).await {
+                        Ok(home) if home.origin != chat.exchange_key() => {
+                            format!("{}@{}", c.name, at_home(&home))
+                        }
+                        _ => c.name,
+                    };
+                    found.push(Found {
                         channel: c.channel,
                         instance: c.instance,
-                        name: c.name,
+                        name,
                         topic: c.topic,
                         members: c.members,
-                    })
-                    .collect();
+                    });
+                }
                 state.send_modify(|s| {
                     s.found = found;
                     s.searched = true;

@@ -5,8 +5,11 @@ exchanges may hold a copy (SIP-35). Until now a copy was read-only where it
 was held: to say something in a channel that lived at `squic.org`, you had
 to be connected to `squic.org`.
 
-Now you post where you are. When a conversation you have open lives at
-another exchange, the bar says so -- *lives at squic.org* -- and what you
+Now you post where you are. A conversation that lives at another exchange
+is named with where it lives -- `general@trunk.exchange` beside your own
+`general` -- in the list, the bar and the directory, so two rooms called
+the same thing on two exchanges read as two rooms. When one is open the
+bar says so too -- *lives at trunk.exchange* -- and what you
 write is carried to that exchange, ordered there, receipted there, and
 comes back to the copy you are reading within a second. You cannot tell
 from the answer whether the exchange you posted at ordered the message or
