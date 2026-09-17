@@ -7052,4 +7052,3 @@ fn a_message_sent_through_a_copy_says_via_where() {
         "only the one that was: {said}"
     );
 }
-
