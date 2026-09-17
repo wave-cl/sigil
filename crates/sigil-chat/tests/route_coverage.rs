@@ -181,6 +181,102 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/rendezvous/introduce",
         NotYet("SIP-25 introductions"),
     ),
+    // SIP-48: the sealed backup is written and restored from sqex-chat's
+    // command line; sigil has no backup surface yet.
+    (
+        "POST",
+        "/backup/write",
+        NotYet("SIP-48 sealed backup, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/backup/read",
+        NotYet("SIP-48 sealed backup, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/backup/drop",
+        NotYet("SIP-48 sealed backup, from sqex-chat"),
+    ),
+    // SIP-53: a channel's origin moves; sigil reads across a move through
+    // sqex-chat's client, which verifies under former origins, but does
+    // not post one.
+    (
+        "POST",
+        "/channel/rehome",
+        NotYet("SIP-53 origin succession, from sqex-chat's /rehome"),
+    ),
+    (
+        "POST",
+        "/channel/rehomed",
+        NotYet("SIP-53 origin succession, from sqex-chat's /rehome"),
+    ),
+    (
+        "POST",
+        "/channel/stranded",
+        NotYet("SIP-53 origin succession, from sqex-chat's /rehome"),
+    ),
+    // SIP-55: sigil's finder reads /channel/list, this exchange's own
+    // directory; the federated search is not surfaced yet.
+    (
+        "POST",
+        "/channel/search",
+        NotYet("SIP-55 federated directory; sigil's finder is local"),
+    ),
+    // SIP-56: no moderation surface in sigil yet.
+    (
+        "POST",
+        "/channel/mute",
+        NotYet("SIP-56 abuse controls, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/channel/unmute",
+        NotYet("SIP-56 abuse controls, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/channel/report",
+        NotYet("SIP-56 abuse controls, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/channel/reports",
+        NotYet("SIP-56 abuse controls, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/channel/dismiss",
+        NotYet("SIP-56 abuse controls, from sqex-chat"),
+    ),
+    // SIP-59, 60, 62: moving home, reaching somebody at another exchange
+    // and rotating the account key are `sqex-chat move`, `^N name@domain`
+    // and `sqex-chat handover`; sigil has none of the three yet.
+    (
+        "POST",
+        "/account/move",
+        NotYet("SIP-59 moving home, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/account/home",
+        NotYet("SIP-59 moving home, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/account/locate",
+        NotYet("SIP-60 reaching another exchange, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/channel/create_at",
+        NotYet("SIP-60 reaching another exchange, from sqex-chat"),
+    ),
+    (
+        "POST",
+        "/account/handover",
+        NotYet("SIP-62 key handover, from sqex-chat"),
+    ),
     ("POST", "/attest/lodge", NotYet("SIP-27 attestation")),
     ("POST", "/attest/read", NotYet("SIP-27 attestation")),
     ("POST", "/resolve/publish", NotYet("SIP-28 resolution")),
@@ -229,6 +325,15 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/peer/channel", NotAClientRoute),
     ("POST", "/peer/forward", NotAClientRoute),
     ("POST", "/peer/standing", NotAClientRoute),
+    // SIP-53, 54, 57, 59, 60, 61: more of the same, between exchanges.
+    ("POST", "/peer/rehomed", NotAClientRoute),
+    ("POST", "/peer/cursors", NotAClientRoute),
+    ("POST", "/peer/signals", NotAClientRoute),
+    ("POST", "/peer/tombstones", NotAClientRoute),
+    ("POST", "/peer/mine", NotAClientRoute),
+    ("POST", "/peer/moved", NotAClientRoute),
+    ("POST", "/peer/invited", NotAClientRoute),
+    ("POST", "/peer/wait", NotAClientRoute),
 ];
 
 /// Where sqexd's dispatch lives -- asked of cargo, never assumed.
@@ -372,15 +477,15 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 92,
+        total, 117,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
-        peer, 8,
-        "SIP-35 and SIP-43 peering routes, which no client calls"
+        peer, 16,
+        "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 84,
+        client, 101,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(

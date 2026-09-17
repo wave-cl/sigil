@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.30"
+version = "0.1.31"
 edition = "2024"
 license = "MIT"
 
@@ -30,13 +30,13 @@ license = "MIT"
 # tagging a release. `.github/workflows/release.yml` refuses a tag that still
 # carries a path dependency, so forgetting fails loudly rather than shipping
 # something nobody else can build. See docs/dependencies.md.
-sqex-proto = { git = "https://github.com/wave-cl/sqex", tag = "v0.67.0" }
-sqex-discovery = { git = "https://github.com/wave-cl/sqex", tag = "v0.67.0" }
-sqex-voice = { git = "https://github.com/wave-cl/sqex", tag = "v0.67.0" }
-sqex-chat = { git = "https://github.com/wave-cl/sqex", tag = "v0.67.0" }
+sqex-proto = { git = "https://github.com/wave-cl/sqex", tag = "v0.79.4" }
+sqex-discovery = { git = "https://github.com/wave-cl/sqex", tag = "v0.79.4" }
+sqex-voice = { git = "https://github.com/wave-cl/sqex", tag = "v0.79.4" }
+sqex-chat = { git = "https://github.com/wave-cl/sqex", tag = "v0.79.4" }
 # Only ever a dev-dependency: tests drive a real exchange in-process, because a
 # client that was only tested against a mock has tested the mock.
-sqexd = { git = "https://github.com/wave-cl/sqex", tag = "v0.67.0" }
+sqexd = { git = "https://github.com/wave-cl/sqex", tag = "v0.79.4" }
 sqnr = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.9" }
 sqnr-core = { git = "https://github.com/wave-cl/sqnr", tag = "v0.10.9" }
 squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.27.0" }
@@ -82,16 +82,3 @@ features = ["wgpu", "snapshot"]
 lto = true
 codegen-units = 1
 
-# --- co-developing against sqex ---------------------------------------------
-# SIP-52 (catch-up) spans sqex and this workspace, and the sqex side is not
-# tagged yet. Until it is, the tagged pins above are overridden by the
-# sibling checkout, exactly as docs/dependencies.md describes for a change
-# that cannot go through a tag. **Remove this block and bump the pins before
-# tagging a release**; the release workflow refuses a manifest that still
-# carries a path, so forgetting cannot ship.
-[patch."https://github.com/wave-cl/sqex"]
-sqex-proto = { path = "../sqex/crates/sqex-proto" }
-sqex-discovery = { path = "../sqex/crates/sqex-discovery" }
-sqex-voice = { path = "../sqex/crates/sqex-voice" }
-sqex-chat = { path = "../sqex/crates/sqex-chat" }
-sqexd = { path = "../sqex/crates/sqexd" }
