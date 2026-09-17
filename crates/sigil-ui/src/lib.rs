@@ -27,7 +27,10 @@ pub use video::{Standing, Video, VideoAction, video};
 pub use working::working;
 // Re-exported from the host crate, where the `App` trait names one -- see
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.
-pub use identicon::{Presence, avatar, identicon, identicon_of, presence, presence_hover};
+pub use identicon::{
+    Presence, avatar, identicon, identicon_layer, identicon_of, identicon_raster, presence,
+    presence_hover,
+};
 
 /// Teach egui how to decode an image.
 ///
@@ -108,6 +111,53 @@ pub fn password_field(
     width: f32,
 ) -> egui::Response {
     field_as(ui, buf, hint, width, true)
+}
+
+/// A field with room for one control **inside** it, at its right end: the
+/// box takes `width` and the text stops short of a square `slot` wide, so
+/// what goes there -- a magnifier, a paperclip -- sits in the box rather
+/// than beside it. Returns the field and the slot's rectangle; draw the
+/// control there with [`in_slot`], after the field so the press is its.
+pub fn field_with_slot(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    hint: &str,
+    width: f32,
+    height: f32,
+    slot: f32,
+) -> (egui::Response, egui::Rect) {
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let above = ((height - line) / 2.0).max(0.0);
+    let response = ui.add_sized(
+        [width, height],
+        egui::TextEdit::singleline(buf)
+            .id_salt(hint)
+            .hint_text(hint)
+            .margin(egui::Margin {
+                left: sigil::tokens::SPACING_MD as i8,
+                right: (slot + sigil::tokens::SPACING_XS) as i8,
+                top: above as i8,
+                bottom: above as i8,
+            }),
+    );
+    let rect = response.rect;
+    let at = egui::Rect::from_center_size(
+        egui::pos2(
+            rect.right() - sigil::tokens::SPACING_XS - slot / 2.0,
+            rect.center().y,
+        ),
+        egui::vec2(slot, slot.min(rect.height())),
+    );
+    (response, at)
+}
+
+/// Draw a control in a field's slot (see [`field_with_slot`]): a child ui
+/// over the slot, which takes nothing from the row's own layout.
+pub fn in_slot<R>(ui: &mut egui::Ui, slot: egui::Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(slot).layout(
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+    ));
+    add(&mut child)
 }
 
 fn field_as(

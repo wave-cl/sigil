@@ -95,8 +95,7 @@ pub fn identicon_of(ui: &mut egui::Ui, id: &[u8], size: f32) -> egui::Response {
     let half = GRID.div_ceil(2);
     for col in 0..half {
         for row in 0..GRID {
-            let bit = col * GRID + row;
-            if (h >> (bit % 64)) & 1 == 0 {
+            if !lit(h, col, row) {
                 continue;
             }
             for c in [col, GRID - 1 - col] {
@@ -125,6 +124,100 @@ pub fn identicon_of(ui: &mut egui::Ui, id: &[u8], size: f32) -> egui::Response {
 /// The mark for an account or channel named by a base58 string.
 pub fn identicon(ui: &mut egui::Ui, key: &str, size: f32) -> egui::Response {
     identicon_of(ui, key.as_bytes(), size)
+}
+
+/// Whether the cell at `col`, `row` of the mark for a hash is lit: the
+/// left half from the hash's bits, the right half a mirror of it.
+fn lit(h: u64, col: usize, row: usize) -> bool {
+    let col = col.min(GRID - 1 - col);
+    let bit = col * GRID + row;
+    (h >> (bit % 64)) & 1 == 1
+}
+
+/// The mark as an Android launcher layer: `size` square, RGBA, with the
+/// mark's circle two thirds of the side across, centred, and the mark's
+/// background colour everywhere else. A launcher masks an adaptive icon
+/// to the middle two thirds of its layers -- a circle, on most phones --
+/// so a mark drawn this way fills the whole of the icon's circle, and
+/// a launcher that cuts a squircle instead shows its colour, not a hole.
+pub fn identicon_layer(id: &[u8], size: usize) -> Vec<u8> {
+    let (back, _) = colours(id);
+    let inner = size * 2 / 3;
+    let mark = identicon_raster(id, inner);
+    let offset = (size - inner) / 2;
+    let mut out = Vec::with_capacity(size * size * 4);
+    for y in 0..size {
+        for x in 0..size {
+            let (mx, my) = (x as isize - offset as isize, y as isize - offset as isize);
+            let px = if mx >= 0 && my >= 0 && (mx as usize) < inner && (my as usize) < inner {
+                let i = (my as usize * inner + mx as usize) * 4;
+                let p = &mark[i..i + 4];
+                // Over the background colour, so the circle's soft edge
+                // blends into it rather than into nothing.
+                let a = p[3] as u32;
+                [
+                    ((p[0] as u32 * a + back.r() as u32 * (255 - a)) / 255) as u8,
+                    ((p[1] as u32 * a + back.g() as u32 * (255 - a)) / 255) as u8,
+                    ((p[2] as u32 * a + back.b() as u32 * (255 - a)) / 255) as u8,
+                    255,
+                ]
+            } else {
+                [back.r(), back.g(), back.b(), 255]
+            };
+            out.extend_from_slice(&px);
+        }
+    }
+    out
+}
+
+/// The mark as pixels: `size` square, RGBA, row by row, with the corners
+/// outside the circle clear. The same rule as [`identicon_of`] draws by,
+/// for where there is no painter -- a phone's launcher icon, which is
+/// nobody's mark until an identity is made.
+pub fn identicon_raster(id: &[u8], size: usize) -> Vec<u8> {
+    const SUB: usize = 4;
+    let (back, fore) = colours(id);
+    let h = fnv(id);
+    let radius = size as f32 / 2.0;
+    let cell = size as f32 / GRID as f32;
+    let mut out = Vec::with_capacity(size * size * 4);
+    for y in 0..size {
+        for x in 0..size {
+            // Supersampled: how much of the pixel is inside the circle,
+            // and of that how much is in a lit cell.
+            let mut inside = 0u32;
+            let mut on = 0u32;
+            for sy in 0..SUB {
+                for sx in 0..SUB {
+                    let px = x as f32 + (sx as f32 + 0.5) / SUB as f32;
+                    let py = y as f32 + (sy as f32 + 0.5) / SUB as f32;
+                    let (dx, dy) = (px - radius, py - radius);
+                    if dx * dx + dy * dy > radius * radius {
+                        continue;
+                    }
+                    inside += 1;
+                    let (col, row) = ((px / cell) as usize, (py / cell) as usize);
+                    if lit(h, col.min(GRID - 1), row.min(GRID - 1)) {
+                        on += 1;
+                    }
+                }
+            }
+            let total = (SUB * SUB) as u32;
+            if inside == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            let mix = |a: u8, b: u8| ((a as u32 * (inside - on) + b as u32 * on) / inside) as u8;
+            let alpha = (255 * inside / total) as u8;
+            out.extend_from_slice(&[
+                mix(back.r(), fore.r()),
+                mix(back.g(), fore.g()),
+                mix(back.b(), fore.b()),
+                alpha,
+            ]);
+        }
+    }
+    out
 }
 
 /// An avatar: a picture if there is one, and the identicon if there is not.
@@ -281,6 +374,63 @@ pub fn ring(ui: &egui::Ui, around: egui::Rect, colour: egui::Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The raster is the mark: mirrored left to right, clear outside the
+    /// circle, and not one colour.
+    #[test]
+    fn the_raster_is_a_mirrored_mark_in_a_circle() {
+        let size = 48;
+        let px = identicon_raster(b"11111111111111111111111111111111", size);
+        assert_eq!(px.len(), size * size * 4);
+        let at = |x: usize, y: usize| &px[(y * size + x) * 4..(y * size + x) * 4 + 4];
+        assert_eq!(at(0, 0)[3], 0, "the corner is clear");
+        assert_eq!(at(size / 2, size / 2)[3], 255, "the middle is solid");
+        for y in 0..size {
+            for x in 0..size / 2 {
+                assert_eq!(at(x, y), at(size - 1 - x, y), "mirrored at {x},{y}");
+            }
+        }
+        let distinct: std::collections::HashSet<&[u8]> = (0..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(x, y)[3] == 255)
+            .map(|(x, y)| &at(x, y)[..3])
+            .collect();
+        assert!(distinct.len() >= 2, "one colour: {distinct:?}");
+    }
+
+    /// The launcher layer is opaque everywhere, the mark's circle spans
+    /// the middle two thirds, and outside it is the mark's own background.
+    #[test]
+    fn the_launcher_layer_fills_its_square_with_the_mark_in_the_middle_two_thirds() {
+        let size = 108;
+        let id = b"11111111111111111111111111111111";
+        let px = identicon_layer(id, size);
+        assert_eq!(px.len(), size * size * 4);
+        let at = |x: usize, y: usize| &px[(y * size + x) * 4..(y * size + x) * 4 + 4];
+        let (back, _) = colours(id);
+        let back = [back.r(), back.g(), back.b(), 255];
+        assert_eq!(at(0, 0), &back, "the corner is the background colour");
+        assert_eq!(
+            at(1, size / 2),
+            &back,
+            "just inside the edge, left of the circle"
+        );
+        assert!(
+            px.iter().skip(3).step_by(4).all(|&a| a == 255),
+            "opaque throughout"
+        );
+        // The mark's circle reaches two thirds across: a point at 1/6 from
+        // the edge on the middle row is on the circle's rim.
+        let mark = identicon_raster(id, size * 2 / 3);
+        let m = |x: usize, y: usize| {
+            &mark[(y * (size * 2 / 3) + x) * 4..(y * (size * 2 / 3) + x) * 4 + 4]
+        };
+        assert_eq!(
+            &at(size / 2, size / 2)[..3],
+            &m(size / 3, size / 3)[..3],
+            "the middle is the mark's middle"
+        );
+    }
 
     #[test]
     fn the_two_hues_are_never_confusable() {

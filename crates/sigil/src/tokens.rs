@@ -46,6 +46,9 @@ pub const AVATAR_XL: f32 = 80.0;
 /// characters reads as a rule somebody wrote on, and is a small target. The
 /// hint inside says what the field is for, so it needs room for a sentence.
 pub const FIELD_MD: f32 = 40.0;
+/// A field with a control inside it, on a phone: tall enough for the
+/// control's finger-sized target and a little air around it.
+pub const FIELD_LG: f32 = 48.0;
 
 pub const BUTTON_SM: f32 = 28.0;
 pub const BUTTON_MD: f32 = 34.0;

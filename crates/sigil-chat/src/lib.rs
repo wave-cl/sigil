@@ -3851,19 +3851,37 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_XS);
 
         ui.horizontal(|ui| {
-            let control =
-                sigil::Form::of(ui.ctx()).button_size() + ui.spacing().item_spacing.x * 2.0;
-            let width = ui.available_width() - control;
+            let form = sigil::Form::of(ui.ctx());
+            let phone = form.is_phone();
+            let control = form.button_size() + ui.spacing().item_spacing.x * 2.0;
+            let width = ui.available_width() - if phone { 0.0 } else { control };
             // No label beside it. A search box is the one control everybody
             // recognises without being told, and the word is still on the
             // magnifier next to it -- which is a button, so it reaches the
-            // accessibility tree where a placeholder would not.
-            let field = sigil_ui::field(
-                ui,
-                &mut self.panes.entry(at.clone()).or_default().searching,
-                "Search chats",
-                width,
-            );
+            // accessibility tree where a placeholder would not. On a phone
+            // the box is the whole width and the magnifier sits inside it,
+            // at the right.
+            let (field, slot) = if phone {
+                let (field, slot) = sigil_ui::field_with_slot(
+                    ui,
+                    &mut self.panes.entry(at.clone()).or_default().searching,
+                    "Search chats",
+                    width,
+                    tokens::FIELD_LG,
+                    form.button_size(),
+                );
+                (field, Some(slot))
+            } else {
+                (
+                    sigil_ui::field(
+                        ui,
+                        &mut self.panes.entry(at.clone()).or_default().searching,
+                        "Search chats",
+                        width,
+                    ),
+                    None,
+                )
+            };
             if field.changed() {
                 let query = self.pane(at).searching.clone();
                 self.pane(at).chosen = None;
@@ -3883,13 +3901,24 @@ impl ChatApp {
             }
             // The control tells you what it will do: clear the search while
             // there is one, and otherwise say what the box is for.
+            let control = |ui: &mut egui::Ui| {
+                if searching {
+                    sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked()
+                } else {
+                    sigil_ui::icon_button(ui, sigil_ui::Icon::Search).clicked()
+                }
+            };
+            let pressed = match slot {
+                Some(slot) => sigil_ui::in_slot(ui, slot, control),
+                None => control(ui),
+            };
             if searching {
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() || escaped {
+                if pressed || escaped {
                     self.pane(at).searching.clear();
                     self.pane(at).chosen = None;
                     self.send_as(Some(at), Cmd::Search(String::new()));
                 }
-            } else if sigil_ui::icon_button(ui, sigil_ui::Icon::Search).clicked() {
+            } else if pressed {
                 // Focuses the box rather than doing nothing: it is beside a
                 // field and the obvious thing to press first.
                 field.request_focus();
@@ -5382,15 +5411,40 @@ impl ChatApp {
             // ran off the edge of the window. The button's size is the
             // form's: a phone's is bigger, and measured at the desktop's
             // Send ran off the edge of the phone.
-            let button = sigil::Form::of(ui.ctx()).button_size();
+            let form = sigil::Form::of(ui.ctx());
+            let phone = form.is_phone();
+            let button = form.button_size();
             let controls = (button + ui.spacing().item_spacing.x) * 2.0;
-            let width = (ui.available_width() - controls).max(80.0);
-            let field = sigil_ui::field(
-                ui,
-                &mut self.panes.entry(at.clone()).or_default().composing,
-                "write a message, @ to mention, or / for a command",
-                width,
-            );
+            // On a phone the box is the whole width and a little taller,
+            // with the paperclip inside it at the right; there is no Send
+            // button, because the keyboard's own key sends. On a desktop the
+            // two buttons sit beside it as they always have.
+            let width = if phone {
+                ui.available_width()
+            } else {
+                (ui.available_width() - controls).max(80.0)
+            };
+            let (field, slot) = if phone {
+                let (field, slot) = sigil_ui::field_with_slot(
+                    ui,
+                    &mut self.panes.entry(at.clone()).or_default().composing,
+                    "write a message, @ to mention, or / for a command",
+                    width,
+                    tokens::FIELD_LG,
+                    button,
+                );
+                (field, Some(slot))
+            } else {
+                (
+                    sigil_ui::field(
+                        ui,
+                        &mut self.panes.entry(at.clone()).or_default().composing,
+                        "write a message, @ to mention, or / for a command",
+                        width,
+                    ),
+                    None,
+                )
+            };
             self.pane(at).field = Some(field.id);
             if refocus {
                 field.request_focus();
@@ -5424,23 +5478,30 @@ impl ChatApp {
             }
             // Attach sits before Send, which is where every messenger puts
             // it: the last control on the row is the one that commits.
-            if sigil_ui::icon_button(ui, sigil_ui::Icon::Attach)
-                .on_hover_text(
-                    "Attach files -- pictures, clips, anything, up to four in a message. \
-                     They are sealed before they leave this machine.",
-                )
-                .clicked()
-            {
+            let attach = |ui: &mut egui::Ui| {
+                sigil_ui::icon_button(ui, sigil_ui::Icon::Attach)
+                    .on_hover_text(
+                        "Attach files -- pictures, clips, anything, up to four in a message. \
+                         They are sealed before they leave this machine.",
+                    )
+                    .clicked()
+            };
+            let attaching = match slot {
+                Some(slot) => sigil_ui::in_slot(ui, slot, attach),
+                None => attach(ui),
+            };
+            if attaching {
                 self.picking = Some((at.clone(), files::pick_files()));
                 ui.ctx().request_repaint();
             }
-            let send = sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
-                .on_hover_text(if editing.is_some() {
-                    "Save the rewrite"
-                } else {
-                    "Send"
-                })
-                .clicked();
+            let send = !phone
+                && sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
+                    .on_hover_text(if editing.is_some() {
+                        "Save the rewrite"
+                    } else {
+                        "Send"
+                    })
+                    .clicked();
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             // Words, or files -- the original's included, on a rewrite, so
             // a picture's caption can be taken off and a picture without

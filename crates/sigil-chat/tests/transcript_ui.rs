@@ -744,22 +744,64 @@ fn on_a_phone_the_conversation_bar_fits_the_screen() {
     assert!(h.query_by_label("Devices").is_some());
 }
 
-/// The composer's field leaves room for both of its buttons at the
-/// phone's button size: measured at the desktop's, Send hung off the
-/// right edge of the phone.
+/// On a phone the composer is the whole width and a little taller, with
+/// the paperclip inside it at the right and no Send button: the keyboard's
+/// own key sends.
 #[test]
-fn on_a_phone_the_composer_keeps_send_on_the_screen() {
+fn on_a_phone_the_composer_is_the_whole_width_with_the_paperclip_inside() {
     let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
     let width = PHONE_PANE;
     h.set_size(egui::vec2(width, PHONE_HEIGHT));
     h.run();
     h.run();
-    let send = h.get_by_label("Send").rect();
     assert!(
-        send.right() <= width - sigil::tokens::SPACING_MD,
-        "Send is off the edge: {send:?}"
+        h.query_by_label("Send").is_none(),
+        "a Send button on the phone"
     );
-    assert!(send.width() >= sigil::tokens::BUTTON_LG - 1.0, "{send:?}");
+    let field = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .map(|n| n.rect())
+        .max_by(|a, b| a.bottom().total_cmp(&b.bottom()))
+        .expect("the composer");
+    let edge = width - 2.0 * sigil::tokens::SPACING_MD;
+    assert!(field.right() >= edge, "the box stops short: {field:?}");
+    assert!(field.height() >= sigil::tokens::FIELD_LG - 0.5, "{field:?}");
+    let clip = h.get_by_label("Attach a file").rect();
+    assert!(
+        field.contains_rect(clip),
+        "the paperclip is not in the box: {clip:?} vs {field:?}"
+    );
+    assert!(
+        clip.right() > field.center().x,
+        "the paperclip is at the right"
+    );
+}
+
+/// On a phone the search box is the whole width, with the magnifier
+/// inside it at the right.
+#[test]
+fn on_a_phone_the_search_box_is_the_whole_width_with_the_magnifier_inside() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let field = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .map(|n| n.rect())
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the search box");
+    let edge = PHONE_WIDTH - 2.0 * sigil::tokens::SPACING_MD;
+    assert!(field.right() >= edge, "the box stops short: {field:?}");
+    let glass = h.get_by_label("Search").rect();
+    assert!(
+        field.contains_rect(glass),
+        "the magnifier is not in the box: {glass:?} vs {field:?}"
+    );
+    assert!(
+        glass.right() > field.center().x,
+        "the magnifier is at the right"
+    );
 }
 
 /// No row is wider than the pane, whatever is in it. A file's row did
