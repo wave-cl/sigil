@@ -341,7 +341,7 @@ fn with_phone(insets: sigil::Insets) -> Harness<'static> {
             sigil::Account::unlocked_for_test([4u8; 32]),
         ]));
     Harness::builder()
-        .with_size(egui::vec2(412.0, 915.0))
+        .with_size(egui::vec2(360.0, 804.0))
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             sigil::Form::install(&ctx, sigil::Form::Phone);
@@ -352,20 +352,30 @@ fn with_phone(insets: sigil::Insets) -> Harness<'static> {
         })
 }
 
-/// On a phone the status bar lies over the top of the surface and the app
-/// bar sits under it, so the rail starts below both; a keyboard or gesture
-/// bar at the bottom takes its room the same way. The desktop's strip is
-/// drawn *behind* the window's buttons; the phone's is drawn *below* the
-/// system's bar, so the whole inset moves things, not the part past the
-/// strip.
+/// On a phone there is no rail: the screen is the app's, and the other
+/// apps are behind the title in the app bar. The status bar lies over the
+/// top of the surface and the app bar sits under it, so the title moves
+/// down by the whole inset; a keyboard or gesture bar at the bottom takes
+/// its room the same way.
 #[test]
-fn on_a_phone_the_rail_starts_under_the_status_bar_and_the_app_bar() {
+fn on_a_phone_the_apps_are_behind_the_title_under_the_status_bar() {
     let mut bare = with_phone(sigil::Insets::NONE);
     bare.run();
-    let without = bare.get_by_label("Chat (3)").rect().top();
     assert!(
-        without >= sigil::tokens::BUTTON_LG,
-        "the app bar is a finger tall, and the rail starts under it: {without}"
+        bare.query_by_label("Chat (3)").is_none(),
+        "a rail icon is on the phone"
+    );
+    // The topmost "Calls": the app's own body says its name too.
+    let topmost = |h: &Harness<'static>, label: &str| {
+        h.get_all_by_label(label)
+            .map(|n| n.rect())
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+            .expect(label)
+    };
+    let title = topmost(&bare, "Calls");
+    assert!(
+        title.top() >= 0.0 && title.top() < sigil::tokens::BUTTON_LG,
+        "the title is in the app bar: {title:?}"
     );
 
     let insets = sigil::Insets {
@@ -375,19 +385,27 @@ fn on_a_phone_the_rail_starts_under_the_status_bar_and_the_app_bar() {
     };
     let mut below = with_phone(insets);
     below.run();
-    let with = below.get_by_label("Chat (3)").rect().top();
+    let with = topmost(&below, "Calls").top();
     assert!(
-        (with - without - insets.top).abs() < 0.5,
-        "the rail moved down by {}, and the status bar is {}",
-        with - without,
+        (with - title.top() - insets.top).abs() < 0.5,
+        "the title moved down by {}, and the status bar is {}",
+        with - title.top(),
         insets.top
     );
-    // The rail's icon is bigger under a finger than under a pointer.
-    let icon = below.get_by_label("Chat (3)").rect();
+    // The other app is a press on the title away, badge and all.
+    below
+        .get_all_by_label("Calls")
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the title")
+        .click();
+    below.run();
+    below.get_by_label("Chat (3)").click();
+    below.run();
+    below.run();
+    let now = topmost(&below, "Chat");
     assert!(
-        icon.height() >= sigil::tokens::BUTTON_LG - 0.5,
-        "a phone's rail icon is {} tall",
-        icon.height()
+        now.top() < insets.top + sigil::tokens::BUTTON_LG,
+        "the title did not become the other app's: {now:?}"
     );
 }
 

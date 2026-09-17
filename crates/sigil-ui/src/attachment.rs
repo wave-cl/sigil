@@ -460,9 +460,42 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                 );
                 // A file that cannot be drawn keeps its button: there is
                 // nothing else to do with it, and nothing on screen to click.
-                ui.label(a.described);
-                if ui.small_button("Save").clicked() {
-                    action.save = true;
+                //
+                //
+                // Packed, when the row has room for the name and the button:
+                // that is what a desktop shows. When it has not -- a phone's
+                // bubble -- the button goes first, from the right, and the
+                // name takes what is left, truncating. A `horizontal` does
+                // not wrap, so a long name pushed Save past the bubble and
+                // the bubble past the pane; and a ui grows to what is drawn
+                // in it, so every message after this one was laid out for a
+                // pane that wide.
+                let name = egui::WidgetText::from(a.described).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                );
+                let save = egui::WidgetText::from("Save").into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                );
+                let padding = ui.spacing().button_padding.x * 2.0;
+                let need = name.size().x + ui.spacing().item_spacing.x + save.size().x + padding;
+                if need <= ui.available_width() {
+                    ui.label(a.described);
+                    if ui.small_button("Save").clicked() {
+                        action.save = true;
+                    }
+                } else {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Save").clicked() {
+                            action.save = true;
+                        }
+                        ui.add(egui::Label::new(a.described).truncate());
+                    });
                 }
             });
         });

@@ -710,6 +710,11 @@ impl Shell {
                 // On a phone the bar also says where you are: the app's own
                 // title for the view on screen, at the left, the way every
                 // phone's app bar does. A desktop has the tab strip for that.
+                //
+                // The title is also the way to the other apps. A phone has no
+                // rail -- a column of icons beside a 360-point screen was a
+                // sixth of it -- so the apps are a menu on the title, and a
+                // phone that only chats never sees it.
                 if form.is_phone() && app_on_screen {
                     let entry = self.nav.top().clone();
                     let active = self.active();
@@ -717,14 +722,40 @@ impl Shell {
                         .nav_title(&entry.token)
                         .unwrap_or_else(|| self.apps[active].title().to_string());
                     let left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
+                    let mut switch = None;
                     ui.scope_builder(
                         egui::UiBuilder::new()
                             .max_rect(left)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
-                            ui.label(egui::RichText::new(title).heading());
+                            let heading = egui::RichText::new(&title).heading();
+                            if self.apps.len() < 2 {
+                                ui.label(heading);
+                                return;
+                            }
+                            let button = ui
+                                .add(egui::Button::new(heading).frame(false))
+                                .on_hover_text("The other things sigil does");
+                            egui::Popup::menu(&button).show(|ui| {
+                                for i in 0..self.apps.len() {
+                                    let badge = self.apps[i].tab_notifications();
+                                    let said = if badge.is_empty() {
+                                        self.apps[i].title().to_string()
+                                    } else {
+                                        format!("{} ({})", self.apps[i].title(), badge.count)
+                                    };
+                                    if ui.selectable_label(i == active, said).clicked()
+                                        && i != active
+                                    {
+                                        switch = Some(i);
+                                    }
+                                }
+                            });
                         },
                     );
+                    if let Some(i) = switch {
+                        self.navigator.switch_to(AppId(i));
+                    }
                 }
                 // The app's corner of it, drawn **over** the drag region --
                 // a later widget wins the press -- from the right edge in, and
@@ -823,7 +854,9 @@ impl Shell {
         // Panels rather than a bare horizontal layout: a panel takes the full
         // height of its parent and reserves its width, which is what makes the
         // rail a rail rather than a box the size of its text.
-        if self.chrome_visible {
+        // No rail on a phone: the screen is the app's, and the other apps
+        // are behind the title in the app bar.
+        if self.chrome_visible && !form.is_phone() {
             egui::Panel::left("sigil_rail")
                 .resizable(false)
                 .exact_size(form.rail_width())

@@ -2244,15 +2244,23 @@ impl ChatApp {
         // two people is what one is, and "2" beside it says nothing.
         let members = state.members.len();
         let mut go = None;
+        let may_call =
+            callable && !self.calls.contains_key(&me) && !state.ringing.iter().any(|r| r.mine);
+        let mut call = false;
         if narrow {
-            // Everything but the call behind one button. The call stays
-            // out: it is the one of these somebody reaches for in a hurry.
+            // Everything behind one button, the call first. The call was
+            // kept out as the control somebody reaches for in a hurry, and
+            // on a 360-point phone it cost the conversation its name:
+            // "ge…" beside a call button is a bar nobody can read.
             let more = sigil_ui::icon_button_named(
                 ui,
                 sigil_ui::Icon::More,
                 "More about this conversation",
             );
             egui::Popup::menu(&more).show(|ui| {
+                if may_call && ui.button("Call").clicked() {
+                    call = true;
+                }
                 let who = if members > 0 && !dm {
                     format!("Members ({members})")
                 } else {
@@ -2312,11 +2320,10 @@ impl ChatApp {
             Some(route) => ctx.navigator.push_here(route),
             None => {}
         }
-        if callable
-            && !self.calls.contains_key(&me)
-            && !state.ringing.iter().any(|r| r.mine)
-            && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked()
-        {
+        if !narrow && may_call && sigil_ui::icon_button(ui, sigil_ui::Icon::Call).clicked() {
+            call = true;
+        }
+        if call {
             // Say in the invitation whether this side will ask for an
             // introduction, so the other side is not left waiting on one
             // that is never asked for.
@@ -3753,7 +3760,8 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_XS);
 
         ui.horizontal(|ui| {
-            let control = tokens::BUTTON_MD + ui.spacing().item_spacing.x * 2.0;
+            let control =
+                sigil::Form::of(ui.ctx()).button_size() + ui.spacing().item_spacing.x * 2.0;
             let width = ui.available_width() - control;
             // No label beside it. A search box is the one control everybody
             // recognises without being told, and the word is still on the
@@ -5280,8 +5288,11 @@ impl ChatApp {
         ui.horizontal(|ui| {
             // Room for both controls, measured rather than guessed: the field
             // took `available - one button` while two sat beside it, and Send
-            // ran off the edge of the window.
-            let controls = (tokens::BUTTON_MD + ui.spacing().item_spacing.x) * 2.0;
+            // ran off the edge of the window. The button's size is the
+            // form's: a phone's is bigger, and measured at the desktop's
+            // Send ran off the edge of the phone.
+            let button = sigil::Form::of(ui.ctx()).button_size();
+            let controls = (button + ui.spacing().item_spacing.x) * 2.0;
             let width = (ui.available_width() - controls).max(80.0);
             let field = sigil_ui::field(
                 ui,

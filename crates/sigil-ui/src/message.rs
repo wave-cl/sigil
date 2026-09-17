@@ -346,7 +346,14 @@ fn centred(
     // Measured, not guessed. The rules used to be `available_width() * 0.5 -
     // 40.0`, which centres only a label that happens to be 80px wide and puts
     // everything else off to one side.
-    let text = label.into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body);
+    // Wrapped at the pane: a system line is a sentence, and one about who
+    // let whom hold a copy of what ran off the right edge of a phone.
+    let text = label.into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        ui.available_width(),
+        egui::TextStyle::Body,
+    );
     let gap = ui.spacing().item_spacing.x;
     let width = ((ui.available_width() - text.size().x) * 0.5 - gap).max(0.0);
     let row = ui.horizontal(|ui| {

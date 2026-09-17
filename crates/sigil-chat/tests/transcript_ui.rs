@@ -532,6 +532,16 @@ fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
 /// A phone: 412 by 915 points, told what it is, with a status bar and a
 /// gesture bar over it. The same app, drawn the way the shell draws it
 /// there -- the route reached through `render_nav`, as the shell does.
+/// The phone the app is checked on: a OnePlus NE2213, 1080×2412 pixels at
+/// 3 points per pixel. Not a Pixel's 412: at 412 every phone test passed
+/// while the phone overflowed.
+const PHONE_WIDTH: f32 = 360.0;
+const PHONE_HEIGHT: f32 = 804.0;
+/// The pane the chat gets on it: the whole screen, there being no rail on
+/// a phone. Kept as its own name because the tests that use it are about
+/// the pane, not the screen.
+const PHONE_PANE: f32 = PHONE_WIDTH;
+
 fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
@@ -539,7 +549,7 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
     Harness::builder()
-        .with_size(egui::vec2(412.0, 915.0))
+        .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
         // A tap is a press and a release within egui's click duration; at
         // the harness's default quarter-second per frame, a `run` between
         // the two can outlast it. See `with_inset` in the shell's tests.
@@ -619,7 +629,7 @@ fn on_a_phone_the_devices_pane_fits_its_width() {
     h.run();
     let button = h.get_by_label("Write credential").rect();
     assert!(
-        button.right() <= 412.0,
+        button.right() <= PHONE_WIDTH,
         "the button after the key field is off the screen: {button:?}"
     );
     assert!(button.left() > 0.0);
@@ -628,18 +638,16 @@ fn on_a_phone_the_devices_pane_fits_its_width() {
 /// On a phone the conversation bar is the way back, the name, one More
 /// button, the call, and the identity. Six controls beside the identity
 /// were wider than the row, and a right-to-left row that overflows pushes
-/// Back off the left edge and drags the transcript after it -- over the
-/// rail, on the phone. The pane here is narrowed by the rail's width, as
-/// the shell narrows it.
+/// Back off the left edge and drags the transcript after it.
 #[test]
-fn on_a_phone_the_conversation_bar_fits_beside_the_rail() {
+fn on_a_phone_the_conversation_bar_fits_the_screen() {
     let mut state = a_conversation();
     for c in state.conversations.iter_mut() {
         c.label = "general".into();
     }
     let mut h = harness_phone(state, sigil_chat::Route::Conversations);
-    let width = 412.0 - sigil::tokens::RAIL_TOUCH;
-    h.set_size(egui::vec2(width, 915.0));
+    let width = PHONE_PANE;
+    h.set_size(egui::vec2(width, PHONE_HEIGHT));
     h.run();
     h.run();
     let back = h.get_by_label("Back").rect();
@@ -675,6 +683,60 @@ fn on_a_phone_the_conversation_bar_fits_beside_the_rail() {
     assert!(h.query_by_label("Devices").is_some());
 }
 
+/// The composer's field leaves room for both of its buttons at the
+/// phone's button size: measured at the desktop's, Send hung off the
+/// right edge of the phone.
+#[test]
+fn on_a_phone_the_composer_keeps_send_on_the_screen() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    let width = PHONE_PANE;
+    h.set_size(egui::vec2(width, PHONE_HEIGHT));
+    h.run();
+    h.run();
+    let send = h.get_by_label("Send").rect();
+    assert!(
+        send.right() <= width - sigil::tokens::SPACING_MD,
+        "Send is off the edge: {send:?}"
+    );
+    assert!(send.width() >= sigil::tokens::BUTTON_LG - 1.0, "{send:?}");
+}
+
+/// No row is wider than the pane, whatever is in it. A file's row did
+/// not wrap, so a long name pushed its bubble past the pane -- and egui
+/// grows a ui to what is drawn in it, so every message after that one
+/// was laid out for a pane 35 points wider than the phone: a message that
+/// wrapped ran off the right edge, and one's own were right-aligned to an
+/// edge past the screen.
+#[test]
+fn on_a_phone_no_row_is_wider_than_the_pane() {
+    let mut state = a_conversation();
+    let ada = state
+        .lines
+        .iter_mut()
+        .find(|l| !l.mine && l.text == "the second one, then")
+        .expect("Ada's line");
+    ada.text = "posted at squic.org, ordered at trunk.exchange (SIP-43)".into();
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.set_size(egui::vec2(PHONE_PANE, PHONE_HEIGHT));
+    h.run();
+    h.run();
+    let edge = PHONE_PANE - sigil::tokens::SPACING_MD;
+    for label in [
+        "posted at squic.org, ordered at trunk.exchange (SIP-43)",
+        "mine, on the other side",
+        "[notes.txt, 2.1 kB]",
+        "Save",
+    ] {
+        let r = topmost(&h, label);
+        assert!(r.right() <= edge, "{label:?} runs past the pane: {r:?}");
+        assert!(r.left() >= 0.0, "{label:?} is off the left: {r:?}");
+    }
+    // One's own message sits against the pane's edge, not past it: its
+    // furniture (the time, the receipt) ends inside the bubble.
+    let mine = topmost(&h, "mine, on the other side");
+    assert!(mine.right() < edge - sigil::tokens::SPACING_XL, "{mine:?}");
+}
+
 /// A dialog on a phone is as wide as the screen has, not 360 points.
 #[test]
 fn on_a_phone_a_dialog_fits_the_screen() {
@@ -694,7 +756,10 @@ fn on_a_phone_a_dialog_fits_the_screen() {
             Some(acc.map_or(r, |a| a.union(r)))
         })
         .expect("the dialog has a field");
-    assert!(field.right() <= 412.0 && field.left() >= 0.0, "{field:?}");
+    assert!(
+        field.right() <= PHONE_WIDTH && field.left() >= 0.0,
+        "{field:?}"
+    );
 }
 
 /// Under a finger, a tap on a message reveals its actions and a tap
@@ -6987,3 +7052,4 @@ fn a_message_sent_through_a_copy_says_via_where() {
         "only the one that was: {said}"
     );
 }
+
