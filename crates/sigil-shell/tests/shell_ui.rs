@@ -372,7 +372,13 @@ fn on_a_phone_the_apps_are_behind_the_title_under_the_status_bar() {
             .min_by(|a, b| a.top().total_cmp(&b.top()))
             .expect(label)
     };
-    let title = topmost(&bare, "Calls");
+    // The home app's bar says the product's name, not the app's.
+    assert!(
+        bare.query_by_label("Calls").is_none()
+            || topmost(&bare, "Calls").top() > sigil::tokens::BUTTON_LG,
+        "the home app's own name heads the bar"
+    );
+    let title = topmost(&bare, "Sigil");
     assert!(
         title.top() >= 0.0 && title.top() < sigil::tokens::BUTTON_LG,
         "the title is in the app bar: {title:?}"
@@ -385,7 +391,7 @@ fn on_a_phone_the_apps_are_behind_the_title_under_the_status_bar() {
     };
     let mut below = with_phone(insets);
     below.run();
-    let with = topmost(&below, "Calls").top();
+    let with = topmost(&below, "Sigil").top();
     assert!(
         (with - title.top() - insets.top).abs() < 0.5,
         "the title moved down by {}, and the status bar is {}",
@@ -393,11 +399,7 @@ fn on_a_phone_the_apps_are_behind_the_title_under_the_status_bar() {
         insets.top
     );
     // The other app is a press on the title away, badge and all.
-    below
-        .get_all_by_label("Calls")
-        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
-        .expect("the title")
-        .click();
+    below.get_by_label("Sigil").click();
     below.run();
     below.get_by_label("Chat (3)").click();
     below.run();

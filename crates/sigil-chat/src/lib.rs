@@ -1109,6 +1109,10 @@ pub struct ChatApp {
     /// list beside it reads as an application with one chat in it, so the
     /// list is there from the start and the hamburger puts it away.
     columns_open: bool,
+    /// Whether the last pass drew one pane: the list *or* a conversation.
+    /// Read by the phone's app bar, which is drawn before the body and
+    /// has to know whether it is heading a list or a conversation.
+    single: bool,
     config: Config,
     /// Where the stores live, when it is not `~/.sqex/chat`.
     ///
@@ -1193,6 +1197,7 @@ impl ChatApp {
             // Open, with the newest conversation in it: what somebody signs
             // in to is their chats, not an empty pane.
             columns_open: true,
+            single: false,
             config: Config::load(),
             store_root: None,
             now: None,
@@ -1789,6 +1794,8 @@ impl App for ChatApp {
         // conversation view cannot drift into two answers about what "narrow"
         // means.
         let layout = sigil::layout(ui.available_width(), 2);
+        self.single = matches!(layout, sigil::Layout::Single);
+        let phone = sigil::Form::of(ui.ctx()).is_phone();
 
         // Arriving at a conversation rather than at an empty pane. Decided
         // once per identity, and never in a one-pane window -- there, opening
@@ -1813,18 +1820,26 @@ impl App for ChatApp {
                     None => {
                         // One pane and nothing open: the list is the whole
                         // window, and the identity sits in its heading row
-                        // rather than in a bar with nothing else on it.
-                        self.list_ui(ctx, at, &state, ui, &theme, true);
+                        // rather than in a bar with nothing else on it. On
+                        // a phone the identity is in the app bar (`head_ui`),
+                        // so the heading row is the list's alone.
+                        self.list_ui(ctx, at, &state, ui, &theme, !phone);
                     }
                     Some(_) => {
-                        self.bar_ui(
-                            ctx,
-                            at,
-                            &state,
-                            ui,
-                            &theme,
-                            Bar::Conversation { back: true },
-                        );
+                        // On a phone the app bar *is* the conversation's bar
+                        // (`head_ui` and `chrome_ui`): Back, the name, and
+                        // More. A second bar under it was two headers for
+                        // one screen.
+                        if !phone {
+                            self.bar_ui(
+                                ctx,
+                                at,
+                                &state,
+                                ui,
+                                &theme,
+                                Bar::Conversation { back: true },
+                            );
+                        }
                         self.transcript_ui(ctx, at, &state, ui, &theme);
                     }
                 }
@@ -1882,11 +1897,55 @@ impl App for ChatApp {
     /// changes the whole conversation list, so it belongs where a reader can
     /// see it at all times, which is the strip the window's own buttons live
     /// in.
+    /// A phone's app bar, at its left end. With a conversation open on one
+    /// pane: Back and the conversation's name, and the bar is the
+    /// conversation's. Otherwise the identity's mark, and the title follows.
+    fn head_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> bool {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return false;
+        };
+        let state = self.state_of(Some(&at));
+        let open = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open)
+            .cloned();
+        match open {
+            Some(c) if self.single => {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    self.send_as(Some(&at), Cmd::Close);
+                }
+                self.conversation_name_ui(ctx, &at, &state, &c, ui, &theme);
+                true
+            }
+            _ => {
+                self.me_ui(&at, &state, ctx.away, ui, &theme, true);
+                false
+            }
+        }
+    }
+
     fn chrome_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
         let theme = ColorTheme::current(ui.ctx());
         let Some(at) = self.showing_at(ctx) else {
             return;
         };
+        // On a phone with a conversation open the corner is the
+        // conversation's controls, folded behind More; the exchange is
+        // chosen from the list, which is where one is left by Back.
+        if sigil::Form::of(ui.ctx()).is_phone() && self.single {
+            let state = self.state_of(Some(&at));
+            if let Some(c) = state
+                .conversations
+                .iter()
+                .find(|c| Some(c.channel) == state.open)
+                .cloned()
+            {
+                self.conversation_controls_ui(ctx, &at, &state, &c, ui, &theme, true);
+                return;
+            }
+        }
         let me = at.0;
         let named = self.listable_exchanges(ctx);
         // A dead default on show -- nothing named yet, nowhere to go -- is
@@ -3747,7 +3806,7 @@ impl ChatApp {
                     // when the list is the whole window: there is no column
                     // to put away, and on a phone the heading row has no
                     // room for a button that does nothing.
-                    if !identity
+                    if !self.single
                         && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Hide the chats")
                             .clicked()
                     {

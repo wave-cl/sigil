@@ -15,6 +15,9 @@ pub mod account;
 pub mod accounts;
 pub mod app;
 pub mod deck;
+/// What the product is called, where a bar has to say so.
+pub const NAME: &str = "Sigil";
+
 pub mod form;
 pub mod icon;
 pub mod nav;

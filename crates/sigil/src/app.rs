@@ -287,6 +287,19 @@ pub trait App {
     /// not the things it can do. The default draws nothing.
     fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) {}
 
+    /// Draw the **head** of a phone's app bar: its left-hand end, in a
+    /// left-to-right layout, before the title.
+    ///
+    /// Called only on a phone, only for the app on screen. Return `true`
+    /// when what was drawn names the view -- a Back button and a
+    /// conversation's name, say -- and the shell draws no title after it;
+    /// `false` to have the title follow whatever was drawn (an identity's
+    /// mark, or nothing). The default draws nothing and leaves the title to
+    /// the shell.
+    fn head_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) -> bool {
+        false
+    }
+
     /// Whether [`notice_ui`](App::notice_ui) has something to draw.
     ///
     /// Asked every pass, for every opened app, before the band is laid out

@@ -560,6 +560,42 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(egui::Theme::Dark);
             let t = sigil::ColorTheme::current(&ctx);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            // The phone's app bar, as the shell composes it: the app's head
+            // at the left, the title after it unless the head named the
+            // view, and the app's corner from the right.
+            egui::Panel::top("app_bar")
+                .exact_size(sigil::tokens::BUTTON_LG)
+                .frame(egui::Frame::NONE.fill(t.surface_secondary))
+                .show(ui, |ui| {
+                    let whole = ui.max_rect();
+                    let left = whole.shrink2(egui::vec2(sigil::tokens::SPACING_MD, 0.0));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(left)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            if !app.head_ui(&mut app_ctx, ui) {
+                                ui.label(egui::RichText::new(sigil::NAME).heading());
+                            }
+                        },
+                    );
+                    let corner = whole.shrink2(egui::vec2(sigil::tokens::SPACING_SM, 0.0));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(corner)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| app.chrome_ui(&mut app_ctx, ui),
+                    );
+                });
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::NONE
@@ -567,15 +603,6 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
                         .inner_margin(egui::Margin::same(sigil::tokens::SPACING_MD as i8)),
                 )
                 .show(ui, |ui| {
-                    let mut nav = Navigator::default();
-                    let mut app_ctx = AppContext {
-                        navigator: &mut nav,
-                        accounts: &mut accounts,
-                        unfocused: false,
-                        away: false,
-                        notify: &sigil::Silent,
-                        connections: &Default::default(),
-                    };
                     let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
         })
@@ -651,12 +678,19 @@ fn on_a_phone_the_conversation_bar_fits_the_screen() {
     h.run();
     h.run();
     let back = h.get_by_label("Back").rect();
-    let identity = h.get_by_label("Your identity").rect();
+    let more = h.get_by_label("More about this conversation").rect();
     assert!(back.left() >= 0.0, "Back is off the left edge: {back:?}");
-    assert!(identity.right() <= width, "{identity:?}");
+    assert!(more.right() <= width, "{more:?}");
     assert!(
-        (back.center().y - identity.center().y).abs() < tokens::SPACING_SM,
-        "the bar wrapped: back {back:?}, identity {identity:?}"
+        (back.center().y - more.center().y).abs() < tokens::SPACING_SM,
+        "the bar wrapped: back {back:?}, more {more:?}"
+    );
+    // The bar is the app bar: everything in it is in the top finger's
+    // height, and nothing else heads the transcript.
+    assert!(back.top() < sigil::tokens::BUTTON_LG, "{back:?}");
+    assert!(
+        h.query_by_label("Your identity").is_none(),
+        "the identity is on the list's bar, not a conversation's"
     );
     let bubble = topmost(&h, "the second one, then");
     assert!(
@@ -668,10 +702,7 @@ fn on_a_phone_the_conversation_bar_fits_the_screen() {
     // beside it says.
     let name = topmost(&h, "general");
     assert!(name.width() > 60.0, "the name is cut short: {name:?}");
-    assert!(
-        name.right() <= identity.left(),
-        "{name:?} runs into {identity:?}"
-    );
+    assert!(name.right() <= more.left(), "{name:?} runs into {more:?}");
     // The rest of the controls are behind More, and come out of it.
     assert!(
         h.query_by_label("Settings").is_none(),
@@ -786,6 +817,34 @@ fn a_hidden_strip_does_not_come_back_when_another_menu_opens() {
         h.query_by_label("Reply").is_none(),
         "the strip came back with the menu"
     );
+}
+
+/// On a phone the app bar is the identity's mark and the product's name
+/// over the list, and Back and the conversation's name over a
+/// conversation: one bar, not a bar under a bar.
+#[test]
+fn on_a_phone_the_app_bar_heads_the_list_with_the_identity_and_a_conversation_with_back() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let mark = h.get_by_label("Your identity").rect();
+    assert!(mark.top() < sigil::tokens::BUTTON_LG, "{mark:?}");
+    let name = topmost(&h, sigil::NAME);
+    assert!(mark.right() <= name.left(), "the mark is left of the name");
+    assert!(h.query_by_label("Back").is_none(), "nothing to go back to");
+
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let back = h.get_by_label("Back").rect();
+    assert!(back.top() < sigil::tokens::BUTTON_LG, "{back:?}");
+    assert!(
+        h.query_by_label(sigil::NAME).is_none(),
+        "the bar is the conversation's"
+    );
+    assert!(h.query_by_label("Your identity").is_none());
 }
 
 /// A dialog on a phone is as wide as the screen has, not 360 points.

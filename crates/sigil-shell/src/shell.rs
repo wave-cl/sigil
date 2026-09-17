@@ -718,9 +718,18 @@ impl Shell {
                 if form.is_phone() && app_on_screen {
                     let entry = self.nav.top().clone();
                     let active = self.active();
+                    // The home app's bar says what the product is; another
+                    // app's says which it is, so nobody wonders where they
+                    // are. A view with a name of its own says that.
                     let title = self.apps[active]
                         .nav_title(&entry.token)
-                        .unwrap_or_else(|| self.apps[active].title().to_string());
+                        .unwrap_or_else(|| {
+                            if active == 0 {
+                                sigil::NAME.to_string()
+                            } else {
+                                self.apps[active].title().to_string()
+                            }
+                        });
                     let left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
                     let mut switch = None;
                     ui.scope_builder(
@@ -728,6 +737,23 @@ impl Shell {
                             .max_rect(left)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
+                            // The app's own head first: an identity's mark,
+                            // or Back and a name, in which case there is no
+                            // title to draw.
+                            let named = {
+                                let mut ctx = AppContext {
+                                    navigator: &mut self.navigator,
+                                    accounts: &mut self.accounts,
+                                    unfocused: false,
+                                    away: self.away,
+                                    notify: self.platform.as_ref(),
+                                    connections: &self.connections,
+                                };
+                                self.apps[active].head_ui(&mut ctx, ui)
+                            };
+                            if named {
+                                return;
+                            }
                             let heading = egui::RichText::new(&title).heading();
                             if self.apps.len() < 2 {
                                 ui.label(heading);
