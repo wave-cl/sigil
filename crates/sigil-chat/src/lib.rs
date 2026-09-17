@@ -5470,6 +5470,13 @@ impl ChatApp {
             }
         });
         ui.add_space(tokens::SPACING_SM);
+        // A join that was refused says so here, where the button is. It
+        // used to be said only in a conversation's bar, which this pane is
+        // not -- so a refused join looked like a button that did nothing.
+        if let Some(trouble) = &state.trouble {
+            ui.colored_label(theme.destructive, trouble);
+            ui.add_space(tokens::SPACING_SM);
+        }
 
         if state.found.is_empty() {
             // "Nothing matched" and "nobody has searched" are different facts

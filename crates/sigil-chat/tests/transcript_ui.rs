@@ -6663,3 +6663,34 @@ fn a_conversation_that_lives_elsewhere_says_where() {
     let key = PubKey::new([7; 32]).to_string();
     assert!(said.contains(&format!("lives at {}", &key[..8])), "{said}");
 }
+
+/// A join the exchange refused is said in the directory pane, beside the
+/// button that asked. It used to be said only in a conversation's bar,
+/// which the directory is not, so a refused join was a button that did
+/// nothing.
+#[test]
+fn a_refused_join_is_said_where_the_button_is() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.found = vec![sigil_chat::Found {
+        channel: [9u8; 32],
+        instance: [1u8; 32],
+        name: "the square".into(),
+        topic: String::new(),
+        members: 3,
+    }];
+    state.searched = true;
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Directory);
+    h.run();
+    assert!(!text_of(&h).contains("cannot be reached"));
+
+    state.trouble = Some(
+        "this conversation lives at another exchange, which cannot be reached right now; \
+         nothing was sent"
+            .into(),
+    );
+    let mut h = harness_at(state, sigil_chat::Route::Directory);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("cannot be reached"), "{said}");
+}

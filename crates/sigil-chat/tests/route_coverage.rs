@@ -192,6 +192,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/peer/records", NotAClientRoute),
     ("POST", "/peer/channel", NotAClientRoute),
     ("POST", "/peer/forward", NotAClientRoute),
+    ("POST", "/peer/standing", NotAClientRoute),
 ];
 
 /// Where sqexd's dispatch lives -- asked of cargo, never assumed.
@@ -335,11 +336,11 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 84,
+        total, 85,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
-        peer, 7,
+        peer, 8,
         "SIP-35 and SIP-43 peering routes, which no client calls"
     );
     assert_eq!(

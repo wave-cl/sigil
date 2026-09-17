@@ -3923,6 +3923,74 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
         bob.state().lines
     );
 
+    // Carol has never been to the origin. She finds the square in the
+    // replica's directory, joins it *there* -- the join is carried to the
+    // origin as a post is -- reads it, and speaks.
+    let (_, carol_key) = signer(49);
+    let carol = start_at(
+        at_replica,
+        signer(49).0,
+        &replica_dir.path().join("carol.db"),
+    );
+    assert!(until(|| carol.state().me == Some(carol_key), 15).await);
+    carol.send(Cmd::Find("square".into()));
+    assert!(
+        until(
+            || carol.state().found.iter().any(|f| f.name == "the square"),
+            20
+        )
+        .await,
+        "the replica's directory does not list the square: {:?}",
+        carol.state().found
+    );
+    let found = carol
+        .state()
+        .found
+        .into_iter()
+        .find(|f| f.name == "the square")
+        .unwrap();
+    carol.send(Cmd::Join {
+        channel: found.channel,
+        instance: found.instance,
+    });
+    assert!(
+        until(
+            || carol
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel),
+            30
+        )
+        .await,
+        "the join was not carried to the origin: {:?}",
+        carol.state().trouble
+    );
+    carol.send(Cmd::Show(channel));
+    assert!(
+        until(
+            || carol.state().lines.iter().any(|l| l.text == "welcome"),
+            30
+        )
+        .await
+    );
+    carol.send(Cmd::Send("and a third, who joined from the copy".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "and a third, who joined from the copy" && l.who == carol_key),
+            30
+        )
+        .await,
+        "carol {:?} / alice {:?}",
+        carol.state().trouble,
+        alice.state().trouble
+    );
+    carol.stop();
+
     alice.stop();
     bob.stop();
 }
