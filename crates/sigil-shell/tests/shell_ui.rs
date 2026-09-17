@@ -352,6 +352,27 @@ fn with_phone(insets: sigil::Insets) -> Harness<'static> {
         })
 }
 
+/// A phone's Back button closes whatever menu is open. winit hands it to
+/// egui as BrowserBack, and nothing looked at it, so it did nothing.
+#[test]
+fn on_a_phone_back_closes_an_open_menu() {
+    let mut h = with_phone(sigil::Insets::NONE);
+    h.run();
+    h.get_by_label("Sigil").click();
+    h.run();
+    assert!(
+        h.query_by_label("Chat (3)").is_some(),
+        "the menu did not open"
+    );
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Chat (3)").is_none(),
+        "Back left the menu open"
+    );
+}
+
 /// On a phone there is no rail: the screen is the app's, and the other
 /// apps are behind the title in the app bar. The status bar lies over the
 /// top of the surface and the app bar sits under it, so the title moves

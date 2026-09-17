@@ -2577,9 +2577,11 @@ impl ChatApp {
             format!("{word}\n{key}")
         };
         let mark = if compact {
+            // A size down from the desktop's: it heads a phone's app bar,
+            // beside a word, and the bar is a finger tall.
             let mark = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-                    sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
+                    sigil_ui::presence(ui, &key, None, tokens::ICON_LG, seen, word, &hover);
                 })
                 .response;
             mark.widget_info(|| {
@@ -2590,7 +2592,11 @@ impl ChatApp {
             sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
             None
         };
-        if !up {
+        // Not on a phone: the dot on the mark says the link is down, the
+        // session reconnects by itself, and a word about it in a bar a
+        // finger tall is a word nobody asked for. The word is still on the
+        // mark's hover and in the accessibility tree.
+        if !up && !compact {
             let colour = match state.link {
                 LinkState::Gone => theme.link_gone,
                 _ => theme.link_retrying,

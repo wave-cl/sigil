@@ -666,6 +666,22 @@ impl Shell {
         // First, and outside the sealed-identity branch below, so the opening
         // screen is not under the buttons either.
         let form = Form::of(ui.ctx());
+        // **A phone's Back button.** winit hands it to egui as BrowserBack
+        // and nothing else looked at it, so it did nothing. It closes
+        // whatever menu is open; with none open, the view goes back the
+        // way Escape does. Before anything is drawn, so the menu is gone
+        // in this pass and not the next.
+        if form.is_phone()
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack))
+        {
+            if egui::Popup::is_any_open(ui.ctx()) {
+                egui::Popup::close_all(ui.ctx());
+            } else {
+                self.nav.go_back();
+            }
+        }
         let app_on_screen = self.accounts.active().is_unlocked() && self.choosing.is_none();
         // **On a phone the strip is the app bar.** The system's status bar
         // lies over the top of the surface, so the bar starts under it; it
