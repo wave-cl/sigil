@@ -302,10 +302,22 @@ impl Shell {
     }
 
     /// Start with a whole roster. Used by tests that switch between them.
-    pub fn with_accounts(mut self, accounts: Accounts) -> Self {
+    pub fn with_accounts(self, accounts: Accounts) -> Self {
+        self.with_roster(accounts, false)
+    }
+
+    /// Start with a roster the host built, and say whether changes to it
+    /// are written back to `accounts.json` as the shell's own roster's are.
+    ///
+    /// A test passes `false`: it must never write the real file. A host that
+    /// opened the identity itself -- the phone, whose key store holds the
+    /// passphrase -- passes `true`, or every exchange added is forgotten at
+    /// the next launch, which is how sigil-android lost trunk.exchange on
+    /// its first day.
+    pub fn with_roster(mut self, accounts: Accounts, remember: bool) -> Self {
         self.seen_generation = accounts.generation();
         self.accounts = accounts;
-        self.remember = false;
+        self.remember = remember;
         self
     }
 

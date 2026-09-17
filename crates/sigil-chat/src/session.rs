@@ -2216,6 +2216,12 @@ impl Desk {
                 self.restructure = true;
                 self.dirty.extend(self.channels.keys().copied());
             }
+            // SIP-56: a member reported an entry here, said to the admins.
+            // Nothing in sigil shows a report yet; the channel is re-read so
+            // whatever the exchange now serves about it is what is drawn.
+            Event::Reported { channel } => {
+                self.dirty.insert(channel);
+            }
             // A profile changed. Refetching is the *only* way to know: a
             // cached name that has moved on looks exactly like a correct one,
             // so this must ignore the cache rather than merely revalidate it.
