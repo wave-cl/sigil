@@ -206,6 +206,18 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/account/lodged",
         NotYet("SIP-44 succession, from the CLI"),
     ),
+    // SIP-45: a desktop holds its stream and needs no waking; the phone
+    // client that will register an endpoint does not exist yet.
+    (
+        "POST",
+        "/wake/register",
+        NotYet("SIP-45 wake-up, for a phone client that does not exist yet"),
+    ),
+    (
+        "POST",
+        "/wake/forget",
+        NotYet("SIP-45 wake-up, for a phone client that does not exist yet"),
+    ),
     // ---- exchange to exchange --------------------------------------------
     ("POST", "/peer/hello", NotAClientRoute),
     ("POST", "/peer/pull", NotAClientRoute),
@@ -358,7 +370,7 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 89,
+        total, 91,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -366,7 +378,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35 and SIP-43 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 81,
+        client, 83,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
