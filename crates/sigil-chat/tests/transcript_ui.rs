@@ -941,6 +941,30 @@ fn on_a_phone_back_leaves_a_conversation_for_the_list() {
     );
 }
 
+/// In the list, a conversation's name sits close to its last words. The
+/// phone's theme makes every row a finger tall, for buttons; in a list
+/// row that put a finger's height between the name and the preview.
+#[test]
+fn on_a_phone_a_conversations_name_sits_close_to_its_last_words() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let preview = h.get_by_label_contains("the second one, then").rect();
+    let name = h
+        .get_all_by_label("Ada")
+        .map(|n| n.rect())
+        .filter(|r| r.bottom() <= preview.top())
+        .max_by(|a, b| a.bottom().total_cmp(&b.bottom()))
+        .expect("the conversation's name over its preview");
+    let gap = preview.top() - name.bottom();
+    assert!(
+        gap <= sigil::tokens::SPACING_SM,
+        "a finger's height between the name and the preview: {gap}"
+    );
+}
+
 /// A dialog on a phone is as wide as the screen has, not 360 points.
 #[test]
 fn on_a_phone_a_dialog_fits_the_screen() {

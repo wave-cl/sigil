@@ -166,6 +166,16 @@ fn row_body(
                 }
                 ui.add_space(tokens::SPACING_SM);
                 ui.vertical(|ui| {
+                    // Two lines of text, not two finger-tall rows: the
+                    // phone's theme makes every row a control's height for
+                    // the buttons' sake, and that put a finger's height
+                    // between a conversation's name and its last words.
+                    if sigil::Form::of(ui.ctx()).is_phone() {
+                        let line = ui.text_style_height(&egui::TextStyle::Body);
+                        let spacing = ui.spacing_mut();
+                        spacing.interact_size.y = line;
+                        spacing.item_spacing.y = tokens::SPACING_XXS;
+                    }
                     ui.horizontal(|ui| {
                         // A public channel is marked, not merely named. Anybody may
                         // join it and everything in it is in the clear -- that is
