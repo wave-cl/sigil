@@ -1254,6 +1254,14 @@ fn body(
         theme.accent
     };
     let inner = frame.show(ui, |ui| {
+        // **A row in a bubble is a line of text, not a control.** The
+        // phone's theme makes every row a finger tall for the buttons'
+        // sake, and that put a finger's height between a name and the
+        // words under it. Inside the bubble a row is as tall as its line.
+        if sigil::Form::of(ui.ctx()).is_phone() {
+            ui.spacing_mut().interact_size.y =
+                ui.text_style_height(&egui::TextStyle::Body) + tokens::SPACING_XS;
+        }
         // **Inside the bubble, always left to right.** The right-alignment
         // that puts one's own message on the right is a property of where the
         // bubble sits, not of what is in it — inherited, it reversed the
@@ -1418,33 +1426,18 @@ fn body(
 /// destructive colour and read is still the accent or the success colour: the
 /// ones that mean something keep meaning it.
 ///
-/// **Always against the bubble's right edge.** Laid out from the right, so
-/// the pieces are placed in reverse -- the receipt first, then the word about
-/// the entry, then "edited", then the time -- and read left to right as time,
-/// edited, standing, receipt. The caller supplies a right-to-left layout that
-/// has been given a bounded row: see the two call sites for why it must be
-/// bounded.
+/// **Always against the bubble's right edge, the time last.** Laid out
+/// from the right, so the pieces are placed in reverse -- the time first,
+/// then where it came from, then "edited", then the word about the entry,
+/// then the receipt -- and read left to right as receipt, standing, edited,
+/// via, time. The caller supplies a right-to-left layout that has been
+/// given a bounded row: see the two call sites for why it must be bounded.
 fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
-    if let Some(r) = b.receipt {
-        let colour = match r {
-            Receipt::Failed => theme.destructive,
-            Receipt::Read if !b.mine => theme.accent,
-            Receipt::Read => theme.success,
-            _ => quiet,
-        };
-        receipt(ui, r, colour).on_hover_text(r.word());
-    }
-    // SIP-31 **requires** a fork be surfaced, so this is a word in the
-    // message and not a line in a diagnostics pane somebody would have to go
-    // and look at.
-    if let Some((word, means)) = b.standing {
-        let colour = if b.alarming { theme.destructive } else { quiet };
-        ui.colored_label(colour, egui::RichText::new(word).small())
-            .on_hover_text(means);
-    }
-    if b.edited {
-        ui.colored_label(quiet, egui::RichText::new("edited").small());
-    }
+    // **The time is the furthest right, always.** Laid out from the right,
+    // so it goes first; everything else reads to its left, nearest first:
+    // where it came from, whether it was edited, the word about the entry,
+    // the receipt.
+    ui.colored_label(quiet, egui::RichText::new(b.at).small());
     // SIP-43: said by the sender, not by any exchange; named by what this
     // machine knows the key as.
     if let Some(via) = b.via {
@@ -1454,7 +1447,26 @@ fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::
                  conversation lives. Their word, signed with the message."
             ));
     }
-    ui.colored_label(quiet, egui::RichText::new(b.at).small());
+    if b.edited {
+        ui.colored_label(quiet, egui::RichText::new("edited").small());
+    }
+    // SIP-31 **requires** a fork be surfaced, so this is a word in the
+    // message and not a line in a diagnostics pane somebody would have to go
+    // and look at.
+    if let Some((word, means)) = b.standing {
+        let colour = if b.alarming { theme.destructive } else { quiet };
+        ui.colored_label(colour, egui::RichText::new(word).small())
+            .on_hover_text(means);
+    }
+    if let Some(r) = b.receipt {
+        let colour = match r {
+            Receipt::Failed => theme.destructive,
+            Receipt::Read if !b.mine => theme.accent,
+            Receipt::Read => theme.success,
+            _ => quiet,
+        };
+        receipt(ui, r, colour).on_hover_text(r.word());
+    }
 }
 
 /// The same row, on a line of its own under the words, against the right.

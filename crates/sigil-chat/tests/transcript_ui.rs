@@ -543,18 +543,30 @@ const PHONE_HEIGHT: f32 = 804.0;
 const PHONE_PANE: f32 = PHONE_WIDTH;
 
 fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
+    harness_phone_with(state, route).0
+}
+
+/// The phone harness, and the app it drives, for a test that has to read
+/// what a press sent.
+fn harness_phone_with(
+    state: ChatState,
+    route: sigil_chat::Route,
+) -> (Harness<'static>, std::rc::Rc<std::cell::RefCell<ChatApp>>) {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
     app.show_state_for_test(state);
+    let app = std::rc::Rc::new(std::cell::RefCell::new(app));
+    let shared = app.clone();
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
-    Harness::builder()
+    let h = Harness::builder()
         .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
         // A tap is a press and a release within egui's click duration; at
         // the harness's default quarter-second per frame, a `run` between
         // the two can outlast it. See `with_inset` in the shell's tests.
         .with_step_dt(0.05)
         .build_ui(move |ui| {
+            let mut app = app.borrow_mut();
             let ctx = ui.ctx().clone();
             sigil::Form::install(&ctx, sigil::Form::Phone);
             theme::install(&ctx, theme::light(), theme::dark());
@@ -596,6 +608,23 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
                         |ui| app.chrome_ui(&mut app_ctx, ui),
                     );
                 });
+            // The phone's Back, as the shell handles it: a menu closes; else
+            // the app takes a step back; else it is Escape.
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)) {
+                if egui::Popup::is_any_open(&ctx) {
+                    egui::Popup::close_all(&ctx);
+                } else if !app.back(&mut app_ctx) {
+                    ctx.input_mut(|i| {
+                        i.events.push(egui::Event::Key {
+                            key: egui::Key::Escape,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        })
+                    });
+                }
+            }
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::NONE
@@ -605,7 +634,8 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
                 .show(ui, |ui| {
                     let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
-        })
+        });
+    (h, shared)
 }
 
 /// A finger: the touch event egui-winit would forward, and the pointer it
@@ -845,6 +875,70 @@ fn on_a_phone_the_app_bar_heads_the_list_with_the_identity_and_a_conversation_wi
         "the bar is the conversation's"
     );
     assert!(h.query_by_label("Your identity").is_none());
+}
+
+/// A name in a bubble sits close to the words under it. The phone's theme
+/// makes every row a finger tall, for buttons; inside a bubble that put a
+/// finger's height between a name and the words.
+#[test]
+fn on_a_phone_a_name_sits_close_to_its_words() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let words = h.get_by_label_contains("yesterday's message").rect();
+    let names: Vec<egui::Rect> = h
+        .get_all_by_label("Ada")
+        .map(|n| n.rect())
+        .filter(|r| r.bottom() <= words.top())
+        .collect();
+    let name = names
+        .iter()
+        .max_by(|a, b| a.bottom().total_cmp(&b.bottom()))
+        .expect("Ada's name over her words");
+    let gap = words.top() - name.bottom();
+    assert!(
+        gap <= sigil::tokens::SPACING_MD,
+        "a finger's height between the name and the words: {gap}"
+    );
+}
+
+/// The time is the furthest right thing on a message, whatever else is
+/// beside it: "edited", a receipt, where it came from.
+#[test]
+fn the_time_is_furthest_right_on_a_message() {
+    let mut h = harness(true);
+    h.run();
+    h.run();
+    let edited = topmost(&h, "edited");
+    let clock = sigil_ui::clock(NOW - 3600);
+    let time = h
+        .get_all_by_label(&clock)
+        .map(|n| n.rect())
+        .find(|r| (r.center().y - edited.center().y).abs() < 2.0)
+        .expect("the time on the edited message's row");
+    assert!(
+        edited.right() <= time.left(),
+        "edited {edited:?} is right of the time {time:?}"
+    );
+}
+
+/// The phone's Back leaves a conversation for the list, the way the bar's
+/// own Back does.
+#[test]
+fn on_a_phone_back_leaves_a_conversation_for_the_list() {
+    let (mut h, app) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(h.query_by_label("Back").is_some(), "a conversation is open");
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    // A fixed state has no session to close, so the ask is what shows.
+    let sent = app.borrow().sent_for_test().to_vec();
+    assert!(
+        sent.iter().any(|c| c == "Close"),
+        "Back did not ask to close the conversation: {sent:?}"
+    );
 }
 
 /// A dialog on a phone is as wide as the screen has, not 360 points.
@@ -3184,9 +3278,10 @@ fn the_receipt_is_on_the_time_row_inside_the_bubble() {
         "the receipt is not on the time's row: receipt {mark:?}, time {time:?}"
     );
     // And after it, not before: words, time, receipt is the order everywhere.
+    // The time is the furthest right; the receipt sits to its left.
     assert!(
-        mark.left() >= time.right(),
-        "the receipt is before the time: receipt {mark:?}, time {time:?}"
+        mark.right() <= time.left(),
+        "the receipt is after the time: receipt {mark:?}, time {time:?}"
     );
 }
 
@@ -4759,12 +4854,23 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         marks.len() >= 3,
         "three of our messages carry a receipt: {marks:?}"
     );
-    let rightmost = marks.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+    // The time is the furthest right, against the bubble's edge, on every
+    // one of them; the receipt sits to its left on the same row.
+    let times: Vec<egui::Rect> = h.get_all_by_label_contains(":").map(|n| n.rect()).collect();
+    let mut edges = Vec::new();
     for m in &marks {
+        let time = times
+            .iter()
+            .filter(|t| (t.center().y - m.center().y).abs() < 4.0 && t.left() >= m.right())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .unwrap_or_else(|| panic!("no time to the right of the receipt {m:?}"));
+        edges.push(time.right());
+    }
+    let rightmost = edges.iter().copied().fold(f32::MIN, f32::max);
+    for e in &edges {
         assert!(
-            (m.right() - rightmost).abs() < 1.0,
-            "a receipt is short of the bubble's right edge: {m:?}, against \
-             {rightmost} for the others"
+            (e - rightmost).abs() < 1.0,
+            "a time is short of the bubble's right edge: {e}, against {rightmost} for the others"
         );
     }
 }

@@ -1405,6 +1405,13 @@ impl ChatApp {
     /// drawn — only in how one is fetched, which is what `chat_session.rs`
     /// covers against a real `sqexd`.
     #[doc(hidden)]
+    /// Every command sent while a fixed state was shown, as `Debug` strings:
+    /// the fixed state has no session to send to, so this is how a test
+    /// learns what a press asked for.
+    pub fn sent_for_test(&self) -> &[String] {
+        &self.sent
+    }
+
     pub fn show_state_for_test(&mut self, state: ChatState) {
         // A fixed state is a test, and a test's reactions are not this
         // machine's habits: the counts stay in memory unless a root was set.
@@ -1924,6 +1931,25 @@ impl App for ChatApp {
                 false
             }
         }
+    }
+
+    /// One step back on a phone: a conversation closes for the list. Not
+    /// while a picture or a dialog is over it -- those close on Escape,
+    /// which is what the shell sends when this says no.
+    fn back(&mut self, ctx: &mut AppContext<'_>) -> bool {
+        let Some(at) = self.showing_at(ctx) else {
+            return false;
+        };
+        let state = self.state_of(Some(&at));
+        let pane = self.panes.entry(at.clone()).or_default();
+        if pane.viewing.is_some() || pane.dialog.is_some() {
+            return false;
+        }
+        if self.single && state.open.is_some() {
+            self.send_as(Some(&at), Cmd::Close);
+            return true;
+        }
+        false
     }
 
     fn chrome_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {

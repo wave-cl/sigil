@@ -678,8 +678,31 @@ impl Shell {
         {
             if egui::Popup::is_any_open(ui.ctx()) {
                 egui::Popup::close_all(ui.ctx());
-            } else {
-                self.nav.go_back();
+            } else if !self.nav.go_back() {
+                let active = self.active();
+                let stepped = {
+                    let mut ctx = AppContext {
+                        navigator: &mut self.navigator,
+                        accounts: &mut self.accounts,
+                        unfocused: false,
+                        away: self.away,
+                        notify: self.platform.as_ref(),
+                        connections: &self.connections,
+                    };
+                    self.apps[active].back(&mut ctx)
+                };
+                if !stepped {
+                    // Escape, then: what closes a viewer or a dialog.
+                    ui.ctx().input_mut(|i| {
+                        i.events.push(egui::Event::Key {
+                            key: egui::Key::Escape,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        });
+                    });
+                }
             }
         }
         let app_on_screen = self.accounts.active().is_unlocked() && self.choosing.is_none();

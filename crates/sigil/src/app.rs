@@ -300,6 +300,15 @@ pub trait App {
         false
     }
 
+    /// A phone's Back button, once no menu is open and the shell's own
+    /// history has nothing to go back to: take one step back within the
+    /// app -- a conversation closes for the list -- and say whether there
+    /// was one. With `false` the shell treats the press as Escape, which
+    /// is what closes a viewer or a dialog. The default has no step.
+    fn back(&mut self, _ctx: &mut AppContext<'_>) -> bool {
+        false
+    }
+
     /// Whether [`notice_ui`](App::notice_ui) has something to draw.
     ///
     /// Asked every pass, for every opened app, before the band is laid out
