@@ -625,6 +625,37 @@ fn on_a_phone_the_devices_pane_fits_its_width() {
     assert!(button.left() > 0.0);
 }
 
+/// On a phone the conversation bar is the way back, the name, one More
+/// button, the call, and the identity. Six controls beside the identity
+/// were wider than the row, and a right-to-left row that overflows pushes
+/// Back off the left edge and drags the transcript after it -- over the
+/// rail, on the phone. The pane here is narrowed by the rail's width, as
+/// the shell narrows it.
+#[test]
+fn on_a_phone_the_conversation_bar_fits_beside_the_rail() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    let width = 412.0 - sigil::tokens::RAIL_TOUCH;
+    h.set_size(egui::vec2(width, 915.0));
+    h.run();
+    h.run();
+    let back = h.get_by_label("Back").rect();
+    let identity = h.get_by_label("Your identity").rect();
+    assert!(back.left() >= 0.0, "Back is off the left edge: {back:?}");
+    assert!(identity.right() <= width, "{identity:?}");
+    assert!(
+        (back.center().y - identity.center().y).abs() < tokens::SPACING_SM,
+        "the bar wrapped: back {back:?}, identity {identity:?}"
+    );
+    let bubble = topmost(&h, "the second one, then");
+    assert!(bubble.left() >= 0.0, "the transcript spilled left: {bubble:?}");
+    // The rest of the controls are behind More, and come out of it.
+    assert!(h.query_by_label("Settings").is_none(), "Settings is in the bar");
+    h.get_by_label("More about this conversation").click();
+    h.run();
+    assert!(h.query_by_label("Settings").is_some());
+    assert!(h.query_by_label("Devices").is_some());
+}
+
 /// A dialog on a phone is as wide as the screen has, not 360 points.
 #[test]
 fn on_a_phone_a_dialog_fits_the_screen() {

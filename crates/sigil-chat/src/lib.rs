@@ -2112,6 +2112,14 @@ impl ChatApp {
         // second line -- which is what this did, and it moved the header
         // about as a member count appeared. Whatever is left is the name's,
         // and it truncates rather than pushing anything off the row.
+        //
+        // That holds only while the controls themselves fit. In a narrow
+        // pane -- a phone, or a desktop window pulled in -- six of them
+        // beside the identity are wider than the row, and a right-to-left
+        // row that overflows pushes Back and the name off the left edge
+        // and drags the transcript after them. So a narrow pane folds most
+        // of them behind one More button.
+        let narrow = ui.available_width() < tokens::NARROW_WIDTH;
         ui.horizontal(|ui| {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2128,7 +2136,7 @@ impl ChatApp {
                         gap.y_range(),
                         egui::Stroke::new(tokens::STROKE_THIN, theme.border_default),
                     );
-                    self.conversation_controls_ui(ctx, at, state, c, ui, theme);
+                    self.conversation_controls_ui(ctx, at, state, c, ui, theme, narrow);
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     // The one way out at the left end, and never two: back
@@ -2206,6 +2214,7 @@ impl ChatApp {
 
     /// The conversation's controls, from the right: Settings, the bell,
     /// Devices, Members with their count, Call.
+    #[allow(clippy::too_many_arguments)]
     fn conversation_controls_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
@@ -2214,6 +2223,7 @@ impl ChatApp {
         open: &session::Summary,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
+        narrow: bool,
     ) {
         let me = at.0;
         let dm = open.peer.is_some();
@@ -2225,35 +2235,82 @@ impl ChatApp {
         // answered", and offering a call on a guess is offering the wrong
         // thing to the wrong room.
         let callable = open.public == Some(false);
-        if sigil_ui::icon_button(ui, sigil_ui::Icon::Settings).clicked() {
-            ctx.navigator.push_here(Route::Settings);
-        }
         // Muted or not, in the header where the conversation is named:
         // the one control about *this* conversation that is not about
         // its members or its settings.
         let channel = open.channel;
         let muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
-        let bell = if muted {
-            sigil_ui::Icon::BellOff
-        } else {
-            sigil_ui::Icon::Bell
-        };
-        if sigil_ui::icon_button(ui, bell).clicked() {
-            ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
-        }
-        if sigil_ui::icon_button(ui, sigil_ui::Icon::Device).clicked() {
-            self.send_as(Some(at), Cmd::Devices);
-            ctx.navigator.push_here(Route::Devices);
-        }
         // How many, beside the way to see who. Not for a direct message:
         // two people is what one is, and "2" beside it says nothing.
         let members = state.members.len();
-        if members > 0 && !dm {
-            ui.colored_label(theme.text_muted, members.to_string());
+        let mut go = None;
+        if narrow {
+            // Everything but the call behind one button. The call stays
+            // out: it is the one of these somebody reaches for in a hurry.
+            let more = sigil_ui::icon_button_named(
+                ui,
+                sigil_ui::Icon::More,
+                "More about this conversation",
+            );
+            egui::Popup::menu(&more).show(|ui| {
+                let who = if members > 0 && !dm {
+                    format!("Members ({members})")
+                } else {
+                    "Members".to_string()
+                };
+                if ui.button(who).clicked() {
+                    go = Some(Route::Members);
+                }
+                if ui
+                    .button(if muted {
+                        "Unmute this conversation"
+                    } else {
+                        "Mute this conversation"
+                    })
+                    .clicked()
+                {
+                    ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
+                }
+                if ui.button("Devices").clicked() {
+                    go = Some(Route::Devices);
+                }
+                if ui.button("Settings").clicked() {
+                    go = Some(Route::Settings);
+                }
+            });
+        } else {
+            if sigil_ui::icon_button(ui, sigil_ui::Icon::Settings).clicked() {
+                go = Some(Route::Settings);
+            }
+            let bell = if muted {
+                sigil_ui::Icon::BellOff
+            } else {
+                sigil_ui::Icon::Bell
+            };
+            if sigil_ui::icon_button(ui, bell).clicked() {
+                ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
+            }
+            if sigil_ui::icon_button(ui, sigil_ui::Icon::Device).clicked() {
+                go = Some(Route::Devices);
+            }
+            if members > 0 && !dm {
+                ui.colored_label(theme.text_muted, members.to_string());
+            }
+            if sigil_ui::icon_button(ui, sigil_ui::Icon::People).clicked() {
+                go = Some(Route::Members);
+            }
         }
-        if sigil_ui::icon_button(ui, sigil_ui::Icon::People).clicked() {
-            self.send_as(Some(at), Cmd::Blocked);
-            ctx.navigator.push_here(Route::Members);
+        match go {
+            Some(Route::Devices) => {
+                self.send_as(Some(at), Cmd::Devices);
+                ctx.navigator.push_here(Route::Devices);
+            }
+            Some(Route::Members) => {
+                self.send_as(Some(at), Cmd::Blocked);
+                ctx.navigator.push_here(Route::Members);
+            }
+            Some(route) => ctx.navigator.push_here(route),
+            None => {}
         }
         if callable
             && !self.calls.contains_key(&me)
@@ -3659,9 +3716,13 @@ impl ChatApp {
                     // Beside the heading, and it puts the column away. The
                     // control that brings it back is in the conversation's own
                     // bar, because a control inside the thing it hides is a
-                    // control nobody can reach once they have used it.
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Hide the chats")
-                        .clicked()
+                    // control nobody can reach once they have used it. Not
+                    // when the list is the whole window: there is no column
+                    // to put away, and on a phone the heading row has no
+                    // room for a button that does nothing.
+                    if !identity
+                        && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Hide the chats")
+                            .clicked()
                     {
                         self.columns_open = false;
                     }
