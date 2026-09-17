@@ -653,6 +653,9 @@ pub struct ChatState {
     /// Every message from somebody else that arrived live; the ones that
     /// name us are the mentions.
     pub arrivals: Vec<Arrival>,
+    /// Messages from others this device did not hold when the session
+    /// started -- live or not. See `Known::held_from`.
+    pub unseen: Vec<Arrival>,
     /// The first message that was unread when this conversation was opened.
     ///
     /// **Frozen on entry.** Reading advances the read mark, so a divider that
@@ -1235,6 +1238,12 @@ pub enum Cmd {
         device: PubKey,
         days: u64,
     },
+    /// SIP-47 §Pairing, step 3, from the phone's side: another device of
+    /// `owner` registered this one and showed where to go. This client finds
+    /// itself in the account's list, with the credential that device
+    /// presented, and only then treats the account as its own. `owner` is a
+    /// key, or a SIP-38 name resolved at this exchange.
+    ClaimAccount(String),
     /// Withdraw a device.
     ///
     /// **The revocation outlives the credential**, and has to: everything
@@ -1389,6 +1398,13 @@ impl ChatHandle {
     /// Every message from somebody else that arrived live.
     pub fn arrivals(&self) -> Vec<Arrival> {
         self.state.borrow().arrivals.clone()
+    }
+
+    /// Every message from somebody else that this device did not hold when
+    /// the session started, whether it arrived live or while the device was
+    /// away. What a woken phone has to say.
+    pub fn unseen(&self) -> Vec<Arrival> {
+        self.state.borrow().unseen.clone()
     }
 
     /// How much is waiting here, across every conversation.
@@ -1641,6 +1657,11 @@ async fn run(
     (wake)();
 
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
+    // SIP-52: everything that moved while this client was away, in one
+    // round trip, before the sweep asks channel by channel. On a desktop it
+    // is a faster start; on a phone woken for seconds it is the difference
+    // between a window that finishes and one that does not.
+    catch_up(&mut chat, &state, &mut desk, me).await;
     // The backstop's own clock. `sleep` rather than `interval`, because how
     // long to wait is decided each time round from what is outstanding.
     let busy = std::cmp::min(every, std::time::Duration::from_millis(TICK_MS));
@@ -1962,6 +1983,14 @@ struct Known {
     /// answered for it this session -- everything after it arrived live.
     /// What was there already is history, and history is not announced.
     live_from: Option<u64>,
+    /// The newest message this **device's store** held when the session
+    /// started, or 0 for a channel it did not hold at all. Everything above
+    /// it is new to this device, whether it arrived live or while the device
+    /// was away -- which is a different question from `live_from`'s, and the
+    /// one a phone woken by SIP-45 asks: not "what happened while I
+    /// watched" but "what did I miss". A desktop that was closed overnight
+    /// could ask it too.
+    held_from: u64,
     /// The read mark this client has already written to the exchange.
     ///
     /// **A cursor is only worth writing when it has moved.** It was written on
@@ -2345,6 +2374,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 unread: 0,
                 mentioned: 0,
                 live_from: None,
+                held_from: 0,
                 told: 0,
                 waiting: false,
                 typing: false,
@@ -2396,6 +2426,7 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             unread: 0,
             mentioned: 0,
             live_from: None,
+            held_from: 0,
             // Nothing has happened here yet, so it sorts below anything that
             // has rather than claiming a time it does not have.
             last_at: 0,
@@ -2499,6 +2530,7 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
         } = known;
         let timeline = chat.history(&channel, &admins).unwrap_or_default();
         let last_at = timeline.messages().last().map(|m| m.posted).unwrap_or(0);
+        let held_from = timeline.messages().last().map_or(0, |m| m.seq);
         let seen = timeline.messages().count();
         let peer = (!group)
             .then(|| admins.iter().copied().find(|a| *a != me))
@@ -2526,6 +2558,7 @@ fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
             unread: 0,
             mentioned: 0,
             live_from: None,
+            held_from,
             told: 0,
             waiting: false,
             typing: false,
@@ -2909,6 +2942,83 @@ fn at_home(home: &sqex_proto::channel::Home) -> String {
     } else {
         home.domain.clone()
     }
+}
+
+/// Bytes of entries and envelopes one catch-up asks for. Half of SIP-52's
+/// ceiling: what a phone can absorb in a window, and more than a night's
+/// worth of most conversations.
+const CATCHUP_BUDGET: u32 = 512 * 1024;
+
+/// SIP-52, once per session: name every channel the store holds, with where
+/// it got to, and absorb what came back exactly as a poll's answer is
+/// absorbed -- the same `Chat::absorb`, the same bookkeeping in `took`.
+///
+/// A channel answered whole leaves the sweep's dirty set, so the first
+/// pass does not fetch it a second time; one answered with `more` stays,
+/// and the sweep collects the rest. An exchange from before SIP-52 refuses
+/// the route and nothing changes: the sweep runs as it always did.
+async fn catch_up(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk, me: PubKey) {
+    let named = match chat.named_for_catchup() {
+        Ok(named) if !named.is_empty() => named,
+        _ => return,
+    };
+    let answer = match chat.catchup(&named, CATCHUP_BUDGET).await {
+        Ok(answer) => answer,
+        Err(sqex_chat::client::ChatError::NoChatHere(_)) => {
+            tracing::debug!("the exchange does not catch up (before SIP-52); polling instead");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("catch-up failed, polling instead: {e}");
+            return;
+        }
+    };
+    let open = desk.open;
+    let mut accepted: Vec<([u8; 32], u64)> = Vec::new();
+    let mut whole = 0usize;
+    for caught in answer.caught {
+        let Some(fetched) = caught.fetched else {
+            continue;
+        };
+        let Some(known) = desk.channels.get_mut(&caught.channel) else {
+            continue;
+        };
+        let mut timeline = std::mem::take(&mut known.timeline);
+        let absorbed = chat.absorb(&mut timeline, fetched).await;
+        let Some(known) = desk.channels.get_mut(&caught.channel) else {
+            continue;
+        };
+        match absorbed {
+            Ok(conversation) => {
+                if let Some(seq) = took(
+                    chat.store(),
+                    chat.me,
+                    known,
+                    caught.channel,
+                    open,
+                    conversation,
+                ) {
+                    accepted.push((caught.channel, seq));
+                }
+                if !caught.more {
+                    desk.dirty.remove(&caught.channel);
+                    whole += 1;
+                }
+            }
+            Err(_) => {
+                known.timeline = timeline;
+            }
+        }
+    }
+    tracing::info!(
+        named = named.len(),
+        whole,
+        unnamed = answer.unnamed.len(),
+        prekeys = answer.prekeys,
+        "caught up in one round trip"
+    );
+    desk.answered.extend(accepted);
+    let _ = publish(chat, state, desk, me);
 }
 
 async fn refresh_blocked(chat: &mut Chat, state: &watch::Sender<ChatState>) {
@@ -4181,6 +4291,44 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     }
     arrivals.sort_by_key(|m| (m.channel, m.seq));
 
+    // The same record above a different floor: what this device did not
+    // hold when the session started. For a phone woken while it slept, this
+    // is what there is to say; `arrivals` is empty then, since nothing
+    // arrived while it watched -- it arrived while it did not.
+    let mut unseen: Vec<Arrival> = Vec::new();
+    for (channel, known) in &desk.channels {
+        for m in known
+            .timeline
+            .messages()
+            .filter(|m| m.seq > known.held_from)
+        {
+            if m.account == me || m.redacted {
+                continue;
+            }
+            let words = m.post.body_text().unwrap_or("");
+            unseen.push(Arrival {
+                channel: *channel,
+                seq: m.seq,
+                from: m.account,
+                from_label: name_for(&people, &m.account, ""),
+                conversation: match known.peer {
+                    Some(peer) => name_for(&people, &peer, &known.label),
+                    None => known.label.clone(),
+                },
+                public: known.public.unwrap_or(false),
+                direct: known.peer.is_some(),
+                said: if words.is_empty() {
+                    only_files(m.post.attachments().map(|a| a.effective_kind()))
+                } else {
+                    stub(words)
+                },
+                in_open: desk.open == Some(*channel),
+                mentions_me: m.post.mentions().any(|k| *k == me),
+            });
+        }
+    }
+    unseen.sort_by_key(|m| (m.channel, m.seq));
+
     let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
     let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
     let members = open.map(|(_, k)| k.members.clone()).unwrap_or_default();
@@ -4232,6 +4380,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(home, home);
         set!(ringing, ringing);
         set!(arrivals, arrivals);
+        set!(unseen, unseen);
         set!(presence, desk.presence.clone());
         set!(peers, desk.peers.clone());
         set!(verified, verified);
@@ -4611,6 +4760,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     unread: 0,
                     mentioned: 0,
                     live_from: None,
+                    held_from: 0,
                     told: 0,
                     waiting,
                     typing: false,
@@ -5116,6 +5266,39 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
 
         Cmd::Devices => refresh_devices(chat, state, desk).await,
+        Cmd::ClaimAccount(owner) => {
+            let account = match owner.trim().parse::<PubKey>() {
+                Ok(key) => Ok(key),
+                Err(_) => chat.resolve_name(owner.trim()).await,
+            };
+            let account = match account {
+                Ok(account) => account,
+                Err(e) => {
+                    trouble(state, e);
+                    return;
+                }
+            };
+            match chat.claim_listed(&account).await {
+                Ok(credential) => {
+                    tracing::info!(
+                        account = %account,
+                        until = credential.not_after,
+                        "registered as a device of the account, by its own listing"
+                    );
+                    state.send_modify(|s| s.linked = Some(true));
+                    note(
+                        state,
+                        format!(
+                            "This device now acts for {account}. Its conversations arrive as \
+                             your other devices hand them over."
+                        ),
+                    );
+                    refresh_devices(chat, state, desk).await;
+                    desk.dirty.extend(desk.channels.keys().copied());
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
         Cmd::LinkDevice { device, days } => {
             // This client registers itself first, and it has to. An account
             // with no registered devices is its own device; the moment one
@@ -5733,6 +5916,7 @@ mod naming_tests {
             unread: 0,
             mentioned: 0,
             live_from: None,
+            held_from: 0,
             told: 0,
             waiting: false,
             typing: false,

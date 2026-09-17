@@ -9,7 +9,6 @@ description = "Messaging as a sigil App."
 egui = { workspace = true }
 bs58 = { workspace = true }
 image = { workspace = true }
-rfd = { workspace = true }
 sigil = { path = "../sigil" }
 sigil-ui = { path = "../sigil-ui" }
 sigil-video = { path = "../sigil-video" }
@@ -27,6 +26,11 @@ futures = { workspace = true }
 # account's other devices. The same pair sigil-net uses for direct calls.
 x25519-dalek = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
+
+# The native file dialog. A phone has none -- choosing there is an activity
+# the platform runs -- so the host installs a chooser instead; see `files`.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }

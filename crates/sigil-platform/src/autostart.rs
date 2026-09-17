@@ -4,6 +4,7 @@
 //! run forever without being asked has taken something that was not offered.
 
 use crate::support::Support;
+#[cfg(not(target_os = "android"))]
 use auto_launch::AutoLaunch;
 
 /// Build the platform's autostart entry.
@@ -31,7 +32,7 @@ fn build(name: &str, path: &str) -> AutoLaunch {
 }
 
 /// See the macOS version above for why this is a separate function.
-#[cfg(not(target_os = "macos"))]
+#[cfg(linux_desktop)]
 fn build(name: &str, path: &str) -> AutoLaunch {
     // A `.desktop` file under ~/.config/autostart rather than a systemd user
     // unit. Every desktop reads the first; the second needs a running systemd
@@ -47,6 +48,7 @@ fn build(name: &str, path: &str) -> AutoLaunch {
 }
 
 pub struct Autostart {
+    #[cfg(not(target_os = "android"))]
     inner: Option<AutoLaunch>,
     support: Support,
 }
@@ -57,6 +59,34 @@ impl Default for Autostart {
     }
 }
 
+/// A phone does not start applications at login. It starts this one when
+/// the exchange wakes it (SIP-45), which is the thing starting at login was
+/// for -- so this is not a loss, and says so.
+#[cfg(target_os = "android")]
+impl Autostart {
+    pub fn new() -> Autostart {
+        Autostart {
+            support: Support::no(
+                "a phone starts sigil when the exchange wakes it, which is what \
+                 starting at login is for",
+            ),
+        }
+    }
+
+    pub fn support(&self) -> &Support {
+        &self.support
+    }
+
+    pub fn enabled(&self) -> bool {
+        false
+    }
+
+    pub fn set(&self, _on: bool) -> Result<(), String> {
+        Err(self.support.reason().unwrap_or("unavailable").to_string())
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 impl Autostart {
     pub fn new() -> Autostart {
         match std::env::current_exe() {

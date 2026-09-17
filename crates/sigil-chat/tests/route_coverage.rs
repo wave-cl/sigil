@@ -49,6 +49,8 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/channel/close", Chat),
     ("POST", "/channel/post", Chat),
     ("POST", "/channel/fetch", Chat),
+    // SIP-52: the session's first reconcile, and the phone's wake window.
+    ("POST", "/channel/catchup", Chat),
     ("POST", "/channel/info", Chat),
     ("POST", "/channel/mine", Chat),
     ("POST", "/channel/list", Chat),
@@ -370,7 +372,7 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 91,
+        total, 92,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -378,11 +380,11 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35 and SIP-43 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 83,
+        client, 84,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 62,
+        reached, 63,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

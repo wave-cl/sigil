@@ -76,6 +76,11 @@ pub enum Session {
     MacOs,
     X11,
     Wayland,
+    /// A phone. The variant exists only in a phone build, so every match
+    /// on a desktop stays exhaustive without an arm for a case it cannot
+    /// meet.
+    #[cfg(target_os = "android")]
+    Android,
     /// Neither variable is set, so this is a login shell, a container, or
     /// something else with no display at all.
     Headless,
@@ -93,6 +98,16 @@ impl Session {
         if cfg!(target_os = "macos") {
             return Session::MacOs;
         }
+        #[cfg(target_os = "android")]
+        {
+            return Session::Android;
+        }
+        #[cfg(not(target_os = "android"))]
+        Self::detect_display()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn detect_display() -> Session {
         let kind = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
         if kind == "wayland" || std::env::var_os("WAYLAND_DISPLAY").is_some() {
             Session::Wayland
@@ -108,6 +123,8 @@ impl Session {
             Session::MacOs => "macOS",
             Session::X11 => "Linux (X11)",
             Session::Wayland => "Linux (Wayland)",
+            #[cfg(target_os = "android")]
+            Session::Android => "Android",
             Session::Headless => "no display",
         }
     }

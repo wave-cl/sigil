@@ -7,15 +7,23 @@ description = "Desktop capabilities: tray, notifications, hotkeys, deep links --
 
 [dependencies]
 tracing = { workspace = true }
+image = { workspace = true }
+sigil = { path = "../sigil" }
+sqnr-core = { workspace = true }
+libc = { workspace = true }
+
+# The desktop itself. None of it exists on a phone: a tray, a global
+# shortcut, a login item and a notification daemon are all things a desktop
+# has, and every one of these links something Android does not ship. There
+# the module reports `Support::No` with the reason, and sigil-android posts
+# its own notifications through the platform. See build.rs for the
+# `linux_desktop` cfg the modules select the GTK and D-Bus arms with.
+[target.'cfg(not(target_os = "android"))'.dependencies]
 tray-icon = { workspace = true }
 global-hotkey = { workspace = true }
 notify-rust = { workspace = true }
 auto-launch = { workspace = true }
-image = { workspace = true }
-sigil = { path = "../sigil" }
-sqnr-core = { workspace = true }
 rfd = { workspace = true }
-libc = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -41,7 +49,7 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGEventTypes",
 ] }
 
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 # The tray is GTK on Linux and wants its own loop on its own thread; the
 # version tray-icon already links.

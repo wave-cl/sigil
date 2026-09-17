@@ -1,6 +1,7 @@
 //! Messaging, as a sigil app.
 
 pub mod command;
+pub mod files;
 pub mod frequent;
 pub mod mention;
 pub mod presence;
@@ -830,6 +831,10 @@ struct Pane {
     linking: String,
     /// A credential another device wrote, being presented by this one.
     presenting: String,
+    /// SIP-47's `sqx-pair:` string, or a name, being typed.
+    pairing: String,
+    /// Whom this device is claiming, while the sessions ask.
+    claim_pending: Option<String>,
     /// The message search box.
     searching: String,
     /// The exchange being added.
@@ -991,6 +996,8 @@ impl Pane {
 impl Default for Pane {
     fn default() -> Self {
         Pane {
+            pairing: String::new(),
+            claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
             open_when_fetched: HashMap::new(),
@@ -1116,6 +1123,13 @@ pub struct ChatApp {
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
+    /// Files being chosen to attach, for which conversation. One at a time:
+    /// the dialog is modal on a desktop and an activity on a phone, and
+    /// neither runs two.
+    picking: Option<(At, files::Pick)>,
+    /// Where to save an attachment, and which one: conversation, entry,
+    /// index.
+    saving: Option<(At, u64, usize, files::Pick)>,
     /// What this pass's background work wants of the shell, handed over
     /// through `App::asked`.
     asked: Vec<AppAction>,
@@ -1166,6 +1180,8 @@ impl ChatApp {
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             announced: std::collections::HashSet::new(),
+            picking: None,
+            saving: None,
             away: false,
             asked: Vec::new(),
             quiet: sigil::Quiet::default(),
@@ -1652,6 +1668,7 @@ impl App for ChatApp {
 
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
+        self.take_choices(egui_ctx);
         if self.quiet != ctx.accounts.quiet {
             self.quiet = ctx.accounts.quiet.clone();
         }
@@ -2793,11 +2810,10 @@ impl ChatApp {
                             egui::RichText::new(&file.described).small(),
                         );
                         // Nothing to save until it is here.
-                        if bytes.is_some()
-                            && ui.button("Save…").clicked()
-                            && let Some(to) = rfd::FileDialog::new().save_file()
-                        {
-                            self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
+                        if bytes.is_some() && ui.button("Save…").clicked() {
+                            self.saving =
+                                Some((at.clone(), seq, index, files::save_file(&file.described)));
+                            ui.ctx().request_repaint();
                         }
                         if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
                             self.pane(at).viewing = None;
@@ -2976,8 +2992,9 @@ impl ChatApp {
                 playing.player.set_volume(if mute { 0.0 } else { 1.0 });
             }
         }
-        if save && let Some(to) = rfd::FileDialog::new().save_file() {
-            self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
+        if save {
+            self.saving = Some((at.clone(), seq, index, files::save_file("")));
+            egui_ctx.request_repaint();
         }
         if done.fullscreen {
             let whole = !self.pane(at).whole_screen;
@@ -4613,12 +4630,11 @@ impl ChatApp {
                 self.pane(at).look = Look::default();
             }
             if let Some(index) = did.save {
-                // The dialog is native and blocking, which is fine here: it is
-                // a direct answer to a click, and the session goes on running
-                // on its own task regardless.
-                if let Some(to) = rfd::FileDialog::new().save_file() {
-                    self.send_as(Some(at), Cmd::SaveFile { seq, index, to });
-                }
+                // Asked here, acted on in `take_choices`: on a desktop the
+                // dialog blocks and the answer is in by the next pass; on a
+                // phone it arrives when the platform's activity ends.
+                self.saving = Some((at.clone(), seq, index, files::save_file("")));
+                ui.ctx().request_repaint();
             }
         }
     }
@@ -4642,6 +4658,54 @@ impl ChatApp {
     /// so. Thumbnails are made on a thread of their own -- a photograph
     /// decodes in a good fraction of a second, a clip's first frame longer
     /// -- and land through `previews`.
+    /// SIP-47's `sqx-pair:` string for this identity: the account, and every
+    /// exchange this identity holds a session at whose domain is known. An
+    /// exchange reached by address alone has no domain to name and is left
+    /// out -- a phone reaches exchanges by SIP-33, by name or not at all.
+    fn pairing_string(&self, at: &At) -> Option<String> {
+        let mut domains: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(key, _)| key.0 == at.0)
+            .filter_map(|(_, session)| session.state().domain)
+            .collect();
+        domains.sort();
+        domains.dedup();
+        if domains.is_empty() {
+            return None;
+        }
+        Some(format!("sqx-pair:{}@{}", at.0, domains.join(",")))
+    }
+
+    /// Act on a file choice that has been answered since the last pass.
+    ///
+    /// The choice is asked for in `render`, where the click is, and acted
+    /// on here: on a desktop the dialog blocked and the answer is already
+    /// in, one pass later; on a phone it arrives whenever the platform's
+    /// activity ends. Either way one place stages the files.
+    fn take_choices(&mut self, ctx: &egui::Context) {
+        if let Some((at, pick)) = &self.picking
+            && let Some(answer) = pick.take()
+        {
+            let at = at.clone();
+            self.picking = None;
+            if let Some(paths) = answer {
+                self.stage(&at, paths, ctx);
+            }
+        }
+        if let Some((at, seq, index, pick)) = &self.saving
+            && let Some(answer) = pick.take()
+        {
+            let (at, seq, index) = (at.clone(), *seq, *index);
+            self.saving = None;
+            if let Some(mut paths) = answer
+                && let Some(to) = paths.pop()
+            {
+                self.send_as(Some(&at), Cmd::SaveFile { seq, index, to });
+            }
+        }
+    }
+
     fn stage(&mut self, at: &At, paths: Vec<std::path::PathBuf>, ctx: &egui::Context) {
         let pane = self.pane(at);
         // One channel for the life of the pane; the sending half is cloned
@@ -5138,9 +5202,9 @@ impl ChatApp {
                      They are sealed before they leave this machine.",
                 )
                 .clicked()
-                && let Some(paths) = rfd::FileDialog::new().pick_files()
             {
-                self.stage(at, paths, ui.ctx());
+                self.picking = Some((at.clone(), files::pick_files()));
+                ui.ctx().request_repaint();
             }
             let send = sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
                 .on_hover_text(if editing.is_some() {
@@ -6642,7 +6706,14 @@ impl ChatApp {
                 300.0,
             );
             if ui.button("Write credential").clicked() {
+                // A phone shows its key as `sqx-device:<key>` (SIP-47), and
+                // somebody typing what they see should not have to trim it.
                 let typed = self.pane(at).linking.trim().to_string();
+                let typed = typed
+                    .strip_prefix("sqx-device:")
+                    .unwrap_or(&typed)
+                    .trim()
+                    .to_string();
                 match typed.parse::<PubKey>() {
                     Ok(device) => {
                         self.pane(at).linking.clear();
@@ -6662,6 +6733,82 @@ impl ChatApp {
             if ui.button("Copy").clicked() {
                 ui.ctx().copy_text(credential.clone());
             }
+            // **Where the phone goes next.** A phone paired by SIP-47 has
+            // been told nothing but that it is registered; this names the
+            // account and every exchange this identity is at, as one string
+            // it can scan or type. Public facts, both -- the registration
+            // is the act of trust, and it is already signed.
+            if let Some(pair) = self.pairing_string(at) {
+                ui.add_space(tokens::SPACING_SM);
+                ui.colored_label(
+                    theme.text_secondary,
+                    "Then show the other device where to go -- a phone scans this:",
+                );
+                sigil_ui::qr(ui, &pair, 160.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&pair).monospace().small())
+                        .selectable(true),
+                );
+                if ui.button("Copy where to go").clicked() {
+                    ui.ctx().copy_text(pair);
+                }
+            }
+        }
+
+        // **The phone's half of SIP-47.** This device showed its key, another
+        // device registered it and showed where to go; typed or scanned here,
+        // this device joins the exchanges named and claims the account by
+        // finding itself in its list.
+        ui.add_space(tokens::SPACING_XL);
+        ui.heading("Where the other device sent you");
+        ui.colored_label(
+            theme.text_secondary,
+            "If another of your devices read this one's key and showed you an \
+             `sqx-pair:` string -- or you know your name at an exchange -- put it here.",
+        );
+        ui.add_space(tokens::SPACING_SM);
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().pairing,
+            "sqx-pair:<account>@<domain>, or name@domain",
+            width,
+        );
+        ui.add_space(tokens::SPACING_SM);
+        if ui.button("Go there").clicked() {
+            let typed = self.pane(at).pairing.trim().to_string();
+            match pairing::parse(&typed) {
+                Ok((owner, domains)) => {
+                    self.pane(at).pairing.clear();
+                    // The exchanges, so a session opens at each; the claim
+                    // is asked of every session this identity holds, and an
+                    // exchange that has not heard of the registration says so.
+                    let index = ctx.accounts.active_index();
+                    for domain in &domains {
+                        ctx.accounts.add_exchange(index, domain);
+                    }
+                    let ats: Vec<At> = self
+                        .sessions
+                        .keys()
+                        .filter(|k| k.0 == at.0)
+                        .cloned()
+                        .collect();
+                    for session_at in ats {
+                        self.send_as(Some(&session_at), Cmd::ClaimAccount(owner.clone()));
+                    }
+                    self.pane(at).claim_pending = Some(owner);
+                }
+                Err(why) => self.pane(at).add_trouble = Some(why),
+            }
+        }
+        if let Some(owner) = &self.pane(at).claim_pending {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!(
+                    "asking each exchange to list this device under {owner}…"
+                ))
+                .small(),
+            );
         }
 
         // **The other half.** The screen could write a credential and had
@@ -7497,5 +7644,76 @@ mod joining_tests {
         let rings = vec![ring(false, true), ring(true, false), ring(true, true)];
         let found = to_join(&rings, false).expect("ours, answered");
         assert!(found.mine && found.answered);
+    }
+}
+
+/// SIP-47's `sqx-pair:` grammar, the little of it this pane needs: an owner
+/// (a key or a `name@domain`) and the domains after the `@`. The phone
+/// crate has the full parser and its tests; this crate cannot depend on it
+/// (it depends on this one), so the pane accepts the same shapes and lets
+/// the session's `ClaimAccount` sort key from name.
+mod pairing {
+    pub fn parse(shown: &str) -> Result<(String, Vec<String>), String> {
+        let shown = shown.trim();
+        if shown.len() > 512 {
+            return Err("that is longer than any pairing string".into());
+        }
+        let body = shown.strip_prefix("sqx-pair:").unwrap_or(shown).trim();
+        let (who, where_) = body
+            .rsplit_once('@')
+            .ok_or_else(|| "a pairing string is <account or name>@<domain>".to_string())?;
+        let who = who.trim();
+        if who.is_empty() {
+            return Err("nothing before the @".into());
+        }
+        let mut domains: Vec<String> = Vec::new();
+        for d in where_.split(',') {
+            let d = d.trim().to_ascii_lowercase();
+            if d.is_empty() {
+                continue;
+            }
+            if !d.contains('.')
+                || d.chars()
+                    .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '.'))
+            {
+                return Err(format!("`{d}` is not a domain name"));
+            }
+            if !domains.contains(&d) {
+                domains.push(d);
+            }
+        }
+        if domains.is_empty() {
+            return Err("a pairing string names at least one domain".into());
+        }
+        // A key stands alone; a name lives at its one domain and is handed
+        // on as `name@domain`, which the session resolves.
+        let owner = if who.parse::<sqnr_core::PubKey>().is_ok() {
+            who.to_string()
+        } else {
+            if domains.len() != 1 {
+                return Err("a name lives at one domain".into());
+            }
+            format!("{}@{}", who.to_ascii_lowercase(), domains[0])
+        };
+        Ok((owner, domains))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::parse;
+
+        #[test]
+        fn a_pair_string_yields_its_owner_and_domains() {
+            let (owner, domains) = parse("sqx-pair:colin@squic.org").unwrap();
+            assert_eq!(owner, "colin@squic.org");
+            assert_eq!(domains, ["squic.org"]);
+            let key = sqnr_core::PubKey::new([3; 32]).to_string();
+            let (owner, domains) =
+                parse(&format!("sqx-pair:{key}@Squic.org,trunk.exchange")).unwrap();
+            assert_eq!(owner, key);
+            assert_eq!(domains, ["squic.org", "trunk.exchange"]);
+            assert!(parse("sqx-pair:nobody").is_err());
+            assert!(parse("colin@squic.org,trunk.exchange").is_err());
+        }
     }
 }

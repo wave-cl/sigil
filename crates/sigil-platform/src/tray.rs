@@ -6,20 +6,25 @@
 
 use std::sync::Mutex;
 
-use crate::support::{Session, Support};
+#[cfg(not(target_os = "android"))]
+use crate::support::Session;
+use crate::support::Support;
+#[cfg(not(target_os = "android"))]
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+#[cfg(not(target_os = "android"))]
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 pub struct Tray {
     /// The icon and its menu, on this thread. On Linux they live on the
     /// GTK thread instead, and this is `None`; see [`gtk_thread`].
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    #[cfg(target_os = "macos")]
     built: Option<Built>,
     support: Support,
 }
 
 /// The icon and the menu that is built when the desktop has a tray:
 /// what the state is kept on, wherever it lives.
+#[cfg(not(target_os = "android"))]
 struct Built {
     // Dropping a TrayIcon removes it, so it is held even though nothing reads
     // it back.
@@ -65,6 +70,7 @@ impl Default for Tray {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Built {
     /// The icon with its menu, and the handlers that report what is done
     /// to them. **On the thread that owns the desktop's tray**: the main
@@ -145,7 +151,7 @@ impl Built {
     }
 }
 
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(target_os = "macos")]
 impl Tray {
     /// Build the tray icon.
     ///
@@ -205,7 +211,7 @@ impl Tray {
 ///
 /// A desktop with no GTK to initialise -- no display -- is reported as
 /// unavailable, with GTK's reason, rather than left to panic.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(linux_desktop)]
 mod gtk_thread {
     use std::cell::RefCell;
     use std::sync::mpsc;
@@ -259,7 +265,7 @@ mod gtk_thread {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(linux_desktop)]
 impl Tray {
     /// Build the tray icon, on its own thread; see [`gtk_thread`].
     pub fn new() -> Tray {
@@ -290,6 +296,25 @@ impl Tray {
             gtk_thread::on_tray(move |b| b.set_quiet(quiet));
         }
     }
+}
+
+/// A phone has no tray, and does not need one for the thing a tray is for:
+/// sigil stays reachable with its window gone because the exchange wakes it
+/// (SIP-45), and what wants attention is said through a notification.
+#[cfg(target_os = "android")]
+impl Tray {
+    pub fn new() -> Tray {
+        Tray {
+            support: Support::no(
+                "a phone has no tray; sigil is woken by the exchange and says what \
+                 is waiting through a notification",
+            ),
+        }
+    }
+
+    pub fn set_unread(&mut self, _unread: u32, _quiet: bool) {}
+
+    pub fn set_quiet(&self, _quiet: bool) {}
 }
 
 /// Held by every test that reports through [`PENDING`], which is one
@@ -342,6 +367,7 @@ fn tray_tooltip(unread: u32) -> String {
 /// On macOS the emblem alone, in black, as a template the menu bar tints;
 /// on the others the emblem on its rounded square, at a size the tray
 /// scales from. Twice the nominal size so a Retina bar draws it sharp.
+#[cfg(not(target_os = "android"))]
 fn icon(marked: bool) -> Icon {
     const SIZE: u32 = 64;
     let rgba = match (cfg!(target_os = "macos"), marked) {
@@ -353,6 +379,7 @@ fn icon(marked: bool) -> Icon {
     Icon::from_rgba(rgba, SIZE, SIZE).expect("a square rgba buffer is a valid icon")
 }
 
+#[cfg(not(target_os = "android"))]
 fn probe() -> Support {
     // The menu bar, and the menu that goes in it, belong to the main
     // thread; asked from anywhere else the library panics rather than
@@ -392,7 +419,7 @@ mod tests {
     /// With nowhere to draw, the GTK thread says so and the tray is
     /// unavailable -- where it used to panic on the first menu built.
     /// Run where there is no display, which is what every test runner is.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(linux_desktop)]
     #[test]
     fn without_a_display_the_gtk_thread_refuses_rather_than_panics() {
         if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -411,7 +438,7 @@ mod tests {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let _ = drain_for_test();
         let tray = Tray {
-            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            #[cfg(target_os = "macos")]
             built: None,
             support: Support::no("test"),
         };

@@ -12,14 +12,19 @@
 //! nothing. A mute key that silently fails is worse than no mute key: somebody
 //! believes they are muted.
 
-use crate::support::{Session, Support};
+#[cfg(not(target_os = "android"))]
+use crate::support::Session;
+use crate::support::Support;
+#[cfg(not(target_os = "android"))]
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+#[cfg(not(target_os = "android"))]
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
 pub struct Hotkeys {
     /// Held for its `Drop`: releasing the manager unregisters every key it
     /// took, so the binding lives exactly as long as this does. Nothing reads
     /// it back — events arrive on a process-wide channel instead.
+    #[cfg(not(target_os = "android"))]
     _manager: Option<GlobalHotKeyManager>,
     support: Support,
     mute: Option<u32>,
@@ -31,6 +36,30 @@ impl Default for Hotkeys {
     }
 }
 
+/// A phone has no keyboard to hold a key on while another application is in
+/// front, and its own way of muting a call -- the notification's control,
+/// the in-call screen -- is the platform's.
+#[cfg(target_os = "android")]
+impl Hotkeys {
+    pub fn new() -> Hotkeys {
+        Hotkeys {
+            support: Support::no(
+                "a phone has no global shortcuts; the call's own controls mute it",
+            ),
+            mute: None,
+        }
+    }
+
+    pub fn support(&self) -> &Support {
+        &self.support
+    }
+
+    pub fn mute_presses(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 impl Hotkeys {
     pub fn new() -> Hotkeys {
         if let Support::No(why) = probe() {
@@ -84,6 +113,7 @@ impl Hotkeys {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn probe() -> Support {
     match Session::detect() {
         Session::Headless => Support::no("there is no desktop session here"),

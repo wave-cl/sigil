@@ -228,6 +228,7 @@ fn a_conversation() -> ChatState {
         home: None,
         ringing: Vec::new(),
         arrivals: Vec::new(),
+        unseen: Vec::new(),
         presence: std::collections::HashMap::new(),
         peers: Vec::new(),
         verified: std::collections::HashMap::new(),

@@ -15,9 +15,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sigil::{Notice, Sound, Target};
+#[cfg(not(target_os = "android"))]
+use sigil::Sound;
+use sigil::{Notice, Target};
 
-use crate::support::{Session, Support};
+#[cfg(not(target_os = "android"))]
+use crate::support::Session;
+use crate::support::Support;
 
 /// On macOS a notification is posted by a *bundle*, identified by its bundle
 /// id. A binary run straight from `cargo` is not one, so it cannot notify at
@@ -42,6 +46,7 @@ impl Default for Notifier {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Notifier {
     pub fn new() -> Notifier {
         Notifier {
@@ -91,7 +96,7 @@ impl Notifier {
         // action, which the daemon only reports for a notification that
         // declared it. On macOS a press is a press, and an action would be
         // a button.
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(linux_desktop)]
         n.action("default", "Open");
         let pressed = Arc::clone(&self.pressed);
         let watching = Arc::clone(&self.watching);
@@ -123,10 +128,48 @@ impl Notifier {
     }
 }
 
+/// The phone posts nothing from here. Its notifications are the platform's,
+/// composed and shown by sigil-android through the system's own surface --
+/// which is also where a press on one comes back from -- and the shell is
+/// handed that notifier in place of this one. This one only says so, in
+/// case somebody looks.
+#[cfg(target_os = "android")]
+impl Notifier {
+    pub fn new() -> Notifier {
+        Notifier {
+            support: Support::no(
+                "the phone posts its own notifications; sigil-android installs them",
+            ),
+            pressed: Arc::new(Mutex::new(Vec::new())),
+            watching: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn support(&self) -> &Support {
+        &self.support
+    }
+
+    pub fn post(&self, summary: &str, body: &str) -> bool {
+        self.notice(Notice::plain(summary, body))
+    }
+
+    pub fn notice(&self, _notice: Notice<'_>) -> bool {
+        false
+    }
+
+    pub fn pressed(&self) -> Vec<Target> {
+        self.pressed
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default()
+    }
+}
+
 /// The desktop's name for the sound, if any.
 ///
 /// macOS takes the name of a system sound; the freedesktop sound naming
 /// specification has words for both cases.
+#[cfg(not(target_os = "android"))]
 fn sound_name(sound: Sound) -> Option<&'static str> {
     match sound {
         Sound::None => None,
@@ -141,6 +184,7 @@ fn sound_name(sound: Sound) -> Option<&'static str> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn probe() -> Support {
     match Session::detect() {
         Session::Headless => {
@@ -199,6 +243,7 @@ mod tests {
     use super::*;
 
     /// A ring sounds different from a message, and a plain notice is silent.
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn a_ring_and_a_message_sound_different_and_a_plain_notice_is_silent() {
         assert_eq!(sound_name(Sound::None), None);

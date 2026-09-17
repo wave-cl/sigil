@@ -15,7 +15,7 @@ use crate::support::Support;
 
 pub struct Badge {
     support: Support,
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(linux_desktop)]
     connection: Option<zbus::blocking::Connection>,
     /// What was last set, so the desktop is only told about a change.
     shown: Option<u32>,
@@ -42,7 +42,7 @@ impl Badge {
                 shown: None,
             }
         }
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(linux_desktop)]
         {
             match zbus::blocking::Connection::session() {
                 Ok(connection) => Badge {
@@ -57,10 +57,16 @@ impl Badge {
                 },
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(target_os = "macos", linux_desktop)))]
         {
             Badge {
-                support: Support::no("no application badge on this desktop"),
+                support: Support::no(if cfg!(target_os = "android") {
+                    // The launcher's dot is the notification channel's, and
+                    // the phone's own notifier carries the number on it.
+                    "the phone's launcher counts notifications itself"
+                } else {
+                    "no application badge on this desktop"
+                }),
                 shown: None,
             }
         }
@@ -93,7 +99,7 @@ impl Badge {
         true
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(linux_desktop)]
     fn set(&mut self, count: u32) -> bool {
         let Some(connection) = &self.connection else {
             return false;
@@ -110,7 +116,7 @@ impl Badge {
             .is_ok()
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "macos", linux_desktop)))]
     fn set(&mut self, _count: u32) -> bool {
         false
     }
@@ -124,7 +130,7 @@ pub fn badge_label(count: u32) -> Option<String> {
 /// The launcher entry's update: which application, and the count with
 /// whether to show it -- the count is left in place at nought and hidden,
 /// which is what the docks expect.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(linux_desktop)]
 pub fn launcher_entry(
     count: u32,
 ) -> (
@@ -153,7 +159,7 @@ mod tests {
     fn a_count_already_shown_is_not_set_again() {
         let mut badge = Badge {
             support: Support::no("test"),
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(linux_desktop)]
             connection: None,
             shown: Some(3),
         };
@@ -168,7 +174,7 @@ mod tests {
 
     /// The launcher entry names sigil's own `.desktop` file, which is what
     /// the docks match against, and hides the count at nought.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(linux_desktop)]
     #[test]
     fn the_launcher_entry_names_the_desktop_file_and_hides_nought() {
         use zbus::zvariant::Value;
