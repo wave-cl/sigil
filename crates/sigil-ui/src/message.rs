@@ -699,11 +699,18 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     // One slot in memory rather than a flag per message: only one message
     // can be under the pointer at a time, so remembering *which* is enough.
     let slot = egui::Id::new("sigil-message-controls");
+    let any_open = egui::Popup::is_any_open(ui.ctx());
     if over {
         ui.ctx().data_mut(|d| d.insert_temp(slot, me));
+    } else if !any_open && ui.ctx().data(|d| d.get_temp::<egui::Id>(slot)) == Some(me) {
+        // **Forgotten once it is neither shown nor holding a menu.** The
+        // slot names the message whose strip may stay while a menu is
+        // open -- and it kept that name after the strip had gone, so any
+        // popup at all (the identity's, a phone's title) brought the last
+        // strip back onto the transcript.
+        ui.ctx().data_mut(|d| d.remove::<egui::Id>(slot));
     }
-    let holding = egui::Popup::is_any_open(ui.ctx())
-        && ui.ctx().data(|d| d.get_temp::<egui::Id>(slot)) == Some(me);
+    let holding = any_open && ui.ctx().data(|d| d.get_temp::<egui::Id>(slot)) == Some(me);
     if !(over || holding) || b.redacted {
         return;
     }

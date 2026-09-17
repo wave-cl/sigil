@@ -737,6 +737,57 @@ fn on_a_phone_no_row_is_wider_than_the_pane() {
     assert!(mine.right() < edge - sigil::tokens::SPACING_XL, "{mine:?}");
 }
 
+/// A strip that has been put away stays away when some other menu opens.
+/// The strip holds while *its* menu is open, by remembering which message
+/// it was -- and it remembered after the strip had gone, so the phone's
+/// title menu (or the identity's, anywhere) brought the last strip back.
+#[test]
+fn a_hidden_strip_does_not_come_back_when_another_menu_opens() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.set_size(egui::vec2(PHONE_PANE, PHONE_HEIGHT));
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    let on = bubble.center();
+    finger_down(&mut h, on);
+    h.run();
+    finger_up(&mut h, on);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_some(),
+        "the tap did not reveal"
+    );
+    let away = egui::pos2(bubble.left() - 60.0, bubble.center().y);
+    finger_down(&mut h, away);
+    h.run();
+    finger_up(&mut h, away);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "the tap away did not hide"
+    );
+    // Some other menu: the conversation's More.
+    let more = h
+        .get_by_label("More about this conversation")
+        .rect()
+        .center();
+    finger_down(&mut h, more);
+    h.run();
+    finger_up(&mut h, more);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Settings").is_some(),
+        "the menu did not open"
+    );
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "the strip came back with the menu"
+    );
+}
+
 /// A dialog on a phone is as wide as the screen has, not 360 points.
 #[test]
 fn on_a_phone_a_dialog_fits_the_screen() {
