@@ -5801,7 +5801,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigil"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "bs58",
  "dirs",
@@ -5821,7 +5821,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-admin"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "bs58",
  "ed25519-dalek",
@@ -5846,7 +5846,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-chat"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "bs58",
  "bytes",
@@ -5885,14 +5885,14 @@ dependencies = [
 
 [[package]]
 name = "sigil-emoji"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "flate2",
 ]
 
 [[package]]
 name = "sigil-net"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -5918,7 +5918,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-platform"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "auto-launch",
  "block2 0.6.2",
@@ -5943,7 +5943,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-shell"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "dirs",
  "eframe",
@@ -5968,7 +5968,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-ui"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "egui",
  "egui_extras",
@@ -5982,7 +5982,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-update"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "dirs",
  "ed25519-dalek",
@@ -5998,7 +5998,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-video"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "cpal",
  "eframe",
@@ -6011,7 +6011,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-voice"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "ed25519-dalek",
  "egui",
