@@ -31,6 +31,13 @@ conversation lives at another exchange, which cannot be reached right now;
 nothing was sent* -- and your draft stands. Nothing is queued: a queue that
 failed later would have to invent the failure after you were told success.
 
+A message you send through a copy carries *via squic.org* beside its
+time, for everyone in the conversation. That is your client's statement,
+signed with the message and sealed with it; no exchange adds it, and a
+message sent where the conversation lives carries nothing. It names the
+exchange by its key, and each reader's own machine turns that into the
+domain it knows the key by.
+
 ## What it means for you
 
 - **Follow a conversation from home.** An operator who replicates a channel

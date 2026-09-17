@@ -197,6 +197,10 @@ pub struct Bubble<'a> {
     /// the name are left off and the gap above is smaller.
     pub grouped: bool,
     pub edited: bool,
+    /// SIP-43: the exchange the sender says they posted this through, where
+    /// that is not where the conversation lives. Already a name: the caller
+    /// resolves the key by its own pin store, or shortens it.
+    pub via: Option<&'a str>,
     /// The body was removed. Draws a tombstone; see the module note.
     pub redacted: bool,
     /// What is being replied to, if anything.
@@ -748,6 +752,9 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     let mut meta = measure(b.at, egui::TextStyle::Small);
     if b.edited {
         meta += gap + measure("edited", egui::TextStyle::Small);
+    }
+    if let Some(via) = b.via {
+        meta += gap + measure(&format!("via {via}"), egui::TextStyle::Small);
     }
     if let Some((word, _)) = b.standing {
         meta += gap + measure(word, egui::TextStyle::Small);
@@ -1324,6 +1331,15 @@ fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::
     if b.edited {
         ui.colored_label(quiet, egui::RichText::new("edited").small());
     }
+    // SIP-43: said by the sender, not by any exchange; named by what this
+    // machine knows the key as.
+    if let Some(via) = b.via {
+        ui.colored_label(quiet, egui::RichText::new(format!("via {via}")).small())
+            .on_hover_text(format!(
+                "The sender posted this through {via}, which carried it to where the \
+                 conversation lives. Their word, signed with the message."
+            ));
+    }
     ui.colored_label(quiet, egui::RichText::new(b.at).small());
 }
 
@@ -1767,6 +1783,7 @@ mod tests {
             mine: false,
             grouped: true,
             edited: false,
+            via: None,
             redacted: false,
             reply_to: None,
             reactions: &[],

@@ -124,6 +124,10 @@ pub struct Line {
     /// Presenting an edit as though it were the original hides that the text
     /// changed after it was read.
     pub edited: bool,
+    /// SIP-43: the exchange the sender says they posted this through, when
+    /// that is not where the conversation lives; named by this machine's
+    /// pin store, or by the head of its key.
+    pub via: Option<String>,
     /// Emoji, how many sent it, and whether we are one of them.
     pub reactions: Vec<(String, usize, bool)>,
     /// What this replies to.
@@ -3835,6 +3839,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                     text: m.post.body_text().unwrap_or_default().to_string(),
                     redacted: m.redacted,
                     edited: m.edited.is_some(),
+                    via: m.post.via().map(|k| Chat::via_name(&k)),
                     reactions: m
                         .reactions
                         .iter()

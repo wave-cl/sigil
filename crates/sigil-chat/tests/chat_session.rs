@@ -3941,6 +3941,27 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
         "{:?}",
         bob.state().lines
     );
+    // Bob's message says which exchange carried it -- his own word, in the
+    // body -- and Alice's, made where the room lives, says nothing. The
+    // replica was dialled by address, so it is named by the head of its key.
+    let via_of = |h: &ChatHandle, text: &str| {
+        h.state()
+            .lines
+            .iter()
+            .find(|l| l.text == text)
+            .map(|l| l.via.clone())
+    };
+    let replica_head = format!("{}…", &replica_key.to_string()[..8]);
+    assert_eq!(
+        via_of(&alice, "hello from the other side"),
+        Some(Some(replica_head.clone()))
+    );
+    assert_eq!(via_of(&alice, "welcome"), Some(None));
+    assert_eq!(
+        via_of(&bob, "hello from the other side"),
+        Some(Some(replica_head.clone()))
+    );
+    assert_eq!(via_of(&bob, "welcome"), Some(None));
 
     // Carol has never been to the origin. She finds the square in the
     // replica's directory, joins it *there* -- the join is carried to the
@@ -4011,6 +4032,10 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
         "carol {:?} / alice {:?}",
         carol.state().trouble,
         alice.state().trouble
+    );
+    assert_eq!(
+        via_of(&alice, "and a third, who joined from the copy"),
+        Some(Some(replica_head))
     );
     carol.stop();
 

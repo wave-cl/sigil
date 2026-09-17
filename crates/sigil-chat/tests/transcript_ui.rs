@@ -86,6 +86,7 @@ fn a_conversation() -> ChatState {
                 text: "yesterday's message, so there is a separator above today".into(),
                 redacted: false,
                 edited: false,
+                via: None,
                 reactions: Vec::new(),
                 reply_to: None,
                 receipt: None,
@@ -103,6 +104,7 @@ fn a_conversation() -> ChatState {
                 text: "mine, on the other side".into(),
                 redacted: false,
                 edited: true,
+                via: None,
                 reactions: vec![("\u{1f44d}".to_string(), 2, true)],
                 reply_to: None,
                 receipt: Some(Receipt::Read),
@@ -120,6 +122,7 @@ fn a_conversation() -> ChatState {
                 text: "one".into(),
                 redacted: false,
                 edited: false,
+                via: None,
                 reactions: Vec::new(),
                 reply_to: None,
                 receipt: None,
@@ -151,6 +154,7 @@ fn a_conversation() -> ChatState {
                 text: "the second one, then".into(),
                 redacted: false,
                 edited: false,
+                via: None,
                 reactions: Vec::new(),
                 reply_to: Some(Quoted {
                     seq: 2,
@@ -173,6 +177,7 @@ fn a_conversation() -> ChatState {
                 text: "gone".into(),
                 redacted: true,
                 edited: false,
+                via: None,
                 reactions: Vec::new(),
                 reply_to: None,
                 receipt: None,
@@ -1277,6 +1282,7 @@ fn a_page(from: u32, to: u32) -> ChatState {
             text: format!("message {i}"),
             redacted: false,
             edited: false,
+            via: None,
             reactions: Vec::new(),
             reply_to: None,
             receipt: None,
@@ -4278,6 +4284,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         text: "ok".into(),
         redacted: false,
         edited: false,
+        via: None,
         reactions: vec![],
         reply_to: None,
         receipt: Some(Receipt::Read),
@@ -4297,6 +4304,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
             .into(),
         redacted: false,
         edited: false,
+        via: None,
         reactions: vec![],
         reply_to: None,
         receipt: Some(Receipt::Read),
@@ -6693,4 +6701,26 @@ fn a_refused_join_is_said_where_the_button_is() {
     h.run();
     let said = text_of(&h);
     assert!(said.contains("cannot be reached"), "{said}");
+}
+
+/// SIP-43: a message the sender posted through another exchange says so
+/// beside the time -- *via squic.org* -- and one they did not says nothing.
+#[test]
+fn a_message_sent_through_a_copy_says_via_where() {
+    let mut state = a_conversation();
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Conversations);
+    h.run();
+    assert!(!text_of(&h).contains("via "), "{}", text_of(&h));
+
+    state.lines[1].via = Some("squic.org".into());
+    let mut h = harness_at(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("via squic.org"), "{said}");
+    // The tree names a label twice (see "edited" beside it); what matters is
+    // that no other message acquired one.
+    assert!(
+        !said.contains("via 2") && !said.contains("via A"),
+        "only the one that was: {said}"
+    );
 }

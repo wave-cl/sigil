@@ -4354,6 +4354,7 @@ impl ChatApp {
                 mine: line.mine,
                 grouped,
                 edited: line.edited,
+                via: line.via.as_deref(),
                 redacted: line.redacted,
                 reply_to: line.reply_to.as_ref().map(|q| sigil_ui::Quote {
                     seq: q.seq,
