@@ -647,9 +647,15 @@ fn on_a_phone_the_conversation_bar_fits_beside_the_rail() {
         "the bar wrapped: back {back:?}, identity {identity:?}"
     );
     let bubble = topmost(&h, "the second one, then");
-    assert!(bubble.left() >= 0.0, "the transcript spilled left: {bubble:?}");
+    assert!(
+        bubble.left() >= 0.0,
+        "the transcript spilled left: {bubble:?}"
+    );
     // The rest of the controls are behind More, and come out of it.
-    assert!(h.query_by_label("Settings").is_none(), "Settings is in the bar");
+    assert!(
+        h.query_by_label("Settings").is_none(),
+        "Settings is in the bar"
+    );
     h.get_by_label("More about this conversation").click();
     h.run();
     assert!(h.query_by_label("Settings").is_some());
