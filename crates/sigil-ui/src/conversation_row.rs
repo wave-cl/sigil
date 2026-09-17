@@ -165,16 +165,32 @@ fn row_body(
                     }
                 }
                 ui.add_space(tokens::SPACING_SM);
-                ui.vertical(|ui| {
+                // **The words are centred on the mark.** A vertical ui
+                // takes the row's whole height and lays out from its top,
+                // so the two lines sat at the top of a row whose mark was
+                // in the middle. egui lays out in one pass, so the lines'
+                // height is remembered from the last pass and the padding
+                // above them is half of what is left: right from the second
+                // pass, and the first is never shown for long.
+                let phone = sigil::Form::of(ui.ctx()).is_phone();
+                let remembered = egui::Id::new(("sigil-row-lines", row.id));
+                let lines: f32 = ui.ctx().data(|d| d.get_temp(remembered)).unwrap_or(0.0);
+                let pad = if phone {
+                    ((height - lines) / 2.0).max(0.0)
+                } else {
+                    0.0
+                };
+                let column = ui.vertical(|ui| {
                     // Two lines of text, not two finger-tall rows: the
                     // phone's theme makes every row a control's height for
                     // the buttons' sake, and that put a finger's height
                     // between a conversation's name and its last words.
-                    if sigil::Form::of(ui.ctx()).is_phone() {
+                    if phone {
                         let line = ui.text_style_height(&egui::TextStyle::Body);
                         let spacing = ui.spacing_mut();
                         spacing.interact_size.y = line;
                         spacing.item_spacing.y = tokens::SPACING_XXS;
+                        ui.add_space(pad);
                     }
                     ui.horizontal(|ui| {
                         // A public channel is marked, not merely named. Anybody may
@@ -304,6 +320,10 @@ fn row_body(
                             .truncate(),
                     );
                 });
+                if phone {
+                    let drawn = column.response.rect.height() - pad;
+                    ui.ctx().data_mut(|d| d.insert_temp(remembered, drawn));
+                }
             });
         });
 

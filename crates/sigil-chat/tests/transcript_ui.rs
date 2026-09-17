@@ -965,6 +965,37 @@ fn on_a_phone_a_conversations_name_sits_close_to_its_last_words() {
     );
 }
 
+/// In the list, the name and the last words together are centred on the
+/// mark beside them, not stacked at the top of the row.
+#[test]
+fn on_a_phone_a_conversations_lines_are_centred_on_its_mark() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.run();
+    let preview = h.get_by_label_contains("the second one, then").rect();
+    let name = h
+        .get_all_by_label("Ada")
+        .map(|n| n.rect())
+        .filter(|r| r.bottom() <= preview.top())
+        .max_by(|a, b| a.bottom().total_cmp(&b.bottom()))
+        .expect("the conversation's name over its preview");
+    let lines = name.union(preview);
+    // The mark is the presence on Ada's row: the one on the lines' row.
+    let mark = h
+        .get_all_by_label(sigil_ui::Presence::Offline.word())
+        .map(|n| n.rect())
+        .find(|r| r.top() <= lines.center().y && lines.center().y <= r.bottom() + 20.0)
+        .expect("Ada's mark beside her lines");
+    let off = (lines.center().y - mark.center().y).abs();
+    assert!(
+        off <= 2.0,
+        "the lines are {off} off the mark's middle: lines {lines:?}, mark {mark:?}"
+    );
+}
+
 /// A dialog on a phone is as wide as the screen has, not 360 points.
 #[test]
 fn on_a_phone_a_dialog_fits_the_screen() {
