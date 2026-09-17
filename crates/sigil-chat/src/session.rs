@@ -31,7 +31,7 @@ use sqex_chat::client::{Chat, Link};
 use sqex_chat::store::{self, Store};
 use sqex_proto::channel::{
     EVENT_ADDED, EVENT_CREATED, EVENT_DEMOTED, EVENT_JOINED, EVENT_LEFT, EVENT_PROMOTED,
-    EVENT_REMOVED, EVENT_RENAMED, EVENT_REPLICATE, EVENT_RETENTION, EVENT_ROTATED,
+    EVENT_REMOVED, EVENT_RENAMED, EVENT_REPLICATE, EVENT_RETENTION, EVENT_ROTATED, EVENT_SUCCEEDED,
     EVENT_UNREPLICATE, Role, Visibility,
 };
 use sqex_proto::events::Event;
@@ -3998,6 +3998,15 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         EVENT_LEFT => (format!("{b} left"), None),
                         EVENT_JOINED => (format!("{b} joined"), None),
                         EVENT_PROMOTED => (format!("{a} made {b} an admin"), None),
+                        // SIP-44: the old key's own signature is in the entry,
+                        // which is the one thing that makes this believable.
+                        EVENT_SUCCEEDED => (
+                            format!("{a}'s account is now {b}"),
+                            Some(
+                                "They named this key to succeed them, signed by the key they \
+                                 lost. Everything they held here is that key's now.",
+                            ),
+                        ),
                         EVENT_DEMOTED => (format!("{a} took {b}'s admin away"), None),
                         EVENT_ROTATED => (
                             format!("{a} rotated the key"),

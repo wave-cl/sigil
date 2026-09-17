@@ -18,7 +18,10 @@ hand each other the history the exchange has since forgotten, through a
 session it cannot read; see [docs/devices.md](docs/devices.md). A
 conversation that lives at another exchange can be written to from the copy
 you are reading; the bar says where it lives, and what you write is ordered
-there; see [docs/homes.md](docs/homes.md).
+there; see [docs/homes.md](docs/homes.md). Name who takes your account
+if your key is lost -- a successor you sign for, or guardians a quorum of
+whom can -- and the exchange carries everything across when they claim
+it; see [docs/succession.md](docs/succession.md).
 
 ## Status
 

@@ -184,6 +184,28 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/resolve/publish", NotYet("SIP-28 resolution")),
     ("POST", "/resolve/get", NotYet("SIP-28 resolution")),
     ("POST", "/resolve/successor", NotYet("SIP-28 resolution")),
+    // SIP-44: signed with `sqex succession`; sigil shows the result in the
+    // transcript and tells a succeeded key where its account went.
+    (
+        "POST",
+        "/account/succeed",
+        NotYet("SIP-44 succession, from the CLI"),
+    ),
+    (
+        "POST",
+        "/account/succession",
+        NotYet("SIP-44 succession, from the CLI"),
+    ),
+    (
+        "POST",
+        "/account/lodge",
+        NotYet("SIP-44 succession, from the CLI"),
+    ),
+    (
+        "POST",
+        "/account/lodged",
+        NotYet("SIP-44 succession, from the CLI"),
+    ),
     // ---- exchange to exchange --------------------------------------------
     ("POST", "/peer/hello", NotAClientRoute),
     ("POST", "/peer/pull", NotAClientRoute),
@@ -336,7 +358,7 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 85,
+        total, 89,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -344,7 +366,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35 and SIP-43 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 77,
+        client, 81,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(

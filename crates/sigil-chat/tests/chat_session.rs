@@ -4042,3 +4042,131 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
     alice.stop();
     bob.stop();
 }
+
+/// SIP-44: a member sees a succession in the transcript, worded and backed by
+/// the old key's own signature; the old key's session is told where the
+/// account went.
+#[tokio::test]
+async fn a_succession_is_said_in_the_room_and_to_the_old_key() {
+    use sqex_proto::succession::{Claim, Proof, Will};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (alice_signer, alice_key) = signer(51);
+    let (bob_signer, bob_key) = signer(52);
+    let carol_seed = [53u8; 32];
+    let carol_key = PubKey::new(
+        SigningKey::from_bytes(&carol_seed)
+            .verifying_key()
+            .to_bytes(),
+    );
+    let alice = start_at(endpoint, alice_signer, &dir.path().join("alice.db"));
+    let bob = start_at(endpoint, bob_signer, &dir.path().join("bob.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(alice_key) && bob.state().me == Some(bob_key),
+            15
+        )
+        .await
+    );
+    alice.send(Cmd::NewPublic {
+        name: "the square".into(),
+        topic: String::new(),
+    });
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.public == Some(true)),
+            15
+        )
+        .await
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.public == Some(true))
+        .unwrap()
+        .channel;
+    alice.send(Cmd::Show(channel));
+    assert!(until(|| alice.state().open == Some(channel), 15).await);
+    bob.send(Cmd::Find("square".into()));
+    assert!(
+        until(
+            || bob.state().found.iter().any(|f| f.name == "the square"),
+            15
+        )
+        .await
+    );
+    let found = bob
+        .state()
+        .found
+        .into_iter()
+        .find(|f| f.name == "the square")
+        .unwrap();
+    bob.send(Cmd::Join {
+        channel: found.channel,
+        instance: found.instance,
+    });
+    assert!(until(|| bob.state().open == Some(channel), 15).await);
+
+    // Alice's will, presented by Carol as herself, on a bare connection.
+    let will = Will::sign(&[51u8; 32], &carol_key, 1000);
+    let mut carol = sqnr::Client::connect_as(addr, &server_pub, &carol_seed)
+        .await
+        .unwrap();
+    let (code, _) = carol
+        .post(
+            "/account/succeed",
+            Claim {
+                proof: Proof::Will(will),
+            }
+            .encode(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+
+    // Bob's transcript says so, in words that name both keys.
+    let said = until(
+        || {
+            bob.state().events.iter().any(|e| {
+                e.said.contains("account is now") && e.actor == alice_key && e.subject == carol_key
+            })
+        },
+        30,
+    )
+    .await;
+    assert!(
+        said,
+        "the succession was not said: {:?}",
+        bob.state()
+            .events
+            .iter()
+            .map(|e| e.said.clone())
+            .collect::<Vec<_>>()
+    );
+    // Alice's session is told where the account went, rather than left
+    // failing at everything.
+    let told =
+        until(
+            || {
+                alice.state().trouble.as_deref().is_some_and(|t| {
+                    t.contains("succeeded by") && t.contains(&carol_key.to_string())
+                })
+            },
+            30,
+        )
+        .await;
+    assert!(told, "{:?}", alice.state().trouble);
+
+    alice.stop();
+    bob.stop();
+}
