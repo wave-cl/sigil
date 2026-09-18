@@ -101,6 +101,16 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/device/list", Chat),
     ("POST", "/device/revoke", Chat),
     ("POST", "/device/register", Chat),
+    // SIP-67: which account this transport identity is registered to. A
+    // linked device learns that from the pairing claim it was given, and a
+    // desktop opens an identity that is its own account, so nothing asks
+    // yet. The phone will want it after a handover, when its store still
+    // names the key that was retired.
+    (
+        "GET",
+        "/device/account",
+        NotYet("a device learns its account from the pairing claim, not from the registry"),
+    ),
     ("POST", "/admission/request", Chat),
     ("POST", "/name/resolve", Chat),
     ("POST", "/name/reverse", Beneath),
@@ -491,7 +501,7 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 119,
+        total, 120,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -499,7 +509,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 103,
+        client, 104,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
