@@ -1,0 +1,21 @@
+# Debug info the tests never use.
+#
+# A dev/test build of this workspace links egui, wgpu, openh264 and the
+# whole sqex stack into every one of ~30 test binaries, and with cargo's
+# defaults each carried full DWARF for all of it: `transcript_ui` was
+# 147 MB. Nothing here reads it — kittest reports rects and labels, the
+# snapshot tests compare PNGs, and a panic's backtrace keeps `file:line`
+# under line tables. It cost link time on every test run and, multiplied
+# by the stale variants a path dependency leaves behind (a new metadata
+# hash for every crate on every edit of `../sqex`), 343 GB of target
+# directory in six days. See ~/projects/scripts/cargo-sweep-all.
+#
+# Lives here rather than in Cargo.toml so it is one file that nothing else
+# edits; cargo merges config profiles with the manifest's, config winning.
+# profile.test inherits from profile.dev, so this reaches every test.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies are never stepped through here at all.
+[profile.dev.package."*"]
+debug = false
