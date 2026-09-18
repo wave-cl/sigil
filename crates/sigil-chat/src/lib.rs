@@ -185,6 +185,32 @@ fn shape_of(line: &Line, grouped: bool) -> u64 {
 /// microphone, one room).
 ///
 /// `in_a_call` rather than the map, so the test says what it means.
+/// Whether a call this window is carrying has finished.
+///
+/// **The room is the fastest word.** A peer that was present and is no
+/// longer has left, and the roster says so within a tick; the channel's own
+/// end entry is authoritative but arrives when the exchange gets round to
+/// it -- nine seconds, on one measured call, against the roster's one. Both
+/// are kept: the entry covers a peer whose media path is still up, the
+/// roster covers an entry that has not arrived.
+///
+/// `saw_peer` is what keeps the start of a call from reading as the end of
+/// one: a room nobody has joined yet is also a room with nobody in it. A
+/// two-party call that never goes through a room leaves it false, and ends
+/// by the other two routes.
+fn call_is_over(
+    phase: sigil_net::Phase,
+    present: usize,
+    connecting: usize,
+    saw_peer: bool,
+    hung_up: bool,
+    waiting: std::time::Duration,
+) -> bool {
+    let never = !matches!(phase, sigil_net::Phase::Live);
+    let left = saw_peer && present == 0 && connecting == 0;
+    phase == sigil_net::Phase::Ended || hung_up || left || (never && waiting > RING_WINDOW)
+}
+
 fn to_join<'a>(
     rings: &'a [Ring],
     in_a_call: bool,
@@ -1183,6 +1209,10 @@ pub struct ChatApp {
 
 /// A call this client is actually carrying audio for.
 struct Live {
+    /// Whether anybody else has been in this call yet. A room that had
+    /// somebody and now has nobody is a call the far end has left; one
+    /// that never had anybody is a call still being answered.
+    saw_peer: bool,
     channel: [u8; 32],
     /// The invitation's `seq`. Everything about a call is keyed on it.
     seq: u64,
@@ -1325,6 +1355,7 @@ impl ChatApp {
                 seq,
                 handle,
                 since: std::time::Instant::now(),
+                saw_peer: false,
             },
         );
     }
@@ -6342,6 +6373,7 @@ impl ChatApp {
                 seq: ring.seq,
                 handle,
                 since: std::time::Instant::now(),
+                saw_peer: false,
             },
         );
     }
@@ -6407,25 +6439,36 @@ impl ChatApp {
     /// From `update` rather than `render`, for the reason `announce_rings` is:
     /// a call that cannot be seen is exactly the one this has to reach.
     fn end_calls_nobody_is_in(&mut self) {
-        let over: Vec<PubKey> = self
-            .calls
-            .iter()
-            .filter(|(me, live)| {
-                let phase = live.handle.state().phase;
-                let never = !matches!(phase, sigil_net::Phase::Live);
-                // The channel says it is over: the other side hung up and
-                // said so where every reader sees it, whether or not the
-                // path between the two has noticed yet.
-                let hung_up = self
-                    .at_for(**me)
-                    .map(|at| self.state_of(Some(&at)))
-                    .is_some_and(|state| state.over.contains(&(live.channel, live.seq)));
-                phase == sigil_net::Phase::Ended
-                    || hung_up
-                    || (never && live.since.elapsed() > RING_WINDOW)
-            })
-            .map(|(me, _)| *me)
-            .collect();
+        let mut over: Vec<PubKey> = Vec::new();
+        let mut present_now: Vec<(PubKey, bool)> = Vec::new();
+        for (me, live) in self.calls.iter() {
+            let call = live.handle.state();
+            // The channel says it is over: the other side hung up and
+            // said so where every reader sees it, whether or not the
+            // path between the two has noticed yet.
+            let hung_up = self
+                .at_for(*me)
+                .map(|at| self.state_of(Some(&at)))
+                .is_some_and(|state| state.over.contains(&(live.channel, live.seq)));
+            present_now.push((*me, !call.present.is_empty()));
+            if call_is_over(
+                call.phase,
+                call.present.len(),
+                call.connecting,
+                live.saw_peer,
+                hung_up,
+                live.since.elapsed(),
+            ) {
+                over.push(*me);
+            }
+        }
+        // Remembered after the decision, so the pass a peer first appears in
+        // is not also the pass that reads them as having left.
+        for (me, here) in present_now {
+            if here && let Some(live) = self.calls.get_mut(&me) {
+                live.saw_peer = true;
+            }
+        }
         for me in over {
             // The same act as pressing hang up, and recorded the same way: a
             // call that ends because nobody came still happened, and a
@@ -7912,7 +7955,7 @@ mod look_tests {
 
 #[cfg(test)]
 mod joining_tests {
-    use super::{Ring, to_join};
+    use super::{RING_WINDOW, Ring, call_is_over, to_join};
     use sqnr_core::PubKey;
     use std::collections::HashSet;
 
@@ -7931,6 +7974,42 @@ mod joining_tests {
     }
 
     /// The one case that joins: our call, picked up, and we are not in one.
+    /// The room emptying ends the call, and only once somebody had been
+    /// in it: a call still being answered has nobody present either.
+    #[test]
+    fn a_room_that_had_somebody_and_now_has_nobody_is_over() {
+        use sigil_net::Phase;
+        let nothing = std::time::Duration::ZERO;
+        // Somebody was there, and has gone.
+        assert!(call_is_over(Phase::Live, 0, 0, true, false, nothing));
+        // Still ringing: nobody has arrived yet, so nobody has left.
+        assert!(!call_is_over(Phase::Live, 0, 0, false, false, nothing));
+        // They are still here.
+        assert!(!call_is_over(Phase::Live, 1, 0, true, false, nothing));
+        // Gone from the roster, but another is still connecting.
+        assert!(!call_is_over(Phase::Live, 0, 1, true, false, nothing));
+    }
+
+    /// The other three routes are unchanged: the task finished, the
+    /// channel recorded the end, or nobody ever answered.
+    #[test]
+    fn a_call_also_ends_when_the_task_the_channel_or_the_ring_window_says_so() {
+        use sigil_net::Phase;
+        let nothing = std::time::Duration::ZERO;
+        assert!(call_is_over(Phase::Ended, 1, 0, true, false, nothing));
+        assert!(call_is_over(Phase::Live, 1, 0, true, true, nothing));
+        let past = RING_WINDOW + std::time::Duration::from_secs(1);
+        assert!(call_is_over(Phase::Connecting, 0, 0, false, false, past));
+        assert!(!call_is_over(
+            Phase::Connecting,
+            0,
+            0,
+            false,
+            false,
+            nothing
+        ));
+    }
+
     #[test]
     fn our_own_call_being_answered_is_the_one_to_join() {
         let rings = vec![ring(true, true)];
