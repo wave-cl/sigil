@@ -349,6 +349,11 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/peer/channel", NotAClientRoute),
     ("POST", "/peer/forward", NotAClientRoute),
     ("POST", "/peer/standing", NotAClientRoute),
+    // SIP-68: the account's home collects its waiting mail from a former
+    // home, and says what it took. Exchange to exchange, and refused to
+    // anyone the exchange is not peering with.
+    ("POST", "/peer/mailbox", NotAClientRoute),
+    ("POST", "/peer/mailbox/took", NotAClientRoute),
     // SIP-53, 54, 57, 59, 60, 61: more of the same, between exchanges.
     ("POST", "/peer/rehomed", NotAClientRoute),
     ("POST", "/peer/cursors", NotAClientRoute),
@@ -501,11 +506,11 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 120,
+        total, 122,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
-        peer, 16,
+        peer, 18,
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
