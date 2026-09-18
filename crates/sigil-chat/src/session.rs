@@ -648,6 +648,12 @@ pub struct ChatState {
     /// Not only the one on screen: a call is the thing that most needs to
     /// reach somebody who is looking elsewhere.
     pub ringing: Vec<Ring>,
+    /// Calls that have ended, by conversation and ring: the other side's
+    /// hangup is an entry in the channel, and a call this window is still
+    /// in that the channel says is over is one to leave. Without this the
+    /// window stayed "in a call" the other side had left, until the path
+    /// itself timed out.
+    pub over: Vec<([u8; 32], u64)>,
     /// Messages mentioning us that arrived while this session was up, in
     /// every conversation. See [`Mention`].
     /// Every message from somebody else that arrived live; the ones that
@@ -4237,8 +4243,12 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     // thing taken from a signal is `answered`, because answering writes no
     // entry and the log therefore cannot say it.
     let mut ringing: Vec<Ring> = Vec::new();
+    let mut over: Vec<([u8; 32], u64)> = Vec::new();
     for (channel, known) in &desk.channels {
         for call in known.timeline.calls() {
+            if call.ended.is_some() {
+                over.push((*channel, call.seq));
+            }
             if call.outcome(now).is_some() {
                 continue;
             }
@@ -4385,6 +4395,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(topic, topic);
         set!(home, home);
         set!(ringing, ringing);
+        set!(over, over);
         set!(arrivals, arrivals);
         set!(unseen, unseen);
         set!(presence, desk.presence.clone());

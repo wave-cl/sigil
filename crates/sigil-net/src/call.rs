@@ -116,6 +116,12 @@ struct Bridge {
 
 impl Report for Bridge {
     fn event(&mut self, event: Event) {
+        // Every step of a call, in the log: a call that ended eight seconds
+        // in on a phone was ending for a reason nothing had written down.
+        // Stats and presence are a line a second each, and are not.
+        if !matches!(event, Event::Stats(_) | Event::Present { .. }) {
+            tracing::info!(?event, "call");
+        }
         // Update the snapshot first, so a wake never arrives before the state
         // it is waking somebody up to look at.
         self.state.send_modify(|s| match &event {
@@ -226,6 +232,12 @@ impl CallHandle {
     /// which is the same trade the CLI's signal handler already makes and is
     /// documented there.
     pub fn hang_up(&self) {
+        // The last second's statistics, before the task that would have
+        // summed them up is gone: a call ended from this side leaves no
+        // closing summary, and the last line is what there is to read of
+        // how it went.
+        let last = self.ending.borrow().stats.clone();
+        tracing::info!(stats = ?last, "hung up");
         self.task.abort();
         // Said here rather than left to the task, which will not run again.
         self.ending.send_modify(|s| {
@@ -414,6 +426,10 @@ pub fn spawn_call(
         // Whatever happened, the interface must be told the call is over --
         // otherwise a failed call sits on screen looking like a connecting one
         // forever.
+        match &result {
+            Ok(_) => tracing::info!("call over"),
+            Err(e) => tracing::warn!("call over with trouble: {e}"),
+        }
         ending.send_modify(|s| {
             s.phase = Phase::Ended;
             if let Err(e) = &result {
@@ -589,6 +605,10 @@ pub fn spawn_dm_call(
         }
         .await;
 
+        match &result {
+            Ok(_) => tracing::info!("call over"),
+            Err(e) => tracing::warn!("call over with trouble: {e}"),
+        }
         ending.send_modify(|s| {
             s.phase = Phase::Ended;
             s.present.clear();

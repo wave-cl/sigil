@@ -6397,10 +6397,19 @@ impl ChatApp {
         let over: Vec<PubKey> = self
             .calls
             .iter()
-            .filter(|(_, live)| {
+            .filter(|(me, live)| {
                 let phase = live.handle.state().phase;
                 let never = !matches!(phase, sigil_net::Phase::Live);
-                phase == sigil_net::Phase::Ended || (never && live.since.elapsed() > RING_WINDOW)
+                // The channel says it is over: the other side hung up and
+                // said so where every reader sees it, whether or not the
+                // path between the two has noticed yet.
+                let hung_up = self
+                    .at_for(**me)
+                    .map(|at| self.state_of(Some(&at)))
+                    .is_some_and(|state| state.over.contains(&(live.channel, live.seq)));
+                phase == sigil_net::Phase::Ended
+                    || hung_up
+                    || (never && live.since.elapsed() > RING_WINDOW)
             })
             .map(|(me, _)| *me)
             .collect();
@@ -6635,7 +6644,10 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) -> bool {
-        let Some(ring) = state.ringing.iter().find(|r| r.mine) else {
+        // Only while it is ringing: once the other side has answered, the
+        // call's own banner says what is happening, and "Ringing…" under
+        // "In a call" was two answers to one question.
+        let Some(ring) = state.ringing.iter().find(|r| r.mine && !r.answered) else {
             return false;
         };
         let (channel, seq) = (ring.channel, ring.seq);

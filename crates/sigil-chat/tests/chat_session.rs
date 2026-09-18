@@ -1840,6 +1840,28 @@ async fn an_answered_call_stops_ringing_for_the_caller() {
         alice.state().ringing
     );
 
+    // The other side hangs up, and the caller's state says so by the
+    // conversation and the ring -- which is what lets the caller's window
+    // leave a call the path has not yet noticed is over.
+    assert!(
+        !alice.state().over.contains(&(ring.channel, ring.seq)),
+        "the call is not over yet"
+    );
+    bob.send(Cmd::Hangup {
+        channel: ring.channel,
+        seq: ring.seq,
+        seconds: 3,
+    });
+    assert!(
+        until(
+            || alice.state().over.contains(&(ring.channel, ring.seq)),
+            20
+        )
+        .await,
+        "the caller should learn the call is over: {:?}",
+        alice.state().over
+    );
+
     alice.stop();
     bob.stop();
 }

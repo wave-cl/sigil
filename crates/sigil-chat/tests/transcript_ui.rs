@@ -227,6 +227,7 @@ fn a_conversation() -> ChatState {
         topic: String::new(),
         home: None,
         ringing: Vec::new(),
+        over: Vec::new(),
         arrivals: Vec::new(),
         unseen: Vec::new(),
         presence: std::collections::HashMap::new(),
@@ -3243,6 +3244,39 @@ fn a_picture_still_coming_says_it_is_coming() {
 /// not change with the mechanism: a name is an assertion (SIP-21), and this is
 /// the one screen where acting on the wrong one puts somebody in a call with a
 /// stranger who chose a confusable name. The key stays on the ring.
+/// A call of ours that has been answered shows no "Calling… Ringing…"
+/// card: the call's own banner says what is happening from then on, and
+/// on a phone the two sat one under the other for the whole call.
+#[test]
+fn an_answered_call_of_ours_is_no_longer_shown_as_ringing() {
+    let ring = |answered: bool| sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: me(),
+        mine: true,
+        secret: [3u8; 32],
+        answered,
+        label: "Ada".into(),
+        direct: false,
+        peer: Some(them()),
+    };
+    let mut state = a_conversation();
+    state.ringing = vec![ring(false)];
+    let mut h = harness_with(state, true);
+    h.run();
+    assert!(text_of(&h).contains("Ringing"), "unanswered, it rings");
+
+    let mut state = a_conversation();
+    state.ringing = vec![ring(true)];
+    let mut h = harness_with(state, true);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("Ringing"),
+        "answered, and still ringing: {said}"
+    );
+}
+
 #[test]
 fn a_ring_shows_the_callers_key_in_full() {
     let mut state = a_conversation();
