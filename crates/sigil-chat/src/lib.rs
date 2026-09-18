@@ -185,11 +185,20 @@ fn shape_of(line: &Line, grouped: bool) -> u64 {
 /// microphone, one room).
 ///
 /// `in_a_call` rather than the map, so the test says what it means.
-fn to_join(rings: &[Ring], in_a_call: bool) -> Option<&Ring> {
+fn to_join<'a>(
+    rings: &'a [Ring],
+    in_a_call: bool,
+    left: &HashSet<([u8; 32], u64)>,
+) -> Option<&'a Ring> {
     if in_a_call {
         return None;
     }
-    rings.iter().find(|r| r.mine && r.answered)
+    // Not one this window has already left: the ring stays listed until
+    // the channel records the end, and for those seconds a call just hung
+    // up was joined again and hung up again.
+    rings
+        .iter()
+        .find(|r| r.mine && r.answered && !left.contains(&(r.channel, r.seq)))
 }
 
 /// How long to leave a session that died before starting it again.
@@ -1145,6 +1154,9 @@ pub struct ChatApp {
     /// SIP-13 room on its own connection, which is `sigil-net`'s job. This is
     /// the join between them, and nothing else needs to know both halves.
     calls: HashMap<PubKey, Live>,
+    /// Calls this window has left, by conversation and ring, so a ring still
+    /// listed as answered is not joined again on the way out.
+    left: HashSet<([u8; 32], u64)>,
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
@@ -1205,6 +1217,7 @@ impl ChatApp {
             sent: Vec::new(),
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
+            left: HashSet::new(),
             announced: std::collections::HashSet::new(),
             picking: None,
             saving: None,
@@ -6362,7 +6375,7 @@ impl ChatApp {
         let mut joining: Vec<(At, Ring)> = Vec::new();
         for (at, session) in &self.sessions {
             let rings = session.ringing();
-            if let Some(ring) = to_join(&rings, self.calls.contains_key(&at.0)) {
+            if let Some(ring) = to_join(&rings, self.calls.contains_key(&at.0), &self.left) {
                 joining.push((at.clone(), ring.clone()));
             }
         }
@@ -6441,6 +6454,7 @@ impl ChatApp {
     /// Stop carrying audio, and say how long it lasted.
     fn leave_call(&mut self, me: PubKey) -> Option<([u8; 32], u64, u32)> {
         let live = self.calls.remove(&me)?;
+        self.left.insert((live.channel, live.seq));
         let seconds = live.since.elapsed().as_secs().min(u32::MAX as u64) as u32;
         live.handle.hang_up();
         Some((live.channel, live.seq, seconds))
@@ -7900,6 +7914,7 @@ mod look_tests {
 mod joining_tests {
     use super::{Ring, to_join};
     use sqnr_core::PubKey;
+    use std::collections::HashSet;
 
     fn ring(mine: bool, answered: bool) -> Ring {
         Ring {
@@ -7919,36 +7934,46 @@ mod joining_tests {
     #[test]
     fn our_own_call_being_answered_is_the_one_to_join() {
         let rings = vec![ring(true, true)];
-        assert!(to_join(&rings, false).is_some());
+        assert!(to_join(&rings, false, &HashSet::new()).is_some());
+    }
+
+    /// A ring this window has already left is not joined again while the
+    /// channel still lists it as answered.
+    #[test]
+    fn a_call_just_left_is_not_joined_again() {
+        let rings = vec![ring(true, true)];
+        let left: HashSet<([u8; 32], u64)> = [(rings[0].channel, rings[0].seq)].into();
+        assert!(to_join(&rings, false, &left).is_none());
+        assert!(to_join(&rings, false, &HashSet::new()).is_some());
     }
 
     /// Still ringing is not yet a call. Joining here would open the
     /// microphone for as long as it rings, and for calls nobody ever answers.
     #[test]
     fn a_call_still_ringing_is_not_joined() {
-        assert!(to_join(&[ring(true, false)], false).is_none());
+        assert!(to_join(&[ring(true, false)], false, &HashSet::new()).is_none());
     }
 
     /// Somebody else's ring is answered by pressing Answer. Joining it here
     /// would pick up every incoming call by itself.
     #[test]
     fn somebody_elses_ring_is_not_ours_to_join() {
-        assert!(to_join(&[ring(false, true)], false).is_none());
-        assert!(to_join(&[ring(false, false)], false).is_none());
+        assert!(to_join(&[ring(false, true)], false, &HashSet::new()).is_none());
+        assert!(to_join(&[ring(false, false)], false, &HashSet::new()).is_none());
     }
 
     /// One microphone, one room: already being in a call ends the question,
     /// which is also what stops this joining the same call on every pass.
     #[test]
     fn a_call_already_being_carried_is_not_joined_again() {
-        assert!(to_join(&[ring(true, true)], true).is_none());
+        assert!(to_join(&[ring(true, true)], true, &HashSet::new()).is_none());
     }
 
     /// Ours among others.
     #[test]
     fn the_answered_one_is_found_among_several() {
         let rings = vec![ring(false, true), ring(true, false), ring(true, true)];
-        let found = to_join(&rings, false).expect("ours, answered");
+        let found = to_join(&rings, false, &HashSet::new()).expect("ours, answered");
         assert!(found.mine && found.answered);
     }
 }
