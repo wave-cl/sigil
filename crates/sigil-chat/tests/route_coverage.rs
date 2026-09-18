@@ -170,6 +170,20 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         ),
     ),
     ("GET", "/exchange/peers", Chat),
+    // SIP-64: the exchange's earlier keys, so a client that pinned an old one
+    // can follow a handover it did not see. sigil pins through sqnr and
+    // follows SIP-40's signed handover instead, and writing a lineage is an
+    // operator's act, not a chat client's.
+    (
+        "GET",
+        "/exchange/lineage",
+        NotYet("sigil follows SIP-40's signed handover; it does not read the lineage"),
+    ),
+    (
+        "POST",
+        "/exchange/lineage",
+        NotYet("an operator writes an exchange's lineage, through sqnr's admin protocol"),
+    ),
     // SIP-43: asked with a channel's first `info`, so the session signs and
     // verifies under the exchange that orders it.
     ("POST", "/channel/home", Chat),
@@ -477,7 +491,7 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 117,
+        total, 119,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -485,7 +499,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 101,
+        client, 103,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
