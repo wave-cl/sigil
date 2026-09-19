@@ -301,6 +301,21 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/account/handover",
         NotYet("SIP-62 key handover, from sqex-chat"),
     ),
+    (
+        "POST",
+        "/account/hint",
+        NotYet("SIP-76: a device tells its home which origin to pull from"),
+    ),
+    (
+        "POST",
+        "/channel/chain",
+        NotYet("SIP-77: this device's chain heads as the exchange holds them"),
+    ),
+    (
+        "POST",
+        "/channel/folded",
+        NotYet("SIP-71: the folded log of a direct message the exchange ended"),
+    ),
     ("POST", "/attest/lodge", NotYet("SIP-27 attestation")),
     ("POST", "/attest/read", NotYet("SIP-27 attestation")),
     ("POST", "/resolve/publish", NotYet("SIP-28 resolution")),
@@ -354,6 +369,10 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // anyone the exchange is not peering with.
     ("POST", "/peer/mailbox", NotAClientRoute),
     ("POST", "/peer/mailbox/took", NotAClientRoute),
+    // SIP-71: a folded direct message asked for across the peering, with
+    // the caller having to be that identifier's home by its own signed
+    // Move. Exchange to exchange like the rest of `/peer/`.
+    ("POST", "/peer/folded", NotAClientRoute),
     // SIP-53, 54, 57, 59, 60, 61: more of the same, between exchanges.
     ("POST", "/peer/rehomed", NotAClientRoute),
     ("POST", "/peer/cursors", NotAClientRoute),
@@ -506,15 +525,15 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 122,
+        total, 126,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
-        peer, 18,
+        peer, 19,
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 104,
+        client, 107,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
