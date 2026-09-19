@@ -1195,6 +1195,12 @@ pub struct ChatApp {
     /// Held with the moment it was pressed so a ring that never turns up
     /// stops being waited for rather than latching forever.
     answering: Option<(At, [u8; 32], std::time::Instant)>,
+    /// Rings announced and not yet withdrawn, each with where it was posted.
+    ///
+    /// Announcing is half of it. A ring is posted **ongoing** -- unswipeable,
+    /// carrying an Answer -- so when the call goes, the notification has to
+    /// go with it or it stands there offering to answer nothing.
+    ringing_out: std::collections::HashMap<([u8; 32], u64), Target>,
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
@@ -1261,6 +1267,7 @@ impl ChatApp {
             calls: HashMap::new(),
             left: HashSet::new(),
             answering: None,
+            ringing_out: std::collections::HashMap::new(),
             announced: std::collections::HashSet::new(),
             picking: None,
             saving: None,
@@ -6605,6 +6612,8 @@ impl ChatApp {
                     continue;
                 }
                 self.announced.insert((ring.channel, ring.seq));
+                self.ringing_out
+                    .insert((ring.channel, ring.seq), target(at, ring.channel));
                 // The whole state, but only for a ring nobody has been told
                 // about yet -- which happens about as often as a telephone
                 // rings, rather than sixty times a second.
@@ -6616,6 +6625,42 @@ impl ChatApp {
             }
         }
         self.announce_rings_in(ctx, fresh);
+        self.withdraw_gone_rings(ctx);
+    }
+
+    /// Take down the notification for a ring that has stopped ringing.
+    ///
+    /// **Nothing did this, on any platform.** The Android glue has had the
+    /// call to withdraw a ring since rings existed and no Rust ever made it,
+    /// so every ring posted on that phone stayed on the notification shade
+    /// for good: ongoing, so it could not be swiped away, and still offering
+    /// Answer for a call that had ended minutes before. Pressing it opened
+    /// the conversation and did nothing else, which is exactly what a broken
+    /// button looks like.
+    ///
+    /// A ring that is no longer in the session's list has been answered,
+    /// declined, cancelled or missed. All four mean the same thing here.
+    fn withdraw_gone_rings(&mut self, ctx: &mut AppContext<'_>) {
+        if self.ringing_out.is_empty() {
+            return;
+        }
+        let live: std::collections::HashSet<([u8; 32], u64)> = self
+            .sessions
+            .values()
+            .flat_map(|s| s.ringing())
+            .map(|r| (r.channel, r.seq))
+            .collect();
+        let gone: Vec<([u8; 32], u64)> = self
+            .ringing_out
+            .keys()
+            .filter(|k| !live.contains(*k))
+            .copied()
+            .collect();
+        for key in gone {
+            if let Some(to) = self.ringing_out.remove(&key) {
+                ctx.notify.withdraw(&to);
+            }
+        }
     }
 
     /// The deciding half: rings nobody has been told about yet are said,
@@ -7423,11 +7468,21 @@ mod mention_notice_tests {
     struct Noted(
         RefCell<Vec<(String, String)>>,
         RefCell<Vec<(Option<Target>, Sound)>>,
+        RefCell<Vec<Target>>,
     );
 
     impl Noted {
         fn new() -> Noted {
-            Noted(RefCell::new(Vec::new()), RefCell::new(Vec::new()))
+            Noted(
+                RefCell::new(Vec::new()),
+                RefCell::new(Vec::new()),
+                RefCell::new(Vec::new()),
+            )
+        }
+
+        /// Rings taken down since the last time this was asked.
+        fn withdrawn(&self) -> Vec<Target> {
+            std::mem::take(&mut self.2.borrow_mut())
         }
     }
 
@@ -7438,6 +7493,10 @@ mod mention_notice_tests {
                 .push((notice.summary.into(), notice.body.into()));
             self.1.borrow_mut().push((notice.target, notice.sound));
             true
+        }
+
+        fn withdraw(&self, target: &Target) {
+            self.2.borrow_mut().push(target.clone());
         }
     }
 
@@ -7584,6 +7643,47 @@ mod mention_notice_tests {
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
         app.announce_rings_in(&mut c, vec![]);
         assert_eq!(app.asked(), vec![], "no ring, nothing asked");
+    }
+
+    /// A ring that has stopped ringing is taken down, once, and a ring that
+    /// is still ringing is left alone.
+    ///
+    /// **Nothing withdrew a ring on any platform.** The Android glue had the
+    /// call and no Rust ever made it, so a ring posted there stayed on the
+    /// shade for good -- ongoing, unswipeable, still offering Answer for a
+    /// call that had ended. Pressing it opened the conversation and did
+    /// nothing else, which is what a broken button looks like.
+    #[test]
+    fn a_ring_that_has_stopped_ringing_is_taken_down_once() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        // Two rings posted. No session holds either, so both have gone.
+        let gone = target(&at(), [8u8; 32]);
+        let other = target(&at(), [9u8; 32]);
+        app.ringing_out.insert(([8u8; 32], 1), gone.clone());
+        app.ringing_out.insert(([9u8; 32], 7), other.clone());
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        // **Through `announce_rings`, not straight into the pass.** The
+        // defect being fixed is a withdrawal nothing called; a test that
+        // calls the pass itself passes with the wiring cut out, and I
+        // checked that it did before writing it this way.
+        app.announce_rings(&mut c);
+        let mut taken = noted.withdrawn();
+        taken.sort_by_key(|t| t.channel);
+        assert_eq!(taken, vec![gone, other], "both rings should be taken down");
+        assert!(app.ringing_out.is_empty());
+
+        // And not again: an ongoing notification withdrawn twice is a second
+        // call into the platform for a notification that is already gone.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_rings(&mut c);
+        assert!(noted.withdrawn().is_empty(), "a ring was taken down twice");
     }
 
     /// With several identities held, which one was mentioned; with one,

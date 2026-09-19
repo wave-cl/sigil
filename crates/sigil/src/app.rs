@@ -237,6 +237,20 @@ pub trait Notify {
     fn pressed(&self) -> Vec<Target> {
         Vec::new()
     }
+
+    /// Take down a ring that is no longer ringing: answered, declined,
+    /// cancelled, or simply missed.
+    ///
+    /// **A ring is the one notification that must be withdrawn.** It is
+    /// posted ongoing, so the person cannot swipe it away, and it carries an
+    /// Answer. Left up after the call has gone, it is an offer to answer
+    /// something that no longer exists -- pressing it opens the conversation
+    /// and nothing else happens, which is indistinguishable from a broken
+    /// button. On the phone this was every ring ever posted: the platform
+    /// had the call to withdraw one and nothing ever made it.
+    ///
+    /// Platforms whose notifications expire on their own may do nothing.
+    fn withdraw(&self, _target: &Target) {}
 }
 
 /// Says nothing, for tests and for a session with no desktop at all.
