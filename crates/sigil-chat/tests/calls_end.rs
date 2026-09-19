@@ -328,6 +328,7 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
         identity: second,
         exchange: String::new(),
         channel: [7u8; 32],
+        answer: false,
     };
     let mut nav = Navigator::default();
     let mut ctx = AppContext {
@@ -359,6 +360,7 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
         identity: PubKey::new([9u8; 32]),
         exchange: String::new(),
         channel: [7u8; 32],
+        answer: false,
     };
     let mut nav = Navigator::default();
     let mut ctx = AppContext {

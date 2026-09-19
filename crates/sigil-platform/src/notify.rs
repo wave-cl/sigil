@@ -263,6 +263,7 @@ mod tests {
             identity: sqnr_core::PubKey::new([1u8; 32]),
             exchange: "trunk.exchange".into(),
             channel: [2u8; 32],
+            answer: false,
         };
         notifier.pressed.lock().unwrap().push(target.clone());
         assert_eq!(notifier.pressed(), vec![target]);

@@ -320,6 +320,9 @@ fn target(at: &At, channel: [u8; 32]) -> Target {
         identity: at.0,
         exchange: at.1.clone(),
         channel,
+        // A notification leads to a conversation. A ring's Answer is the
+        // one that answers, and it is built where the ring is.
+        answer: false,
     }
 }
 
@@ -1183,6 +1186,15 @@ pub struct ChatApp {
     /// Calls this window has left, by conversation and ring, so a ring still
     /// listed as answered is not joined again on the way out.
     left: HashSet<([u8; 32], u64)>,
+    /// A ring whose **Answer** was pressed on a notification, waiting for
+    /// the conversation it belongs to to be in hand.
+    ///
+    /// Not answered on the spot, because the press can arrive before there
+    /// is anything to answer: on a phone the window may be starting from
+    /// cold, and the session, its state and the ring itself all land later.
+    /// Held with the moment it was pressed so a ring that never turns up
+    /// stops being waited for rather than latching forever.
+    answering: Option<(At, [u8; 32], std::time::Instant)>,
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
@@ -1248,6 +1260,7 @@ impl ChatApp {
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             left: HashSet::new(),
+            answering: None,
             announced: std::collections::HashSet::new(),
             picking: None,
             saving: None,
@@ -1740,6 +1753,9 @@ impl App for ChatApp {
             (!target.exchange.is_empty()).then(|| target.exchange.clone()),
         );
         self.send_as(Some(&at), Cmd::Show(target.channel));
+        if target.answer {
+            self.answering = Some((at, target.channel, std::time::Instant::now()));
+        }
         true
     }
 
@@ -1763,6 +1779,7 @@ impl App for ChatApp {
         self.announce_mentions(ctx);
         self.announce_arrivals(ctx);
         self.join_answered_calls(ctx, egui_ctx);
+        self.answer_pressed(ctx, egui_ctx);
         self.end_calls_nobody_is_in();
         // **A window carrying audio is not idle.** Everything else here sleeps
         // until something happens, which is what makes a quiet sigil cost
@@ -2377,19 +2394,33 @@ impl ChatApp {
             callable && !self.calls.contains_key(&me) && !state.ringing.iter().any(|r| r.mine);
         let mut call = false;
         if narrow {
-            // Everything behind one button, the call first. The call was
-            // kept out as the control somebody reaches for in a hurry, and
-            // on a 360-point phone it cost the conversation its name:
-            // "ge…" beside a call button is a bar nobody can read.
+            // **The call is its own button, not a menu item.** It is the
+            // control somebody reaches for in a hurry, and a hurry is the
+            // worst time to open a menu and read it. It was folded in once
+            // because a call button beside the name cost a 360-point phone
+            // the name itself -- but that was a bar carrying five controls,
+            // and this one carries two. `callable` keeps it to the places a
+            // call belongs: a direct message or a private channel, never a
+            // public one.
             let more = sigil_ui::icon_button_named(
                 ui,
                 sigil_ui::Icon::More,
                 "More about this conversation",
             );
+            // **After the menu, not before it.** This bar lays out from the
+            // right, so drawing the call first would push the menu button
+            // left -- and `a_hidden_strip_does_not_come_back_when_another_menu_opens`
+            // then fails: with the menu button moved, a press on it leaves a
+            // message's action strip on the transcript. I could not account
+            // for that from the geometry the harness reports, so I have not
+            // claimed to: what is established is that the bar's positions
+            // are load-bearing for that behaviour, and this keeps every
+            // existing control exactly where it was. Worth understanding
+            // before anything else is added to this bar.
+            if may_call && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Call, "Call").clicked() {
+                call = true;
+            }
             egui::Popup::menu(&more).show(|ui| {
-                if may_call && ui.button("Call").clicked() {
-                    call = true;
-                }
                 let who = if members > 0 && !dm {
                     format!("Members ({members})")
                 } else {
@@ -6416,6 +6447,49 @@ impl ChatApp {
         }
     }
 
+    /// Answer a ring whose notification Answer was pressed.
+    ///
+    /// **Opening the conversation is not answering the call.** A ring's
+    /// Answer on a phone led into the window and stopped: the conversation
+    /// came up and the call went on ringing behind it, so the button
+    /// appeared to do nothing at all.
+    ///
+    /// From `update`, beside [`ChatApp::join_answered_calls`], and for the
+    /// same reason -- the press can arrive before there is a ring to answer,
+    /// when the window is starting from cold and the session has not
+    /// reconnected yet. Answering goes through the same two steps the Answer
+    /// button takes, so there is one way a call is answered.
+    fn answer_pressed(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
+        let Some((at, channel, asked)) = self.answering.clone() else {
+            return;
+        };
+        // A ring nobody can find within the window it would have rung for is
+        // one that ended while the window was coming up.
+        if asked.elapsed() > RING_WINDOW {
+            self.answering = None;
+            return;
+        }
+        let Some(session) = self.sessions.get(&at) else {
+            return;
+        };
+        let Some(ring) = session
+            .ringing()
+            .into_iter()
+            .find(|r| r.channel == channel && !r.mine && !r.answered)
+        else {
+            return;
+        };
+        self.answering = None;
+        self.send_as(
+            Some(&at),
+            Cmd::Answer {
+                channel: ring.channel,
+                seq: ring.seq,
+            },
+        );
+        self.join_call(ctx, &at, &ring, egui_ctx);
+    }
+
     /// Put down a call that is over, or that never became one.
     ///
     /// **A call holds the microphone, and until this existed the only thing
@@ -7559,6 +7633,7 @@ mod mention_notice_tests {
                 identity: key(4),
                 exchange: String::new(),
                 channel: [8u8; 32],
+                answer: false,
             })
         );
         assert_eq!(sound, Sound::Default);

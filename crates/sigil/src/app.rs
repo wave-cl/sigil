@@ -177,6 +177,15 @@ pub struct Target {
     pub identity: sqnr_core::PubKey,
     pub exchange: String,
     pub channel: [u8; 32],
+    /// The press was **Answer** on a ring, not an ordinary press.
+    ///
+    /// Opening the conversation is not answering it, and on a phone the two
+    /// are pressed in the same place: a ring's Answer led into the window
+    /// and stopped there, so the call went on ringing behind the
+    /// conversation it had just opened. Answering still happens in the one
+    /// place it happens from the Answer button, and this only says the
+    /// person asked for it.
+    pub answer: bool,
 }
 
 /// Whether a notification makes a sound, and which.

@@ -1728,6 +1728,7 @@ fn a_pressed_notification_opens_the_app_it_came_from() {
         identity: sqnr_core::PubKey::new([4u8; 32]),
         exchange: String::new(),
         channel: [8u8; 32],
+        answer: false,
     };
     pressed.borrow_mut().push(target.clone());
     h.step();
