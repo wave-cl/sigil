@@ -602,7 +602,7 @@ pub struct ChatState {
     /// other party of every direct message and the members of the open
     /// conversation. Absent is not known.
     pub presence: HashMap<PubKey, crate::presence::Presence>,
-    /// The exchanges this one federates with (SIP-46): each by key and,
+    /// The exchanges this one federates with (SIP-39 §The peer directory): each by key and,
     /// where recorded, the domain it is reached by. A hint; sigil reaches
     /// one only by discovering its domain and refusing a different key.
     pub peers: Vec<(PubKey, String)>,
@@ -1663,7 +1663,7 @@ async fn run(
     (wake)();
 
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
-    // SIP-52: everything that moved while this client was away, in one
+    // SIP-47 §Catching up in one round trip: everything that moved while this client was away, in one
     // round trip, before the sweep asks channel by channel. On a desktop it
     // is a faster start; on a phone woken for seconds it is the difference
     // between a window that finishes and one that does not.
@@ -2092,7 +2092,7 @@ struct Desk {
     asked_at: HashMap<PubKey, std::time::Instant>,
     /// What the asking found.
     presence: HashMap<PubKey, crate::presence::Presence>,
-    /// SIP-46: what this exchange federates with, read once per connection.
+    /// SIP-39 §The peer directory: what this exchange federates with, read once per connection.
     peers: Vec<(PubKey, String)>,
     peers_read: bool,
     /// SIP-42: this account's other devices, the open kept toward each,
@@ -2956,18 +2956,18 @@ fn at_home(home: &sqex_proto::channel::Home) -> String {
     }
 }
 
-/// Bytes of entries and envelopes one catch-up asks for. Half of SIP-52's
+/// Bytes of entries and envelopes one catch-up asks for. Half of SIP-47 §Limits'
 /// ceiling: what a phone can absorb in a window, and more than a night's
 /// worth of most conversations.
 const CATCHUP_BUDGET: u32 = 512 * 1024;
 
-/// SIP-52, once per session: name every channel the store holds, with where
+/// SIP-47 §Catching up in one round trip, once per session: name every channel the store holds, with where
 /// it got to, and absorb what came back exactly as a poll's answer is
 /// absorbed -- the same `Chat::absorb`, the same bookkeeping in `took`.
 ///
 /// A channel answered whole leaves the sweep's dirty set, so the first
 /// pass does not fetch it a second time; one answered with `more` stays,
-/// and the sweep collects the rest. An exchange from before SIP-52 refuses
+/// and the sweep collects the rest. An exchange from before sqex 0.70.0 (SIP-47 §Catching up in one round trip) refuses
 /// the route and nothing changes: the sweep runs as it always did.
 async fn catch_up(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk, me: PubKey) {
     let named = match chat.named_for_catchup() {
@@ -2977,7 +2977,7 @@ async fn catch_up(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut 
     let answer = match chat.catchup(&named, CATCHUP_BUDGET).await {
         Ok(answer) => answer,
         Err(sqex_chat::client::ChatError::NoChatHere(_)) => {
-            tracing::debug!("the exchange does not catch up (before SIP-52); polling instead");
+            tracing::debug!("the exchange does not catch up (before SIP-47); polling instead");
             return;
         }
         Err(e) => {
@@ -3690,7 +3690,7 @@ fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
 }
 
 /// Build what the interface draws from what the task holds.
-/// SIP-46: ask the exchange what it federates with. An exchange from
+/// SIP-39 §The peer directory: ask the exchange what it federates with. An exchange from
 /// before the directory answers 404, which is an empty directory here.
 async fn read_peers(chat: &mut Chat, desk: &mut Desk) -> bool {
     let Some(mut client) = chat.connection() else {

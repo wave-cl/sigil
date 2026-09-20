@@ -30,7 +30,7 @@ async fn server_with(
 }
 
 /// The same, seeded with exchanges it federates with (SIP-39's list, which
-/// SIP-46 reads back).
+/// SIP-39 §The peer directory reads back).
 async fn server_peering(
     dir: &Path,
     names: &str,
@@ -3500,7 +3500,7 @@ async fn a_verified_mark_is_kept_here_and_said_only_when_asked() {
     alice.stop();
 }
 
-/// What the exchange federates with is in the state once connected (SIP-46):
+/// What the exchange federates with is in the state once connected (SIP-39 §The peer directory):
 /// the seeded peer by key, with no domain since a seed carries none.
 #[tokio::test]
 async fn the_exchanges_this_one_federates_with_are_in_the_state() {

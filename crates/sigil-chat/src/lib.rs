@@ -3718,7 +3718,7 @@ impl ChatApp {
         if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
             ui.colored_label(theme.destructive, trouble);
         }
-        // **What this exchange federates with** (SIP-46), each one press
+        // **What this exchange federates with** (SIP-39 §The peer directory), each one press
         // away -- through the same path as a domain typed by hand, which
         // discovers it and pins the key it finds. A listing is a hint the
         // exchange gave; the pin is the fact. Only peers with a domain: a

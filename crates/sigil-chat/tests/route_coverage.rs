@@ -49,7 +49,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/channel/close", Chat),
     ("POST", "/channel/post", Chat),
     ("POST", "/channel/fetch", Chat),
-    // SIP-52: the session's first reconcile, and the phone's wake window.
+    // SIP-47 §Catching up in one round trip: the session's first reconcile, and the phone's wake window.
     ("POST", "/channel/catchup", Chat),
     ("POST", "/channel/info", Chat),
     ("POST", "/channel/mine", Chat),
@@ -311,12 +311,14 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     (
         "POST",
         "/channel/chain",
-        NotYet("SIP-43 §The heads by position: this device's chain heads as the exchange holds them"),
+        NotYet(
+            "SIP-43 §The heads by position: this device's chain heads as the exchange holds them",
+        ),
     ),
     (
         "POST",
         "/channel/folded",
-        NotYet("SIP-71: the folded log of a direct message the exchange ended"),
+        NotYet("SIP-60 §Reading the folded log, from sqex-chat"),
     ),
     ("POST", "/attest/lodge", NotYet("SIP-27 attestation")),
     ("POST", "/attest/read", NotYet("SIP-27 attestation")),
@@ -366,16 +368,16 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/peer/channel", NotAClientRoute),
     ("POST", "/peer/forward", NotAClientRoute),
     ("POST", "/peer/standing", NotAClientRoute),
-    // SIP-68: the account's home collects its waiting mail from a former
+    // SIP-59 §Collecting mail: the account's home collects its waiting mail from a former
     // home, and says what it took. Exchange to exchange, and refused to
     // anyone the exchange is not peering with.
     ("POST", "/peer/mailbox", NotAClientRoute),
     ("POST", "/peer/mailbox/took", NotAClientRoute),
-    // SIP-71: a folded direct message asked for across the peering, with
+    // SIP-60 §The home learns of a stray: a stray told across the peering, with
     // the caller having to be that identifier's home by its own signed
     // Move. Exchange to exchange like the rest of `/peer/`.
     ("POST", "/peer/folded", NotAClientRoute),
-    // SIP-68: an account's backup and its wake registrations
+    // SIP-59 §Collecting the backup, §Collecting wakes: an account's backup and its wake registrations
     // follow it home, collected by the home over the peering as its mail
     // is. Exchange to exchange.
     ("POST", "/peer/backup", NotAClientRoute),

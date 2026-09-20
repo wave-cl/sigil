@@ -3845,7 +3845,7 @@ fn the_exchange_control_offers_to_add_a_domain() {
     );
 }
 
-/// The dialog offers what this exchange federates with (SIP-46): a peer
+/// The dialog offers what this exchange federates with (SIP-39 §The peer directory): a peer
 /// with a domain, one press away; not one known by key alone, not one
 /// already held, and not the exchange itself. Pressing one puts its domain
 /// in the box, and Add takes it through the same path as one typed.
