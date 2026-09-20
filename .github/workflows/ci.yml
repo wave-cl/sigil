@@ -94,6 +94,9 @@ jobs:
       # Runs the real audio path: tone in, WAV out, through an in-process sqexd
       # and a real Opus encoder, with no sound hardware anywhere. That is the
       # Linux half of the call actually being exercised rather than assumed.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Tests
         run: scripts/run-tests
 
@@ -143,6 +146,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-latest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Tests
         run: scripts/run-tests
       # The bundle is not optional on macOS: notifications and the microphone

@@ -31,8 +31,18 @@ done
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
+# nextest where it is installed: this workspace is many small integration
+# binaries, which `cargo test` runs one after another and nextest runs at
+# once -- 157 s against 48 s here (2026-09-20). The same command locally and
+# in CI, and the same floor counted from either's summary.
 set +e
-cargo test --workspace ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
+if cargo nextest --version >/dev/null 2>&1; then
+    runner=nextest
+    cargo nextest run --workspace ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
+else
+    runner=test
+    cargo test --workspace ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
+fi
 status=${PIPESTATUS[0]}
 set -e
 if [[ $status -ne 0 ]]; then
@@ -40,11 +50,17 @@ if [[ $status -ne 0 ]]; then
     exit $status
 fi
 
-# Sum the "test result: ok. N passed" lines. Doc-test and empty suites report
-# zero and contribute nothing, which is what we want: only real assertions
-# count towards the floor.
-passed=$(grep -Eo '^test result: ok\. [0-9]+ passed' "$log" \
-         | grep -Eo '[0-9]+' | paste -sd+ - | bc 2>/dev/null || echo 0)
+# nextest says it once: "N tests run: N passed". cargo test says it per
+# binary: the "test result: ok. N passed" lines are summed. Doc-test and
+# empty suites report zero and contribute nothing, which is what we want:
+# only real assertions count towards the floor.
+if [[ "$runner" == nextest ]]; then
+    passed=$(grep -Eo '[0-9]+ tests? run: [0-9]+ passed' "$log" | tail -1 \
+             | grep -Eo '[0-9]+ passed' | grep -Eo '[0-9]+')
+else
+    passed=$(grep -Eo '^test result: ok\. [0-9]+ passed' "$log" \
+             | grep -Eo '[0-9]+' | paste -sd+ - | bc 2>/dev/null || echo 0)
+fi
 passed=${passed:-0}
 
 echo
