@@ -79,6 +79,11 @@ version = "0.36"
 features = ["wgpu", "snapshot"]
 
 [profile.release]
-lto = true
-codegen-units = 1
+# Thin, not fat, and the default codegen units. Fat LTO with one codegen unit
+# made the final crate alone take 6.5 of the Intel runner's 13 minutes (131 s
+# against 26 s on an M-series laptop, 2026-09-20), for a binary a third
+# smaller (33 MB against 44) and no difference anybody could measure in an
+# egui chat client. The link is the one step no cache can carry, so it is the
+# one worth making cheap.
+lto = "thin"
 

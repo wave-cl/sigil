@@ -18,17 +18,20 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Four builds, every one of them **native**. sigil links ALSA, PipeWire, GTK,
+  # Three builds, every one of them **native**. sigil links ALSA, PipeWire, GTK,
   # libxdo and libpcsclite on Linux, and a cross toolchain would need every one
   # of those headers and libraries for the other architecture inside the image.
-  # GitHub gives arm64 Linux and Intel macOS runners, so the whole problem is
-  # avoidable: build each artifact on the machine it is for.
+  # GitHub gives arm64 Linux runners, so the whole problem is avoidable: build
+  # each artifact on the machine it is for. The Intel macOS build was dropped
+  # 2026-09-20 (v0.1.38): it was the slowest runner and the longest queue, and
+  # nobody runs sigil on one; an installed Intel sigil is told "no build for
+  # this machine" by its updater rather than left guessing.
   # ---------------------------------------------------------------------------
   build:
     strategy:
-      # One platform failing should not hide whether the other three work. A
+      # One platform failing should not hide whether the other two work. A
       # release that publishes nothing is the correct outcome either way --
-      # `release` needs all four -- but the log should say how many are broken.
+      # `release` needs all three -- but the log should say how many are broken.
       fail-fast: false
       matrix:
         include:
@@ -48,9 +51,6 @@ jobs:
           - artifact: aarch64-apple-darwin
             os: macos-latest
             machine: arm64
-          - artifact: x86_64-apple-darwin
-            os: macos-15-intel
-            machine: x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -91,7 +91,7 @@ jobs:
       # dependencies into a worktree beside this one (docs/dependencies.md),
       # and a tag carrying those is a tag nobody but this machine can build.
       # Without the guard the failure arrives as a cargo error about a missing
-      # directory, several minutes in, on four runners at once.
+      # directory, several minutes in, on three runners at once.
       - name: Check the sqex dependencies are pinned, not paths
         run: |
           if grep -qE '^\s*sqex[a-z-]*\s*=\s*\{[^}]*path\s*=' Cargo.toml; then
@@ -118,10 +118,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Keyed by the runner image: see ci.yml.
+      # **Read from main, never saved here.** A cache saved by a tag's run is
+      # visible only to that tag, so every release used to start cold and
+      # compile all 515 crates -- six of the Intel runner's thirteen minutes.
+      # ci.yml's `warm` job builds this same profile on these same runners on
+      # every push to main and saves under this shared key, which a tag's run
+      # may read; `save-if: false` keeps tag runs from filling the 10 GB quota
+      # with caches nothing can use.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}
+          shared-key: release-${{ matrix.os }}
+          save-if: false
 
       - name: Packaging tools (Linux)
         if: runner.os == 'Linux'
@@ -230,7 +237,7 @@ jobs:
           path: dist/*
 
   # ---------------------------------------------------------------------------
-  # Publish -- but only if all four platforms actually produced everything.
+  # Publish -- but only if all three platforms actually produced everything.
   #
   # `needs` already stops this running when a build fails. What it does not
   # catch is a build that succeeded while producing less than it should: a
@@ -263,7 +270,6 @@ jobs:
             "sigil-${VERSION}-aarch64-linux-gnu.rpm" \
             "sigil-${VERSION}-aarch64-linux-gnu.tar.gz" \
             "sigil-${VERSION}-aarch64-apple-darwin.zip" \
-            "sigil-${VERSION}-x86_64-apple-darwin.zip" \
           ; do
             if [ -s "dist/$want" ]; then
               printf 'ok      %s\n' "$want"
@@ -281,14 +287,14 @@ jobs:
       # -----------------------------------------------------------------------
       # The signed manifest: what lets an installed sigil update itself.
       #
-      # A ninth and tenth file -- the tag, the version, and every asset's size
+      # An eighth and ninth file -- the tag, the version, and every asset's size
       # and SHA-256, signed with Ed25519 over the exact bytes of the file. An
       # installed sigil verifies the signature with the public key it was built
       # with, then the digest of what it downloaded, and installs nothing
       # otherwise. The tool is the same crate the app verifies with, built here
       # from the tag's own tree, and it refuses three things a release would
       # otherwise carry silently: a tag that is not this tree's version, a set
-      # of files that is not exactly the eight above, and a secret that is not
+      # of files that is not exactly the seven above, and a secret that is not
       # the key this build trusts -- a release signed with any other key would
       # be one no sigil ever installs. See docs/packaging.md.
       # -----------------------------------------------------------------------
@@ -303,7 +309,7 @@ jobs:
         env:
           SIGIL_UPDATE_KEY: ${{ secrets.SIGIL_UPDATE_KEY }}
         # From inside the checkout, so rustup reads its rust-toolchain.toml
-        # and this is built with the same compiler as the eight files.
+        # and this is built with the same compiler as the seven files.
         working-directory: src
         run: |
           set -eu
@@ -321,11 +327,11 @@ jobs:
           VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           test -s "dist/sigil-${VERSION}-manifest.json"
           test -s "dist/sigil-${VERSION}-manifest.sig"
-          # Ten and only ten: eight builds, the manifest, its signature. A
+          # Nine and only nine: seven builds, the manifest, its signature. A
           # stray file here would be published, and a missing one would leave
           # every installed sigil saying "not signed".
           n=$(ls dist | wc -l)
-          test "$n" -eq 10 || { echo "::error::dist holds $n files, not 10"; ls -l dist; exit 1; }
+          test "$n" -eq 9 || { echo "::error::dist holds $n files, not 9"; ls -l dist; exit 1; }
 
       - name: Notes
         run: |
@@ -337,7 +343,7 @@ jobs:
           | | |
           |---|---|
           | macOS, Apple silicon | `aarch64-apple-darwin.zip` |
-          | macOS, Intel | `x86_64-apple-darwin.zip` |
+          | macOS, Intel | not built since v0.1.38 |
           | Linux, x86_64 | `x86_64-linux-gnu.deb` / `.rpm` / `.tar.gz` |
           | Linux, aarch64 | `aarch64-linux-gnu.deb` / `.rpm` / `.tar.gz` |
 

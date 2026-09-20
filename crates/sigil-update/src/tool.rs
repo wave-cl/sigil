@@ -3,7 +3,7 @@
 //!
 //! Three refusals, each of which would otherwise be a release that looks
 //! right and installs nowhere: a manifest for a tag that is not this
-//! build's version; a manifest over a set of files that is not the eight
+//! build's version; a manifest over a set of files that is not the seven
 //! a release has; and a signature from a key that is not the one the app
 //! carries.
 
@@ -12,8 +12,10 @@ use std::path::Path;
 use crate::Error;
 use crate::manifest::{self, Manifest};
 
-/// What every release publishes, less the manifest's own two files.
-pub const EXPECTED_ASSETS: [&str; 8] = [
+/// What every release publishes, less the manifest's own two files. The
+/// Intel macOS build was dropped at v0.1.38 (2026-09-20); an installed Intel
+/// sigil is told "no build for this machine" by the updater.
+pub const EXPECTED_ASSETS: [&str; 7] = [
     "x86_64-linux-gnu.deb",
     "x86_64-linux-gnu.rpm",
     "x86_64-linux-gnu.tar.gz",
@@ -21,7 +23,6 @@ pub const EXPECTED_ASSETS: [&str; 8] = [
     "aarch64-linux-gnu.rpm",
     "aarch64-linux-gnu.tar.gz",
     "aarch64-apple-darwin.zip",
-    "x86_64-apple-darwin.zip",
 ];
 
 /// Write `out` describing the files in `dir`, refusing a tag that is not
@@ -123,7 +124,7 @@ mod tests {
         assert_eq!(sig, dir.path().join("sigil-v1.2.3-manifest.sig"));
         assert_eq!(std::fs::read_to_string(&sig).unwrap().trim().len(), 128);
         let back = verify(&out, dir.path(), &public).unwrap();
-        assert_eq!(back.assets.len(), 8);
+        assert_eq!(back.assets.len(), EXPECTED_ASSETS.len());
         // A second manifest over the same files, with the first's own two
         // files now present, is byte for byte the same.
         let again = dir.path().join("again.json");
@@ -143,15 +144,19 @@ mod tests {
     }
 
     #[test]
-    fn the_tool_refuses_a_release_that_is_not_eight_files() {
+    fn the_tool_refuses_a_release_that_is_not_seven_files() {
         let dir = release_dir("v1.2.3");
-        std::fs::remove_file(dir.path().join("sigil-v1.2.3-x86_64-apple-darwin.zip")).unwrap();
+        std::fs::remove_file(dir.path().join("sigil-v1.2.3-aarch64-apple-darwin.zip")).unwrap();
         let out = dir.path().join("m.json");
         assert!(matches!(
             manifest("v1.2.3", dir.path(), &out, "1.2.3"),
             Err(Error::BadManifest(_))
         ));
-        std::fs::write(dir.path().join("sigil-v1.2.3-x86_64-apple-darwin.zip"), "z").unwrap();
+        std::fs::write(
+            dir.path().join("sigil-v1.2.3-aarch64-apple-darwin.zip"),
+            "z",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("stray.txt"), "?").unwrap();
         assert!(matches!(
             manifest("v1.2.3", dir.path(), &out, "1.2.3"),

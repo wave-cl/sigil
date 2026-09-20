@@ -178,7 +178,20 @@ one of them built **natively**:
 | `x86_64-linux-gnu` | `ubuntu-22.04` |
 | `aarch64-linux-gnu` | `ubuntu-22.04-arm` |
 | `aarch64-apple-darwin` | `macos-latest` |
-| `x86_64-apple-darwin` | `macos-15-intel` |
+
+The Intel macOS build (`x86_64-apple-darwin` on `macos-15-intel`) was
+dropped at v0.1.38: it was the slowest runner with the longest queue, and
+nobody runs sigil on one. An installed Intel sigil is told "no build for
+this machine" by the updater.
+
+Two things keep a release short. The profile is thin LTO with the default
+codegen units: fat LTO with one unit made the final crate alone take half
+the build, and the link is the one step no cache carries. And the
+dependency cache is **read from `main`, never saved by a tag**: a cache a
+tag's run saves is visible only to that tag, so every release used to
+start cold; `ci.yml`'s `warm` job builds the release profile on the
+release runners on every push to `main` under the `release-<os>` shared
+key, which the tag's run restores.
 
 Native rather than cross, because sigil links ALSA, PipeWire, GTK, libxdo and
 libpcsclite: a cross toolchain would need every one of those headers and
@@ -196,11 +209,11 @@ Three guards, each of which exists because its failure is silent:
   `uname -m`. Otherwise a label that quietly resolves elsewhere ships two
   x86_64 binaries, one of them labelled `aarch64`, and nobody finds out until
   it will not start.
-- **All eight files must be present before anything is published.** `needs`
+- **All seven files must be present before anything is published.** `needs`
   stops a *failed* build publishing. It does not stop a build that succeeded
   while producing less than it should — a rename that matched nothing, an
   upload glob that found one file — and that publishes a release which looks
-  complete and is missing an architecture. After signing, ten and only ten.
+  complete and is missing an architecture. After signing, nine and only nine.
 
 ### What is not signed
 
@@ -211,7 +224,7 @@ remove the step; see **Distributing** above.
 
 ### The signed manifest, and self-update
 
-What *is* signed is the manifest. After the eight files are in `dist`, the
+What *is* signed is the manifest. After the seven files are in `dist`, the
 `release` job checks out the tag's tree and runs `sigil-update-tool` from
 `crates/sigil-update` — the same crate an installed sigil verifies with, so
 what is signed is byte for byte what is checked:
@@ -231,7 +244,7 @@ nine or eleven.
 The tool refuses three things, each of which would otherwise be a release
 that looks right and installs nowhere: a tag that is not the tree's
 `Cargo.toml` version (bump before tagging), a `dist` that is not exactly the
-eight builds, and a secret whose public key is not the one in
+seven builds, and a secret whose public key is not the one in
 `crates/sigil-update/src/lib.rs` — `PUBLIC_KEY`, which every sigil is built
 with.
 
