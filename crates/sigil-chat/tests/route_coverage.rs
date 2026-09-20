@@ -101,7 +101,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/device/list", Chat),
     ("POST", "/device/revoke", Chat),
     ("POST", "/device/register", Chat),
-    // SIP-67: which account this transport identity is registered to. A
+    // SIP-62 §Which account a device is: which account this transport identity is registered to. A
     // linked device learns that from the pairing claim it was given, and a
     // desktop opens an identity that is its own account, so nothing asks
     // yet. The phone will want it after a handover, when its store still
@@ -304,7 +304,9 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     (
         "POST",
         "/account/hint",
-        NotYet("SIP-76: a device tells its home which origin to pull from"),
+        NotYet(
+            "SIP-60 §A device hints its home: a device tells its home which origin to pull from",
+        ),
     ),
     (
         "POST",
@@ -373,7 +375,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // the caller having to be that identifier's home by its own signed
     // Move. Exchange to exchange like the rest of `/peer/`.
     ("POST", "/peer/folded", NotAClientRoute),
-    // SIP-79 and SIP-84: an account's backup and its wake registrations
+    // SIP-68: an account's backup and its wake registrations
     // follow it home, collected by the home over the peering as its mail
     // is. Exchange to exchange.
     ("POST", "/peer/backup", NotAClientRoute),
