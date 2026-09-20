@@ -148,10 +148,13 @@ jobs:
       # The bundle is not optional on macOS: notifications and the microphone
       # both depend on its Info.plist keys, and both fail silently without
       # them. Building it here catches a broken plist before somebody discovers
-      # it as a call with no sound.
+      # it as a call with no sound. **Debug**: the plist is the same whichever
+      # profile is inside it, the test profile is already built by the step
+      # above, and the release link was six of this job's twelve minutes;
+      # the release profile is built on this runner by `warm`, for the cache.
       - name: Build Sigil.app
         run: |
-          scripts/macos-app
+          scripts/macos-app --debug
           plutil -lint target/Sigil.app/Contents/Info.plist
           for key in NSMicrophoneUsageDescription CFBundleIdentifier CFBundleURLTypes; do
             /usr/libexec/PlistBuddy -c "Print :$key" target/Sigil.app/Contents/Info.plist >/dev/null \
