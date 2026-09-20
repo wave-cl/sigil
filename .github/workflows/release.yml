@@ -130,9 +130,14 @@ jobs:
           shared-key: release-${{ matrix.os }}
           save-if: false
 
+      # Prebuilt, not compiled: `cargo install` built the two tools' 288
+      # dependency crates from source on every release, 1m45s of a Linux
+      # job that otherwise takes three -- and they are not part of the cache.
       - name: Packaging tools (Linux)
         if: runner.os == 'Linux'
-        run: cargo install cargo-deb cargo-generate-rpm --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
 
       # `scripts/linux-packages` and `scripts/macos-app` are the same scripts
       # somebody builds with by hand, called here rather than reimplemented.
