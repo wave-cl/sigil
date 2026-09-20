@@ -7362,6 +7362,8 @@ fn a_refused_join_is_said_where_the_button_is() {
         name: "the square".into(),
         topic: String::new(),
         members: 3,
+        domain: String::new(),
+        here: true,
     }];
     state.searched = true;
     let mut h = harness_at(state.clone(), sigil_chat::Route::Directory);
@@ -7400,3 +7402,41 @@ fn a_message_sent_through_a_copy_says_via_where() {
         "only the one that was: {said}"
     );
 }
+
+/// SIP-16 §What a client does with a search row: a room the directory
+/// lists from another exchange is not joinable here, and the pane says
+/// where it lives and offers to add that exchange instead of Join.
+#[test]
+fn a_room_listed_from_elsewhere_offers_its_exchange_not_join() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.found = vec![
+        sigil_chat::Found {
+            channel: [11u8; 32],
+            instance: [1u8; 32],
+            name: "lounge@trunk.exchange".into(),
+            topic: String::new(),
+            members: 3,
+            domain: "trunk.exchange".into(),
+            here: false,
+        },
+        sigil_chat::Found {
+            channel: [10u8; 32],
+            instance: [1u8; 32],
+            name: "here".into(),
+            topic: String::new(),
+            members: 1,
+            domain: String::new(),
+            here: true,
+        },
+    ];
+    state.searched = true;
+    let mut h = harness_at(state, sigil_chat::Route::Directory);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("lives at trunk.exchange"), "{said}");
+    assert!(said.contains("Add trunk.exchange"), "{said}");
+    // One Join, for the one held here.
+    assert_eq!(said.matches("Join").count(), 1, "{said}");
+}
+

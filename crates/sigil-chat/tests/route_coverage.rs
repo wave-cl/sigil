@@ -242,11 +242,8 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ),
     // SIP-16 §Federated directory: sigil's finder reads /channel/list, this exchange's own
     // directory; the federated search is not surfaced yet.
-    (
-        "POST",
-        "/channel/search",
-        NotYet("SIP-16 §Federated directory; sigil's finder is local"),
-    ),
+    // SIP-16 §Federated directory: the directory pane, since v0.1.35.
+    ("POST", "/channel/search", Chat),
     // SIP-56: no moderation surface in sigil yet.
     (
         "POST",
@@ -276,26 +273,13 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // SIP-59, 60, 62: moving home, reaching somebody at another exchange
     // and rotating the account key are `sqex-chat move`, `^N name@domain`
     // and `sqex-chat handover`; sigil has none of the three yet.
-    (
-        "POST",
-        "/account/move",
-        NotYet("SIP-59 moving home, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/account/home",
-        NotYet("SIP-59 moving home, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/account/locate",
-        NotYet("SIP-60 reaching another exchange, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/channel/create_at",
-        NotYet("SIP-60 reaching another exchange, from sqex-chat"),
-    ),
+    // SIP-60, since v0.1.35: writing to somebody at another exchange from
+    // the home session -- `ensure_home` (move/home), `locate`, and the
+    // conversation created at the lower key's home.
+    ("POST", "/account/move", Chat),
+    ("POST", "/account/home", Chat),
+    ("POST", "/account/locate", Chat),
+    ("POST", "/channel/create_at", Chat),
     (
         "POST",
         "/account/handover",
@@ -548,7 +532,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 63,
+        reached, 68,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

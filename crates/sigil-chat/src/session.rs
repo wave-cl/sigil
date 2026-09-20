@@ -27,7 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use sqex_chat::client::{Chat, Link};
+use sqex_chat::client::{Chat, HomeSaid, Link};
 use sqex_chat::store::{self, Store};
 use sqex_proto::channel::{
     EVENT_ADDED, EVENT_CREATED, EVENT_DEMOTED, EVENT_JOINED, EVENT_LEFT, EVENT_PROMOTED,
@@ -802,6 +802,12 @@ pub struct Found {
     pub name: String,
     pub topic: String,
     pub members: u16,
+    /// SIP-16 §Federated directory: where the room lives, as the exchange
+    /// names it; empty when it lives at the exchange that answered.
+    pub domain: String,
+    /// Whether the exchange that answered holds it (its own, or a copy) --
+    /// joinable from here -- or only lists it, to be joined at `domain`.
+    pub here: bool,
 }
 
 /// Who is in a conversation, and what they may do.
@@ -1283,6 +1289,13 @@ pub enum Cmd {
     Blocked,
     /// Open a conversation with somebody named `name@domain` (SIP-38).
     OpenByName(String),
+    /// SIP-60: open a conversation with somebody at **another** exchange,
+    /// `label@domain` (a key or a SIP-38 name at that domain). Only from the
+    /// home session: reaching out is carried by the home after this
+    /// identity's Move, which is presented here on the first reach if it is
+    /// not already on record -- and never from an added exchange, whose
+    /// session must not become the home.
+    OpenRemote(String),
     /// Attach an existing file to another conversation and post the reference.
     ///
     /// **By reference: the bytes stay where they are.** The exchange stores one
@@ -4822,6 +4835,44 @@ fn hex8(id: &[u8; 32]) -> String {
 
 async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk: &mut Desk) {
     match cmd {
+        Cmd::OpenRemote(target) => {
+            // SIP-60: the create is carried to the other person's home as
+            // this identity's own signed act, after its Move. Presented now
+            // if it is not on record; a visitor (a store filed under another
+            // exchange) or a linked device does not reach out from here.
+            match chat.ensure_home().await {
+                Ok(HomeSaid::Presented | HomeSaid::OnRecord) => {}
+                Ok(HomeSaid::Visitor { home, .. }) => {
+                    return trouble(
+                        state,
+                        format!(
+                            "this identity lives at {home}; write to people at other \
+                             exchanges from there"
+                        ),
+                    );
+                }
+                Ok(HomeSaid::NotMine) => {
+                    return trouble(
+                        state,
+                        "a linked device cannot reach out to another exchange; the \
+                         account's own client can",
+                    );
+                }
+                Err(e) => return trouble(state, e),
+            }
+            match chat.locate(&target).await {
+                Ok(found) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let _ = chat.store().add_contact(&found.account, &target, now);
+                    desk.restructure = true;
+                    Box::pin(apply(chat, Cmd::OpenDm(found.account), state, desk)).await;
+                }
+                Err(e) => trouble(state, format!("could not find {target}: {e}")),
+            }
+        }
         Cmd::OpenDm(peer) => match chat.open_dm(&peer).await {
             Ok(channel) => {
                 // Opening a conversation and minting its key are separate, and
@@ -5633,19 +5684,27 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
             Err(e) => trouble(state, e),
         },
-        Cmd::Find(query) => match chat.find(&query, 0).await {
+        // SIP-16 §Federated directory: the exchange's own rooms and its
+        // peers' in one answer, each saying where it lives; an exchange
+        // from before answers only its own, which `search` reads for us.
+        Cmd::Find(query) => match chat.search(&query, 0).await {
             Ok(listing) => {
-                let mut found = Vec::with_capacity(listing.channels.len());
-                for c in listing.channels {
+                let mut found = Vec::with_capacity(listing.rows.len());
+                for c in listing.rows {
                     // SIP-43: a copy of a room from elsewhere is listed with
                     // where it lives. A public channel's home is answered to
                     // anyone at a copy; at its origin a non-member is refused
-                    // and the room is named plainly, which is right.
-                    let name = match chat.home(&c.channel).await {
-                        Ok(home) if home.origin != chat.exchange_key() => {
-                            format!("{}@{}", c.name, at_home(&home))
+                    // and the room is named plainly, which is right. A room
+                    // held nowhere here is named by the directory's word.
+                    let name = if !c.here && !c.domain.is_empty() {
+                        format!("{}@{}", c.name, c.domain)
+                    } else {
+                        match chat.home(&c.channel).await {
+                            Ok(home) if home.origin != chat.exchange_key() => {
+                                format!("{}@{}", c.name, at_home(&home))
+                            }
+                            _ => c.name,
                         }
-                        _ => c.name,
                     };
                     found.push(Found {
                         channel: c.channel,
@@ -5653,6 +5712,8 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                         name,
                         topic: c.topic,
                         members: c.members,
+                        domain: c.domain,
+                        here: c.here,
                     });
                 }
                 state.send_modify(|s| {

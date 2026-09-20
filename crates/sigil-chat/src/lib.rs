@@ -3442,7 +3442,7 @@ impl ChatApp {
         let field = sigil_ui::field(
             ui,
             &mut self.panes.entry(at.clone()).or_default().adding,
-            "paste their key, or type name@domain",
+            "paste their key, or type name@domain — at another exchange too",
             width,
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -3450,6 +3450,33 @@ impl ChatApp {
         let go = ui.horizontal(|ui| ui.button("Add").clicked()).inner;
         if go || entered {
             let typed = self.pane(at).adding.trim().to_string();
+            // SIP-60: `label@domain` naming another exchange is reached
+            // through the home -- this identity's default session, and only
+            // that one: the create is carried after this identity's Move,
+            // and a Move presented from an added exchange would move the
+            // home there.
+            let here = self.state_of(Some(at)).domain;
+            if let Some((label, domain)) = typed.rsplit_once('@')
+                && !label.is_empty()
+                && !domain.is_empty()
+                && typed.parse::<PubKey>().is_err()
+                && here.as_deref() != Some(domain)
+            {
+                if at.1.is_empty() {
+                    let pane = self.pane(at);
+                    pane.add_trouble = None;
+                    pane.adding.clear();
+                    pane.dialog = None;
+                    self.send_as(Some(at), Cmd::OpenRemote(typed));
+                } else {
+                    self.pane(at).add_trouble = Some(format!(
+                        "{domain} is another exchange: write to people there from your \
+                         home, not from {}.",
+                        at.1
+                    ));
+                }
+                return;
+            }
             match typed.parse::<PubKey>() {
                 Ok(who) => {
                     let pane = self.pane(at);
@@ -6063,10 +6090,43 @@ impl ChatApp {
                                 })
                                 .small(),
                             );
+                            // SIP-16 §What a client does with a search row: a
+                            // room listed from elsewhere is joined there.
+                            if !found.here {
+                                ui.colored_label(
+                                    theme.text_muted,
+                                    egui::RichText::new(format!(
+                                        "lives at {}; no copy is held here",
+                                        found.domain
+                                    ))
+                                    .small(),
+                                );
+                            }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if already {
                                 ui.colored_label(theme.text_muted, "joined");
+                            } else if !found.here {
+                                // Add that exchange -- through the home when
+                                // there is one to carry it: the reason to look
+                                // from here rather than there is not wanting
+                                // to be there in person. The box stays on the
+                                // dialog to untick.
+                                if ui
+                                    .button(format!("Add {}", found.domain))
+                                    .on_hover_text(
+                                        "connect this identity to that exchange to join it",
+                                    )
+                                    .clicked()
+                                {
+                                    let home = self.home_domain(ctx);
+                                    let pane = self.pane(at);
+                                    pane.exchange = found.domain.clone();
+                                    pane.exchange_via = home
+                                        .is_some_and(|h| !h.eq_ignore_ascii_case(&found.domain));
+                                    pane.add_trouble = None;
+                                    pane.dialog = Some(Dialog::Exchange);
+                                }
                             } else if ui.button("Join").clicked() {
                                 // Reading a public channel *is* joining it:
                                 // fetching requires membership, so there is no
