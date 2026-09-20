@@ -101,7 +101,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/device/list", Chat),
     ("POST", "/device/revoke", Chat),
     ("POST", "/device/register", Chat),
-    // SIP-62 §Which account a device is: which account this transport identity is registered to. A
+    // SIP-44 §Which account a device is: which account this transport identity is registered to. A
     // linked device learns that from the pairing claim it was given, and a
     // desktop opens an identity that is its own account, so nothing asks
     // yet. The phone will want it after a handover, when its store still
@@ -180,7 +180,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         ),
     ),
     ("GET", "/exchange/peers", Chat),
-    // SIP-64: the exchange's earlier keys, so a client that pinned an old one
+    // SIP-40 §Lineage: the exchange's earlier keys, so a client that pinned an old one
     // can follow a handover it did not see. sigil pins through sqnr and
     // follows SIP-40's signed handover instead, and writing a lineage is an
     // operator's act, not a chat client's.
@@ -299,7 +299,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     (
         "POST",
         "/account/handover",
-        NotYet("SIP-62 key handover, from sqex-chat"),
+        NotYet("SIP-44 §The handover, from sqex-chat"),
     ),
     (
         "POST",
@@ -311,7 +311,7 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     (
         "POST",
         "/channel/chain",
-        NotYet("SIP-77: this device's chain heads as the exchange holds them"),
+        NotYet("SIP-43 §The heads by position: this device's chain heads as the exchange holds them"),
     ),
     (
         "POST",
