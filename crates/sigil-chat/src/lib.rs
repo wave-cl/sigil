@@ -3457,7 +3457,7 @@ impl ChatApp {
         let field = sigil_ui::field(
             ui,
             &mut self.panes.entry(at.clone()).or_default().adding,
-            "paste their key, or type name@domain — at another exchange too",
+            "their key, or name@domain at any exchange",
             width,
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
