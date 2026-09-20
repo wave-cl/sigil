@@ -143,8 +143,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # `prefix-key` rolled once (2026-09-20): the cache under the old prefix
+      # held the release target from when this job built the bundle in
+      # release, 2.5 GB and 70 s to restore; the test profile alone is well
+      # under half that.
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           key: macos-latest
       - uses: taiki-e/install-action@v2
         with:
