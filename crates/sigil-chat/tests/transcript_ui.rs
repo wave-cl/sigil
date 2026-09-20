@@ -44,6 +44,7 @@ fn a_conversation() -> ChatState {
         me: Some(me()),
         exchange: Some(PubKey::new([3u8; 32])),
         domain: Some("squic.org".into()),
+        carried: None,
         link: LinkState::Up,
         trouble: None,
         posted: None,
@@ -441,7 +442,7 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     for name in extra {
-        assert!(accounts.add_exchange(0, name));
+        assert!(accounts.add_exchange(0, name, None));
     }
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))

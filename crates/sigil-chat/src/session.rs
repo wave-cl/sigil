@@ -44,7 +44,7 @@ use sqnr_core::{PubKey, SoftwareSigner};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use sigil_net::Dial;
+use sigil_net::{Dial, Endpoint};
 
 /// How long a call rings before a reader derives that it was missed.
 ///
@@ -529,6 +529,11 @@ pub struct ChatState {
     /// from, so the two cannot disagree. `None` when the connection was made
     /// to an address, which has no domain to report.
     pub domain: Option<String>,
+    /// SIP-85: the home this connection is carried through, when it is --
+    /// the domain the roster named, for the switcher to say "via" by. The
+    /// exchange sees the home's address; and no introduction (SIP-25) may be
+    /// asked for on this connection, which is what a call checks here.
+    pub carried: Option<String>,
     /// The exchange this session could not take the store lock for.
     ///
     /// Two interactive clients on one account at one exchange would disagree
@@ -1561,6 +1566,41 @@ struct Wires {
     holds: sigil_net::Held,
 }
 
+/// An `At` or `Discover` dial, resolved to where it points. The two other
+/// shapes are refused here: a session **owns** its connection -- it is the
+/// thing that dials, holds and redials it, and lends it to calls
+/// (`ChatHandle::connection`) -- so running on somebody else's (`On`) would
+/// invert that, and a tunnel inside a tunnel (`Via` within `Via`) is not
+/// specified (SIP-85 §Rationale).
+async fn resolve_plain(dial: &Dial) -> Result<Endpoint, String> {
+    match dial {
+        Dial::At(e) => Ok(*e),
+        Dial::Discover(layers) => {
+            let mut silent = sqex_voice::engine::Silent;
+            sqex_voice::engine::resolve(&layers[..], &mut silent).await
+        }
+        Dial::On(_) => Err("a chat session opens its own connection".to_string()),
+        Dial::Via { .. } => {
+            Err("a tunnel through a tunnel is not something this opens".to_string())
+        }
+    }
+}
+
+/// SIP-85: what to call the home in the interface -- its domain when the
+/// dial names one, else its address.
+fn chat_home_label(dial: &Dial) -> String {
+    match dial {
+        Dial::Via { home, .. } => match home.as_ref() {
+            Dial::Discover(layers) => {
+                sigil_net::domain_of(layers).unwrap_or_else(|| "your home".into())
+            }
+            Dial::At(e) => e.address.to_string(),
+            _ => "your home".into(),
+        },
+        _ => "your home".into(),
+    }
+}
+
 async fn run(
     dial: Dial,
     signer: SoftwareSigner,
@@ -1586,19 +1626,34 @@ async fn run(
     // exchange**: what it protects is the SIP-17 counter, and the store keeps
     // one of those per pair. One lock per account would refuse a second
     // exchange over a conflict that does not exist.
-    let endpoint = match &dial {
-        Dial::At(e) => *e,
-        Dial::Discover(layers) => {
-            let mut silent = sqex_voice::engine::Silent;
-            sqex_voice::engine::resolve(&layers[..], &mut silent).await?
+    // SIP-85: through the home, the target is resolved for its key and the
+    // home for its address, and what is dialled is the tunnel's loopback
+    // socket with the target's key pinned. The lock below is by the
+    // **target's** key -- it is the target's SIP-17 counter -- as it would be
+    // directly.
+    let (endpoint, carried) = match &dial {
+        Dial::Via {
+            home,
+            target,
+            target_domain,
+        } => {
+            let target = resolve_plain(target).await?;
+            let home = resolve_plain(home).await?;
+            if home.server == target.server {
+                return Err(format!(
+                    "{target_domain} is your home; a home carries connections to other exchanges"
+                ));
+            }
+            let carrier = sigil_net::carry(home, &seed, &target.server, target_domain).await?;
+            (
+                Endpoint {
+                    address: carrier.local_addr(),
+                    server: target.server,
+                },
+                Some((home, carrier)),
+            )
         }
-        // A session **owns** its connection: it is the thing that dials, holds
-        // and redials it, and lends it to calls (`ChatHandle::connection`).
-        // Handing it one to run on would invert that, and there would be
-        // nothing left to say who redials.
-        Dial::On(_) => {
-            return Err("a chat session opens its own connection".to_string());
-        }
+        other => (resolve_plain(other).await?, None),
     };
     // Held for the life of the session. Two interactive clients on one account
     // at one exchange would disagree about the next message counter, and
@@ -1617,6 +1672,21 @@ async fn run(
     let client =
         sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
     let mut chat = Chat::new(client, seed, me, endpoint.server, store);
+    // SIP-85: the tunnel is the session's for as long as it lives, and a
+    // reconnect that finds it closed opens another before it dials.
+    let carried_by = match (&dial, carried) {
+        (Dial::Via { target_domain, .. }, Some((home, carrier))) => {
+            let home_label = chat_home_label(&dial);
+            chat.via(
+                (home.address, *home.server.as_bytes()),
+                *endpoint.server.as_bytes(),
+                target_domain.clone(),
+                carrier,
+            );
+            Some(home_label)
+        }
+        _ => None,
+    };
     // The exchange's domain, for showing SIP-38 handles as `name@domain`.
     //
     // **Nothing set this.** `Chat::handle` needs a domain to compose one, so
@@ -1627,6 +1697,9 @@ async fn run(
     // is not one, and `name@203.0.113.1` is not a handle.
     let domain = match &dial {
         Dial::Discover(layers) => sigil_net::domain_of(layers),
+        // SIP-85: the name the home was asked to find the target by is the
+        // target's domain, whichever way the target itself was given.
+        Dial::Via { target_domain, .. } => Some(target_domain.clone()),
         // No domain to show: reached by a literal host and key, or — refused
         // above — on somebody else's connection.
         Dial::At(_) | Dial::On(_) => None,
@@ -1639,6 +1712,7 @@ async fn run(
         s.me = Some(me);
         s.exchange = Some(endpoint.server);
         s.domain = domain;
+        s.carried = carried_by;
     });
 
     // **Somewhere for the exchange to knock.** The tick is a backstop now, not

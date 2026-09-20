@@ -41,7 +41,40 @@ use crate::account::Account;
 struct Remembered {
     path: PathBuf,
     #[serde(default)]
-    exchanges: Vec<String>,
+    exchanges: Vec<Exchange>,
+}
+
+/// An exchange somebody added, as they typed it, and how it is reached.
+///
+/// `via` is SIP-85: the domain of the home that carries the connection, so
+/// the exchange named here sees the home's address and never this
+/// machine's. `None` is a direct connection, which is what every exchange
+/// added before this field existed gets -- and what a file written then
+/// still reads as, since a bare string is accepted beside the struct.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Exchange {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for Exchange {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Exchange, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Name(String),
+            Full {
+                name: String,
+                #[serde(default)]
+                via: Option<String>,
+            },
+        }
+        Ok(match Either::deserialize(d)? {
+            Either::Name(name) => Exchange { name, via: None },
+            Either::Full { name, via } => Exchange { name, via },
+        })
+    }
 }
 
 /// One identity, and the exchanges it is connected to.
@@ -54,12 +87,13 @@ struct Remembered {
 pub struct Held {
     account: Account,
     /// Exchanges beyond the one discovery finds, as the person typed them: a
-    /// domain, or `host:port`.
+    /// domain, or `host:port` -- and, for each, whether the home carries the
+    /// connection (SIP-85).
     ///
     /// The default is not in this list. It has no name to be in it by — it is
     /// whatever the identity's own SIP-38 handle and `~/.sqnr/config` resolve
     /// to, which is the answer for almost everybody and needs no configuring.
-    extra: Vec<String>,
+    extra: Vec<Exchange>,
 }
 
 impl Held {
@@ -75,8 +109,17 @@ impl Held {
     /// this and report the key they reached.
     pub fn exchanges(&self) -> Vec<String> {
         let mut all = vec![String::new()];
-        all.extend(self.extra.iter().cloned());
+        all.extend(self.extra.iter().map(|e| e.name.clone()));
         all
+    }
+
+    /// SIP-85: the home that carries this identity's connection to `name`,
+    /// if one does. The default exchange is never carried: it *is* the home.
+    pub fn via_of(&self, name: &str) -> Option<&str> {
+        self.extra
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| e.via.as_deref())
     }
 }
 
@@ -232,18 +275,25 @@ impl Accounts {
     /// channel keys and SIP-17 counters all belong to one exchange. This is
     /// therefore closer to adding an account than to changing a setting, and
     /// the interface should say so.
-    pub fn add_exchange(&mut self, i: usize, named: &str) -> bool {
+    ///
+    /// `via` is SIP-85: the domain of the home to carry the connection
+    /// through, or `None` to connect directly.
+    pub fn add_exchange(&mut self, i: usize, named: &str, via: Option<String>) -> bool {
         let named = named.trim().to_string();
         let Some(held) = self.entries.get_mut(i) else {
             return false;
         };
         // The empty name is the default exchange and is always present, so it
         // cannot be added; and one already here is not added twice, which
-        // would give two sessions racing for one lock.
-        if named.is_empty() || held.extra.contains(&named) {
+        // would give two sessions racing for one lock -- whichever way it is
+        // reached, since the lock is by name.
+        if named.is_empty() || held.extra.iter().any(|e| e.name == named) {
             return false;
         }
-        held.extra.push(named);
+        let via = via
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case(&named));
+        held.extra.push(Exchange { name: named, via });
         self.generation += 1;
         true
     }
@@ -258,7 +308,7 @@ impl Accounts {
             return false;
         };
         let before = held.extra.len();
-        held.extra.retain(|e| e != named);
+        held.extra.retain(|e| e.name != named);
         if held.extra.len() == before {
             return false;
         }
@@ -680,7 +730,7 @@ mod exchanges {
     fn adding_one_makes_it_a_second_exchange_not_a_replacement() {
         let mut accounts = Accounts::of(vec![held(1)]);
         let was = accounts.generation();
-        assert!(accounts.add_exchange(0, "indra.org"));
+        assert!(accounts.add_exchange(0, "indra.org", None));
         assert_eq!(
             accounts.active_held().exchanges(),
             vec![String::new(), "indra.org".to_string()]
@@ -693,9 +743,11 @@ mod exchanges {
         // Two sessions for one pair would race for one store lock, and the
         // loser would report that somebody else is using the account.
         let mut accounts = Accounts::of(vec![held(1)]);
-        assert!(accounts.add_exchange(0, "indra.org"));
-        assert!(!accounts.add_exchange(0, "indra.org"));
-        assert!(!accounts.add_exchange(0, "  indra.org  "));
+        assert!(accounts.add_exchange(0, "indra.org", None));
+        assert!(!accounts.add_exchange(0, "indra.org", None));
+        assert!(!accounts.add_exchange(0, "  indra.org  ", None));
+        // Nor through a home: the lock is by name, whichever way it is reached.
+        assert!(!accounts.add_exchange(0, "indra.org", Some("squic.org".into())));
         assert_eq!(accounts.active_held().exchanges().len(), 2);
     }
 
@@ -711,8 +763,8 @@ mod exchanges {
     #[test]
     fn dropping_an_added_one_leaves_the_rest() {
         let mut accounts = Accounts::of(vec![held(1)]);
-        accounts.add_exchange(0, "indra.org");
-        accounts.add_exchange(0, "squic.org");
+        accounts.add_exchange(0, "indra.org", None);
+        accounts.add_exchange(0, "squic.org", None);
         assert!(accounts.drop_exchange(0, "indra.org"));
         assert_eq!(
             accounts.active_held().exchanges(),
@@ -738,7 +790,7 @@ mod exchanges {
     #[test]
     fn what_is_written_carries_the_exchanges_and_no_seed() {
         let mut accounts = Accounts::of(vec![held(1)]);
-        accounts.add_exchange(0, "indra.org");
+        accounts.add_exchange(0, "indra.org", None);
         let written = serde_json::to_string(&accounts.remembered()).unwrap();
         assert!(written.contains("indra.org"));
         // Round-trips.
@@ -752,5 +804,47 @@ mod exchanges {
             !reopened.active().is_unlocked(),
             "nothing written can reconstruct a seed"
         );
+    }
+
+    /// SIP-85: an exchange reached through the home remembers the home, and
+    /// a roster written when an exchange was a bare string still loads --
+    /// as a direct connection, which is what it was.
+    #[test]
+    fn a_home_is_remembered_beside_the_exchange_and_a_bare_name_still_loads() {
+        let mut accounts = Accounts::of(vec![held(1)]);
+        assert!(accounts.add_exchange(0, "trunk.exchange", Some("squic.org".into())));
+        // A home that is the exchange itself carries nothing: dropped, not kept.
+        assert!(accounts.add_exchange(0, "indra.org", Some(" Indra.org ".into())));
+        let held = accounts.active_held();
+        assert_eq!(held.via_of("trunk.exchange"), Some("squic.org"));
+        assert_eq!(held.via_of("indra.org"), None);
+        assert_eq!(
+            held.via_of(""),
+            None,
+            "the default is the home, never carried"
+        );
+
+        let written = serde_json::to_string(&accounts.remembered()).unwrap();
+        assert!(written.contains("\"via\":\"squic.org\""), "{written}");
+        assert!(
+            !written.contains("\"via\":null"),
+            "a direct exchange writes no via: {written}"
+        );
+        let back: Vec<Remembered> = serde_json::from_str(&written).unwrap();
+        let reopened = Accounts::of_remembered(back);
+        assert_eq!(
+            reopened.active_held().via_of("trunk.exchange"),
+            Some("squic.org")
+        );
+
+        // The shape written before `via` existed: a bare string per exchange.
+        let old = r#"[{"path":"/one","exchanges":["indra.org","trunk.exchange"]}]"#;
+        let back: Vec<Remembered> = serde_json::from_str(old).unwrap();
+        let reopened = Accounts::of_remembered(back);
+        assert_eq!(
+            reopened.active_held().exchanges(),
+            vec![String::new(), "indra.org".into(), "trunk.exchange".into()]
+        );
+        assert_eq!(reopened.active_held().via_of("trunk.exchange"), None);
     }
 }

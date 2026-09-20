@@ -200,6 +200,11 @@ async fn run(
             sqex_voice::engine::resolve(&layers[..], &mut silent).await?
         }
         (Dial::On(_), None) => unreachable!("a borrowed connection was just taken"),
+        // SIP-85: the console rides a chat session's tunnelled connection
+        // when there is one to borrow (above); it does not open tunnels.
+        (Dial::Via { .. }, None) => {
+            return Err(sigil_net::call::NO_CALL_TUNNEL.to_string());
+        }
     };
     // Its own, when there is nothing to borrow. Held in the same slot so the
     // rest of this session has one way of asking for a connection rather than

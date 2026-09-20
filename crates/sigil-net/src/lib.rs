@@ -31,6 +31,32 @@ pub fn domain_of(layers: &[Layer]) -> Option<String> {
     }
 }
 
+/// SIP-85: the tunnel a chat session holds at its home, re-exported so the
+/// session can open one without depending on `sqex-proto` for it.
+pub use sqex_proto::tunnel::Carrier;
+
+/// SIP-85: ask `home` to carry a connection to the exchange at
+/// `target_domain`, whose key this identity already holds as `target`.
+///
+/// One dial to the home under the `sqex-tunnel` ALPN, one `Open`, and a
+/// loopback socket the caller then dials with the target's key pinned. A home
+/// that does not carry connections fails the handshake, and the error says so.
+pub async fn carry(
+    home: Endpoint,
+    seed: &[u8; 32],
+    target: &sqnr_core::PubKey,
+    target_domain: &str,
+) -> Result<Carrier, String> {
+    Carrier::open(
+        home.address,
+        home.server.as_bytes(),
+        seed,
+        target.as_bytes(),
+        target_domain,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod domain_tests {
     use super::*;

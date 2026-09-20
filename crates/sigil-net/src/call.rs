@@ -307,6 +307,17 @@ pub enum Dial {
     /// call — one that outlived its connection would have nothing to carry
     /// audio on anyway.
     On(Held),
+    /// SIP-85: reach `target` through `home`, which carries the connection
+    /// so the target sees the home's address and this identity's own key.
+    /// Only a chat session takes this: it opens the tunnel and owns it, and
+    /// a call at that exchange rides the session's connection (`On`), never
+    /// a tunnel of its own. `home` and `target` are `At` or `Discover`;
+    /// `target_domain` is what the home is asked to find the target by.
+    Via {
+        home: Box<Dial>,
+        target: Box<Dial>,
+        target_domain: String,
+    },
 }
 
 impl From<Held> for Dial {
@@ -344,6 +355,12 @@ impl Dial {
         crate::discovery::any_configured(&layers).then_some(Dial::Discover(layers))
     }
 }
+
+/// SIP-85: a call never opens a tunnel of its own. At an exchange reached
+/// through the home it rides the chat session's connection, which is the
+/// tunnelled one; with that connection down there is nothing to ride.
+pub const NO_CALL_TUNNEL: &str =
+    "a call at an exchange reached through your home needs the chat connection, which is down";
 
 impl From<Endpoint> for Dial {
     fn from(e: Endpoint) -> Self {
@@ -405,6 +422,7 @@ pub fn spawn_call(
                     let e = engine::resolve(&layers[..], &mut bridge).await?;
                     engine::dial(e, &signer, peer, &mut bridge).await?
                 }
+                Dial::Via { .. } => return Err(NO_CALL_TUNNEL.to_string()),
             };
             // Ring before waiting, so the other end has a reason to answer.
             // Best effort on purpose: a ring that does not arrive costs a call
@@ -496,6 +514,7 @@ pub fn spawn_room(
                     let e = engine::resolve(&layers[..], &mut bridge).await?;
                     engine::connect(e, &signer, &mut bridge).await?
                 }
+                Dial::Via { .. } => return Err(NO_CALL_TUNNEL.to_string()),
             };
             engine::room_call(client, &signer, room, opts, &mut bridge).await
         }
@@ -577,6 +596,7 @@ pub fn spawn_dm_call(
                     let e = engine::resolve(&layers[..], &mut bridge).await?;
                     (engine::connect(e, &signer, &mut bridge).await?, e)
                 }
+                Dial::Via { .. } => return Err(NO_CALL_TUNNEL.to_string()),
             };
             if direct {
                 match sqex_voice::direct::connect(

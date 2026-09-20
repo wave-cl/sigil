@@ -167,7 +167,7 @@ async fn one_identity_at_two_exchanges_is_two_sessions() {
         "one identity starts at its default exchange, which has no name"
     );
 
-    assert!(accounts.add_exchange(0, "indra.org"));
+    assert!(accounts.add_exchange(0, "indra.org", None));
     pass(&mut app, &mut accounts, &egui_ctx);
 
     assert_eq!(
@@ -190,7 +190,7 @@ async fn dropping_an_exchange_stops_only_its_session() {
     let one = Account::unlocked_for_test([1u8; 32]);
     let me = key_of(&one);
     let mut accounts = Accounts::of(vec![one]);
-    accounts.add_exchange(0, "indra.org");
+    accounts.add_exchange(0, "indra.org", None);
     pass(&mut app, &mut accounts, &egui_ctx);
     assert_eq!(app.running_at_for_test().len(), 2);
 
@@ -215,8 +215,8 @@ async fn closing_an_identity_stops_all_of_its_exchanges() {
     let mut app = app_at(dir.path().to_path_buf());
 
     let mut accounts = Accounts::of(vec![Account::unlocked_for_test([1u8; 32])]);
-    accounts.add_exchange(0, "indra.org");
-    accounts.add_exchange(0, "squic.org");
+    accounts.add_exchange(0, "indra.org", None);
+    accounts.add_exchange(0, "squic.org", None);
     pass(&mut app, &mut accounts, &egui_ctx);
     assert_eq!(app.running_at_for_test().len(), 3);
 

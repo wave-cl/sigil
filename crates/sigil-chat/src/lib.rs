@@ -75,6 +75,14 @@ pub const SUGGESTED_EXCHANGE: &str = "trunk.exchange";
 /// discovered at is the answer when there is one; the key is the fallback,
 /// because a connection made to an address has no domain to report and a key
 /// is still better than a word that names nothing.
+/// SIP-85 §What the member MUST NOT do: whether a call may ask the exchange for
+/// a SIP-25 introduction -- the invitation says the other side will, this side
+/// allows it, and the connection is not carried by the home, whose address is
+/// the one that would be introduced.
+fn direct_allowed(ring_says: bool, preference: bool, carried: bool) -> bool {
+    ring_says && preference && !carried
+}
+
 fn default_label(its: Option<ChatState>) -> String {
     match its {
         Some(s) => match (s.domain, s.exchange) {
@@ -898,6 +906,8 @@ struct Pane {
     searching: String,
     /// The exchange being added.
     exchange: String,
+    /// SIP-85: the "through my home" box on Add an exchange.
+    exchange_via: bool,
     /// The message whose file is being forwarded.
     forwarding: Option<(u64, usize)>,
     /// The picture being looked at full size: a message and which of its
@@ -1056,6 +1066,7 @@ impl Default for Pane {
     fn default() -> Self {
         Pane {
             pairing: String::new(),
+            exchange_via: false,
             claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
@@ -1410,8 +1421,25 @@ impl ChatApp {
         if name.is_empty() {
             default_label(self.sessions.get(&(me, String::new())).map(|s| s.state()))
         } else {
-            name.to_string()
+            // SIP-85: carried through the home, said where the name is.
+            match self
+                .sessions
+                .get(&(me, name.to_string()))
+                .and_then(|s| s.state().carried)
+            {
+                Some(home) => format!("{name} via {home}"),
+                None => name.to_string(),
+            }
         }
+    }
+
+    /// SIP-85: the domain of the active identity's default exchange -- the
+    /// home a new exchange can be reached through -- or `None` when the
+    /// default is an address, which a home cannot be asked to find by.
+    fn home_domain(&self, ctx: &AppContext<'_>) -> Option<String> {
+        let path = ctx.accounts.active().path().to_path_buf();
+        let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+        sigil_net::domain_of(&layers)
     }
 
     /// Whether the active identity's default exchange is anywhere at all.
@@ -1549,13 +1577,18 @@ impl ChatApp {
         // Every identity at every exchange it is connected to. The pair is
         // what a session belongs to: the identity is the same key everywhere,
         // and its conversations are not.
-        let mut held: Vec<(At, std::path::PathBuf)> = Vec::new();
+        let mut held: Vec<(At, std::path::PathBuf, Option<String>)> = Vec::new();
         for one in ctx.accounts.all() {
             let Some(unlocked) = one.account().unlocked() else {
                 continue;
             };
             for exchange in one.exchanges() {
-                held.push(((unlocked.me(), exchange), unlocked.path().to_path_buf()));
+                let via = one.via_of(&exchange).map(str::to_string);
+                held.push((
+                    (unlocked.me(), exchange),
+                    unlocked.path().to_path_buf(),
+                    via,
+                ));
             }
         }
 
@@ -1564,7 +1597,7 @@ impl ChatApp {
         // keeps succeeding, and is the wrong person.
         let live: Vec<At> = self.sessions.keys().cloned().collect();
         for at in live {
-            if !held.iter().any(|(k, _)| *k == at) {
+            if !held.iter().any(|(k, _, _)| *k == at) {
                 if let Some(session) = self.sessions.remove(&at) {
                     // Nothing else may go on borrowing what this session was
                     // holding: the identity is gone, and so is the connection
@@ -1600,7 +1633,7 @@ impl ChatApp {
             ctx.connections.forget(at.0, &at.1);
         }
 
-        for (at, path) in held {
+        for (at, path, via) in held {
             if self.sessions.contains_key(&at) {
                 continue;
             }
@@ -1632,6 +1665,31 @@ impl ChatApp {
             if !discovery::any_configured(&layers) {
                 continue;
             }
+            // SIP-85: reached through the home -- the default exchange, by
+            // its domain. The roster remembers the home's domain, and the
+            // session is given the default's own layers to reach it by, so a
+            // changed default does not silently carry through a stranger:
+            // the two must still agree.
+            let dial = match via {
+                Some(home) => {
+                    let home_layers =
+                        discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
+                    if sigil_net::domain_of(&home_layers).as_deref() != Some(home.as_str()) {
+                        // The default is no longer the home this exchange was
+                        // added through. Said once, as a session that never
+                        // comes up; the person removes and re-adds.
+                        tracing::warn!(exchange = %named, home = %home,
+                            "the default exchange is no longer this home; not connecting");
+                        continue;
+                    }
+                    sigil_net::Dial::Via {
+                        home: Box::new(sigil_net::Dial::Discover(home_layers)),
+                        target: Box::new(sigil_net::Dial::Discover(layers)),
+                        target_domain: named.clone(),
+                    }
+                }
+                None => sigil_net::Dial::Discover(layers),
+            };
             // **One store file per identity, shared by its exchanges.** The
             // store scopes every row by exchange and the lock is per (account,
             // exchange), so two sessions on one file do not collide -- and a
@@ -1641,7 +1699,7 @@ impl ChatApp {
                 .as_ref()
                 .map(|root| root.join(format!("{me}.db")));
             let wake = egui_ctx.clone();
-            let session = session::start(layers, unlocked.signer(), store_at, move || {
+            let session = session::start(dial, unlocked.signer(), store_at, move || {
                 wake.request_repaint()
             });
             // **The connection this session is about to hold, offered to the
@@ -2191,9 +2249,11 @@ impl ChatApp {
                 );
                 ui.add_space(tokens::SPACING_SM);
                 if ui.button(format!("Add {SUGGESTED_EXCHANGE}")).clicked()
-                    && ctx
-                        .accounts
-                        .add_exchange(ctx.accounts.active_index(), SUGGESTED_EXCHANGE)
+                    && ctx.accounts.add_exchange(
+                        ctx.accounts.active_index(),
+                        SUGGESTED_EXCHANGE,
+                        None,
+                    )
                 {
                     // Shown straight away, as the dialog does: adding one and
                     // staying on "not connected" looks like nothing happened.
@@ -2881,6 +2941,17 @@ impl ChatApp {
                             .selectable(true),
                     )
                     .on_hover_text("the exchange this conversation list belongs to");
+                    // SIP-85: it sees the home's address, not this machine's.
+                    if let Some(home) = &state.carried {
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new(format!("through {home}")).small(),
+                        )
+                        .on_hover_text(
+                            "your home carries this connection: the exchange sees your home's \
+                             address and your own key, never where you are",
+                        );
+                    }
                 }
                 None => {
                     ui.colored_label(theme.text_muted, egui::RichText::new("connecting…").small());
@@ -3697,6 +3768,7 @@ impl ChatApp {
         theme: &ColorTheme,
     ) {
         let which = ctx.accounts.active_index();
+        let home = self.home_domain(ctx);
         ui.heading("Add an exchange");
         ui.add_space(tokens::SPACING_SM);
         ui.label("Exchange");
@@ -3715,6 +3787,30 @@ impl ChatApp {
             )
             .small(),
         );
+        // SIP-85: through the home. The exchange then sees the home's
+        // address and this identity's own key, never where this machine is.
+        // A home is reached by name, so a default that is an address cannot
+        // be one -- said, rather than a box that does nothing.
+        match &home {
+            Some(home) => {
+                let pane = self.panes.entry(at.clone()).or_default();
+                ui.checkbox(&mut pane.exchange_via, format!("Reach it through {home}"))
+                    .on_hover_text(
+                        "your home carries the connection: the exchange sees your home's \
+                         address and your own key, never where you are (SIP-85)",
+                    );
+            }
+            None => {
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(
+                        "Your default exchange is an address, not a domain, so it cannot \
+                         carry this connection for you.",
+                    )
+                    .small(),
+                );
+            }
+        }
         if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
             ui.colored_label(theme.destructive, trouble);
         }
@@ -3774,9 +3870,18 @@ impl ChatApp {
         ui.horizontal(|ui| {
             if ui.button("Add").clicked() {
                 let named = self.pane(at).exchange.trim().to_string();
-                if ctx.accounts.add_exchange(which, &named) {
+                let via = home.filter(|_| self.pane(at).exchange_via);
+                if via
+                    .as_deref()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(&named))
+                {
+                    self.pane(at).add_trouble = Some(format!(
+                        "{named} is your home; it carries connections to other exchanges."
+                    ));
+                } else if ctx.accounts.add_exchange(which, &named, via) {
                     let pane = self.pane(at);
                     pane.exchange.clear();
+                    pane.exchange_via = false;
                     pane.add_trouble = None;
                     pane.dialog = None;
                     // Shown straight away: adding one and staying where you
@@ -3797,6 +3902,7 @@ impl ChatApp {
             if ui.button("Cancel").clicked() {
                 let pane = self.pane(at);
                 pane.exchange.clear();
+                pane.exchange_via = false;
                 pane.dialog = None;
             }
         });
@@ -6380,9 +6486,27 @@ impl ChatApp {
         // Falling back to dialling rather than refusing: the link may be down
         // and coming back, and a call is worth more than the saving.
         let held = self.sessions.get(at).map(|s| s.connection());
+        // SIP-85: at an exchange reached through the home, the call rides the
+        // session's tunnelled connection or does not happen -- a dial of its
+        // own would go to the default exchange's layers below, which is the
+        // wrong exchange, and directly, which is the address the tunnel
+        // exists to keep from it. And no introduction is asked for on it:
+        // the address the exchange would introduce is the home's.
+        let carried = self
+            .sessions
+            .get(at)
+            .is_some_and(|s| s.state().carried.is_some());
         let layers = discovery::layers(discovery::nothing_explicit(), &self.config, Some(&path));
-        let Some(reach) = sigil_net::Dial::borrowed_or(held, layers) else {
-            return;
+        let reach = if carried {
+            match held.filter(|h| h.is_live()) {
+                Some(h) => sigil_net::Dial::On(h),
+                None => return,
+            }
+        } else {
+            match sigil_net::Dial::borrowed_or(held, layers) {
+                Some(reach) => reach,
+                None => return,
+            }
         };
         let wake = egui_ctx.clone();
         let room = sigil_net::RoomId::new(ring.secret);
@@ -6396,7 +6520,7 @@ impl ChatApp {
                 signer,
                 peer,
                 room,
-                ring.direct && ctx.accounts.prefs.direct_calls,
+                direct_allowed(ring.direct, ctx.accounts.prefs.direct_calls, carried),
                 Default::default(),
                 move || wake.request_repaint(),
             ),
@@ -7267,7 +7391,7 @@ impl ChatApp {
                     // exchange that has not heard of the registration says so.
                     let index = ctx.accounts.active_index();
                     for domain in &domains {
-                        ctx.accounts.add_exchange(index, domain);
+                        ctx.accounts.add_exchange(index, domain, None);
                     }
                     let ats: Vec<At> = self
                         .sessions
@@ -8300,5 +8424,31 @@ mod pairing {
             assert!(parse("sqx-pair:nobody").is_err());
             assert!(parse("colin@squic.org,trunk.exchange").is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod carried_tests {
+    use super::direct_allowed;
+
+    /// SIP-85 §What the member MUST NOT do: on a connection the home
+    /// carries, no introduction is asked for, whatever the invitation and
+    /// the preference say -- the address the exchange would introduce is
+    /// the home's, which answers for nobody.
+    #[test]
+    fn a_carried_connection_never_asks_for_an_introduction() {
+        assert!(
+            direct_allowed(true, true, false),
+            "direct, when everybody agrees"
+        );
+        assert!(!direct_allowed(true, true, true), "carried: never");
+        assert!(
+            !direct_allowed(false, true, false),
+            "the invitation did not say so"
+        );
+        assert!(
+            !direct_allowed(true, false, false),
+            "this side does not allow it"
+        );
     }
 }

@@ -184,8 +184,8 @@ fn the_console_follows_the_exchange_chosen_in_the_title_strip() {
     let account = account();
     let me = account.unlocked().unwrap().me();
     let mut accounts = sigil::accounts::Accounts::of(vec![account]);
-    assert!(accounts.add_exchange(0, "a.example"));
-    assert!(accounts.add_exchange(0, "b.example"));
+    assert!(accounts.add_exchange(0, "a.example", None));
+    assert!(accounts.add_exchange(0, "b.example", None));
     // Slots for both, as the chat's sessions would lend them: empty, so the
     // console waits on them rather than dialling.
     let connections = Connections::new();
@@ -235,8 +235,8 @@ fn the_title_strip_offers_the_exchanges_to_administer() {
     let account = account();
     let me = account.unlocked().unwrap().me();
     let mut accounts = sigil::accounts::Accounts::of(vec![account]);
-    assert!(accounts.add_exchange(0, "a.example"));
-    assert!(accounts.add_exchange(0, "b.example"));
+    assert!(accounts.add_exchange(0, "a.example", None));
+    assert!(accounts.add_exchange(0, "b.example", None));
     accounts.show_exchange(me, Some("b.example".into()));
     let mut app = AdminApp::new();
     let mut h = Harness::builder()
