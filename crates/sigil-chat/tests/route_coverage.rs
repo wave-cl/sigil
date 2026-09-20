@@ -373,6 +373,13 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // the caller having to be that identifier's home by its own signed
     // Move. Exchange to exchange like the rest of `/peer/`.
     ("POST", "/peer/folded", NotAClientRoute),
+    // SIP-79 and SIP-84: an account's backup and its wake registrations
+    // follow it home, collected by the home over the peering as its mail
+    // is. Exchange to exchange.
+    ("POST", "/peer/backup", NotAClientRoute),
+    ("POST", "/peer/backup/blob", NotAClientRoute),
+    ("POST", "/peer/backup/took", NotAClientRoute),
+    ("POST", "/peer/wakes", NotAClientRoute),
     // SIP-53, 54, 57, 59, 60, 61: more of the same, between exchanges.
     ("POST", "/peer/rehomed", NotAClientRoute),
     ("POST", "/peer/cursors", NotAClientRoute),
@@ -525,11 +532,11 @@ fn the_coverage_is_what_it_says_it_is() {
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
     assert_eq!(
-        total, 126,
+        total, 130,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
-        peer, 19,
+        peer, 23,
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
