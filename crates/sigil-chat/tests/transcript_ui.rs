@@ -218,13 +218,17 @@ fn a_conversation() -> ChatState {
             Member {
                 account: me(),
                 admin: true,
+                muted: false,
             },
             Member {
                 account: them(),
                 admin: false,
+                muted: false,
             },
         ],
         i_am_admin: true,
+        reports: Vec::new(),
+        reports_pending: 0,
         topic: String::new(),
         home: None,
         ringing: Vec::new(),
@@ -1447,6 +1451,7 @@ fn a_direct_message_does_not_count_its_two_people() {
         .map(|i| Member {
             account: PubKey::new([100 + i; 32]),
             admin: i == 0,
+            muted: false,
         })
         .collect();
     let mut h = harness_with(group, true);
@@ -7440,3 +7445,49 @@ fn a_room_listed_from_elsewhere_offers_its_exchange_not_join() {
     assert_eq!(said.matches("Join").count(), 1, "{said}");
 }
 
+/// SIP-56 in the members view: an admin can mute a member and sees who is
+/// muted; a muted member's button reads Unmute; a member who is not an
+/// admin gets neither, and everybody may report the room.
+#[test]
+fn an_admin_mutes_from_the_members_view_and_a_member_only_reports() {
+    let mut state = a_conversation();
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Members);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Mute"), "{said}");
+    assert!(!said.contains("Unmute"), "{said}");
+    assert!(said.contains("Report this room"), "{said}");
+    assert!(
+        said.contains("No reports."),
+        "an admin sees the reports section: {said}"
+    );
+
+    state.members[1].muted = true;
+    state.reports = vec![sigil_chat::Report {
+        id: 7,
+        reporter: them(),
+        target: 3,
+        reason: "spam",
+        at: 0,
+        note: "links".into(),
+    }];
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Members);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("muted"), "the roster's word: {said}");
+    assert!(said.contains("Unmute"), "{said}");
+    assert!(said.contains("reported message 3 as spam: links"), "{said}");
+    assert!(said.contains("Dismiss"), "{said}");
+
+    state.i_am_admin = false;
+    state.members[0].admin = false;
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("Unmute") && !said.contains("Mute"),
+        "not an admin's: {said}"
+    );
+    assert!(!said.contains("Dismiss"), "{said}");
+    assert!(said.contains("Report this room"), "{said}");
+}

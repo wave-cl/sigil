@@ -245,31 +245,13 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // SIP-16 §Federated directory: the directory pane, since v0.1.35.
     ("POST", "/channel/search", Chat),
     // SIP-56: no moderation surface in sigil yet.
-    (
-        "POST",
-        "/channel/mute",
-        NotYet("SIP-56 abuse controls, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/channel/unmute",
-        NotYet("SIP-56 abuse controls, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/channel/report",
-        NotYet("SIP-56 abuse controls, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/channel/reports",
-        NotYet("SIP-56 abuse controls, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/channel/dismiss",
-        NotYet("SIP-56 abuse controls, from sqex-chat"),
-    ),
+    // SIP-56, since v0.1.36: mute/unmute from the members view, report from a
+    // message's menu or the members view, reports and dismiss for admins.
+    ("POST", "/channel/mute", Chat),
+    ("POST", "/channel/unmute", Chat),
+    ("POST", "/channel/report", Chat),
+    ("POST", "/channel/reports", Chat),
+    ("POST", "/channel/dismiss", Chat),
     // SIP-59, 60, 62: moving home, reaching somebody at another exchange
     // and rotating the account key are `sqex-chat move`, `^N name@domain`
     // and `sqex-chat handover`; sigil has none of the three yet.
@@ -532,7 +514,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 68,
+        reached, 73,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

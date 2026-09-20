@@ -161,6 +161,7 @@ mod tests {
             .map(|b| Member {
                 account: k(b),
                 admin: b == 1,
+                muted: false,
             })
             .collect()
     }

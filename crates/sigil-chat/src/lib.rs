@@ -11,7 +11,8 @@ pub mod siblings;
 use session::RING_WINDOW;
 pub use session::{
     Attached, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, Hit, Line, LinkState,
-    Linked, Member, Person, Posted, Quoted, Receipt, Ring, Standing, Summary, Thumb, Trouble,
+    Linked, Member, Person, Posted, Quoted, Receipt, Report, Ring, Standing, Summary, Thumb,
+    Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -528,6 +529,9 @@ enum Dialog {
     Name,
     /// Compare safety words with this key's owner (SIP-41).
     Verify(PubKey),
+    /// SIP-56: report a message (`target` is its seq) or the room (0) to the
+    /// admins.
+    Report { target: u64 },
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -908,6 +912,9 @@ struct Pane {
     exchange: String,
     /// SIP-85: the "through my home" box on Add an exchange.
     exchange_via: bool,
+    /// SIP-56: the report dialog's reason and note.
+    report_reason: u8,
+    report_note: String,
     /// The message whose file is being forwarded.
     forwarding: Option<(u64, usize)>,
     /// The picture being looked at full size: a message and which of its
@@ -1067,6 +1074,8 @@ impl Default for Pane {
         Pane {
             pairing: String::new(),
             exchange_via: false,
+            report_reason: 1,
+            report_note: String::new(),
             claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
@@ -2488,11 +2497,16 @@ impl ChatApp {
                 call = true;
             }
             egui::Popup::menu(&more).show(|ui| {
-                let who = if members > 0 && !dm {
+                let mut who = if members > 0 && !dm {
                     format!("Members ({members})")
                 } else {
                     "Members".to_string()
                 };
+                // SIP-56: reports the exchange announced since an admin last
+                // read them, said where the reports are.
+                if state.i_am_admin && state.reports_pending > 0 {
+                    who.push_str(&format!(" · {} new report(s)", state.reports_pending));
+                }
                 if ui.button(who).clicked() {
                     go = Some(Route::Members);
                 }
@@ -3423,6 +3437,7 @@ impl ChatApp {
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
                     Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
+                    Dialog::Report { target } => self.report_dialog(at, target, ui, theme),
                 }
             });
         if response.should_close() {
@@ -3676,6 +3691,67 @@ impl ChatApp {
             if ui.button("Cancel").clicked() {
                 let pane = self.pane(at);
                 pane.naming.clear();
+                pane.dialog = None;
+            }
+        });
+    }
+
+    /// SIP-56: what is wrong, in one of the four words the wire has, and a
+    /// note. Said plainly where it is typed: the note is stored in the clear
+    /// at the exchange, and the admins see who reported.
+    fn report_dialog(&mut self, at: &At, target: u64, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.heading(if target == 0 {
+            "Report this room"
+        } else {
+            "Report this message"
+        });
+        ui.add_space(tokens::SPACING_SM);
+        ui.label("Why");
+        {
+            let pane = self.panes.entry(at.clone()).or_default();
+            ui.horizontal_wrapped(|ui| {
+                for (n, word) in session::REASONS {
+                    ui.radio_value(&mut pane.report_reason, n, word);
+                }
+            });
+        }
+        ui.add_space(tokens::SPACING_SM);
+        ui.label("Note");
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().report_note,
+            "what the admins should know (optional)",
+            width,
+        );
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "The note is stored in the clear at the exchange. The admins see who \
+                 reported it; nobody else does.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        ui.horizontal(|ui| {
+            if ui.button("Report").clicked() {
+                let pane = self.pane(at);
+                let reason = pane.report_reason;
+                let note = pane.report_note.trim().to_string();
+                pane.report_note.clear();
+                pane.dialog = None;
+                self.send_as(
+                    Some(at),
+                    Cmd::Report {
+                        target,
+                        reason,
+                        note,
+                    },
+                );
+            }
+            if ui.button("Cancel").clicked() {
+                let pane = self.pane(at);
+                pane.report_note.clear();
                 pane.dialog = None;
             }
         });
@@ -5052,6 +5128,12 @@ impl ChatApp {
             if did.verify {
                 self.pane(at).dialog = Some(Dialog::Verify(line.who));
             }
+            if did.report {
+                let pane = self.pane(at);
+                pane.report_note.clear();
+                pane.report_reason = 1;
+                pane.dialog = Some(Dialog::Report { target: seq });
+            }
             if let (Some(target), Some(channel)) = (did.jump, state.open) {
                 self.pane(at).jump = Some((channel, target));
             }
@@ -6251,6 +6333,12 @@ impl ChatApp {
                                     // not, which is why it is not here.
                                     ui.colored_label(theme.accent, "admin");
                                 }
+                                if member.muted {
+                                    // SIP-56: the exchange's own signed entry
+                                    // says so; drawn as the roster's word.
+                                    ui.colored_label(theme.text_muted, "muted")
+                                        .on_hover_text("They read, and may not write.");
+                                }
                                 if member.account == me {
                                     ui.colored_label(theme.text_muted, "you");
                                 }
@@ -6313,6 +6401,29 @@ impl ChatApp {
                                             },
                                         );
                                     }
+                                    // SIP-56. An admin cannot be muted (the
+                                    // SIP says demote first), so the button is
+                                    // for members only.
+                                    if !member.admin
+                                        && ui
+                                            .button(if member.muted { "Unmute" } else { "Mute" })
+                                            .on_hover_text(if member.muted {
+                                                "They may write again. Everybody sees this."
+                                            } else {
+                                                "An admin's act, seen by all: they read, and may \
+                                                 not write. Not the same as muting this \
+                                                 conversation for yourself."
+                                            })
+                                            .clicked()
+                                    {
+                                        self.send_as(
+                                            Some(at),
+                                            Cmd::Mute {
+                                                who: member.account,
+                                                on: !member.muted,
+                                            },
+                                        );
+                                    }
                                     let blocked = state.blocked.contains(&member.account);
                                     if ui
                                         .button(if blocked { "Unblock" } else { "Block" })
@@ -6342,6 +6453,81 @@ impl ChatApp {
                         }
                     });
                     ui.separator();
+                }
+                // SIP-56. Anybody may report the room itself; the admins see
+                // what was reported, with who reported it, and dismiss.
+                ui.add_space(tokens::SPACING_SM);
+                if ui
+                    .button("Report this room…")
+                    .on_hover_text("Tell the room's admins something is wrong with it.")
+                    .clicked()
+                {
+                    let pane = self.pane(at);
+                    pane.report_note.clear();
+                    pane.report_reason = 1;
+                    pane.dialog = Some(Dialog::Report { target: 0 });
+                }
+                if state.i_am_admin {
+                    ui.add_space(tokens::SPACING_MD);
+                    ui.separator();
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.horizontal(|ui| {
+                        ui.heading("Reports");
+                        if ui
+                            .button("Refresh")
+                            .on_hover_text("Read the room's reports from the exchange.")
+                            .clicked()
+                        {
+                            self.send_as(Some(at), Cmd::LoadReports);
+                        }
+                    });
+                    if state.reports.is_empty() {
+                        ui.colored_label(theme.text_secondary, "No reports.");
+                    }
+                    for report in &state.reports {
+                        ui.horizontal(|ui| {
+                            let who = state
+                                .people
+                                .get(&report.reporter)
+                                .and_then(|p| p.named())
+                                .unwrap_or_else(|| sigil_ui::short(&report.reporter.to_string()));
+                            let what = if report.target == 0 {
+                                "the room".to_string()
+                            } else {
+                                format!("message {}", report.target)
+                            };
+                            let mut said = format!("{who} reported {what} as {}", report.reason);
+                            if !report.note.is_empty() {
+                                said.push_str(": ");
+                                said.push_str(&report.note);
+                            }
+                            ui.add(egui::Label::new(said).wrap());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Dismiss").clicked() {
+                                        self.send_as(Some(at), Cmd::Dismiss(report.id));
+                                    }
+                                    if report.target != 0
+                                        && ui
+                                            .button("Show")
+                                            .on_hover_text("Go to the message reported.")
+                                            .clicked()
+                                        && let Some(channel) = state.open
+                                    {
+                                        self.send_as(
+                                            Some(at),
+                                            Cmd::ShowAt {
+                                                channel,
+                                                seq: report.target,
+                                            },
+                                        );
+                                        ctx.navigator.back();
+                                    }
+                                },
+                            );
+                        });
+                    }
                 }
             });
         AppResponse::default()

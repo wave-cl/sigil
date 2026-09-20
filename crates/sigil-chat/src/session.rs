@@ -30,9 +30,9 @@ use std::sync::Arc;
 use sqex_chat::client::{Chat, HomeSaid, Link};
 use sqex_chat::store::{self, Store};
 use sqex_proto::channel::{
-    EVENT_ADDED, EVENT_CREATED, EVENT_DEMOTED, EVENT_JOINED, EVENT_LEFT, EVENT_PROMOTED,
-    EVENT_REMOVED, EVENT_RENAMED, EVENT_REPLICATE, EVENT_RETENTION, EVENT_ROTATED, EVENT_SUCCEEDED,
-    EVENT_UNREPLICATE, Role, Visibility,
+    EVENT_ADDED, EVENT_CREATED, EVENT_DEMOTED, EVENT_JOINED, EVENT_LEFT, EVENT_MUTED,
+    EVENT_PROMOTED, EVENT_REMOVED, EVENT_RENAMED, EVENT_REPLICATE, EVENT_RETENTION, EVENT_ROTATED,
+    EVENT_SUCCEEDED, EVENT_UNMUTED, EVENT_UNREPLICATE, Role, Visibility,
 };
 use sqex_proto::events::Event;
 use sqex_proto::message::{
@@ -617,6 +617,11 @@ pub struct ChatState {
     pub verified: HashMap<PubKey, u64>,
     /// Whether we may rename, invite, remove and rotate here.
     pub i_am_admin: bool,
+    /// SIP-56: the open conversation's reports, as last loaded (admins).
+    pub reports: Vec<Report>,
+    /// SIP-56: reports the exchange has announced since the reports were
+    /// last read here, for a badge; cleared by a load.
+    pub reports_pending: usize,
     /// The open conversation's topic, when it has one.
     pub topic: String,
     /// SIP-43: where the open conversation lives, when that is not the
@@ -818,6 +823,35 @@ pub struct Member {
     /// exchange**, unlike a SIP-21 title, which is why it may be shown as a
     /// role and a title may not.
     pub admin: bool,
+    /// SIP-56: muted by an admin -- reads, and may not write. Read off the
+    /// exchange's own signed mute/unmute entries in the transcript, since the
+    /// roster carries no such flag; a mute older than what has been fetched
+    /// is not seen here, and the exchange refuses the posts regardless.
+    pub muted: bool,
+}
+
+/// SIP-56: one report, as the exchange holds it for the admins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub id: u64,
+    pub reporter: PubKey,
+    /// The entry reported, or 0 for the room itself.
+    pub target: u64,
+    pub reason: &'static str,
+    pub at: u64,
+    /// Stored in the clear at the exchange.
+    pub note: String,
+}
+
+/// SIP-56's four reasons, as the wire numbers them.
+pub const REASONS: [(u8, &str); 4] = [(1, "spam"), (2, "harassment"), (3, "illegal"), (4, "other")];
+
+fn reason_word(reason: u8) -> &'static str {
+    REASONS
+        .iter()
+        .find(|(n, _)| *n == reason)
+        .map(|(_, w)| *w)
+        .unwrap_or("other")
 }
 
 /// How somebody can be named.
@@ -1165,6 +1199,24 @@ pub enum Cmd {
         who: PubKey,
         admin: bool,
     },
+    /// SIP-56: mute somebody -- they read, and may not write -- or unmute
+    /// them. An admin's signed entry, like a removal, without the rotation.
+    Mute {
+        who: PubKey,
+        on: bool,
+    },
+    /// SIP-56: report an entry (`target`, or 0 for the room) of the open
+    /// conversation to its admins. The note is stored in the clear at the
+    /// exchange; the admins see who reported, nobody else does.
+    Report {
+        target: u64,
+        reason: u8,
+        note: String,
+    },
+    /// SIP-56: read the open conversation's reports (admins).
+    LoadReports,
+    /// SIP-56: dismiss a report by id (admins).
+    Dismiss(u64),
     /// Mint a new epoch for everybody present.
     Rotate,
     /// Leave. For a direct message this removes only us — leaving a
@@ -1906,6 +1958,7 @@ async fn run(
                     desk.synced = true;
                     desk.synced_at = std::time::Instant::now();
                 }
+                refresh_rosters(&mut chat, &mut desk).await;
                 if refresh(&mut chat, &state, &mut desk, me, &mut cmds).await {
                     (wake)();
                 }
@@ -2161,6 +2214,11 @@ struct Desk {
     open: Option<[u8; 32]>,
     /// Channels an event says have changed. Only these are fetched.
     dirty: HashSet<[u8; 32]>,
+    /// SIP-56: reports announced since the admin last read them.
+    reports_pending: usize,
+    /// Channels whose roster changed by somebody else's act -- a join, a
+    /// removal -- and is re-read on its own, without rebuilding everything.
+    roster_dirty: HashSet<[u8; 32]>,
     /// Channels whose read marks somebody has moved, so the receipts beside
     /// our own messages are worth asking about again.
     cursors_moved: HashSet<[u8; 32]>,
@@ -2235,6 +2293,8 @@ impl Default for Desk {
             channels: HashMap::new(),
             open: None,
             dirty: HashSet::new(),
+            reports_pending: 0,
+            roster_dirty: HashSet::new(),
             cursors_moved: HashSet::new(),
             restale: HashSet::new(),
             answered: HashSet::new(),
@@ -2301,6 +2361,14 @@ impl Desk {
                 // looked like it worked, because eventually it did.
                 if account == me || !self.channels.contains_key(&channel) {
                     self.restructure = true;
+                } else {
+                    // **Somebody else joined or left a room we know.** The
+                    // roster is what the members view and its admin's
+                    // buttons draw from, and it used to wait for the
+                    // periodic rebuild -- half a minute in which a new
+                    // member could not be muted or removed because they
+                    // were not on the list.
+                    self.roster_dirty.insert(channel);
                 }
             }
             // We fell behind and events were dropped. Nothing local can be
@@ -2314,6 +2382,7 @@ impl Desk {
             // whatever the exchange now serves about it is what is drawn.
             Event::Reported { channel } => {
                 self.dirty.insert(channel);
+                self.reports_pending += 1;
             }
             // A profile changed. Refetching is the *only* way to know: a
             // cached name that has moved on looks exactly like a correct one,
@@ -2394,6 +2463,8 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                         // Attested by the exchange. This is the one role that
                         // may be drawn as a role; a SIP-21 title may not.
                         admin: mem.role == Role::Admin,
+                        // Filled from the transcript when the state is drawn.
+                        muted: false,
                     })
                     .collect::<Vec<_>>(),
             ),
@@ -3118,6 +3189,36 @@ async fn catch_up(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut 
     );
     desk.answered.extend(accepted);
     let _ = publish(chat, state, desk, me);
+}
+
+/// Re-read the roster of each channel somebody else's membership event
+/// named, as `sync_channels` reads it, and nothing else of the channel.
+async fn refresh_rosters(chat: &mut Chat, desk: &mut Desk) {
+    let stale: Vec<[u8; 32]> = desk.roster_dirty.drain().collect();
+    for channel in stale {
+        let Ok(info) = chat.info(&channel).await else {
+            continue;
+        };
+        let Some(k) = desk.channels.get_mut(&channel) else {
+            continue;
+        };
+        k.admins = info
+            .members
+            .iter()
+            .filter(|mem| mem.role == Role::Admin)
+            .map(|mem| mem.account)
+            .collect();
+        k.members = info
+            .members
+            .iter()
+            .map(|mem| Member {
+                account: mem.account,
+                admin: mem.role == Role::Admin,
+                muted: false,
+            })
+            .collect();
+        desk.dirty.insert(channel);
+    }
 }
 
 async fn refresh_blocked(chat: &mut Chat, state: &watch::Sender<ChatState>) {
@@ -4207,6 +4308,13 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                         EVENT_LEFT => (format!("{b} left"), None),
                         EVENT_JOINED => (format!("{b} joined"), None),
                         EVENT_PROMOTED => (format!("{a} made {b} an admin"), None),
+                        // SIP-56: said with what it means, since "muted" alone
+                        // reads as silenced on this screen only.
+                        EVENT_MUTED => (
+                            format!("{a} muted {b} — they read, and may not write"),
+                            None,
+                        ),
+                        EVENT_UNMUTED => (format!("{a} unmuted {b}"), None),
                         // SIP-44: the old key's own signature is in the entry,
                         // which is the one thing that makes this believable.
                         EVENT_SUCCEEDED => (
@@ -4434,7 +4542,31 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
 
     let typing = open.map(|(_, k)| k.typing).unwrap_or(false);
     let trouble = open.map(|(_, k)| k.trouble.clone()).unwrap_or_default();
-    let members = open.map(|(_, k)| k.members.clone()).unwrap_or_default();
+    // SIP-56: who is muted is what the transcript's signed entries say, the
+    // last word per member winning; the roster itself carries no flag.
+    let members = open
+        .map(|(_, k)| {
+            let mut muted: HashSet<PubKey> = HashSet::new();
+            for h in k.timeline.events() {
+                match h.what.event {
+                    EVENT_MUTED => {
+                        muted.insert(h.what.subject);
+                    }
+                    EVENT_UNMUTED | EVENT_REMOVED | EVENT_LEFT => {
+                        muted.remove(&h.what.subject);
+                    }
+                    _ => {}
+                }
+            }
+            k.members
+                .iter()
+                .map(|m| Member {
+                    muted: muted.contains(&m.account),
+                    ..m.clone()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     // What the **exchange** attests, not what anybody says about themselves.
     // This is the one place a role may be drawn as a role.
     let i_am_admin = members.iter().any(|m| m.account == me && m.admin);
@@ -4479,6 +4611,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(mine, mine);
         set!(members, members);
         set!(i_am_admin, i_am_admin);
+        set!(reports_pending, desk.reports_pending);
         set!(topic, topic);
         set!(home, home);
         set!(ringing, ringing);
@@ -4988,7 +5121,17 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 // The text is not thrown away here; the interface keeps it in
                 // the composer, because retyping a message the program lost is
                 // the worst thing a chat client can do to somebody.
-                state.send_modify(|s| s.trouble = Some(e.to_string()));
+                //
+                // SIP-56: a mute is said as what it is, not as a refusal code.
+                let said = match &e {
+                    sqex_chat::client::ChatError::Refused(_, r)
+                        if r.code == sqex_proto::refusal::Code::Muted =>
+                    {
+                        "You are muted here: you can read, and may not write.".to_string()
+                    }
+                    _ => e.to_string(),
+                };
+                state.send_modify(|s| s.trouble = Some(said));
             } else {
                 desk.dirty.insert(channel);
             }
@@ -5779,6 +5922,52 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 }
             };
         }
+        Cmd::Mute { who, on } => {
+            let Some(channel) = desk.open else { return };
+            match chat.mute(&channel, &who, on).await {
+                Ok(()) => {
+                    desk.dirty.insert(channel);
+                    note(
+                        state,
+                        if on {
+                            "Muted: they read, and may not write.".into()
+                        } else {
+                            "Unmuted.".into()
+                        },
+                    );
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Report {
+            target,
+            reason,
+            note: why,
+        } => {
+            let Some(channel) = desk.open else { return };
+            match chat.report(&channel, target, reason, &why).await {
+                Ok(()) => note(
+                    state,
+                    "Reported to the admins. They see who reported it; nobody else does.".into(),
+                ),
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::LoadReports => {
+            let Some(channel) = desk.open else { return };
+            desk.reports_pending = 0;
+            load_reports(chat, state, channel).await;
+        }
+        Cmd::Dismiss(id) => {
+            let Some(channel) = desk.open else { return };
+            match chat.dismiss(&channel, id).await {
+                Ok(()) => {
+                    desk.reports_pending = 0;
+                    load_reports(chat, state, channel).await
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
         Cmd::Rotate => {
             let Some(channel) = desk.open else { return };
             match chat.rotate(&channel).await {
@@ -5859,6 +6048,30 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
 /// a trouble is about a state, and the state is rebuilt by every refresh — so
 /// keeping the two in one field puts every confirmation on screen for less than
 /// a tick, which is to say it is never read.
+/// SIP-56: read the room's reports for an admin, and clear the badge.
+async fn load_reports(chat: &mut Chat, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
+    match chat.reports(&channel).await {
+        Ok(rows) => {
+            let reports: Vec<Report> = rows
+                .into_iter()
+                .map(|r| Report {
+                    id: r.id,
+                    reporter: r.reporter,
+                    target: r.target,
+                    reason: reason_word(r.reason),
+                    at: r.at,
+                    note: r.note,
+                })
+                .collect();
+            state.send_modify(|s| {
+                s.reports = reports;
+                s.reports_pending = 0;
+            });
+        }
+        Err(e) => trouble(state, e),
+    }
+}
+
 fn note(state: &watch::Sender<ChatState>, said: String) {
     state.send_modify(|s| {
         s.note = Some(Note {
@@ -6119,16 +6332,19 @@ mod naming_tests {
             super::Member {
                 account: key(3),
                 admin: true,
+                muted: false,
             },
             super::Member {
                 account: key(4),
                 admin: false,
+                muted: false,
             },
         ];
         let mut closed = dm_with(None);
         closed.members = vec![super::Member {
             account: key(5),
             admin: false,
+            muted: false,
         }];
         desk.channels.insert([1u8; 32], open);
         desk.channels.insert([2u8; 32], closed);

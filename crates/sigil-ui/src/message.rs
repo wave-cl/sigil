@@ -286,6 +286,8 @@ pub struct BubbleAction {
     pub mentioned: Option<MentionAction>,
     /// Compare safety words with the author (SIP-41).
     pub verify: bool,
+    /// SIP-56: report this message to the room's admins.
+    pub report: bool,
 }
 
 /// What the card on a mentioned name offers.
@@ -764,6 +766,11 @@ fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
             // Somebody else's key, to compare words with; ours needs none.
             if !b.mine && ui.button("Compare safety words").clicked() {
                 action.verify = true;
+                ui.close();
+            }
+            // SIP-56: somebody else's message, to the room's admins.
+            if !b.mine && ui.button("Report…").clicked() {
+                action.report = true;
                 ui.close();
             }
             // Saving lives here rather than on the picture: it is the one

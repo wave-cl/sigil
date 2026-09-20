@@ -4192,3 +4192,233 @@ async fn a_succession_is_said_in_the_room_and_to_the_old_key() {
     alice.stop();
     bob.stop();
 }
+
+/// SIP-56 from the interface's commands: an admin mutes a member, whose
+/// next message is refused and said as a mute; the transcript says who muted
+/// whom and the roster shows it; unmuting lets them write again. A member
+/// reports a message; the admin reads the report, with who reported it,
+/// and dismisses it; a member asking for the reports is told it is an
+/// admin's to do.
+#[tokio::test]
+async fn an_admin_mutes_and_reads_reports_and_a_member_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(0x56);
+    let (b_signer, b_id) = signer(0x57);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::NewPublic {
+        name: "moderated".into(),
+        topic: String::new(),
+    });
+    assert!(
+        until(
+            || alice.state().open.is_some() && alice.state().i_am_admin,
+            15
+        )
+        .await,
+        "{:?}",
+        alice.state().trouble
+    );
+    let channel = alice.state().open.unwrap();
+    bob.send(Cmd::Find("moderated".into()));
+    assert!(
+        until(
+            || bob.state().found.iter().any(|f| f.name == "moderated"),
+            15
+        )
+        .await
+    );
+    let found = bob
+        .state()
+        .found
+        .into_iter()
+        .find(|f| f.name == "moderated")
+        .unwrap();
+    bob.send(Cmd::Join {
+        channel: found.channel,
+        instance: found.instance,
+    });
+    assert!(
+        until(|| bob.state().open == Some(channel), 15).await,
+        "{:?}",
+        bob.state().trouble
+    );
+    bob.send(Cmd::Send("before the mute".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "before the mute"),
+            20
+        )
+        .await
+    );
+    assert!(
+        until(
+            || alice.state().members.iter().any(|m| m.account == b_id),
+            15
+        )
+        .await,
+        "Bob is on Alice's roster: {:?}",
+        alice.state().members
+    );
+
+    // Muted: refused, and said as what it is.
+    alice.send(Cmd::Mute {
+        who: b_id,
+        on: true,
+    });
+    assert!(
+        until(
+            || alice
+                .state()
+                .members
+                .iter()
+                .any(|m| m.account == b_id && m.muted),
+            15
+        )
+        .await,
+        "the roster shows the mute: {:?}",
+        alice.state().members
+    );
+    assert!(
+        until(
+            || bob
+                .state()
+                .events
+                .iter()
+                .any(|e| e.said.contains("muted you")),
+            15
+        )
+        .await,
+        "the transcript says so: {:?}",
+        bob.state().events
+    );
+    bob.send(Cmd::Send("while muted".into()));
+    assert!(
+        until(
+            || bob
+                .state()
+                .trouble
+                .as_deref()
+                .is_some_and(|t| t.contains("You are muted here")),
+            15
+        )
+        .await,
+        "a muted member is told: {:?}",
+        bob.state().trouble
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !alice.state().lines.iter().any(|l| l.text == "while muted"),
+        "nothing was written"
+    );
+
+    // Unmuted: writes again.
+    alice.send(Cmd::Mute {
+        who: b_id,
+        on: false,
+    });
+    assert!(
+        until(
+            || alice
+                .state()
+                .members
+                .iter()
+                .any(|m| m.account == b_id && !m.muted),
+            15
+        )
+        .await
+    );
+    bob.send(Cmd::Send("after the mute".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "after the mute"),
+            20
+        )
+        .await,
+        "{:?}",
+        bob.state().trouble
+    );
+
+    // A report, read by the admin with who made it, then dismissed.
+    let seq = alice
+        .state()
+        .lines
+        .iter()
+        .find(|l| l.text == "after the mute")
+        .map(|l| l.seq)
+        .unwrap();
+    bob.send(Cmd::Report {
+        target: seq,
+        reason: 2,
+        note: "unkind".into(),
+    });
+    assert!(
+        until(
+            || bob
+                .state()
+                .note
+                .as_ref()
+                .is_some_and(|n| n.said.contains("Reported to the admins")),
+            15
+        )
+        .await,
+        "{:?}",
+        bob.state().trouble
+    );
+    alice.send(Cmd::LoadReports);
+    assert!(
+        until(|| !alice.state().reports.is_empty(), 15).await,
+        "the admin sees it: {:?}",
+        alice.state().trouble
+    );
+    let report = alice.state().reports[0].clone();
+    assert_eq!(report.reporter, b_id);
+    assert_eq!(report.target, seq);
+    assert_eq!(report.reason, "harassment");
+    assert_eq!(report.note, "unkind");
+    alice.send(Cmd::Dismiss(report.id));
+    assert!(
+        until(|| alice.state().reports.is_empty(), 15).await,
+        "dismissed"
+    );
+
+    // Not for members.
+    bob.send(Cmd::LoadReports);
+    assert!(
+        until(
+            || bob
+                .state()
+                .trouble
+                .as_deref()
+                .is_some_and(|t| t.contains("admin")),
+            15
+        )
+        .await,
+        "{:?}",
+        bob.state().trouble
+    );
+    alice.stop();
+    bob.stop();
+}
