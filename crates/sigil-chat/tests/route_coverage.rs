@@ -240,12 +240,12 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/channel/stranded",
         NotYet("SIP-53 origin succession, from sqex-chat's /rehome"),
     ),
-    // SIP-55: sigil's finder reads /channel/list, this exchange's own
+    // SIP-16 §Federated directory: sigil's finder reads /channel/list, this exchange's own
     // directory; the federated search is not surfaced yet.
     (
         "POST",
         "/channel/search",
-        NotYet("SIP-55 federated directory; sigil's finder is local"),
+        NotYet("SIP-16 §Federated directory; sigil's finder is local"),
     ),
     // SIP-56: no moderation surface in sigil yet.
     (
