@@ -1791,6 +1791,192 @@ fn phone_long_chats() {
     h.snapshot("phone_long_chats");
 }
 
+/// SIP-48's backup on a phone, with the 24 words showing.
+///
+/// The devices pane is long and this is the foot of it, so no phone render
+/// had ever reached it: the words are a six-column grid of `"NN. word"` in
+/// monospace, which is a shape chosen for a window.
+fn a_backup() -> ChatState {
+    let mut state = a_conversation();
+    // BIP39 words, and the longest ones there are: a grid that fits
+    // "ab" and fails on "wrestle" fits nothing worth writing down.
+    const WORDS: [&str; 8] = [
+        "abandon", "wrestle", "youthful", "zebra", "vacuum", "universe", "tornado", "squirrel",
+    ];
+    state.backup = Some(sigil_chat::Backup {
+        has_key: true,
+        held: None,
+        used: 4096,
+        quota: 1_048_576,
+        words: Some((0..24).map(|i| WORDS[i % 8].to_string()).collect()),
+    });
+    state
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_backup() {
+    let mut h = harness_phone(a_backup(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    // Down to the foot of the pane, which is where the words are -- the
+    // devices view is long and a snapshot of its top says nothing about
+    // them.
+    for _ in 0..12 {
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    h.snapshot("phone_backup");
+}
+
+/// And it fits, which is the part a picture cannot be trusted to show at a
+/// glance: a grid that overflows takes the rest of the pane with it.
+#[test]
+fn the_backup_words_fit_a_phone() {
+    let (mut h, _, drawn) = harness_phone_measured(a_backup(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("wrestle"),
+        "the words are not on screen, so this proves nothing about them"
+    );
+    let width = drawn.get();
+    assert!(
+        width <= PHONE_WIDTH + 1.0,
+        "the backup words draw {width} points wide in a {PHONE_WIDTH}-point pane"
+    );
+    nothing_runs_off_the_edge(&h, "the backup words");
+}
+
+/// **The foot of a pane can be got to.**
+///
+/// Not "the content fits", which it need not: a pane taller than the screen
+/// is ordinary, and scrolling is the answer. What is not ordinary is a pane
+/// taller than the screen with **nothing to scroll**, and that is what
+/// Devices was. With the backup's 24 words showing it reaches 1825 points on
+/// an 804-point screen, and the words -- the whole of what opens the backup,
+/// on the one screen somebody copies them from -- were below the fold with
+/// no way down. So were Restore and Drop. Members and the directory have had
+/// a scroll area all along; this pane was simply never given one.
+///
+/// Asked as reachability rather than as "is there a ScrollArea", because
+/// reachability is the property and a widget's rect says it plainly.
+#[test]
+fn the_foot_of_the_devices_pane_can_be_reached_on_a_phone() {
+    let mut h = harness_phone(a_backup(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let last = "wrestle";
+    let on_screen = |h: &Harness<'static>| {
+        h.get_all_by_label_contains(last)
+            .any(|n| n.rect().bottom() <= PHONE_HEIGHT && n.rect().top() >= 0.0)
+    };
+    assert!(
+        h.get_all_by_label_contains(last).next().is_some(),
+        "the words are not drawn at all, so this says nothing about reaching them"
+    );
+    assert!(
+        !on_screen(&h),
+        "the words are already on screen without scrolling, so this test is \
+         not about a pane taller than its screen any more"
+    );
+
+    let before = h
+        .get_all_by_label_contains(last)
+        .next()
+        .map(|n| n.rect().top())
+        .unwrap_or(0.0);
+    for _ in 0..12 {
+        // The wheel goes to whatever is under the pointer, so the pointer
+        // has to be in the pane.
+        h.input_mut()
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(
+                PHONE_WIDTH / 2.0,
+                PHONE_HEIGHT / 2.0,
+            )));
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    let after = h
+        .get_all_by_label_contains(last)
+        .next()
+        .map(|n| n.rect().top())
+        .unwrap_or(0.0);
+    assert!(
+        after < before,
+        "nothing moved: the words were at {before} and are at {after}, so \
+         this pane does not scroll at all"
+    );
+    assert!(
+        on_screen(&h),
+        "scrolling never brought the backup words into view: the foot of this \
+         pane cannot be reached on a phone"
+    );
+}
+
+/// **Settings fits the screen, and has nothing to scroll if it stops.**
+///
+/// Devices reached 1825 points on an 804-point screen with nothing to
+/// scroll, and its backup words were simply unreachable. Settings is the
+/// other pane with no scroll area, and today it fits -- 692 points with the
+/// longest name and topic, as an admin, with the destroy confirmation open,
+/// which is everything it can show at once.
+///
+/// So this is not a fix, it is the tripwire: the day it stops fitting, the
+/// failure is silent and identical to Devices', and the answer is the same
+/// scroll area. Measured against everything showing rather than the ordinary
+/// case, because the ordinary case has a hundred points of slack and would
+/// go quiet long before somebody with a long topic noticed.
+#[test]
+fn the_settings_pane_still_fits_a_phone_or_needs_what_devices_needed() {
+    let mut state = a_long_conversation();
+    state.i_am_admin = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    // The destroy confirmation, which is the tallest this pane gets.
+    let at = h
+        .get_all_by_label_contains("Destroy")
+        .next()
+        .map(|b| b.rect().center());
+    let at = at.expect("an admin is offered Destroy");
+    press_at(&mut h, at);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Yes, destroy it"),
+        "the confirmation did not open, so this is not the tallest the pane gets"
+    );
+
+    fn deepest(node: egui_kittest::Node<'_>, ppp: f64, out: &mut f64) {
+        if let Some(b) = node.accesskit_node().bounding_box() {
+            *out = out.max(b.y1 / ppp);
+        }
+        for c in node.children() {
+            deepest(c, ppp, out);
+        }
+    }
+    let mut bottom = 0.0;
+    deepest(h.root(), h.ctx.pixels_per_point() as f64, &mut bottom);
+    assert!(
+        bottom <= PHONE_HEIGHT as f64,
+        "Settings reaches {bottom:.0} of {PHONE_HEIGHT} and has no scroll \
+         area, so the foot of it cannot be got to -- give it the one Devices \
+         was given"
+    );
+}
+
 /// The directory on a phone: the search box, and a hit with what may be
 /// done about it. Three of the five routes had no phone render at all,
 /// which is three screens nobody had looked at on a 360-point pane.

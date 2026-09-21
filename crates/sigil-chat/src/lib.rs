@@ -679,12 +679,6 @@ fn member_actions_ui(
     chose
 }
 
-fn field_width(ui: &egui::Ui, want: f32) -> f32 {
-    /// Room for the button that follows the field.
-    const CONTROL: f32 = 130.0;
-    want.min((ui.available_width() - CONTROL).max(120.0))
-}
-
 /// What is being typed, per identity.
 ///
 /// **Keyed by account, not shared.** A draft typed as one identity must not
@@ -7779,6 +7773,30 @@ impl ChatApp {
             }
         });
 
+        // **The rest of it scrolls.** This pane is four sections and a
+        // backup, and with the 24 words showing it reaches 1825 points --
+        // more than twice a phone's screen, with nothing to scroll. The
+        // words are the whole of what opens the backup and they were *off
+        // the bottom*, along with Restore and Drop; Members and the
+        // directory have had one all along, and this one was simply never
+        // given it. The heading stays put above, as theirs do.
+        let scrolled = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.devices_body(ctx, at, &state, ui, &theme));
+        scrolled.inner
+    }
+
+    /// Everything under the Devices heading. Split out so the heading does
+    /// not scroll with it.
+    #[allow(clippy::too_many_arguments)]
+    fn devices_body(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) -> AppResponse {
         if state.linked == Some(false) {
             // Otherwise learned only by being refused as a stranger to every
             // conversation this client can see, which reads as everything
@@ -8007,7 +8025,7 @@ impl ChatApp {
             .small(),
         );
 
-        self.backup_ui(at, &state, ui, &theme);
+        self.backup_ui(at, state, ui, theme);
         AppResponse::default()
     }
 
@@ -8079,13 +8097,45 @@ impl ChatApp {
                 "Write these words down, in order, where this machine is not. They are \
                  the whole of what opens the backup, and nothing can get them back.",
             );
+            // **How many across depends on the width there is.** Six cells
+            // of `"24. youthful"` in monospace is some 650 points, which on
+            // a 360-point pane is not a grid, it is a pane torn in half --
+            // and because egui grows a ui to what is drawn in it, it took
+            // the fields *above* it out with it. The words are the whole of
+            // what opens the backup and this is the screen somebody copies
+            // them from, so it is the last place to be clever about space.
+            //
+            // Measured rather than chosen: the widest cell is what decides,
+            // and a language whose words are longer gets fewer columns
+            // rather than an overflow.
+            let cell = {
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                words
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| {
+                        ui.ctx().fonts_mut(|f| {
+                            f.layout_no_wrap(
+                                format!("{:>2}. {w}", i + 1),
+                                font.clone(),
+                                egui::Color32::PLACEHOLDER,
+                            )
+                            .rect
+                            .width()
+                        })
+                    })
+                    .fold(0.0f32, f32::max)
+            };
+            let gap = tokens::SPACING_MD;
+            let columns =
+                (((ui.available_width() + gap) / (cell + gap)).floor() as usize).clamp(1, 6);
             egui::Grid::new("backup-words")
-                .num_columns(6)
-                .spacing([tokens::SPACING_MD, tokens::SPACING_XS])
+                .num_columns(columns)
+                .spacing([gap, tokens::SPACING_XS])
                 .show(ui, |ui| {
                     for (i, word) in words.iter().enumerate() {
                         ui.label(egui::RichText::new(format!("{:>2}. {word}", i + 1)).monospace());
-                        if (i + 1) % 6 == 0 {
+                        if (i + 1) % columns == 0 {
                             ui.end_row();
                         }
                     }
@@ -8102,7 +8152,10 @@ impl ChatApp {
             )
             .small(),
         );
-        let width = field_width(ui, 420.0);
+        // The whole width: `field_width` keeps room for a control beside the
+        // box, and the ones here are on the row *under* it -- so a third of a
+        // phone's pane sat empty next to a box for twenty-four words.
+        let width = ui.available_width();
         ui.add(
             egui::TextEdit::multiline(&mut self.panes.entry(at.clone()).or_default().restoring)
                 .hint_text("the 24 words, in order")
