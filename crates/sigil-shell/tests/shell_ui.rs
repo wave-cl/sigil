@@ -27,6 +27,9 @@ struct Stub {
     asks: std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>,
     /// A name for the app bar's left half, when a test wants one.
     head: Option<&'static str>,
+    /// Draw something anchored to the bottom, as a composer is, for the one
+    /// test about what the keyboard's inset does.
+    composer: bool,
 }
 
 impl Stub {
@@ -39,6 +42,15 @@ impl Stub {
             updates: Default::default(),
             asks: Default::default(),
             head: None,
+            composer: false,
+        }
+    }
+
+    /// The same, with something anchored to the bottom of its pane.
+    fn with_composer(title: &'static str) -> Self {
+        Stub {
+            composer: true,
+            ..Stub::named(title, 0)
         }
     }
 
@@ -62,6 +74,13 @@ impl App for Stub {
         std::mem::take(&mut *self.asks.borrow_mut())
     }
     fn render(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        if self.composer {
+            // Where a chat app puts its composer: the bottom panel of
+            // whatever the shell left it.
+            egui::Panel::bottom("stub_composer").show(ui, |ui| {
+                let _ = ui.button("write a message");
+            });
+        }
         ui.heading(self.title);
         if std::mem::take(&mut self.asks_to_switch) {
             return AppResponse::action(sigil::app::AppAction::ChooseIdentity);
@@ -2147,5 +2166,69 @@ fn a_long_head_does_not_run_under_the_corner() {
          drawn under the buttons",
         head.right(),
         corner.left()
+    );
+}
+
+/// **The keyboard's inset is what lifts the composer above it.**
+///
+/// An edge-to-edge window is never resized when the keyboard comes up, so
+/// nothing moves on its own: the shell puts an empty panel the keyboard's
+/// height at the bottom, and the composer is the bottom panel of what is
+/// left. The code says exactly that and nothing checked it -- and a composer
+/// under the keyboard is a message somebody cannot see themselves typing,
+/// which is the sort of thing found by holding the phone rather than by a
+/// test going red.
+///
+/// A keyboard's height rather than a gesture bar's: three hundred points is
+/// most of the screen, which is what makes this worth getting right.
+#[test]
+fn the_keyboard_takes_its_room_from_the_bottom_and_the_composer_sits_above_it() {
+    use egui_kittest::kittest::Queryable;
+    const TALL: f32 = 804.0;
+    const KEYBOARD: f32 = 300.0;
+
+    let place = |insets: sigil::Insets| -> f32 {
+        let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::with_composer("Chat"))];
+        let mut shell =
+            sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+                sigil::Account::unlocked_for_test([4u8; 32]),
+            ]));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(360.0, TALL))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                sigil::Form::install(&ctx, sigil::Form::Phone);
+                theme::install(&ctx, theme::light(), theme::dark());
+                ctx.set_theme(egui::Theme::Dark);
+                shell.set_insets(insets);
+                shell.ui(ui);
+            });
+        h.run();
+        h.run();
+        h.get_by_label("write a message").rect().bottom()
+    };
+
+    let bare = place(sigil::Insets::NONE);
+    assert!(
+        bare > TALL - 60.0,
+        "with no inset the composer should be at the foot of the screen, and \
+         it is at {bare} of {TALL} -- so this test is not looking at a \
+         composer and would not notice one under a keyboard"
+    );
+
+    let lifted = place(sigil::Insets {
+        bottom: KEYBOARD,
+        ..sigil::Insets::NONE
+    });
+    assert!(
+        lifted <= TALL - KEYBOARD + 1.0,
+        "the keyboard is {KEYBOARD} points tall and the composer's foot is at \
+         {lifted} of {TALL}: it is under the keyboard"
+    );
+    assert!(
+        lifted > TALL - KEYBOARD - 60.0,
+        "the composer is at {lifted}, far above the keyboard at \
+         {}: it has not been lifted, it has been lost",
+        TALL - KEYBOARD
     );
 }
