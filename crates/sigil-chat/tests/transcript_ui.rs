@@ -8786,3 +8786,125 @@ fn phone_long_members() {
     h.run();
     h.snapshot("phone_long_members");
 }
+
+/// **Nothing is drawn where a finger cannot get to it.**
+///
+/// The other half of `no_phone_pane_is_wider_than_the_phone`, and the class
+/// of fault it does not see. Three panes drew content below a phone's screen
+/// with nothing to scroll: the backup words in Devices at y=1274 on an
+/// 804-point screen, the operator console's first operation at y=2392, and
+/// the Calls pane's Leave button at y=1344 -- a call you cannot end is a
+/// microphone that stays open. Each was found by asking, of one pane,
+/// "where is this actually drawn?", which only happens when somebody thinks
+/// to ask.
+///
+/// "Is it on screen" is the wrong question, because a pane taller than the
+/// screen is ordinary and right: what matters is whether it can be *reached*.
+/// So the check scrolls to the end and then asks. A widget still below the
+/// bottom after that is in no scroll area, and there is no way to it.
+///
+/// Scrolling is a real wheel over the middle of the screen, which is what a
+/// finger is: it finds whichever scroll area is actually under the pointer,
+/// including none.
+#[test]
+fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
+    // Enough wheel to reach the end of anything this draws, with the wheel
+    // over the middle of the screen.
+    fn to_the_end(h: &mut Harness<'static>) {
+        for _ in 0..40 {
+            h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, PHONE_HEIGHT / 2.0));
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -400.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            // Not `run`: a pane with a spinner in it repaints for ever, and
+            // `run` calls that exceeding its step budget.
+            h.run_steps(2);
+        }
+    }
+
+    // The control, and it has to be inside the test: if nothing is ever
+    // below the screen to begin with, every route passes without the scroll
+    // doing anything, and this says nothing at all.
+    let mut was_below = Vec::new();
+    let mut unreachable = Vec::new();
+    for (what, build) in [
+        ("ordinary", a_conversation as fn() -> ChatState),
+        ("long", a_long_conversation as fn() -> ChatState),
+    ] {
+        for route in [
+            sigil_chat::Route::Conversations,
+            sigil_chat::Route::Directory,
+            sigil_chat::Route::Members,
+            sigil_chat::Route::Settings,
+            sigil_chat::Route::Devices,
+        ] {
+            let mut state = build();
+            state.reports = vec![sigil_chat::Report {
+                id: 7,
+                reporter: them(),
+                target: 3,
+                reason: "spam",
+                at: NOW - 3600,
+                note: "links".into(),
+            }];
+            let mut h = harness_phone(state, route.clone());
+            h.run();
+            h.run();
+            let before = deepest(&h);
+            if before.1 > PHONE_HEIGHT as f64 + 1.0 {
+                was_below.push(format!("{route:?} with {what} names"));
+            }
+            to_the_end(&mut h);
+            let after = deepest(&h);
+            if after.1 > PHONE_HEIGHT as f64 + 1.0 {
+                unreachable.push(format!(
+                    "{route:?} with {what} names: {:?} still ends at y={:.0} on a \
+                     {PHONE_HEIGHT}-point screen after scrolling to the end, so \
+                     nothing reaches it",
+                    after.0, after.1
+                ));
+            }
+        }
+    }
+    assert!(
+        !was_below.is_empty(),
+        "no route drew anything below the screen even before scrolling, so \
+         the scroll proves nothing and neither does this test"
+    );
+    assert!(
+        unreachable.is_empty(),
+        "{} pane(s) draw something no finger can get to:\n  {}",
+        unreachable.len(),
+        unreachable.join("\n  ")
+    );
+}
+
+/// The deepest thing drawn, and what it is, in points.
+///
+/// The accesskit node's own bounding box, for the reason `walk` in
+/// `nothing_runs_off_the_edge` gives: `Node::rect` panics on the root.
+fn deepest(h: &Harness<'static>) -> (String, f64) {
+    fn walk(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<(String, f64)>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box()
+            && b.y1 > b.y0
+        {
+            out.push((name, b.y1 / ppp));
+        }
+        for c in node.children() {
+            walk(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    walk(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+    seen.sort_by(|a, b| b.1.total_cmp(&a.1));
+    seen.first().cloned().unwrap_or_default()
+}
