@@ -199,11 +199,12 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // ---- other services --------------------------------------------------
     ("POST", "/beacon/beat", Chat),
     ("POST", "/beacon/read", Chat),
-    (
-        "POST",
-        "/rendezvous/introduce",
-        NotYet("SIP-25 introductions"),
-    ),
+    // SIP-25, since sigil-net got direct calls: `sqex_voice::direct::connect`
+    // → `sqex_proto::direct::introduce` posts this, and the reply is the
+    // address and the moment both sides were told to begin punching. The
+    // verdict here said NotYet for as long as it has worked; four direct
+    // calls between a desktop and a phone on 2026-09-18 went through it.
+    ("POST", "/rendezvous/introduce", Voice),
     // SIP-48, since v0.1.39: the Backup section of the Devices view -- the
     // key as 24 words, Back up now, Restore with the words, Drop.
     ("POST", "/backup/write", Chat),
@@ -305,12 +306,20 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     (
         "POST",
         "/wake/register",
-        NotYet("SIP-45 wake-up, for a phone client that does not exist yet"),
+        NotYet(
+            "SIP-45 wake-up: sigil-android's `sigil_phone::wake` does this, and \
+             nothing in *this* workspace does -- a desktop holds its stream open \
+             and is never asleep",
+        ),
     ),
     (
         "POST",
         "/wake/forget",
-        NotYet("SIP-45 wake-up, for a phone client that does not exist yet"),
+        NotYet(
+            "SIP-45 wake-up: sigil-android's `sigil_phone::wake` does this, and \
+             nothing in *this* workspace does -- a desktop holds its stream open \
+             and is never asleep",
+        ),
     ),
     // ---- exchange to exchange --------------------------------------------
     ("POST", "/peer/hello", NotAClientRoute),
@@ -501,7 +510,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 77,
+        reached, 78,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );
