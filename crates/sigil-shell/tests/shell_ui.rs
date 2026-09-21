@@ -27,6 +27,8 @@ struct Stub {
     asks: std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>,
     /// A name for the app bar's left half, when a test wants one.
     head: Option<&'static str>,
+    /// A name for the history entry, as `nav_title` answers it.
+    named: Option<&'static str>,
     /// Draw something anchored to the bottom, as a composer is, for the one
     /// test about what the keyboard's inset does.
     composer: bool,
@@ -42,6 +44,7 @@ impl Stub {
             updates: Default::default(),
             asks: Default::default(),
             head: None,
+            named: None,
             composer: false,
         }
     }
@@ -58,6 +61,16 @@ impl Stub {
     fn heading(title: &'static str, name: &'static str) -> Self {
         Stub {
             head: Some(name),
+            ..Stub::named(title, 0)
+        }
+    }
+
+    /// The same, as a view with a name of its own: what `nav_title` answers
+    /// for a pushed history entry, which on a phone puts the name and the
+    /// way back in the bar.
+    fn view(title: &'static str, name: &'static str) -> Self {
+        Stub {
+            named: Some(name),
             ..Stub::named(title, 0)
         }
     }
@@ -89,12 +102,22 @@ impl App for Stub {
     }
     /// Something in the title strip, named after the app so a test can tell
     /// whose corner was drawn.
-    fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+    fn chrome_ui(
+        &mut self,
+        _ctx: &mut AppContext<'_>,
+        ui: &mut egui::Ui,
+        _token: &std::rc::Rc<dyn std::any::Any>,
+    ) {
         let _ = ui.button(format!("{} corner", self.title));
     }
     /// A head of its own, for the one test about the bar's two halves. Off
     /// by default: every other test here wants the shell's own title, which
     /// is what an app that names nothing gets.
+    /// A name of its own for this history entry, when the stub was made
+    /// with one. Off by default, as `head` is.
+    fn nav_title(&self, _token: &std::rc::Rc<dyn std::any::Any>) -> Option<String> {
+        self.named.map(str::to_string)
+    }
     fn head_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> bool {
         let Some(name) = self.head else {
             return false;
@@ -2230,5 +2253,55 @@ fn the_keyboard_takes_its_room_from_the_bottom_and_the_composer_sits_above_it() 
         "the composer is at {lifted}, far above the keyboard at \
          {}: it has not been lifted, it has been lost",
         TALL - KEYBOARD
+    );
+}
+
+/// **On a phone, a named view's name and its way back are in the bar.**
+///
+/// `nav_title` answers for a view pushed onto the history with a name of its
+/// own -- Devices, Members, Channel settings. The shell drew the name in the
+/// bar and the view drew the same name again in the pane below it, under a
+/// Back button of its own: two bars on the screen with the least room for
+/// one. The bar carries both now, exactly as it already carried an open
+/// conversation's, and the view draws neither.
+#[test]
+fn on_a_phone_the_bar_carries_a_named_views_name_and_its_way_back() {
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::view("Chat", "Devices"))];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+    h.run();
+    let back = h.get_by_label("Back").rect();
+    let name = h.get_by_label("Devices").rect();
+    assert!(
+        back.right() <= name.left(),
+        "the way back comes before the name: {back:?} / {name:?}"
+    );
+    assert!(
+        (back.center().y - name.center().y).abs() < sigil::tokens::SPACING_SM,
+        "they are not on one line: {back:?} / {name:?}"
+    );
+    // In the bar, which is a control tall at the top, and not in the pane.
+    assert!(
+        back.bottom() <= sigil::tokens::BUTTON_LG * 2.0,
+        "Back is at {back:?}, which is too far down to be the bar's"
+    );
+    // The stub's own render draws its title, and that is the only other
+    // heading: the shell has not also drawn "Chat".
+    assert_eq!(
+        h.get_all_by_label("Devices").count(),
+        1,
+        "the name is on the screen more than once"
     );
 }

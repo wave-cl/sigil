@@ -783,7 +783,8 @@ impl Shell {
                                 notify: self.platform.as_ref(),
                                 connections: &self.connections,
                             };
-                            self.apps[active].chrome_ui(&mut ctx, ui);
+                            let token = self.nav.top().token.clone();
+                            self.apps[active].chrome_ui(&mut ctx, ui, &token);
                         },
                     );
                     corner_used = drawn.response.rect.width();
@@ -791,28 +792,50 @@ impl Shell {
                 if form.is_phone() && app_on_screen {
                     let entry = self.nav.top().clone();
                     let active = self.active();
+                    // **A named view owns the bar.** `nav_title` answers for a
+                    // view that was pushed onto the history and has a name of
+                    // its own -- Devices, Members, Channel settings. On a
+                    // phone that name and the way back belong *here*, as a
+                    // conversation's already do, and the view draws no second
+                    // bar under this one. It did: the name was in the strip
+                    // and again in the pane below it, under a Back button of
+                    // its own, which cost a finger's height of a 804-point
+                    // screen on the four panes that have the least room.
+                    //
                     // The home app's bar says what the product is; another
                     // app's says which it is, so nobody wonders where they
-                    // are. A view with a name of its own says that.
-                    let title = self.apps[active]
-                        .nav_title(&entry.token)
-                        .unwrap_or_else(|| {
-                            if active == 0 {
-                                sigil::NAME.to_string()
-                            } else {
-                                self.apps[active].title().to_string()
-                            }
-                        });
+                    // are.
+                    let named = self.apps[active].nav_title(&entry.token);
+                    let title = named.clone().unwrap_or_else(|| {
+                        if active == 0 {
+                            sigil::NAME.to_string()
+                        } else {
+                            self.apps[active].title().to_string()
+                        }
+                    });
                     // What the corner left. A gap between them, so a
                     // truncated name does not read as running into a button.
                     let mut left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
                     left.max.x = (left.max.x - corner_used - tokens::SPACING_SM).max(left.min.x);
                     let mut switch = None;
+                    let mut back = false;
                     ui.scope_builder(
                         egui::UiBuilder::new()
                             .max_rect(left)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
+                            // A named view: the way back, then its name.
+                            // Back is the history's own step, which is what
+                            // the phone's hardware button does -- the view
+                            // asked for exactly that when it drew this
+                            // itself.
+                            if named.is_some() {
+                                if sigil_ui::icon_button(ui, sigil::Icon::Back).clicked() {
+                                    back = true;
+                                }
+                                ui.label(egui::RichText::new(&title).heading());
+                                return;
+                            }
                             // The app's own head first: an identity's mark,
                             // or Back and a name, in which case there is no
                             // title to draw.
@@ -855,6 +878,9 @@ impl Shell {
                             });
                         },
                     );
+                    if back {
+                        self.nav.go_back();
+                    }
                     if let Some(i) = switch {
                         self.navigator.switch_to(AppId(i));
                     }

@@ -323,7 +323,13 @@ pub trait App {
     /// one small control tall and is the window's drag region, so what goes
     /// here should be small and rare: the thing an identity is looking *at*,
     /// not the things it can do. The default draws nothing.
-    fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) {}
+    ///
+    /// `token` is the history entry being drawn -- the same one `nav_title`
+    /// and `render_nav` are given -- so a view that is its own nav entry can
+    /// put its one action here. On a phone that is where it belongs: the
+    /// shell draws Back and the view's name in the bar, and the corner is
+    /// the rest of the bar.
+    fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui, _token: &Rc<dyn Any>) {}
 
     /// Draw the **head** of a phone's app bar: its left-hand end, in a
     /// left-to-right layout, before the title.

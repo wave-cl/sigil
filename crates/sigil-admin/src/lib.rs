@@ -260,7 +260,12 @@ impl App for AdminApp {
     /// identity's exchanges is being looked at. Choosing here moves the
     /// console and the chat together. No "add" -- that is the chat's dialog,
     /// and an exchange is added to talk on before it is administered.
-    fn chrome_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+    fn chrome_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        ui: &mut egui::Ui,
+        _token: &std::rc::Rc<dyn std::any::Any>,
+    ) {
         let theme = ColorTheme::current(ui.ctx());
         let Some(me) = Self::showing(ctx) else {
             return;

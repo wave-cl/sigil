@@ -78,7 +78,10 @@ fn build(account: Account, state: Option<ChatState>) -> Harness<'static> {
                                 notify: &sigil::Silent,
                                 connections: &Default::default(),
                             };
-                            app.chrome_ui(&mut app_ctx, ui);
+                            // The nav entry being drawn. These harnesses show an app's
+                            // root, which has no name of its own.
+                            let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(());
+                            app.chrome_ui(&mut app_ctx, ui, &token);
                         },
                     );
                 });
@@ -414,7 +417,10 @@ fn a_default_that_resolves_to_nothing_is_not_listed() {
                     notify: &sigil::Silent,
                     connections: &Default::default(),
                 };
-                app.chrome_ui(&mut app_ctx, ui);
+                // The nav entry being drawn. These harnesses show an app's
+                // root, which has no name of its own.
+                let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(());
+                app.chrome_ui(&mut app_ctx, ui, &token);
             });
         });
     h.run();

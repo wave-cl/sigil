@@ -1903,6 +1903,18 @@ impl ChatApp {
     }
 }
 
+/// Whether the shell's app bar is already carrying this view's name and its
+/// way back.
+///
+/// On a phone it is: a view with a `nav_title` owns the bar, Back included,
+/// exactly as an open conversation does. Drawing the same two things again
+/// in the pane cost a finger's height on the four panes with the least room
+/// to spare. On a desktop the pane is one of two columns with no bar over
+/// it, so it keeps its own.
+fn bar_has_the_head(ui: &egui::Ui) -> bool {
+    sigil::Form::of(ui.ctx()).is_phone()
+}
+
 impl App for ChatApp {
     fn render_nav(
         &mut self,
@@ -2227,11 +2239,35 @@ impl App for ChatApp {
         false
     }
 
-    fn chrome_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
+    fn chrome_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        ui: &mut egui::Ui,
+        token: &std::rc::Rc<dyn std::any::Any>,
+    ) {
         let theme = ColorTheme::current(ui.ctx());
         let Some(at) = self.showing_at(ctx) else {
             return;
         };
+        // **A named view's one action, on a phone.** The shell has taken
+        // this view's name and its Back into the bar, so the corner is the
+        // rest of that bar -- and it is the exchange control that has no
+        // business here: nothing on these four panes is chosen by exchange,
+        // and switching one from Devices would change what the list below
+        // is about without saying so.
+        if sigil::Form::of(ui.ctx()).is_phone() {
+            match Self::route(token) {
+                Route::Devices => {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                        self.send_as(Some(&at), Cmd::Devices);
+                        self.send_as(Some(&at), Cmd::BackupStatus);
+                    }
+                    return;
+                }
+                Route::Directory | Route::Members | Route::Settings => return,
+                Route::Conversations => {}
+            }
+        }
         // On a phone with a conversation open the corner is the
         // conversation's controls, folded behind More; the exchange is
         // chosen from the list, which is where one is left by Back.
@@ -6242,12 +6278,14 @@ impl ChatApp {
         let at = &at;
         let state = self.state_of(Some(at));
 
-        ui.horizontal(|ui| {
-            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
-                ctx.navigator.back();
-            }
-            ui.heading("Public channels");
-        });
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Public channels");
+            });
+        }
         ui.colored_label(
             theme.text_secondary,
             "Anybody may join these, and nothing said in one is encrypted — everyone \
@@ -6451,12 +6489,14 @@ impl ChatApp {
         let me = at.0;
         let state = self.state_of(Some(at));
 
-        ui.horizontal(|ui| {
-            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
-                ctx.navigator.back();
-            }
-            ui.heading("Members");
-        });
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Members");
+            });
+        }
 
         if state.i_am_admin {
             ui.add_space(tokens::SPACING_SM);
@@ -6803,12 +6843,14 @@ impl ChatApp {
         let state = self.state_of(Some(at));
         self.fill_settings(at, &state);
 
-        ui.horizontal(|ui| {
-            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
-                ctx.navigator.back();
-            }
-            ui.heading("Channel settings");
-        });
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Channel settings");
+            });
+        }
 
         // Yours, whatever your standing here: what this machine says out
         // loud about the conversation.
@@ -7762,16 +7804,21 @@ impl ChatApp {
         let at = &at;
         let state = self.state_of(Some(at));
 
-        ui.horizontal(|ui| {
-            if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
-                ctx.navigator.back();
-            }
-            ui.heading("Devices");
-            if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
-                self.send_as(Some(at), Cmd::Devices);
-                self.send_as(Some(at), Cmd::BackupStatus);
-            }
-        });
+        // Ask again. On a phone this is in the bar's corner, where a
+        // view's one action goes; here it would be the only thing left of a
+        // row whose other two halves the bar has taken.
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Devices");
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                    self.send_as(Some(at), Cmd::Devices);
+                    self.send_as(Some(at), Cmd::BackupStatus);
+                }
+            });
+        }
 
         // **The rest of it scrolls.** This pane is four sections and a
         // backup, and with the 24 words showing it reaches 1825 points --

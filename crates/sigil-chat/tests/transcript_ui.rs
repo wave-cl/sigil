@@ -476,7 +476,10 @@ fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
                                 notify: &sigil::Silent,
                                 connections: &Default::default(),
                             };
-                            app.chrome_ui(&mut app_ctx, ui);
+                            // A desktop's title strip: the app's root,
+                            // which has no name of its own.
+                            let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(());
+                            app.chrome_ui(&mut app_ctx, ui, &token);
                         },
                     );
                 });
@@ -654,7 +657,7 @@ fn harness_phone_themed(
                         egui::UiBuilder::new()
                             .max_rect(corner)
                             .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                        |ui| app.chrome_ui(&mut app_ctx, ui),
+                        |ui| app.chrome_ui(&mut app_ctx, ui, &token),
                     );
                     let used = drawn.response.rect.width();
                     let mut left = whole.shrink2(egui::vec2(sigil::tokens::SPACING_MD, 0.0));
@@ -664,8 +667,26 @@ fn harness_phone_themed(
                             .max_rect(left)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
-                            if !app.head_ui(&mut app_ctx, ui) {
-                                ui.label(egui::RichText::new(sigil::NAME).heading());
+                            // **As the shell composes it, not as this file
+                            // used to.** The harness drew the app's head and
+                            // fell back to the product's name, and the shell
+                            // asks `nav_title` first -- so every phone
+                            // snapshot showed "Sigil" over a pane whose real
+                            // bar says "Devices", and the duplicate name and
+                            // Back button in the pane below were invisible
+                            // here for as long as they existed.
+                            match app.nav_title(&token) {
+                                Some(title) => {
+                                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                                        app_ctx.navigator.back();
+                                    }
+                                    ui.label(egui::RichText::new(title).heading());
+                                }
+                                None => {
+                                    if !app.head_ui(&mut app_ctx, ui) {
+                                        ui.label(egui::RichText::new(sigil::NAME).heading());
+                                    }
+                                }
                             }
                         },
                     );
@@ -8907,4 +8928,135 @@ fn deepest(h: &Harness<'static>) -> (String, f64) {
     walk(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
     seen.sort_by(|a, b| b.1.total_cmp(&a.1));
     seen.first().cloned().unwrap_or_default()
+}
+
+/// **A named view's name is in the bar, and only there.**
+///
+/// On a phone the shell draws Back and the view's name in the app bar, from
+/// `nav_title` -- the same place a conversation's Back and name go. Each of
+/// these four views also drew its own Back and its own heading in the pane
+/// under it, so the name was on the screen twice, under two back arrows,
+/// and a finger's height of an 804-point screen went on saying it again.
+///
+/// Nothing failed, because this file's harness composed the bar its own way
+/// -- head, then the product's name -- and never asked `nav_title` at all.
+/// It does now, which is the other half of this change.
+#[test]
+fn on_a_phone_a_named_view_says_its_name_once() {
+    for (route, name) in [
+        (sigil_chat::Route::Directory, "Public channels"),
+        (sigil_chat::Route::Members, "Members"),
+        (sigil_chat::Route::Settings, "Channel settings"),
+        (sigil_chat::Route::Devices, "Devices"),
+    ] {
+        let mut h = harness_phone(a_conversation(), route.clone());
+        h.run();
+        h.run();
+        let said = h.get_all_by_label(name).count();
+        assert_eq!(
+            said, 1,
+            "{route:?} draws {name:?} {said} times on a phone; the bar has it"
+        );
+        let backs = h.get_all_by_label("Back").count();
+        assert_eq!(
+            backs, 1,
+            "{route:?} has {backs} back arrows on a phone: the bar draws one"
+        );
+        // And the bar's, not the pane's: it is above everything the view
+        // draws.
+        let back = h.get_by_label("Back").rect();
+        let heading = h.get_by_label(name).rect();
+        // The bar's Back, not a pane's: it is the topmost thing drawn.
+        // A Back inside the view would have the bar's own contents above
+        // it, which is exactly the shape this replaces.
+        let above: Vec<String> = every_box(&h)
+            .into_iter()
+            .filter(|(_, r)| r.height() > 0.0 && r.bottom() <= back.top() + 1.0)
+            .map(|(n, r)| format!("{n:?} at {r:?}"))
+            .collect();
+        assert!(
+            above.is_empty(),
+            "{route:?}: {} thing(s) are drawn above Back, so Back is in the \
+             pane and not in the bar:\n  {}",
+            above.len(),
+            above.join("\n  ")
+        );
+        assert!(
+            (back.center().y - heading.center().y).abs() < tokens::SPACING_SM,
+            "{route:?}: Back and the name are not on one line: {back:?} / {heading:?}"
+        );
+    }
+}
+
+/// On a desktop the pane keeps its own head, because there is no bar over it.
+///
+/// The desktop has no app bar to hoist a name into: the view is one of two
+/// columns, and taking its heading and its Back away would leave a pane
+/// nobody could name or leave.
+#[test]
+fn on_a_desktop_a_view_keeps_its_own_head() {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(a_conversation());
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(sigil_chat::Route::Devices);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            egui::CentralPanel::default().show(ui, |ui| {
+                let _ = app.render_nav(&mut app_ctx, ui, &token);
+            });
+        });
+    h.run();
+    h.run();
+    assert_eq!(
+        h.get_all_by_label("Devices").count(),
+        1,
+        "the desktop's Devices pane lost its own heading"
+    );
+    assert_eq!(
+        h.get_all_by_label("Back").count(),
+        1,
+        "the desktop's Devices pane lost its own way back"
+    );
+}
+
+/// Every widget's box and what it is called, for a test that needs to know
+/// what is above what.
+fn every_box(h: &Harness<'static>) -> Vec<(String, egui::Rect)> {
+    fn walk(node: egui_kittest::Node<'_>, ppp: f32, out: &mut Vec<(String, egui::Rect)>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box() {
+            out.push((
+                name,
+                egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32 / ppp, b.y0 as f32 / ppp),
+                    egui::pos2(b.x1 as f32 / ppp, b.y1 as f32 / ppp),
+                ),
+            ));
+        }
+        for c in node.children() {
+            walk(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    walk(h.root(), h.ctx.pixels_per_point(), &mut seen);
+    seen
 }
