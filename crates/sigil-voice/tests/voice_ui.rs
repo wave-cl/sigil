@@ -318,3 +318,119 @@ fn the_calls_pane_is_not_wider_than_the_phone() {
         "Calls draws {width} points wide in a {PHONE}-point pane"
     );
 }
+
+/// The Calls app on a phone, carrying whatever call it was handed.
+fn phone_with(app: VoiceApp) -> Harness<'static> {
+    let mut app = app;
+    let mut accounts = sigil::accounts::Accounts::of(vec![Account::unlocked_for_test([1u8; 32])]);
+    let margin = sigil::Form::Phone.body_margin();
+    Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(margin as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &sigil::Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+        })
+}
+
+/// A room of a dozen on a phone: the roster scrolls, Leave does not move.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+async fn voice_phone_in_a_room() {
+    let mut h = phone_with(a_room_of(12));
+    h.run();
+    h.run();
+    h.snapshot("voice_phone_in_a_room");
+}
+
+/// A call in a room with `n` people in it.
+fn a_room_of(n: usize) -> VoiceApp {
+    let mut app = VoiceApp::new();
+    let present: Vec<sigil_net::PeerStatus> = (0..n)
+        .map(|i| sigil_net::PeerStatus {
+            identity: sqnr_core::PubKey::new([i as u8 + 10; 32]),
+            speaking: i % 3 == 0,
+            level: 0.4,
+            loss_pct: 2.1,
+            concealed: 3,
+            buffered: 9,
+        })
+        .collect();
+    app.hold_call_for_test(sigil_net::CallHandle::for_test(sigil_net::CallState {
+        phase: sigil_net::Phase::Live,
+        room: Some(sigil_net::RoomId::generate()),
+        present,
+        connecting: 2,
+        ..Default::default()
+    }));
+    app
+}
+
+/// **Hang up stays on the screen, however many people are in the room.**
+///
+/// The call view draws the roster and *then* the control that ends the call.
+/// On a phone each roster row is a key, a meter and a line about the path --
+/// two lines, since the detail sits under the row there -- so a room of a
+/// dozen is several hundred points, and Leave was below the fold with
+/// nothing to scroll. A call somebody cannot end is a microphone that stays
+/// open, and the only way out is force-stopping the app.
+///
+/// Twelve is not a stress test. It is a team.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_that_ends_a_call_stays_on_a_phones_screen() {
+    const TALL: f32 = 804.0;
+    let mut h = phone_with(a_room_of(12));
+    h.run();
+    h.run();
+    let leave = h
+        .get_all_by_label_contains("Leave")
+        .map(|n| n.rect())
+        .next()
+        .expect("a call in a room offers Leave");
+    assert!(
+        leave.bottom() <= TALL,
+        "Leave sits at y {:.0}..{:.0} of {TALL}: a dozen people in the room \
+         have pushed the only way out of the call off the screen",
+        leave.top(),
+        leave.bottom()
+    );
+
+    // **And it still ends the call.** Moving a control into a panel is the
+    // sort of change that leaves a button which looks right and does
+    // nothing: the press has to reach the same `hang_up` it did before.
+    assert!(
+        text_of(&h).contains("In a room"),
+        "the call is not up, so pressing Leave proves nothing"
+    );
+    h.get_all_by_label_contains("Leave")
+        .next()
+        .expect("Leave")
+        .click();
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("In a room"),
+        "Leave is on the screen and does not end the call: {}",
+        text_of(&h)
+    );
+}

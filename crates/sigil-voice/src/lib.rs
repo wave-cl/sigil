@@ -92,6 +92,17 @@ impl VoiceApp {
         self.config.server_key = Some(key.to_string());
     }
 
+    /// Carry a call this app did not place, so a view of one can be drawn
+    /// without an exchange to place it against.
+    ///
+    /// The same seam the chat app has, and for the same reason: what a call
+    /// *looks like* -- a roster, a clock, the control that ends it -- is
+    /// worth checking without a network, and every other way in needs one.
+    #[doc(hidden)]
+    pub fn hold_call_for_test(&mut self, handle: sigil_net::CallHandle) {
+        self.call = Some(handle);
+    }
+
     fn note(&mut self, line: String) {
         self.log.push(line);
         if self.log.len() > LOG_LIMIT {
@@ -407,8 +418,47 @@ impl VoiceApp {
             (_, false) => "On a call",
         });
 
+        // **The way out is pinned, and the roster scrolls.** The roster was
+        // drawn first and the control that ends the call last, so a room of a
+        // dozen people -- two lines each on a phone -- put Leave at y 1344 of
+        // an 804-point screen, with nothing to scroll. A call somebody cannot
+        // end is a microphone that stays open, and the only way out of that
+        // is force-stopping the app.
+        //
+        // So it goes in a panel at the foot, where a phone's call controls
+        // live, and everything that can grow is above it in a scroll area.
+        // A desktop sees the same arrangement and has always had room for
+        // it; what changes is that the room is no longer assumed.
+        let leave = if in_room { "Leave" } else { "Hang up" };
+        let mut hung_up = false;
+        egui::Panel::bottom("call_controls")
+            .frame(
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(0, tokens::SPACING_SM as i8)),
+            )
+            .show(ui, |ui| {
+                if ui.button(leave).clicked() {
+                    hung_up = true;
+                }
+                if let Some(stats) = &state.stats {
+                    ui.colored_label(theme.text_secondary, egui::RichText::new(stats).monospace());
+                }
+            });
+        if hung_up && let Some(call) = &self.call {
+            call.hang_up();
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.call_body(&state, ui, theme));
+    }
+
+    /// Everything above the call's own controls: who is there, how it is
+    /// going, and the log. All of it can grow, so all of it scrolls.
+    fn call_body(&self, state: &CallState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let in_room = state.room.is_some();
         if in_room {
-            self.roster_ui(&state, ui);
+            self.roster_ui(state, ui);
         }
 
         if let Some(peer) = state.peer {
@@ -436,18 +486,6 @@ impl VoiceApp {
             );
         }
         ui.add_space(tokens::SPACING_MD);
-
-        let leave = if in_room { "Leave" } else { "Hang up" };
-        if ui.button(leave).clicked()
-            && let Some(call) = &self.call
-        {
-            call.hang_up();
-        }
-        ui.add_space(tokens::SPACING_MD);
-
-        if let Some(stats) = &state.stats {
-            ui.colored_label(theme.text_secondary, egui::RichText::new(stats).monospace());
-        }
         self.log_ui(ui, theme);
     }
 
