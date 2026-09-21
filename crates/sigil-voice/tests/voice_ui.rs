@@ -30,10 +30,25 @@ fn harness_phone(account: Account) -> Harness<'static> {
     sized(account, true, egui::vec2(360.0, 804.0), sigil::Form::Phone)
 }
 
+/// How wide the pane's contents came out. See
+/// `the_calls_pane_is_not_wider_than_the_phone`.
+type Drawn = std::rc::Rc<std::cell::Cell<f32>>;
+
 fn sized(account: Account, dark: bool, size: egui::Vec2, form: sigil::Form) -> Harness<'static> {
+    sized_measured(account, dark, size, form).0
+}
+
+fn sized_measured(
+    account: Account,
+    dark: bool,
+    size: egui::Vec2,
+    form: sigil::Form,
+) -> (Harness<'static>, Drawn) {
+    let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
+    let width = drawn.clone();
     let mut app = VoiceApp::new();
     let mut accounts = sigil::accounts::Accounts::of(vec![account]);
-    Harness::builder().with_size(size).build_ui(move |ui| {
+    let h = Harness::builder().with_size(size).build_ui(move |ui| {
         let ctx = ui.ctx().clone();
         sigil::Form::install(&ctx, form);
         theme::install(&ctx, theme::light(), theme::dark());
@@ -63,8 +78,10 @@ fn sized(account: Account, dark: bool, size: egui::Vec2, form: sigil::Form) -> H
                     connections: &Default::default(),
                 };
                 let _ = app.render(&mut app_ctx, ui);
+                width.set(ui.min_rect().width() + 2.0 * form.body_margin());
             });
-    })
+    });
+    (h, drawn)
 }
 
 /// Everything the interface says, as one string.
@@ -273,4 +290,31 @@ fn voice_phone() {
     h.run();
     h.run();
     h.snapshot("voice_phone");
+}
+
+/// Calls fits a phone, without anybody rendering it and looking.
+///
+/// It did not: its key boxes asked for 420 points in a 360-point pane, so
+/// the box left the screen and the button after it was off the pane
+/// entirely -- and the ui, grown to what was drawn in it, then had both of
+/// this screen's explanations clipped mid-word.
+///
+/// No renderer, so it runs in an ordinary `cargo test`.
+#[test]
+fn the_calls_pane_is_not_wider_than_the_phone() {
+    const PHONE: f32 = 360.0;
+    let (mut h, drawn) = sized_measured(
+        Account::unlocked_for_test([1u8; 32]),
+        true,
+        egui::vec2(PHONE, 804.0),
+        sigil::Form::Phone,
+    );
+    h.run();
+    h.run();
+    let width = drawn.get();
+    assert!(width > 0.0, "Calls drew nothing, so this proves nothing");
+    assert!(
+        width <= PHONE + 1.0,
+        "Calls draws {width} points wide in a {PHONE}-point pane"
+    );
 }

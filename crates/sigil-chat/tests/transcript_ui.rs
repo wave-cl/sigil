@@ -553,12 +553,38 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
     harness_phone_with(state, route).0
 }
 
+/// How wide the pane's contents actually came out, per route.
+///
+/// egui grows a ui to whatever is drawn in it, and that is the whole
+/// mechanism behind every phone layout fault found so far: one row wider
+/// than the pane does not merely stick out, it re-lays the rows after it for
+/// a pane that wide -- so a member's action buttons were painted over the
+/// member above, the reports below started off the left edge, and the
+/// console's prose was clipped mid-word. The width of the ui after a pass
+/// *is* that fault, in one number, and it needs no renderer to read.
+type Drawn = std::rc::Rc<std::cell::Cell<f32>>;
+
 /// The phone harness, and the app it drives, for a test that has to read
 /// what a press sent.
 fn harness_phone_with(
     state: ChatState,
     route: sigil_chat::Route,
 ) -> (Harness<'static>, std::rc::Rc<std::cell::RefCell<ChatApp>>) {
+    let (h, app, _) = harness_phone_measured(state, route);
+    (h, app)
+}
+
+#[allow(clippy::type_complexity)]
+fn harness_phone_measured(
+    state: ChatState,
+    route: sigil_chat::Route,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::RefCell<ChatApp>>,
+    Drawn,
+) {
+    let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
+    let width = drawn.clone();
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
     app.show_state_for_test(state);
@@ -640,9 +666,12 @@ fn harness_phone_with(
                 )
                 .show(ui, |ui| {
                     let _ = app.render_nav(&mut app_ctx, ui, &token);
+                    // What the pane came out as, margins included: the
+                    // number `no_phone_pane_is_wider_than_the_phone` reads.
+                    width.set(ui.min_rect().width() + 2.0 * sigil::tokens::SPACING_MD);
                 });
         });
-    (h, shared)
+    (h, shared, drawn)
 }
 
 /// A finger: the touch event egui-winit would forward, and the pointer it
@@ -681,6 +710,68 @@ fn finger_up(h: &mut Harness<'static>, at: egui::Pos2) {
         modifiers: egui::Modifiers::NONE,
     });
     input.events.push(egui::Event::PointerGone);
+}
+
+/// **No route draws wider than the phone.**
+///
+/// The general form of every phone fault found here, and the one check that
+/// would have caught all of them at once: Members overflowed by some 200
+/// points, the operator console and the Calls app by more. Each was found by
+/// rendering the screen and looking at it, which only happens when somebody
+/// thinks to render that screen -- and three of these five routes had no
+/// render at all until today.
+///
+/// It needs no renderer, so it runs in an ordinary `cargo test`, which is
+/// where a layout regression should be caught rather than in the snapshot
+/// job somebody runs before a release.
+#[test]
+fn no_phone_pane_is_wider_than_the_phone() {
+    for route in [
+        sigil_chat::Route::Conversations,
+        sigil_chat::Route::Directory,
+        sigil_chat::Route::Members,
+        sigil_chat::Route::Settings,
+        sigil_chat::Route::Devices,
+    ] {
+        let mut state = a_conversation();
+        // A hit to find, a report to show: a pane that draws nothing cannot
+        // overflow, and an empty pass would be a vacuous pass.
+        state.found = vec![sigil_chat::Found {
+            channel: [4u8; 32],
+            instance: [2u8; 32],
+            name: "elsewhere".into(),
+            topic: "held at another exchange".into(),
+            members: 1,
+            domain: "trunk.exchange".into(),
+            here: false,
+        }];
+        state.searched = true;
+        state.reports = vec![sigil_chat::Report {
+            id: 7,
+            reporter: them(),
+            target: 3,
+            reason: "spam",
+            at: NOW - 3600,
+            note: "links".into(),
+        }];
+        let (mut h, _, drawn) = harness_phone_measured(state, route.clone());
+        h.run();
+        h.run();
+        let width = drawn.get();
+        assert!(
+            width > 0.0,
+            "{route:?} drew nothing, so this proves nothing about it"
+        );
+        // A point of slack for the rounding egui does on a margin; the
+        // faults this catches were tens of points, not fractions.
+        assert!(
+            width <= PHONE_WIDTH + 1.0,
+            "{route:?} draws {width} points wide in a {PHONE_WIDTH}-point pane. \
+             egui grows a ui to what is drawn in it, so every row after the one \
+             that overflowed is laid out for a pane that wide -- which is how a \
+             roster's buttons end up painted over the member above them."
+        );
+    }
 }
 
 /// On a phone every field and its button fit the width: the key field in
@@ -845,6 +936,105 @@ fn on_a_phone_no_row_is_wider_than_the_pane() {
     // furniture (the time, the receipt) ends inside the bubble.
     let mine = topmost(&h, "mine, on the other side");
     assert!(mine.right() < edge - sigil::tokens::SPACING_XL, "{mine:?}");
+}
+
+/// **No strip at all** stays no strip when the conversation's menu opens.
+///
+/// `a_hidden_strip_does_not_come_back_when_another_menu_opens` is the case
+/// next door: it reveals a strip, hides it, and checks it stays hidden. It
+/// never asked what happens when there was never a strip, which is the
+/// ordinary way somebody opens that menu, so that case had no test at all.
+///
+/// # What this does not yet reproduce
+///
+/// On a OnePlus NE2213 on 2026-09-21, in a scrolled conversation, one tap on
+/// the app bar's More reliably put the menu up **and** an action strip on the
+/// topmost partly-visible message -- a message nobody had touched. Closing
+/// the menu left the strip behind; a second Back cleared it.
+///
+/// This test, with the same sequence, passes. Tried and still passing: a
+/// touch that never sends `PointerGone`, as Android's may not; and a scrolled
+/// transcript, since the strip landed on the topmost *visible* message, which
+/// is only a distinct thing once the transcript is longer than the pane.
+/// Whatever the phone is doing differently is not any of those, and guessing
+/// at a fix without a failing test would be a change nothing could check.
+/// Keeping the case covered is still worth it: it was untested either way.
+#[test]
+fn a_menu_does_not_conjure_a_strip_that_was_never_shown() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.set_size(egui::vec2(PHONE_PANE, PHONE_HEIGHT));
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "a strip is showing before anything was pressed"
+    );
+    // Scrolled, as a real transcript is: the phone showed the strip on the
+    // topmost *visible* message, which is only a distinct thing when the
+    // transcript is longer than the pane.
+    h.input_mut().events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -40.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    // `run_steps`, not `run`: a scroll asks for repaints while it settles,
+    // and `run` refuses a ui that keeps repainting.
+    h.run_steps(6);
+    let more = h
+        .get_by_label("More about this conversation")
+        .rect()
+        .center();
+    // **Without `PointerGone`.** That is the difference between this harness
+    // and the phone: `finger_up` pushes it, so the pointer is nowhere and
+    // nothing can be hovered; Android leaves the last touch position in
+    // place, so a rect containing it goes on reading as hovered after the
+    // finger has lifted.
+    {
+        let input = h.input_mut();
+        input.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: more,
+            force: None,
+        });
+        input.events.push(egui::Event::PointerMoved(more));
+        input.events.push(egui::Event::PointerButton {
+            pos: more,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run();
+    {
+        let input = h.input_mut();
+        input.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::End,
+            pos: more,
+            force: None,
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos: more,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Settings").is_some(),
+        "the menu did not open, so this says nothing about the strip"
+    );
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "opening the conversation's menu put a message's action strip on the \
+         transcript, on a message nobody had touched"
+    );
 }
 
 /// A strip that has been put away stays away when some other menu opens.

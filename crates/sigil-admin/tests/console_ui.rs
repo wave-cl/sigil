@@ -25,11 +25,25 @@ fn harness_phone(state: AdminState) -> Harness<'static> {
     sized(state, egui::vec2(360.0, 804.0), sigil::Form::Phone)
 }
 
+/// How wide the pane's contents came out. See
+/// `the_console_is_not_wider_than_the_phone`.
+type Drawn = std::rc::Rc<std::cell::Cell<f32>>;
+
 fn sized(state: AdminState, size: egui::Vec2, form: sigil::Form) -> Harness<'static> {
+    sized_measured(state, size, form).0
+}
+
+fn sized_measured(
+    state: AdminState,
+    size: egui::Vec2,
+    form: sigil::Form,
+) -> (Harness<'static>, Drawn) {
+    let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
+    let width = drawn.clone();
     let mut app = AdminApp::new();
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
-    Harness::builder().with_size(size).build_ui(move |ui| {
+    let h = Harness::builder().with_size(size).build_ui(move |ui| {
         let ctx = ui.ctx().clone();
         sigil::Form::install(&ctx, form);
         theme::install(&ctx, theme::light(), theme::dark());
@@ -52,8 +66,10 @@ fn sized(state: AdminState, size: egui::Vec2, form: sigil::Form) -> Harness<'sta
                     connections: &Default::default(),
                 };
                 let _ = app.render(&mut app_ctx, ui);
+                width.set(ui.min_rect().width() + 2.0 * form.body_margin());
             });
-    })
+    });
+    (h, drawn)
 }
 
 fn text_of(h: &Harness<'static>) -> String {
@@ -369,4 +385,31 @@ fn console_phone() {
     h.run();
     h.run();
     h.snapshot("console_phone");
+}
+
+/// The console fits a phone, without anybody rendering it and looking.
+///
+/// It did not: its rows were a key box, a label box and two buttons at
+/// widths chosen against a 900-point window, so the pane came out half again
+/// as wide as the phone -- and egui, which grows a ui to whatever is drawn
+/// in it, then laid the prose out for that width and let the pane clip it.
+/// Every explanation on the console ended mid-word, and nothing said so,
+/// because nothing had ever drawn this screen narrow.
+///
+/// No renderer, so it runs in an ordinary `cargo test`.
+#[test]
+fn the_console_is_not_wider_than_the_phone() {
+    const PHONE: f32 = 360.0;
+    let (mut h, drawn) = sized_measured(up(), egui::vec2(PHONE, 804.0), sigil::Form::Phone);
+    h.run();
+    h.run();
+    let width = drawn.get();
+    assert!(
+        width > 0.0,
+        "the console drew nothing, so this proves nothing"
+    );
+    assert!(
+        width <= PHONE + 1.0,
+        "the console draws {width} points wide in a {PHONE}-point pane"
+    );
 }
