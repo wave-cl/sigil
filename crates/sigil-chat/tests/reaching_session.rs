@@ -415,3 +415,111 @@ async fn a_room_at_b_is_found_from_a_as_living_there() {
     alices.stop();
     bobs.stop();
 }
+
+/// **A room that lives at another exchange cannot be joined from here.**
+///
+/// The federated directory (SIP-16) lists B's rooms at A, named
+/// `lounge@b.test`, and pressing Join on one is refused: A has no copy, so
+/// there is nothing at A to join. That is why the directory offers *Add
+/// exchange* against a row that lives elsewhere rather than Join -- the way
+/// to a room at B is a session at B, which is what the roster and SIP-85's
+/// `via` are for.
+///
+/// It is recorded as a test because the refusal is the reason for the
+/// button, and a refusal nobody has written down is indistinguishable from
+/// one nobody has noticed. It goes red the day an exchange pulls a room its
+/// member asked for, and then the directory should offer Join.
+#[tokio::test]
+async fn a_room_that_lives_at_another_exchange_is_not_joinable_from_here() {
+    let (a, b) = pair().await;
+    let (signer_b, bob, _) = signer(0x66);
+    let (signer_a, alice, a_seed) = signer(0x67);
+    let dir = tempfile::tempdir().unwrap();
+    let bobs = start_at(&b, signer_b, &dir.path().join("bob.db"));
+    up(&bobs, bob).await;
+    bobs.send(Cmd::NewPublic {
+        name: "atrium".into(),
+        topic: "at b".into(),
+    });
+    assert!(
+        until(|| bobs.state().open.is_some(), 15).await,
+        "{:?}",
+        bobs.state().trouble
+    );
+    bobs.send(Cmd::Send("said at b".into()));
+
+    let alices = start_at(&a, signer_a, &dir.path().join("alice.db"));
+    up(&alices, alice).await;
+    assert!(
+        mine_at(&a, &a_seed).await.is_empty(),
+        "A already holds channels for Alice before she has joined anything"
+    );
+
+    let mut row = None;
+    for _ in 0..60 {
+        alices.send(Cmd::Find("atrium".into()));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Some(f) = alices.state().found.into_iter().find(|f| !f.here) {
+            row = Some(f);
+            break;
+        }
+    }
+    let row = row.expect("A should list B's room as living elsewhere");
+    assert_eq!(row.domain, "b.test");
+    assert_eq!(row.name, "atrium@b.test");
+
+    alices.send(Cmd::Join {
+        channel: row.channel,
+        instance: row.instance,
+    });
+    assert!(
+        until(|| alices.state().trouble.is_some(), 20).await,
+        "the join neither succeeded nor failed: {:?}",
+        alices.state().note
+    );
+    let said = alices.state().trouble.unwrap_or_default();
+    assert!(
+        said.contains("no_such_channel"),
+        "the join was refused for some other reason, which this test is not \
+         about: {said}"
+    );
+    assert_eq!(
+        alices.state().open,
+        None,
+        "the room opened after all, and this test is about nothing"
+    );
+    // And A still holds nothing: there was no copy before and the refused
+    // join made none.
+    assert!(
+        mine_at(&a, &a_seed).await.is_empty(),
+        "A holds something for Alice after a refused join"
+    );
+
+    alices.stop();
+    bobs.stop();
+}
+
+/// What an exchange holds for the account that `seed` signs as, asked the way
+/// a client asks it and on its own connection.
+async fn mine_at(ex: &Exchange, seed: &[u8; 32]) -> Vec<[u8; 32]> {
+    let Ok(mut c) =
+        sqnr::Client::connect_as(ex.endpoint.address, ex.endpoint.server.as_bytes(), seed).await
+    else {
+        return Vec::new();
+    };
+    let Ok((code, body)) = c
+        .post(
+            "/channel/mine",
+            sqex_proto::channel::Mine { offset: 0 }.encode(),
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    if code != 200 {
+        return Vec::new();
+    }
+    sqex_proto::channel::Mines::decode(&body)
+        .map(|m| m.channels.into_iter().map(|r| r.channel).collect())
+        .unwrap_or_default()
+}

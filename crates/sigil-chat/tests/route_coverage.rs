@@ -251,12 +251,20 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/account/handover",
         NotYet("SIP-44 §The handover, from sqex-chat"),
     ),
+    // SIP-60 §A device hints its home. Not sigil's to call: `sqex-chat`
+    // posts it itself, from `open_dm` where a direct message is created at
+    // the other party's home, and from `home` whenever it learns a channel's
+    // origin is not this exchange. So it is reached in production the moment
+    // a conversation lives somewhere else -- and it is still counted as
+    // unreached here, because nothing in these tests produces that shape:
+    // a direct message needs the other key to be the lower one *and* their
+    // home already located, and a public room elsewhere cannot be joined at
+    // all (`a_room_that_lives_at_another_exchange_is_not_joinable_from_here`
+    // in `reaching_session`). Raise it when a test makes one.
     (
         "POST",
         "/account/hint",
-        NotYet(
-            "SIP-60 §A device hints its home: a device tells its home which origin to pull from",
-        ),
+        NotYet("reached through sqex-chat's open_dm and home; no test here makes the shape"),
     ),
     (
         "POST",
