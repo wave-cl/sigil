@@ -8942,6 +8942,94 @@ mod look_tests {
         };
         assert_eq!(close.zoomed(1.0, VIEW, VIEW).pan, egui::Vec2::ZERO);
     }
+
+    /// **A drag moves the picture by the drag**, which is how a phone looks
+    /// around one.
+    ///
+    /// `following` is the pointer's way and has three tests; `panned` is the
+    /// finger's and had none, which is the wrong way round for a viewer whose
+    /// own comment says the arithmetic is the part worth testing. A drag that
+    /// moves by the wrong amount still looks like a picture moving.
+    #[test]
+    fn a_drag_moves_the_picture_by_the_drag() {
+        let close = Look {
+            zoom: 2.0,
+            pan: egui::Vec2::ZERO,
+        };
+        // Twice the size in a window of one: fifty pixels of room each way.
+        let moved = close.panned(vec2(20.0, -10.0), VIEW, VIEW);
+        assert_eq!(moved.pan, vec2(20.0, -10.0));
+        assert_eq!(moved.zoom, 2.0, "a drag does not change the zoom");
+
+        // And a second drag carries on from the first rather than starting
+        // again, which is what makes a long look around one gesture.
+        let again = moved.panned(vec2(20.0, 0.0), VIEW, VIEW);
+        assert_eq!(again.pan, vec2(40.0, -10.0));
+    }
+
+    /// A drag past the edge stops at it.
+    ///
+    /// The same rule `following` has, and it has to hold for the finger too:
+    /// a flick must not leave a band of nothing down one side of the viewer.
+    #[test]
+    fn a_drag_cannot_pull_the_picture_off_its_own_window() {
+        let close = Look {
+            zoom: 2.0,
+            pan: egui::Vec2::ZERO,
+        };
+        let far = close.panned(vec2(500.0, -900.0), VIEW, VIEW);
+        assert_eq!(far.pan, vec2(50.0, -50.0), "clamped to the room there is");
+        // Already at the edge, and pushed further: it stays.
+        assert_eq!(far.panned(vec2(100.0, 0.0), VIEW, VIEW).pan.x, 50.0);
+    }
+
+    /// A picture that fits does not move for a drag either.
+    ///
+    /// The finger's half of `a_picture_that_fits_does_not_move`: at zoom 1
+    /// there is nothing to look around, and a picture that slides under a
+    /// stray touch reads as something coming loose.
+    #[test]
+    fn a_picture_that_fits_does_not_move_for_a_drag() {
+        let whole = Look::default();
+        assert_eq!(
+            whole.panned(vec2(40.0, 40.0), VIEW, VIEW).pan,
+            egui::Vec2::ZERO
+        );
+    }
+
+    /// **A pinch keeps what you were looking at.**
+    ///
+    /// Zooming in gives the picture more room, so where it had been moved to
+    /// is still somewhere it may be: the part under the fingers stays under
+    /// them. Zooming *out* takes the room away and the pan has to come back
+    /// with it, which is the case already covered; this is the other
+    /// direction, and it was the untested one.
+    #[test]
+    fn pinching_in_keeps_where_you_were_looking() {
+        let close = Look {
+            zoom: 2.0,
+            // At the right edge of what zoom 2 allows.
+            pan: vec2(50.0, 0.0),
+        };
+        let closer = close.zoomed(4.0, VIEW, VIEW);
+        assert_eq!(closer.zoom, 4.0);
+        assert_eq!(
+            closer.pan,
+            vec2(50.0, 0.0),
+            "zooming in has more room, not less, so nothing needs moving"
+        );
+        // And zooming part of the way back out clamps to the smaller room.
+        assert_eq!(
+            Look {
+                zoom: 4.0,
+                pan: vec2(150.0, 0.0),
+            }
+            .zoomed(2.0, VIEW, VIEW)
+            .pan,
+            vec2(50.0, 0.0),
+            "at zoom 2 there are fifty pixels of room, not a hundred and fifty"
+        );
+    }
 }
 
 #[cfg(test)]
