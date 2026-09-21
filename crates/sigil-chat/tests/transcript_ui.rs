@@ -938,6 +938,55 @@ fn on_a_phone_no_row_is_wider_than_the_pane() {
     assert!(mine.right() < edge - sigil::tokens::SPACING_XL, "{mine:?}");
 }
 
+/// **A tap on the app bar is not a tap on the transcript**, even where the
+/// transcript's topmost message is scrolled up behind it.
+///
+/// Found on a OnePlus NE2213: in a scrolled conversation, a tap anywhere
+/// along the app bar -- the More button, the title, even the status bar
+/// above it -- put an action strip on the topmost partly-visible message,
+/// one nobody had touched. It outlived the menu that went up with it.
+///
+/// The cause is that the strip's hit test is `reach.contains(pointer)` on
+/// the bubble's *layout* rect, and `Rect::contains` knows nothing of clip
+/// rects or layers: a message scrolled half out of view still has a rect
+/// reaching up behind the bar, so a point there is "in" it.
+#[test]
+fn a_tap_on_the_app_bar_does_not_reveal_a_message_scrolled_behind_it() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.set_size(egui::vec2(PHONE_PANE, PHONE_HEIGHT));
+    h.run();
+    h.run();
+    // Scrolled, so the topmost message's rect runs up past the bar.
+    h.input_mut().events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -120.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(8);
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "a strip is showing before anything was pressed"
+    );
+    // Down the whole bar, because which y lands inside a hidden bubble
+    // depends on where the scroll stopped -- and none of them is the
+    // transcript.
+    let bar = sigil::tokens::BUTTON_LG;
+    for step in 0..=8 {
+        let at = egui::pos2(PHONE_PANE / 2.0, bar * (step as f32) / 8.0);
+        finger_down(&mut h, at);
+        h.run();
+        finger_up(&mut h, at);
+        h.run();
+        h.run();
+        assert!(
+            h.query_by_label("Reply").is_none(),
+            "a tap on the app bar at y={} revealed a message's action strip",
+            at.y
+        );
+    }
+}
+
 /// **No strip at all** stays no strip when the conversation's menu opens.
 ///
 /// `a_hidden_strip_does_not_come_back_when_another_menu_opens` is the case
@@ -945,20 +994,11 @@ fn on_a_phone_no_row_is_wider_than_the_pane() {
 /// never asked what happens when there was never a strip, which is the
 /// ordinary way somebody opens that menu, so that case had no test at all.
 ///
-/// # What this does not yet reproduce
-///
-/// On a OnePlus NE2213 on 2026-09-21, in a scrolled conversation, one tap on
-/// the app bar's More reliably put the menu up **and** an action strip on the
-/// topmost partly-visible message -- a message nobody had touched. Closing
-/// the menu left the strip behind; a second Back cleared it.
-///
-/// This test, with the same sequence, passes. Tried and still passing: a
-/// touch that never sends `PointerGone`, as Android's may not; and a scrolled
-/// transcript, since the strip landed on the topmost *visible* message, which
-/// is only a distinct thing once the transcript is longer than the pane.
-/// Whatever the phone is doing differently is not any of those, and guessing
-/// at a fix without a failing test would be a change nothing could check.
-/// Keeping the case covered is still worth it: it was untested either way.
+/// The phone's own version of this -- a tap on the app bar conjuring a strip
+/// -- is `a_tap_on_the_app_bar_does_not_reveal_a_message_scrolled_behind_it`,
+/// which is where that fault was finally caught: it needed the transcript
+/// scrolled far enough that a bubble's rect ran up behind the bar, which
+/// this sequence never does.
 #[test]
 fn a_menu_does_not_conjure_a_strip_that_was_never_shown() {
     let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);

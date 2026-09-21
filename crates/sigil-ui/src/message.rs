@@ -632,7 +632,18 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
                 && press.is_some_and(|began| i.time - began > LONG_PRESS_SECS);
             (p.primary_clicked(), p.interact_pos(), long, press)
         });
-        let inside = at.is_some_and(|p| reach.contains(p));
+        // **Only the part of the bubble that is on screen.** `reach` is the
+        // bubble's *layout* rect, and a message scrolled half out of view
+        // still has one -- running up behind the app bar, which is a
+        // different panel entirely. `Rect::contains` knows nothing of clip
+        // rects or layers, so a tap on the bar at a y inside that hidden
+        // part counted as a tap on the message: on a phone, one press on
+        // More put a strip on the topmost partly-visible message, which
+        // nobody had touched, and it outlived the menu that went up with
+        // it. Intersecting with the clip rect is what makes the hit test
+        // agree with what can actually be seen and pressed.
+        let hittable = reach.intersect(ui.clip_rect());
+        let inside = at.is_some_and(|p| hittable.contains(p));
         if tap {
             if inside && !shown {
                 ui.ctx().data_mut(|d| d.insert_temp(revealed, me));
