@@ -189,3 +189,187 @@ fn every_character_in_a_string_literal_is_in_the_font() {
         missing.join("\n")
     );
 }
+
+/// A run of spaces in the middle of a sentence the app says.
+///
+/// # Why this is here
+///
+/// Rust's `\` at the end of a line joins the next one and eats its
+/// indentation, which is how every long message in this workspace is
+/// written. Lose the backslash -- a scripted edit, a paste, a merge -- and
+/// the literal keeps the indentation instead: the sentence still compiles,
+/// still passes every test that looks for a substring near its start, and
+/// draws with a hole in it. Four had shipped that way when this was written,
+/// one of them 43 spaces wide, in a refusal the operator console shows and
+/// in the two sentences that tell somebody a key is not a key.
+///
+/// Nothing legitimate in this workspace puts three spaces between two words,
+/// which is what makes this cheap. If something ever needs to -- a column of
+/// figures in a literal -- the answer is to build it rather than to write it
+/// out, because egui does not draw runs of spaces the way a terminal does
+/// anyway.
+#[test]
+fn nothing_the_app_says_has_a_hole_in_it() {
+    /// Four. Two is a sentence break in older prose, and three is
+    /// `sigil-update-tool` printing an indented shell line for somebody to
+    /// copy -- the one place in the workspace that means it. Every hole
+    /// found so far has been at least five, and the widest was forty-three.
+    const RUN: usize = 4;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/sigil has a parent")
+        .to_path_buf();
+    let mut files = Vec::new();
+    sources(&root, &mut files);
+    assert!(
+        files.len() > 40,
+        "only {} source files found: the scan is pointed at the wrong place",
+        files.len()
+    );
+
+    let mut holes: Vec<String> = Vec::new();
+    let mut literals = 0usize;
+    for file in &files {
+        let Ok(source) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for (line, text) in strings(&source) {
+            literals += 1;
+            if let Some(run) = hole(&text, RUN) {
+                holes.push(format!(
+                    "{}:{line}: {run} spaces in the middle of \"{text}\" -- a \
+                     line continuation lost its backslash and the indentation \
+                     is in the sentence now",
+                    file.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        literals > 200,
+        "only {literals} string literals were found, and this workspace has \
+         thousands: the scan is seeing almost nothing"
+    );
+    // The instrument can say no.
+    assert_eq!(
+        hole("a lost     backslash", RUN),
+        Some(5),
+        "the scan does not see a hole it is shown"
+    );
+    assert_eq!(hole("two  spaces", RUN), None, "two spaces is not a hole");
+    assert_eq!(
+        hole("#   gh secret set", RUN),
+        None,
+        "an indented shell line is not a hole; see RUN"
+    );
+    assert_eq!(hole("     leading", RUN), None, "an indent is not a hole");
+    assert_eq!(
+        hole("a line\n     indented", RUN),
+        None,
+        "indentation after a newline the literal asks for is not a hole"
+    );
+
+    assert!(
+        holes.is_empty(),
+        "{} sentence(s) are drawn with a gap in them:\n{}",
+        holes.len(),
+        holes.join("\n")
+    );
+}
+
+/// A run of `least` or more spaces with a word character on both sides, if
+/// there is one, and how long it is.
+///
+/// Leading and trailing runs are not holes: a literal that starts or ends
+/// with spaces is joining onto something. Nor is a run against a newline the
+/// literal asks for -- that is the next line's indentation, written on
+/// purpose.
+fn hole(text: &str, least: usize) -> Option<usize> {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == ' ' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == ' ' {
+                i += 1;
+            }
+            let run = i - start;
+            let before = start.checked_sub(1).map(|j| bytes[j]);
+            let after = bytes.get(i).copied();
+            if run >= least
+                && matches!(before, Some(c) if c != '\n')
+                && matches!(after, Some(c) if c != '\n')
+            {
+                return Some(run);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The contents of each string literal, with the line it starts on.
+///
+/// As crude as `typed` above and for the same reasons, with one thing it
+/// cannot be crude about: a literal continued with a trailing `\` spans
+/// lines, and those are exactly the ones at risk -- a hole is what is left
+/// where the continuation was. So an open literal is carried on **only**
+/// when the line it is on ends with a backslash, which is what Rust means by
+/// one; an open literal at the end of any other line is this scanner having
+/// lost its place, on a `\'"\'` or a raw string, and it is dropped rather
+/// than swallowing the rest of the file.
+///
+/// Rust drops the continuation line's indentation, so this does too -- and
+/// then a hole is a run of spaces that survived *inside* the text, which is
+/// the fault itself whether or not rustfmt has since joined the lines.
+fn strings(source: &str) -> Vec<(usize, String)> {
+    let source = match source.find("\n#[cfg(test)]") {
+        Some(i) => &source[..i],
+        None => source,
+    };
+    let mut out = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    for (n, line) in source.lines().enumerate() {
+        // A continuation line starts where Rust starts it, and a `//` inside
+        // an open literal is part of it (a URL), not a comment.
+        let code = match &open {
+            Some(_) => line.trim_start(),
+            None => match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            },
+        };
+        let mut text = open.take();
+        let mut chars = code.chars();
+        while let Some(c) = chars.next() {
+            match (&mut text, c) {
+                (Some((_, t)), '\\') => match chars.next() {
+                    // The continuation itself: nothing of it is in the text.
+                    None => {}
+                    // A line break the literal *asks* for. Kept as one,
+                    // because what follows it is indentation of a new line
+                    // and not a gap in a sentence -- taking the `n` as a
+                    // letter would make `\n    foo` read as a four-space
+                    // hole.
+                    Some('n' | 'r' | 't') => t.push('\n'),
+                    Some(e) => t.push(e),
+                },
+                (Some((at, t)), '"') => {
+                    out.push((*at, std::mem::take(t)));
+                    text = None;
+                }
+                (Some((_, t)), _) => t.push(c),
+                (None, '"') => text = Some((n + 1, String::new())),
+                (None, _) => {}
+            }
+        }
+        // Carried on only where Rust would carry it on.
+        open = match text {
+            Some(held) if code.trim_end().ends_with('\\') => Some(held),
+            _ => None,
+        };
+    }
+    out
+}

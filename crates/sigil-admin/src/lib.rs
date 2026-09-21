@@ -235,15 +235,18 @@ fn key_trouble(typed: &str) -> String {
         return "Type or paste a key first.".into();
     }
     if typed.contains('…') || typed.contains("...") {
-        return "That is a key shortened for display, not the whole key: copy it from the                 identity's profile, or from Members, where the whole key is."
+        return "That is a key shortened for display, not the whole key: copy it from \
+                the identity's profile, or from Members, where the whole key is."
             .into();
     }
     if typed.contains('@') {
-        return "That is a handle, not a key. The whitelist holds keys; look the handle up                 and paste the key it names."
+        return "That is a handle, not a key. The whitelist holds keys; look the handle \
+                up and paste the key it names."
             .into();
     }
     format!(
-        "That is not a key: a key is 43 or 44 characters of base58, or 64 of hex, and this          is {} characters.",
+        "That is not a key: a key is 43 or 44 characters of base58, or 64 of hex, and \
+         this is {} characters.",
         typed.chars().count()
     )
 }
