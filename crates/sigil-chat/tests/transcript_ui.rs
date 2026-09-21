@@ -1494,6 +1494,106 @@ fn phone_devices() {
     h.snapshot("phone_devices");
 }
 
+/// Search results on a phone.
+///
+/// A hit is a conversation's name, who said it, a time, and the words around
+/// the match -- four things on a 360-point row, one of them a fragment of a
+/// sentence. It had only ever been drawn in a wide column.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_search() {
+    let mut state = a_search();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    search_for(&mut h, "release");
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_search");
+}
+
+/// And it fits, with a long conversation name and a match deep in a long
+/// line -- which is where a hit row is widest.
+#[test]
+fn the_search_results_fit_a_phone() {
+    let mut state = a_search();
+    state.open = None;
+    for hit in &mut state.hits {
+        hit.label = "Alexandra Constantinopoulos-Whitmore".into();
+    }
+    let (mut h, _, drawn) = harness_phone_measured(state, sigil_chat::Route::Conversations);
+    h.run();
+    search_for(&mut h, "release");
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("release is Thursday"),
+        "no results are on screen, so this proves nothing about their width"
+    );
+    let width = drawn.get();
+    assert!(
+        width <= PHONE_WIDTH + 1.0,
+        "the results draw {width} points wide in a {PHONE_WIDTH}-point pane"
+    );
+}
+
+/// Type into the chat list's search box, as `search_dark` does: the leftmost
+/// text field on screen. Typed rather than set, because what puts the
+/// results on screen is the box being changed.
+fn search_for(h: &mut Harness<'static>, what: &str) {
+    let field = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .expect("the search box");
+    field.focus();
+    field.type_text(what);
+}
+
+/// A conversation with a search's worth of hits in it.
+fn a_search() -> ChatState {
+    let mut state = a_conversation();
+    state.searched_messages = true;
+    let long = format!(
+        "{}so the release check moves to Thursday, bring the notes",
+        "and another thing, ".repeat(6)
+    );
+    let deep = long.find("release").unwrap();
+    state.hits = vec![
+        Hit {
+            channel: [9u8; 32],
+            seq: 7,
+            label: "release check".into(),
+            who: "Ada".into(),
+            text: "the release is Thursday".into(),
+            found: 4..11,
+            at: NOW - 120,
+        },
+        Hit {
+            channel: [9u8; 32],
+            seq: 3,
+            label: "release check".into(),
+            who: "You".into(),
+            text: long,
+            found: deep..deep + 7,
+            at: NOW - 86_400,
+        },
+        Hit {
+            channel: [8u8; 32],
+            seq: 40,
+            label: "Grace".into(),
+            who: "Grace".into(),
+            text: "no release without the notes\nand the notes are late".into(),
+            found: 3..10,
+            at: NOW - 3 * 86_400,
+        },
+    ];
+    state
+}
+
 /// The chat list on a phone in the light theme.
 ///
 /// Every phone render was dark. The two themes are two sets of colours, not
