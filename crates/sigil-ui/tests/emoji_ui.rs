@@ -160,17 +160,44 @@ fn bubble_top() -> f32 {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn emoji_picker_dark() {
-    let mut h = Harness::builder()
-        .with_size(egui::vec2(420.0, 520.0))
+    let mut h = picker(420.0, sigil::Form::Desktop);
+    for _ in 0..6 {
+        h.run();
+    }
+    h.snapshot("emoji_picker_dark");
+}
+
+/// The picker on a phone, which is narrower than the window it was drawn in.
+///
+/// It is a grid over a transcript, and the one thing a grid can do on a
+/// narrower pane is run off the side of it. 420 points is not a phone, and
+/// 420 is where it had always been looked at.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn emoji_picker_phone() {
+    let mut h = picker(360.0, sigil::Form::Phone);
+    for _ in 0..6 {
+        h.run();
+    }
+    h.snapshot("emoji_picker_phone");
+}
+
+fn picker(width: f32, form: sigil::Form) -> Harness<'static> {
+    Harness::builder()
+        .with_size(egui::vec2(width, 520.0))
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, form);
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(egui::Theme::Dark);
             sigil_ui::install_loaders(&ctx);
             let theme = sigil::ColorTheme::current(&ctx);
             ui.painter()
                 .rect_filled(ui.max_rect(), 0.0, theme.surface_primary);
-            let bubble = egui::Rect::from_min_size(egui::pos2(40.0, 60.0), egui::vec2(160.0, 44.0));
+            let bubble = egui::Rect::from_min_size(
+                egui::pos2(40.0, 60.0),
+                egui::vec2(160.0f32.min(width - 80.0), 44.0),
+            );
             ui.painter()
                 .rect_filled(bubble, sigil::tokens::RADIUS_PILL, theme.surface_elevated);
             let first = ctx.cumulative_pass_nr() == 0;
@@ -198,9 +225,5 @@ fn emoji_picker_dark() {
                 sigil_ui::emoji::chip(ui, "\u{1f389}", 2, true);
                 sigil_ui::emoji::chip(ui, "\u{2764}\u{fe0f}", 1, false);
             });
-        });
-    for _ in 0..6 {
-        h.run();
-    }
-    h.snapshot("emoji_picker_dark");
+        })
 }
