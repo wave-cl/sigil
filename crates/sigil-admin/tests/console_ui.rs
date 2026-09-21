@@ -467,3 +467,89 @@ fn the_console_is_not_wider_than_the_phone() {
         "the console draws {width} points wide in a {PHONE}-point pane"
     );
 }
+
+/// **A long answer does not push the console off the screen.**
+///
+/// The last answer is pinned above the operations, because a reply below the
+/// fold reads as a button that did nothing. With no height of its own it did
+/// exactly that in the other direction: an audit tail of fifty lines is some
+/// 2400 points, it is drawn *outside* the scroll area that holds the
+/// operations, and on a phone the Whitelist heading sat at y 2392 of an
+/// 804-point screen. Every operation the console offers was three screens
+/// down, with nothing to scroll.
+///
+/// Fifty lines is a small audit. The preview scrolls inside its own bound
+/// now, and the whole answer is still in Answers, at the foot, which is what
+/// this is a preview of.
+#[test]
+fn a_long_answer_does_not_push_the_console_off_the_screen() {
+    const PHONE: f32 = 360.0;
+    const TALL: f32 = 804.0;
+    let mut state = up();
+    let lines: Vec<String> = (0..50)
+        .map(|i| {
+            format!(
+                "  {{\"seq\": {i}, \"op\": \"whitelist/add\", \"by\": \
+                 \"4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"}}"
+            )
+        })
+        .collect();
+    state.answers = vec![Answer {
+        asked: "audit last 50".into(),
+        said: lines.join("\n"),
+        refused: false,
+    }];
+    let (mut h, _) = sized_measured(state, egui::vec2(PHONE, TALL), sigil::Form::Phone);
+    h.run();
+    h.run();
+
+    let top = h
+        .get_all_by_label_contains("Whitelist")
+        .map(|n| n.rect().top())
+        .fold(f32::MAX, f32::min);
+    assert!(
+        top < f32::MAX,
+        "the console's first operation is not drawn at all, so this says \
+         nothing about where it is"
+    );
+    assert!(
+        top <= TALL,
+        "the console's first operation sits at y {top:.0} of {TALL}: the \
+         pinned answer has pushed the whole console below the screen"
+    );
+
+    // **And on a desktop, where there is room to be greedy.** A scroll area
+    // clamps to the height it is given, so on a phone the bound hardly
+    // matters -- the pane is short and the clamp does the work. On a
+    // 700-point window it would take six hundred of them for a *preview*,
+    // and the operations would be below the fold on a desktop instead. That
+    // is what `LAST_ANSWER` is for, and without it this is the assertion
+    // that notices.
+    let (mut wide, _) = sized_measured(
+        {
+            let mut s = up();
+            s.answers = vec![Answer {
+                asked: "audit last 50".into(),
+                said: lines.join("\n"),
+                refused: false,
+            }];
+            s
+        },
+        egui::vec2(900.0, 700.0),
+        sigil::Form::Desktop,
+    );
+    wide.run();
+    wide.run();
+    let top = wide
+        .get_all_by_label_contains("Whitelist")
+        .map(|n| n.rect().top())
+        .fold(f32::MAX, f32::min);
+    // The top half of the window: the operations are what the console is
+    // for, and a preview of the last reply must not be more than half of
+    // what is on screen before them.
+    assert!(
+        top <= 350.0,
+        "on a 700-point window the console's first operation sits at y \
+         {top:.0}: a preview is taking the window"
+    );
+}

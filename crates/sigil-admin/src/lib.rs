@@ -349,6 +349,13 @@ impl App for AdminApp {
     }
 }
 
+/// How tall the pinned last answer may be before it scrolls inside itself.
+///
+/// Enough for a short reply whole -- a status, a refusal, a handful of keys
+/// -- without a bar, and far short of pushing the console it is pinned above
+/// off the screen. The rest of any answer is in Answers, at the foot.
+const LAST_ANSWER: f32 = 160.0;
+
 impl AdminApp {
     /// Who we are signing as, and what we are signing at.
     fn header_ui(
@@ -726,10 +733,26 @@ impl AdminApp {
                         &answer.asked,
                     );
                 });
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&answer.said).monospace().small())
-                        .selectable(true),
-                );
+                // **Bounded, and scrolled inside that bound.** This is a
+                // *preview*, pinned above the console because a reply below
+                // the fold reads as a button that did nothing -- and with no
+                // height of its own it did the same thing in the other
+                // direction. An audit tail of fifty lines is some 2400
+                // points, and it is drawn outside the scroll area that holds
+                // the operations: on a phone the Whitelist heading sat at
+                // y 2392 of an 804-point screen, so every operation the
+                // console offers was three screens down with nothing to
+                // scroll. The whole answer is still below, in Answers, which
+                // is what this is a preview *of*.
+                egui::ScrollArea::vertical()
+                    .max_height(LAST_ANSWER)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&answer.said).monospace().small())
+                                .selectable(true),
+                        );
+                    });
             });
         ui.add_space(tokens::SPACING_SM);
     }
