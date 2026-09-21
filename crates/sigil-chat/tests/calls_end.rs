@@ -443,7 +443,8 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
         "with no call, the platform is told nothing at all -- not told 'no call'"
     );
 
-    // A real handle to an address nothing answers on, as the tests above use.
+    // A real handle to an address nothing answers on, as the tests above
+    // use. It fails and is reaped, which is how the call ends here.
     let handle = sigil_net::spawn_call(
         sigil_net::Endpoint {
             address: "127.0.0.1:1".parse().unwrap(),
@@ -456,44 +457,53 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
         || {},
     );
     app.hold_call_for_test(me, [3u8; 32], 9, handle);
-    pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
-    let told = watching.told();
-    assert_eq!(told.len(), 1, "the call beginning is said once: {told:?}");
-    assert!(
-        told[0].is_some(),
-        "a call with no conversation to name is still a call: {told:?}"
-    );
 
-    // Passes with nothing changed.
+    // **Everything said from here until the call is gone**, rather than a
+    // fixed number of passes with an assertion after each. The first version
+    // of this took three passes and asserted nothing was said in them, which
+    // passed on this machine and failed on CI: the call is a real one that
+    // fails, the reaper runs in the same `update`, and on a slower machine it
+    // died inside those three passes and the ending was announced there. That
+    // is a race in the test, not in the code, and widening the loop would
+    // only move it.
+    //
+    // The sequence is the claim anyway: one Some when it begins, one None
+    // when it ends, and nothing in between however many passes that takes.
+    let mut said: Vec<Option<String>> = Vec::new();
+    let mut ended = false;
+    for _ in 0..200 {
+        pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+        said.extend(watching.told());
+        if app.calls_for_test().is_empty() {
+            ended = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        ended,
+        "the call never ended, so this says nothing about what was announced: \
+         {said:?}"
+    );
+    assert_eq!(
+        said.len(),
+        2,
+        "a call is announced twice in its life, beginning and ending: {said:?}"
+    );
+    assert!(
+        said[0].is_some(),
+        "a call with no conversation to name is still a call: {said:?}"
+    );
+    assert_eq!(said[1], None, "and the ending says there is no call");
+
+    // And it stays ended without being said again.
     for _ in 0..3 {
         pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
     }
     assert_eq!(
         watching.told(),
         Vec::<Option<String>>::new(),
-        "a call that is still up is not announced again"
-    );
-
-    // And it ends, on its own, because nothing answered. The reaper runs in
-    // `update`, so the same pass that notices also says so.
-    for _ in 0..40 {
-        pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
-        if app.calls_for_test().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        app.calls_for_test().is_empty(),
-        "the call never ended, so this says nothing about what was announced"
-    );
-    assert_eq!(watching.told(), vec![None], "the call ending is said once");
-
-    pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
-    assert_eq!(
-        watching.told(),
-        Vec::<Option<String>>::new(),
-        "and stays ended without being said again"
+        "a call that has ended is not announced again"
     );
 }
 
