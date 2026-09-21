@@ -3356,7 +3356,7 @@ impl ChatApp {
                                 egui::RichText::new(format!("{} of {}", p + 1, siblings.len()))
                                     .small(),
                             );
-                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, "Next")
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Forward, "Next")
                                 .clicked()
                                 && let Some(to) = step(p, 1)
                             {
@@ -3629,17 +3629,19 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_SM);
         // A visible label, not only a hint: a hint disappears the moment
         // somebody types and never reaches the accessibility tree at all.
-        ui.label("Write to");
-        let width = ui.available_width();
-        let field = sigil_ui::field(
+        // The same row every other field in sigil is: the label above on a
+        // narrow pane, the box given what is left, and the action beside it
+        // rather than under it. It was a full-width box with "Add" on a row
+        // of its own below, which on a phone is a third row for a dialog
+        // that is four things tall.
+        let (field, go) = sigil_ui::labelled_field(
             ui,
+            "Write to",
             &mut self.panes.entry(at.clone()).or_default().adding,
             "their key, or name@domain at any exchange",
-            width,
+            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Plus, "Add")),
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.add_space(tokens::SPACING_XS);
-        let go = ui.horizontal(|ui| ui.button("Add").clicked()).inner;
         if go || entered {
             let typed = self.pane(at).adding.trim().to_string();
             // SIP-60: `label@domain` naming another exchange is reached

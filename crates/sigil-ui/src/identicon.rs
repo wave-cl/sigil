@@ -126,6 +126,16 @@ pub fn identicon(ui: &mut egui::Ui, key: &str, size: f32) -> egui::Response {
     identicon_of(ui, key.as_bytes(), size)
 }
 
+/// The key the **product's own** mark is drawn from: thirty-two 0x01 bytes,
+/// spelt as the app spells a key.
+///
+/// A mark like every other in the app and nobody's in particular. It is what
+/// `scripts/launcher-icon` puts on an Android home screen, so it is what a
+/// phone's first screen shows too -- the thing somebody just tapped. Named
+/// here because two copies of a constant that has to match a committed
+/// picture is one copy too many.
+pub const MARK_KEY: &str = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+
 /// Whether the cell at `col`, `row` of the mark for a hash is lit: the
 /// left half from the hash's bits, the right half a mirror of it.
 fn lit(h: u64, col: usize, row: usize) -> bool {

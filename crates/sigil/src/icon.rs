@@ -133,6 +133,8 @@ icons! {
     Verified => "verified",
     /// Apply what has been typed beside it.
     Check => "Set",
+    /// The other way from [`Icon::Back`]: the next of a set.
+    Forward => "Next",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -274,13 +276,35 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             ]);
         }
         Icon::Send => {
-            // An arrow leaving to the right.
-            line(p(0.20, 0.50), p(0.76, 0.50));
-            path(vec![p(0.56, 0.30), p(0.78, 0.50), p(0.56, 0.70)]);
+            // A dart, thrown to the right. It was an arrow -- and so is
+            // [`Icon::Forward`], which is `Back` mirrored: two icons with
+            // different words and the same picture, which the sheet showed
+            // the moment Forward was added. They never appear together, so
+            // nothing was ambiguous in use; it was simply two names for one
+            // shape, and the shape everybody already reads as *send* is this
+            // one.
+            path(vec![
+                p(0.82, 0.50),
+                p(0.18, 0.24),
+                p(0.34, 0.50),
+                p(0.18, 0.76),
+                p(0.82, 0.50),
+            ]);
+            // The fold: what makes it a folded dart rather than a flat
+            // triangle with a bite out of it.
+            line(p(0.34, 0.50), p(0.82, 0.50));
         }
         Icon::Back => {
             line(p(0.80, 0.50), p(0.24, 0.50));
             path(vec![p(0.44, 0.30), p(0.22, 0.50), p(0.44, 0.70)]);
+        }
+        // Back, mirrored. Next to it in a row of controls it has to read as
+        // the same arrow the other way round, which a chevron does not: the
+        // picture viewer's Next was `Chevron`, pointing *down*, beside a
+        // left-pointing Previous.
+        Icon::Forward => {
+            line(p(0.20, 0.50), p(0.76, 0.50));
+            path(vec![p(0.56, 0.30), p(0.78, 0.50), p(0.56, 0.70)]);
         }
         Icon::Close => {
             line(p(0.26, 0.26), p(0.74, 0.74));
@@ -646,43 +670,26 @@ mod tests {
     fn every_icon_says_a_word() {
         // An icon is a convention somebody has to already know, and no
         // assistive technology can read meaning out of a shape.
-        for icon in [
-            Icon::Call,
-            Icon::HangUp,
-            Icon::Settings,
-            Icon::People,
-            Icon::Device,
-            Icon::Plus,
-            Icon::Compose,
-            Icon::Chevron,
-            Icon::Menu,
-            Icon::Search,
-            Icon::Attach,
-            Icon::Send,
-            Icon::Back,
-            Icon::Close,
-            Icon::Refresh,
-            Icon::Pencil,
-            Icon::Public,
-            Icon::Reply,
-            Icon::React,
-            Icon::More,
-            Icon::Switch,
-            Icon::Play,
-            Icon::Pause,
-            Icon::Sound,
-            Icon::Muted,
-            Icon::Enlarge,
-            Icon::Bell,
-            Icon::BellOff,
-            Icon::Verified,
-        ] {
+        //
+        // **From the declaration, not from a copy of it.** This was a list
+        // written out by hand, and it had gone stale in the usual way: it
+        // named thirty-one of the icons and the set had thirty-four, so the
+        // newest three were never asked whether they say anything at all.
+        // `Icon::ALL` comes out of the `icons!` macro, which is the same
+        // place the variants and the words come from.
+        for icon in Icon::ALL {
             let word = icon.word();
             assert!(word.len() > 2, "{icon:?} has no word");
             // ASCII, because this crate's own chrome must not depend on a
             // glyph the bundled fonts lack -- see the module note.
             assert!(word.is_ascii(), "{icon:?}'s word is not ASCII: {word}");
         }
+        assert!(
+            Icon::ALL.len() > 30,
+            "only {} icons, which is not the set: the scan is looking at the \
+             wrong thing",
+            Icon::ALL.len()
+        );
     }
 
     #[test]

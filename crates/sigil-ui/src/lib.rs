@@ -28,8 +28,8 @@ pub use working::working;
 // Re-exported from the host crate, where the `App` trait names one -- see
 // `sigil::icon`. Every `sigil_ui::Icon` still resolves.
 pub use identicon::{
-    Presence, avatar, identicon, identicon_layer, identicon_of, identicon_raster, presence,
-    presence_hover,
+    MARK_KEY, Presence, avatar, identicon, identicon_layer, identicon_of, identicon_raster,
+    presence, presence_hover,
 };
 
 /// Teach egui how to decode an image.
@@ -68,7 +68,19 @@ pub fn install_loaders(ctx: &egui::Context) {
 /// It follows the theme, so it is the brighter accent on a dark ground and
 /// the deeper one on a light ground — the same mark, legible on both, rather
 /// than one fixed colour that is wrong on one of them.
+///
+/// # Except on a phone
+///
+/// A phone's launcher icon is not that disc: `scripts/launcher-icon` draws
+/// the mark of the all-ones key (see [`MARK_KEY`]), which is what sits on the
+/// home screen and what somebody tapped a second before they saw this. So on
+/// a phone this is that mark, and on a desktop it is the disc that is in the
+/// Dock. Either way it is the icon of the thing they just opened, which is
+/// the only thing a mark on a welcome screen is for.
 pub fn mark(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    if sigil::Form::of(ui.ctx()).is_phone() {
+        return identicon(ui, MARK_KEY, size);
+    }
     let theme = sigil::ColorTheme::current(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     if ui.is_rect_visible(rect) {

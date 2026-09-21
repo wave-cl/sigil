@@ -127,3 +127,57 @@ fn icons_dark() {
     h.run();
     h.snapshot("icons_dark");
 }
+
+/// **No two icons are the same picture.**
+///
+/// `Forward` was added as the mirror of `Back`, for the picture viewer's Next
+/// -- which had been a *downward* chevron beside a left-pointing Previous.
+/// The mirror of `Back` is an arrow to the right, and so was `Send`: two
+/// icons, two words, one picture. Nothing was ambiguous in use, because they
+/// never appear on the same screen, but a set where two names draw the same
+/// thing is a set that will eventually put them side by side. The sheet
+/// showed it; nothing failed.
+///
+/// So: draw each one on its own and compare what was actually painted. Every
+/// icon gets the same rectangle, colour and stroke, so two that come out
+/// equal are the same shape in the same place -- which is the whole claim.
+#[test]
+fn no_two_icons_draw_the_same_shape() {
+    fn painted(icon: Icon) -> String {
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(40.0, 40.0));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            sigil::icon::draw(&painter, rect, icon, egui::Color32::WHITE);
+        });
+        // Dropping a `TexturesDelta` with the font atlas in it panics on the
+        // way out, which reads as a failure of whatever the test was doing.
+        out.textures_delta.clear();
+        format!("{:?}", out.shapes)
+    }
+
+    let mut seen: std::collections::HashMap<String, Icon> = std::collections::HashMap::new();
+    let mut same: Vec<String> = Vec::new();
+    for icon in ALL {
+        let shape = painted(*icon);
+        // The instrument can say nothing: an icon that paints nothing at all
+        // would collide with every other one that paints nothing, which is a
+        // different fault and worth its own words.
+        assert!(shape.len() > 20, "{icon:?} painted almost nothing: {shape}");
+        if let Some(other) = seen.insert(shape, *icon) {
+            same.push(format!("{other:?} and {icon:?}"));
+        }
+    }
+    assert!(
+        same.is_empty(),
+        "{} pair(s) of icons draw the same picture:\n  {}",
+        same.len(),
+        same.join("\n  ")
+    );
+    // And that it can say yes: the same icon twice must collide with itself.
+    assert_eq!(
+        painted(Icon::Back),
+        painted(Icon::Back),
+        "the same icon drew differently twice, so this comparison means nothing"
+    );
+}
