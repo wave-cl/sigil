@@ -6718,12 +6718,38 @@ fn phone_pictures(n: usize) -> Harness<'static> {
         })
 }
 
-/// Give egui's loader thread time to decode the tiles.
+/// Wait for egui's loader thread to decode the tiles, and **say so if it
+/// did not**.
+///
+/// A fixed number of passes is a guess at how fast a machine is, and a
+/// snapshot taken before the pictures arrive is not a failure -- it is a
+/// picture of an empty tile, recorded as correct. So this stops as soon as
+/// the texture is there, and fails by name if it never is: a blank where a
+/// photograph should be is exactly the thing a snapshot cannot tell you
+/// about, because it looks like a snapshot.
 fn let_pictures_arrive(h: &mut Harness<'static>) {
-    for _ in 0..20 {
+    let uri = "bytes://pic0";
+    for _ in 0..80 {
         h.run();
+        let ready = matches!(
+            h.ctx.try_load_texture(
+                uri,
+                egui::TextureOptions::default(),
+                egui::SizeHint::Scale(1.0.into()),
+            ),
+            Ok(egui::load::TexturePoll::Ready { .. })
+        );
+        if ready {
+            // One more pass, so what was decoded is what gets drawn.
+            h.run();
+            return;
+        }
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
+    panic!(
+        "{uri} never decoded in two and a half seconds, so the snapshot would \
+         be of an empty tile -- which looks exactly like a snapshot"
+    );
 }
 
 #[test]
@@ -6784,11 +6810,11 @@ fn gallery_dark() {
             };
             let _ = app.render(&mut app_ctx, ui);
         });
-    // The pictures are decoded on egui's loader thread; give it a moment.
-    for _ in 0..20 {
-        h.run();
-        std::thread::sleep(std::time::Duration::from_millis(30));
-    }
+    // The pictures are decoded on egui's loader thread. Through the same
+    // wait as the phone's, which stops when the texture is actually there
+    // and fails by name when it never is -- a snapshot of an empty tile
+    // looks exactly like a snapshot.
+    let_pictures_arrive(&mut h);
     hide_column(&mut h);
     h.snapshot("gallery_dark");
 }
