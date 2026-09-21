@@ -1164,6 +1164,72 @@ fn phone_devices() {
     h.snapshot("phone_devices");
 }
 
+/// The directory on a phone: the search box, and a hit with what may be
+/// done about it. Three of the five routes had no phone render at all,
+/// which is three screens nobody had looked at on a 360-point pane.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_directory() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.found = vec![
+        sigil_chat::Found {
+            channel: [9u8; 32],
+            instance: [1u8; 32],
+            name: "the square".into(),
+            topic: "anybody may join this one".into(),
+            members: 3,
+            domain: String::new(),
+            here: true,
+        },
+        sigil_chat::Found {
+            channel: [4u8; 32],
+            instance: [2u8; 32],
+            name: "elsewhere".into(),
+            topic: "held at another exchange".into(),
+            members: 1,
+            domain: "trunk.exchange".into(),
+            here: false,
+        },
+    ];
+    state.searched = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Directory);
+    h.run();
+    h.run();
+    h.snapshot("phone_directory");
+}
+
+/// Who is in the room, on a phone: a roster row is a mark, a name and the
+/// admin's controls, and on 360 points that row is the one most likely to
+/// run off the edge.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_members() {
+    let mut state = a_conversation();
+    state.reports = vec![sigil_chat::Report {
+        id: 7,
+        reporter: them(),
+        target: 3,
+        reason: "spam",
+        at: NOW - 3600,
+        note: "links".into(),
+    }];
+    let mut h = harness_phone(state, sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    h.snapshot("phone_members");
+}
+
+/// The conversation's own settings on a phone: name, topic, retention.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_settings() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    h.snapshot("phone_settings");
+}
+
 /// Put the conversation list away.
 ///
 /// It is **on screen from the start**: signing in lands on the chats with the

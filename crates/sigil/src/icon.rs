@@ -94,6 +94,8 @@ pub enum Icon {
     /// This key was verified: its safety words were compared with its
     /// owner (SIP-41).
     Verified,
+    /// Apply what has been typed beside it.
+    Check,
 }
 
 impl Icon {
@@ -129,6 +131,7 @@ impl Icon {
             Icon::Bell => "Mute this conversation",
             Icon::BellOff => "Unmute this conversation",
             Icon::Verified => "verified",
+            Icon::Check => "Set",
         }
     }
 }
@@ -448,6 +451,12 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             line(p(0.78, 0.78), p(0.58, 0.78));
             line(p(0.24, 0.24), p(0.42, 0.42));
             line(p(0.76, 0.76), p(0.58, 0.58));
+        }
+        Icon::Check => {
+            // A tick, and nothing else. It is the confirm beside a field --
+            // "Set" three times on one settings pane -- and a word repeated
+            // down a form is three times the width for one meaning.
+            path(vec![p(0.26, 0.52), p(0.43, 0.70), p(0.76, 0.30)]);
         }
         Icon::Verified => {
             // A shield with a tick in it: the tick is the comparison, the

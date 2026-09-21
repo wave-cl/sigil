@@ -98,6 +98,179 @@ pub fn field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32) -> egu
     field_as(ui, buf, hint, width, false)
 }
 
+/// How narrow a field may be squeezed before its action moves below it.
+///
+/// Enough for a readable fragment of what goes in one -- a key, a domain, a
+/// credential -- rather than a dozen characters and an ellipsis.
+const FIELD_MIN: f32 = 200.0;
+
+/// What a form row's action looks like.
+///
+/// # Why an icon is the default and a word the exception
+///
+/// A word beside a field is a word the reader has already been given: the
+/// label says what the field is, the hint says what goes in it, and "Set"
+/// after both says only "yes, that one". Three of those down one settings
+/// pane is a column of the same word taking a third of the row each time. An
+/// icon says it in a square, and -- through [`icon_button_named`] -- still
+/// reaches a screen reader with the word, which is the rule the icon set was
+/// written under: a control that is only a picture is a control some people
+/// cannot use.
+///
+/// A word stays where no picture means the thing. "Write credential" and
+/// "Register this device" are not a tick; drawing one for them would say
+/// *confirm* over an action that is neither obvious nor undoable, and a
+/// picture somebody has to guess at is worth less than a plain sentence.
+#[derive(Clone, Copy)]
+pub enum Action<'a> {
+    /// A picture, named for the tooltip and the accessibility tree.
+    Mark(Icon, &'a str),
+    /// A word, for what no picture says.
+    Word(&'a str),
+}
+
+impl Action<'_> {
+    /// Draw it, and say whether it was pressed.
+    fn show(self, ui: &mut egui::Ui) -> bool {
+        match self {
+            Action::Mark(icon, word) => icon_button_named(ui, icon, word).clicked(),
+            Action::Word(word) => ui.button(word).clicked(),
+        }
+    }
+
+    /// How wide it will be, so the field can be given the rest.
+    fn width(self, ui: &egui::Ui) -> f32 {
+        match self {
+            // Square, and a finger's side on a phone.
+            Action::Mark(..) => sigil::Form::of(ui.ctx()).button_size(),
+            Action::Word(word) => {
+                let galley = ui.painter().layout_no_wrap(
+                    word.to_string(),
+                    egui::TextStyle::Button.resolve(ui.style()),
+                    egui::Color32::PLACEHOLDER,
+                );
+                galley.size().x + ui.spacing().button_padding.x * 2.0
+            }
+        }
+    }
+}
+
+/// A labelled field with at most one action beside it, at the width there is.
+///
+/// # Why a shared row rather than a `horizontal` per pane
+///
+/// Every form in sigil was written the same way: `ui.horizontal(|ui| { label;
+/// field(300.0); button })`. On a desktop that is fine. On a 360-point pane it
+/// is not, and it failed in two ways at once. The label eats the width the
+/// field needed, so a field asking for a key in base58 showed eight
+/// characters of it; and because each pane's labels are different lengths --
+/// "Name", "Topic", "Keep messages for" -- every field on one screen came out
+/// a different width, which reads as three unrelated controls rather than one
+/// form.
+///
+/// So below [`tokens::NARROW_WIDTH`] the label goes **above** the field, and
+/// the field takes every point the action does not. The action's width is
+/// measured rather than guessed: the row lays out right to left, the button
+/// takes what it needs, and the field is given exactly the remainder. A guess
+/// is what [`crate::field`]'s callers were doing with a 130-point constant,
+/// and a guess that is wrong overflows the pane -- which on a phone drags
+/// every row after it out with it, because egui grows a ui to whatever is
+/// drawn in it.
+///
+/// Returns the field's response, and whether the action was pressed (`false`
+/// when there is no action).
+pub fn labelled_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    buf: &mut String,
+    hint: &str,
+    action: Option<Action<'_>>,
+) -> (egui::Response, bool) {
+    if ui.available_width() >= sigil::tokens::NARROW_WIDTH {
+        // The desktop's row, unchanged: this is the arm that was there
+        // before, so nothing about a wide window moves.
+        let mut out = None;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let width = 300.0f32.min((ui.available_width() - 130.0).max(120.0));
+            let response = field(ui, buf, hint, width);
+            let clicked = action.map(|a| a.show(ui)).unwrap_or(false);
+            out = Some((response, clicked));
+        });
+        return out.expect("the row runs its contents");
+    }
+
+    let theme = sigil::ColorTheme::current(ui.ctx());
+    // An empty label is a field whose heading and prose above it already say
+    // what it is for -- a caption repeating them would be noise. It still
+    // comes through here, so its action is placed by the same rule as every
+    // other one and a pane does not end up with one button right-aligned
+    // and the next left-aligned for no reason anybody could name.
+    if !label.is_empty() {
+        ui.label(
+            egui::RichText::new(label)
+                .small()
+                .color(theme.text_secondary),
+        );
+        ui.add_space(sigil::tokens::SPACING_XS);
+    }
+    let mut out = None;
+    // **A row, not the rest of the pane.** `with_layout` on a vertical ui
+    // takes the whole remaining rectangle, so a right-to-left layout asked
+    // for inside one centres its contents in what is left of the screen --
+    // which put this field halfway down an otherwise empty Members pane,
+    // several hundred points below its own label. Allocating the row's own
+    // height is what makes it a row.
+    // **How wide the action is decides whether it fits beside the field.**
+    // "Set" is four characters and leaves the field nearly the whole pane;
+    // "Write credential" is a third of it, and asking for a key in base58 in
+    // what is left showed fourteen characters of a forty-four character
+    // answer. So the button is measured, and when the field would be left
+    // less than a readable minimum the button goes under it instead --
+    // right-aligned, where a form's action belongs. Measured rather than a
+    // list of labels, because the next long label would not be on the list.
+    let wide_enough = action
+        .map(|a| ui.available_width() - a.width(ui) - sigil::tokens::SPACING_SM >= FIELD_MIN)
+        .unwrap_or(true);
+
+    if wide_enough {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), sigil::tokens::FIELD_MD),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let clicked = match action {
+                    Some(a) => {
+                        let hit = a.show(ui);
+                        ui.add_space(sigil::tokens::SPACING_SM);
+                        hit
+                    }
+                    None => false,
+                };
+                // Whatever is left, which is why this cannot overflow.
+                let width = ui.available_width();
+                let response = field(ui, buf, hint, width);
+                out = Some((response, clicked));
+            },
+        );
+    } else {
+        let width = ui.available_width();
+        let response = field(ui, buf, hint, width);
+        ui.add_space(sigil::tokens::SPACING_SM);
+        let mut clicked = false;
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, sigil::tokens::BUTTON_MD),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                if let Some(a) = action {
+                    clicked = a.show(ui);
+                }
+            },
+        );
+        out = Some((response, clicked));
+    }
+    out.expect("the row runs its contents")
+}
+
 /// The same, for something that must not be shown as it is typed.
 ///
 /// A separate function rather than a flag at every call site, so that a field

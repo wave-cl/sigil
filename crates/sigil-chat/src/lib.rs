@@ -550,6 +550,24 @@ type At = (PubKey, String);
 /// A field's width in a row that has a control after it: what it asked
 /// for, or what is left once the control has its room. Width-driven, so a
 /// narrow desktop window and a phone get the same answer.
+/// What may be done about a member of a room, decided once and drawn twice.
+///
+/// The roster's row is a line of buttons where there is room and a menu where
+/// there is not, and the two used to be two copies of the same five
+/// decisions. Naming them means a control added here appears in both, rather
+/// than in whichever arm whoever added it happened to be looking at.
+#[derive(Clone, Copy)]
+enum MemberAct {
+    Verify,
+    Kick,
+    /// Make an admin, or stop being one.
+    Grant(bool),
+    /// SIP-56: they read, and may not write.
+    Mute(bool),
+    /// SIP-21, and not an admin's: personal, and applies everywhere.
+    Block(bool),
+}
+
 fn field_width(ui: &egui::Ui, want: f32) -> f32 {
     /// Room for the button that follows the field.
     const CONTROL: f32 = 130.0;
@@ -6113,17 +6131,47 @@ impl ChatApp {
         );
         ui.add_space(tokens::SPACING_SM);
 
+        // The same box as the chat list's, so the phone has one search
+        // control rather than two that look unrelated: full width, a little
+        // taller, and the magnifier *in* the box at the right. It was the
+        // desktop's row here -- a 320-point field asked for in a 360-point
+        // pane, with a "Search" button after it -- which showed twenty
+        // characters of a hint that is a sentence.
+        let form = sigil::Form::of(ui.ctx());
         ui.horizontal(|ui| {
+            let phone = form.is_phone();
+            let control = form.button_size() + ui.spacing().item_spacing.x * 2.0;
+            let width = ui.available_width() - if phone { 0.0 } else { control };
             let pane = self.panes.entry(at.clone()).or_default();
-            let width = field_width(ui, 320.0);
-            let field = sigil_ui::field(
-                ui,
-                &mut pane.query,
-                "name a channel, or leave empty for everything",
-                width,
-            );
+            let (field, slot) = if phone {
+                let (field, slot) = sigil_ui::field_with_slot(
+                    ui,
+                    &mut pane.query,
+                    "name a channel, or leave empty for everything",
+                    width,
+                    tokens::FIELD_LG,
+                    form.button_size(),
+                );
+                (field, Some(slot))
+            } else {
+                (
+                    sigil_ui::field(
+                        ui,
+                        &mut pane.query,
+                        "name a channel, or leave empty for everything",
+                        width,
+                    ),
+                    None,
+                )
+            };
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if entered || ui.button("Search").clicked() {
+            let control = |ui: &mut egui::Ui| sigil_ui::icon_button(ui, sigil_ui::Icon::Search);
+            let pressed = match slot {
+                Some(slot) => sigil_ui::in_slot(ui, slot, control),
+                None => control(ui),
+            }
+            .clicked();
+            if entered || pressed {
                 let query = self.pane(at).query.clone();
                 self.send_as(Some(at), Cmd::Find(query));
             }
@@ -6151,6 +6199,7 @@ impl ChatApp {
             return AppResponse::default();
         }
 
+        let narrow = ui.available_width() < tokens::NARROW_WIDTH;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -6163,36 +6212,15 @@ impl ChatApp {
                         let id = bs58::encode(found.channel).into_string();
                         sigil_ui::identicon(ui, &id, tokens::AVATAR_MD);
                         ui.add_space(tokens::SPACING_SM);
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(&found.name).strong());
-                            if !found.topic.is_empty() {
-                                ui.colored_label(
-                                    theme.text_secondary,
-                                    egui::RichText::new(&found.topic).small(),
-                                );
-                            }
-                            ui.colored_label(
-                                theme.text_muted,
-                                egui::RichText::new(match found.members {
-                                    1 => "1 member".to_string(),
-                                    n => format!("{n} members"),
-                                })
-                                .small(),
-                            );
-                            // SIP-16 §What a client does with a search row: a
-                            // room listed from elsewhere is joined there.
-                            if !found.here {
-                                ui.colored_label(
-                                    theme.text_muted,
-                                    egui::RichText::new(format!(
-                                        "lives at {}; no copy is held here",
-                                        found.domain
-                                    ))
-                                    .small(),
-                                );
-                            }
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // **The action first, from the right.** A `vertical`
+                        // given the row takes the whole of it -- the topic
+                        // wraps to the width there is, so "the width there
+                        // is" became all of it -- and the button drawn after
+                        // it was painted over the topic it had left no room
+                        // for. Laying the action out first and the text in
+                        // what remains is what `search_hit` does with a time,
+                        // and for the same reason.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             if already {
                                 ui.colored_label(theme.text_muted, "joined");
                             } else if !found.here {
@@ -6201,11 +6229,24 @@ impl ChatApp {
                                 // from here rather than there is not wanting
                                 // to be there in person. The box stays on the
                                 // dialog to untick.
+                                //
+                                // The domain is in the label where there is
+                                // room for it and in the row's own last line
+                                // -- "lives at trunk.exchange" -- either way,
+                                // so a narrow pane drops it from the button
+                                // rather than spending half the row on a
+                                // fact already on screen.
+                                let label = if narrow {
+                                    "Add exchange".to_string()
+                                } else {
+                                    format!("Add {}", found.domain)
+                                };
                                 if ui
-                                    .button(format!("Add {}", found.domain))
-                                    .on_hover_text(
-                                        "connect this identity to that exchange to join it",
-                                    )
+                                    .button(label)
+                                    .on_hover_text(format!(
+                                        "connect this identity to {} to join it",
+                                        found.domain
+                                    ))
                                     .clicked()
                                 {
                                     let home = self.home_domain(ctx);
@@ -6216,7 +6257,13 @@ impl ChatApp {
                                     pane.add_trouble = None;
                                     pane.dialog = Some(Dialog::Exchange);
                                 }
-                            } else if ui.button("Join").clicked() {
+                            } else if sigil_ui::icon_button_named(
+                                ui,
+                                sigil_ui::Icon::Plus,
+                                "Join this channel",
+                            )
+                            .clicked()
+                            {
                                 // Reading a public channel *is* joining it:
                                 // fetching requires membership, so there is no
                                 // way to look without becoming a member.
@@ -6228,6 +6275,40 @@ impl ChatApp {
                                     },
                                 );
                             }
+                            // What is left of the row, and no more.
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(&found.name).strong())
+                                        .truncate(),
+                                );
+                                if !found.topic.is_empty() {
+                                    ui.colored_label(
+                                        theme.text_secondary,
+                                        egui::RichText::new(&found.topic).small(),
+                                    );
+                                }
+                                ui.colored_label(
+                                    theme.text_muted,
+                                    egui::RichText::new(match found.members {
+                                        1 => "1 member".to_string(),
+                                        n => format!("{n} members"),
+                                    })
+                                    .small(),
+                                );
+                                // SIP-16 §What a client does with a search
+                                // row: a room listed from elsewhere is
+                                // joined there.
+                                if !found.here {
+                                    ui.colored_label(
+                                        theme.text_muted,
+                                        egui::RichText::new(format!(
+                                            "lives at {}; no copy is held here",
+                                            found.domain
+                                        ))
+                                        .small(),
+                                    );
+                                }
+                            });
                         });
                     });
                     ui.separator();
@@ -6255,28 +6336,23 @@ impl ChatApp {
 
         if state.i_am_admin {
             ui.add_space(tokens::SPACING_SM);
-            ui.horizontal(|ui| {
-                ui.label("Invite");
-                let width = field_width(ui, 280.0);
-                sigil_ui::field(
-                    ui,
-                    &mut self.panes.entry(at.clone()).or_default().inviting,
-                    "paste their key, or type name@domain",
-                    width,
-                );
-                if ui.button("Add").clicked() {
-                    let typed = self.pane(at).inviting.trim().to_string();
-                    match typed.parse::<PubKey>() {
-                        Ok(who) => {
-                            self.pane(at).inviting.clear();
-                            self.send_as(Some(at), Cmd::Invite(who));
-                        }
-                        Err(e) => {
-                            self.pane(at).add_trouble = Some(format!("that is not a key: {e}"))
-                        }
+            let (_, add) = sigil_ui::labelled_field(
+                ui,
+                "Invite",
+                &mut self.panes.entry(at.clone()).or_default().inviting,
+                "paste their key, or type name@domain",
+                Some(sigil_ui::Action::Mark(sigil_ui::Icon::Plus, "Add them")),
+            );
+            if add {
+                let typed = self.pane(at).inviting.trim().to_string();
+                match typed.parse::<PubKey>() {
+                    Ok(who) => {
+                        self.pane(at).inviting.clear();
+                        self.send_as(Some(at), Cmd::Invite(who));
                     }
+                    Err(e) => self.pane(at).add_trouble = Some(format!("that is not a key: {e}")),
                 }
-            });
+            }
             // Inviting grants the history, and that is a decision rather than
             // a side effect: sealing the current epoch is what hands it over,
             // and rotating instead would deny it.
@@ -6291,6 +6367,16 @@ impl ChatApp {
         }
 
         ui.add_space(tokens::SPACING_SM);
+        // **Five buttons do not fit a phone.** A member's row carried Verify,
+        // Remove, Make admin, Mute and Block inline, laid out right to left.
+        // At 360 points that row was some 200 points wider than the pane, so
+        // it overflowed *and* -- because egui grows a ui to whatever is drawn
+        // in it -- every row after it was laid out for a pane that wide: the
+        // reports below it started off the left edge, and the buttons were
+        // painted over the member above. The conversation bar already answers
+        // this by folding to a More menu on a narrow pane; a roster row folds
+        // the same way, which is also what a phone roster is.
+        let narrow = ui.available_width() < tokens::NARROW_WIDTH;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -6353,110 +6439,165 @@ impl ChatApp {
                                     sigil_ui::verified_mark(ui);
                                 }
                             });
-                            // In full. This is the only thing that identifies
-                            // them; everything above it is a claim.
+                            // This is the only thing that identifies them;
+                            // everything above it is a claim. In full on a
+                            // desktop -- but 44 base58 characters wrap to two
+                            // lines on a phone and make the roster a wall of
+                            // key, so there it is the short form, with the
+                            // whole of it a press away on the row's menu.
+                            let shown = if narrow {
+                                sigil_ui::short(&key)
+                            } else {
+                                key.clone()
+                            };
                             ui.add(
-                                egui::Label::new(egui::RichText::new(&key).monospace().small())
+                                egui::Label::new(egui::RichText::new(shown).monospace().small())
                                     .selectable(true),
                             );
                         });
                         if member.account != me {
+                            // One list of decisions, drawn two ways. A row of
+                            // buttons where there is room, a menu where there
+                            // is not -- but the same list either way, so the
+                            // phone cannot quietly lose a control the desktop
+                            // has, which is how the two drift apart.
+                            let verified = state.verified.contains_key(&member.account);
+                            let blocked = state.blocked.contains(&member.account);
+                            let mut acts: Vec<(String, &str, MemberAct)> = Vec::new();
+                            acts.push((
+                                if verified { "Verified" } else { "Verify" }.to_string(),
+                                if verified {
+                                    "You compared safety words with them. Open to see them \
+                                     again, or to take the mark back."
+                                } else {
+                                    "Compare six words with them, in person or over a call, \
+                                     and mark their key as theirs."
+                                },
+                                MemberAct::Verify,
+                            ));
+                            if state.i_am_admin {
+                                acts.push((
+                                    "Remove".to_string(),
+                                    "Removes them and mints a new key, so what follows is \
+                                     not theirs. What they already hold, they keep.",
+                                    MemberAct::Kick,
+                                ));
+                                acts.push((
+                                    if member.admin { "Demote" } else { "Make admin" }.to_string(),
+                                    if member.admin {
+                                        "They stop being an admin of this room."
+                                    } else {
+                                        "They may invite, remove and mute here."
+                                    },
+                                    MemberAct::Grant(!member.admin),
+                                ));
+                                // SIP-56. An admin cannot be muted (the SIP
+                                // says demote first), so this is for members.
+                                if !member.admin {
+                                    acts.push((
+                                        if member.muted { "Unmute" } else { "Mute" }.to_string(),
+                                        if member.muted {
+                                            "They may write again. Everybody sees this."
+                                        } else {
+                                            "An admin's act, seen by all: they read, and may \
+                                             not write. Not the same as muting this \
+                                             conversation for yourself."
+                                        },
+                                        MemberAct::Mute(!member.muted),
+                                    ));
+                                }
+                            }
+                            // **Anybody's, not an admin's.** SIP-21's list is
+                            // "per account, applies everywhere" -- a personal
+                            // act, and the hover says as much: *you* stop
+                            // hearing from them. It sat after the admin
+                            // check's early return, so the one control a
+                            // member being harassed in somebody else's room
+                            // actually needs was the one they could not reach.
+                            acts.push((
+                                if blocked { "Unblock" } else { "Block" }.to_string(),
+                                if blocked {
+                                    "They can reach you again."
+                                } else {
+                                    // Never over-claimed: the exchange answers
+                                    // on your behalf and tells them nothing,
+                                    // but a delivery mark that stops moving is
+                                    // a thing somebody can notice.
+                                    "You stop hearing from them. They are told nothing, \
+                                     though it can be worked out."
+                                },
+                                MemberAct::Block(!blocked),
+                            ));
+
+                            let mut chose = None;
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    // Anybody may compare words with anybody;
-                                    // the rest is an admin's.
-                                    let verified = state.verified.contains_key(&member.account);
-                                    if ui
-                                        .button(if verified { "Verified" } else { "Verify" })
-                                        .on_hover_text(if verified {
-                                            "You compared safety words with them. Open to see \
-                                             them again, or to take the mark back."
-                                        } else {
-                                            "Compare six words with them, in person or over a \
-                                             call, and mark their key as theirs."
-                                        })
-                                        .clicked()
-                                    {
-                                        self.pane(at).dialog = Some(Dialog::Verify(member.account));
-                                    }
-                                    if !state.i_am_admin {
-                                        return;
-                                    }
-                                    if ui
-                                        .button("Remove")
-                                        .on_hover_text(
-                                            "Removes them and mints a new key, so what \
-                                             follows is not theirs. What they already \
-                                             hold, they keep.",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.send_as(Some(at), Cmd::Kick(member.account));
-                                    }
-                                    let (label, admin) = if member.admin {
-                                        ("Demote", false)
+                                    if narrow {
+                                        let more = sigil_ui::icon_button_named(
+                                            ui,
+                                            sigil_ui::Icon::More,
+                                            "What may be done about them",
+                                        );
+                                        egui::Popup::menu(&more).show(|ui| {
+                                            for (label, hover, act) in &acts {
+                                                if ui
+                                                    .button(label.as_str())
+                                                    .on_hover_text(*hover)
+                                                    .clicked()
+                                                {
+                                                    chose = Some(*act);
+                                                }
+                                            }
+                                            // The whole key, which the row
+                                            // itself has no width for.
+                                            if ui.button("Copy key").clicked() {
+                                                ui.ctx().copy_text(key.clone());
+                                            }
+                                        });
                                     } else {
-                                        ("Make admin", true)
-                                    };
-                                    if ui.button(label).clicked() {
-                                        self.send_as(
-                                            Some(at),
-                                            Cmd::Grant {
-                                                who: member.account,
-                                                admin,
-                                            },
-                                        );
-                                    }
-                                    // SIP-56. An admin cannot be muted (the
-                                    // SIP says demote first), so the button is
-                                    // for members only.
-                                    if !member.admin
-                                        && ui
-                                            .button(if member.muted { "Unmute" } else { "Mute" })
-                                            .on_hover_text(if member.muted {
-                                                "They may write again. Everybody sees this."
-                                            } else {
-                                                "An admin's act, seen by all: they read, and may \
-                                                 not write. Not the same as muting this \
-                                                 conversation for yourself."
-                                            })
-                                            .clicked()
-                                    {
-                                        self.send_as(
-                                            Some(at),
-                                            Cmd::Mute {
-                                                who: member.account,
-                                                on: !member.muted,
-                                            },
-                                        );
-                                    }
-                                    let blocked = state.blocked.contains(&member.account);
-                                    if ui
-                                        .button(if blocked { "Unblock" } else { "Block" })
-                                        .on_hover_text(if blocked {
-                                            "They can reach you again."
-                                        } else {
-                                            // Never over-claimed: the exchange
-                                            // answers on your behalf and tells
-                                            // them nothing, but a delivery
-                                            // mark that stops moving is a
-                                            // thing somebody can notice.
-                                            "You stop hearing from them. They are told nothing, \
-                                             though it can be worked out."
-                                        })
-                                        .clicked()
-                                    {
-                                        self.send_as(
-                                            Some(at),
-                                            Cmd::SetBlocked {
-                                                who: member.account,
-                                                blocked: !blocked,
-                                            },
-                                        );
+                                        for (label, hover, act) in &acts {
+                                            if ui
+                                                .button(label.as_str())
+                                                .on_hover_text(*hover)
+                                                .clicked()
+                                            {
+                                                chose = Some(*act);
+                                            }
+                                        }
                                     }
                                 },
                             );
+                            match chose {
+                                Some(MemberAct::Verify) => {
+                                    self.pane(at).dialog = Some(Dialog::Verify(member.account));
+                                }
+                                Some(MemberAct::Kick) => {
+                                    self.send_as(Some(at), Cmd::Kick(member.account));
+                                }
+                                Some(MemberAct::Grant(admin)) => self.send_as(
+                                    Some(at),
+                                    Cmd::Grant {
+                                        who: member.account,
+                                        admin,
+                                    },
+                                ),
+                                Some(MemberAct::Mute(on)) => self.send_as(
+                                    Some(at),
+                                    Cmd::Mute {
+                                        who: member.account,
+                                        on,
+                                    },
+                                ),
+                                Some(MemberAct::Block(blocked)) => self.send_as(
+                                    Some(at),
+                                    Cmd::SetBlocked {
+                                        who: member.account,
+                                        blocked,
+                                    },
+                                ),
+                                None => {}
+                            }
                         }
                     });
                     ui.separator();
@@ -6480,10 +6621,12 @@ impl ChatApp {
                     ui.add_space(tokens::SPACING_SM);
                     ui.horizontal(|ui| {
                         ui.heading("Reports");
-                        if ui
-                            .button("Refresh")
-                            .on_hover_text("Read the room's reports from the exchange.")
-                            .clicked()
+                        if sigil_ui::icon_button_named(
+                            ui,
+                            sigil_ui::Icon::Refresh,
+                            "Read the room's reports from the exchange",
+                        )
+                        .clicked()
                         {
                             self.send_as(Some(at), Cmd::LoadReports);
                         }
@@ -6492,7 +6635,14 @@ impl ChatApp {
                         ui.colored_label(theme.text_secondary, "No reports.");
                     }
                     for report in &state.reports {
-                        ui.horizontal(|ui| {
+                        // **Not one row.** The report's sentence and its two
+                        // buttons on a single line is 420 points of content
+                        // in a 360-point pane, and a right-to-left row that
+                        // overflows starts off the left edge -- which is how
+                        // "Ada reported message 3 as spam: links" came out as
+                        // "rted message 3 as spam: links". The sentence wraps
+                        // to the width there is; the buttons go under it.
+                        ui.vertical(|ui| {
                             let who = state
                                 .people
                                 .get(&report.reporter)
@@ -6508,31 +6658,38 @@ impl ChatApp {
                                 said.push_str(": ");
                                 said.push_str(&report.note);
                             }
-                            ui.add(egui::Label::new(said).wrap());
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("Dismiss").clicked() {
-                                        self.send_as(Some(at), Cmd::Dismiss(report.id));
-                                    }
-                                    if report.target != 0
-                                        && ui
-                                            .button("Show")
-                                            .on_hover_text("Go to the message reported.")
-                                            .clicked()
-                                        && let Some(channel) = state.open
-                                    {
-                                        self.send_as(
-                                            Some(at),
-                                            Cmd::ShowAt {
-                                                channel,
-                                                seq: report.target,
-                                            },
-                                        );
-                                        ctx.navigator.back();
-                                    }
-                                },
-                            );
+                            ui.add(egui::Label::new(said).wrap().sense(egui::Sense::hover()));
+                            ui.add_space(tokens::SPACING_XS);
+                            // Wrapped, so a third control added here folds to
+                            // the next line rather than off the edge.
+                            ui.horizontal_wrapped(|ui| {
+                                if report.target != 0
+                                    && ui
+                                        .button("Show")
+                                        .on_hover_text("Go to the message reported.")
+                                        .clicked()
+                                    && let Some(channel) = state.open
+                                {
+                                    self.send_as(
+                                        Some(at),
+                                        Cmd::ShowAt {
+                                            channel,
+                                            seq: report.target,
+                                        },
+                                    );
+                                    ctx.navigator.back();
+                                }
+                                if sigil_ui::icon_button_named(
+                                    ui,
+                                    sigil_ui::Icon::Close,
+                                    "Dismiss this report",
+                                )
+                                .clicked()
+                                {
+                                    self.send_as(Some(at), Cmd::Dismiss(report.id));
+                                }
+                            });
+                            ui.add_space(tokens::SPACING_SM);
                         });
                     }
                 }
@@ -6583,36 +6740,37 @@ impl ChatApp {
 
         ui.add_space(tokens::SPACING_SM);
         ui.add_enabled_ui(state.i_am_admin, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                let width = field_width(ui, 280.0);
-                sigil_ui::field(
-                    ui,
-                    &mut self.panes.entry(at.clone()).or_default().channel_name,
-                    "what this channel is called",
-                    width,
-                );
-                if ui.button("Set").clicked() {
-                    let name = self.pane(at).channel_name.clone();
-                    self.send_as(Some(at), Cmd::SetName(name));
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Topic");
-                let width = field_width(ui, 280.0);
-                sigil_ui::field(
-                    ui,
-                    &mut self.panes.entry(at.clone()).or_default().channel_topic,
-                    "a line about what it is for",
-                    width,
-                );
-                if ui.button("Set").clicked() {
-                    let topic = self.pane(at).channel_topic.clone();
-                    self.send_as(Some(at), Cmd::SetTopic(topic));
-                }
-            });
-
+            let (_, set_name) = sigil_ui::labelled_field(
+                ui,
+                "Name",
+                &mut self.panes.entry(at.clone()).or_default().channel_name,
+                "what this channel is called",
+                Some(sigil_ui::Action::Mark(
+                    sigil_ui::Icon::Check,
+                    "Set the name",
+                )),
+            );
+            if set_name {
+                let name = self.pane(at).channel_name.clone();
+                self.send_as(Some(at), Cmd::SetName(name));
+            }
             ui.add_space(tokens::SPACING_SM);
+            let (_, set_topic) = sigil_ui::labelled_field(
+                ui,
+                "Topic",
+                &mut self.panes.entry(at.clone()).or_default().channel_topic,
+                "a line about what it is for",
+                Some(sigil_ui::Action::Mark(
+                    sigil_ui::Icon::Check,
+                    "Set the topic",
+                )),
+            );
+            if set_topic {
+                let topic = self.pane(at).channel_topic.clone();
+                self.send_as(Some(at), Cmd::SetTopic(topic));
+            }
+
+            ui.add_space(tokens::SPACING_MD);
             ui.horizontal(|ui| {
                 ui.label("Keep messages for");
                 ui.add(
@@ -6622,7 +6780,8 @@ impl ChatApp {
                     .range(1..=365)
                     .suffix(" days"),
                 );
-                if ui.button("Set").clicked() {
+                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Set how long").clicked()
+                {
                     let days = self.pane(at).retention_days;
                     self.send_as(
                         Some(at),
@@ -7557,16 +7716,15 @@ impl ChatApp {
             "Write a credential here, then give it to the other device. It names both \
              keys in the clear, so hand it over the way you would hand over a key.",
         );
-        ui.horizontal(|ui| {
-            ui.label("Its key");
-            let width = field_width(ui, 300.0);
-            sigil_ui::field(
+        {
+            let (_, write) = sigil_ui::labelled_field(
                 ui,
+                "Its key",
                 &mut self.panes.entry(at.clone()).or_default().linking,
                 "the new device's key, in base58",
-                width,
+                Some(sigil_ui::Action::Word("Write credential")),
             );
-            if ui.button("Write credential").clicked() {
+            if write {
                 // A phone shows its key as `sqx-device:<key>` (SIP-47), and
                 // somebody typing what they see should not have to trim it.
                 let typed = self.pane(at).linking.trim().to_string();
@@ -7583,7 +7741,7 @@ impl ChatApp {
                     Err(e) => self.pane(at).add_trouble = Some(format!("that is not a key: {e}")),
                 }
             }
-        });
+        }
         if let Some(credential) = &state.credential {
             ui.add_space(tokens::SPACING_SM);
             ui.add(
@@ -7625,18 +7783,17 @@ impl ChatApp {
         ui.colored_label(
             theme.text_secondary,
             "If another of your devices read this one's key and showed you an \
-             `sqx-pair:` string -- or you know your name at an exchange -- put it here.",
+             sqx-pair: string -- or you know your name at an exchange -- put it here.",
         );
         ui.add_space(tokens::SPACING_SM);
-        let width = ui.available_width();
-        sigil_ui::field(
+        let (_, go) = sigil_ui::labelled_field(
             ui,
+            "",
             &mut self.panes.entry(at.clone()).or_default().pairing,
             "sqx-pair:<account>@<domain>, or name@domain",
-            width,
+            Some(sigil_ui::Action::Word("Go there")),
         );
-        ui.add_space(tokens::SPACING_SM);
-        if ui.button("Go there").clicked() {
+        if go {
             let typed = self.pane(at).pairing.trim().to_string();
             match pairing::parse(&typed) {
                 Ok((owner, domains)) => {
@@ -7681,19 +7838,18 @@ impl ChatApp {
         ui.colored_label(
             theme.text_secondary,
             "If another of your devices wrote one for this one, paste it here. The \
-             exchange checks it names *this* device, so one somebody found is one they \
-             cannot use.",
+             exchange checks it names this very device, so one somebody found is one \
+             they cannot use.",
         );
         ui.add_space(tokens::SPACING_SM);
-        let width = ui.available_width();
-        sigil_ui::field(
+        let (_, register) = sigil_ui::labelled_field(
             ui,
+            "",
             &mut self.panes.entry(at.clone()).or_default().presenting,
             "the credential your other device wrote, in base58",
-            width,
+            Some(sigil_ui::Action::Word("Register this device")),
         );
-        ui.add_space(tokens::SPACING_SM);
-        if ui.button("Register this device").clicked() {
+        if register {
             let typed = self.pane(at).presenting.trim().to_string();
             if !typed.is_empty() {
                 self.pane(at).presenting.clear();
