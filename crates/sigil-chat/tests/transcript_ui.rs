@@ -1417,6 +1417,56 @@ fn on_a_phone_back_leaves_a_conversation_for_the_list() {
     );
 }
 
+/// **Back closes the viewer, and does not also leave the conversation.**
+///
+/// The phone's Back is a chain: a menu closes, else the app takes a step,
+/// else it is Escape, which closes a viewer or a dialog. `App::back` returns
+/// false while a picture is open *so that* the Escape arm is reached -- and
+/// if it did not, one press would close the picture and leave the
+/// conversation, two steps for one press, which reads as the app losing
+/// its place.
+///
+/// Only the last link of that chain had a test.
+#[test]
+fn on_a_phone_back_closes_an_open_picture_and_stays_in_the_conversation() {
+    let (mut h, app) = harness_phone_with(with_pictures(3), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let tile = h.get_by_label("[image 0, 4 KiB]").rect();
+    press_at(&mut h, tile.center());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label_contains("of 3").is_some(),
+        "the picture did not open, so this says nothing about closing it: {}",
+        text_of(&h)
+    );
+
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label_contains("of 3").is_none(),
+        "Back left the picture open: {}",
+        text_of(&h)
+    );
+    let sent = app.borrow().sent_for_test().to_vec();
+    assert!(
+        !sent.iter().any(|c| c == "Close"),
+        "one press closed the picture *and* left the conversation: {sent:?}"
+    );
+
+    // And the next press does leave it, which is the step after.
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    let sent = app.borrow().sent_for_test().to_vec();
+    assert!(
+        sent.iter().any(|c| c == "Close"),
+        "with the picture gone, Back leaves the conversation: {sent:?}"
+    );
+}
+
 /// In the list, a conversation's name sits close to its last words. The
 /// phone's theme makes every row a finger tall, for buttons; in a list
 /// row that put a finger's height between the name and the preview.
