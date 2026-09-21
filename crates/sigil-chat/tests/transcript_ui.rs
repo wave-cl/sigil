@@ -1821,8 +1821,16 @@ fn phone_backup() {
     h.run();
     // Down to the foot of the pane, which is where the words are -- the
     // devices view is long and a snapshot of its top says nothing about
-    // them.
+    // them. The pointer has to be in the pane: the wheel goes to whatever
+    // is under it, and without this the snapshot was of the top with the
+    // scroll silently going nowhere.
     for _ in 0..12 {
+        h.input_mut()
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(
+                PHONE_WIDTH / 2.0,
+                PHONE_HEIGHT / 2.0,
+            )));
         h.input_mut().events.push(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -400.0),
@@ -1831,6 +1839,17 @@ fn phone_backup() {
         });
         h.run_steps(2);
     }
+    // The words really are on screen, or this is a picture of the pane's
+    // middle labelled as its backup.
+    assert!(
+        h.get_all_by_label_contains("wrestle")
+            .any(|n| n.rect().bottom() <= PHONE_HEIGHT && n.rect().top() >= 0.0),
+        "the backup words are not on screen, so this snapshot is not of them"
+    );
+    h.remove_cursor();
+    // The scroll is still settling, and `run` refuses a ui that keeps
+    // asking to repaint.
+    h.run_steps(4);
     h.snapshot("phone_backup");
 }
 
