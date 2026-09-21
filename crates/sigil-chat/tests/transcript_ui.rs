@@ -6453,6 +6453,33 @@ fn a_png() -> std::sync::Arc<[u8]> {
     out.into_inner().into()
 }
 
+/// A picture the shape a camera gives, and bigger than a phone's screen.
+///
+/// `a_png` is four pixels across, which is right for the tests that only
+/// need a picture to *load* -- but the viewer draws a small picture at its
+/// own size on purpose ("a big one fills the window and a small one does not
+/// grow"), so at four pixels the viewer's own snapshot was a blue dot. The
+/// path a phone actually takes is the other one: a photograph larger than
+/// the screen, scaled down to fit it.
+///
+/// Two bands rather than a flat colour, so the picture has a top and a
+/// bottom and a snapshot shows whether it was fitted or stretched.
+fn a_photo() -> std::sync::Arc<[u8]> {
+    let (w, h) = (900u32, 1200u32);
+    let img = image::RgbaImage::from_fn(w, h, |_, y| {
+        if y < h / 2 {
+            image::Rgba([90, 120, 255, 255])
+        } else {
+            image::Rgba([40, 60, 140, 255])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner().into()
+}
+
 /// The room with one message at the foot carrying `n` pictures.
 fn with_pictures(n: usize) -> ChatState {
     let mut state = the_room();
@@ -6536,6 +6563,91 @@ fn several_pictures_are_a_gallery_and_the_viewer_moves_through_them() {
     h.run();
     h.run();
     assert!(!text_of(&h).contains(" of 1"), "{}", text_of(&h));
+}
+
+/// The gallery and the viewer on a phone.
+///
+/// Pictures are the one thing on this screen whose size is not the theme's,
+/// and the viewer is the one surface that covers the whole of it -- so both
+/// are worth a look at 360 points, which neither had ever had.
+fn phone_pictures(n: usize) -> Harness<'static> {
+    let mut state = with_pictures(n);
+    // A photograph rather than the four-pixel stand-in: the viewer draws a
+    // small picture at its own size, so at four pixels this snapshot showed
+    // a dot and said nothing about fitting one to a phone.
+    for a in &mut state.lines.last_mut().expect("a message").attachments {
+        a.bytes = Some(a_photo());
+        a.preview = a_photo();
+        a.shape = Some((900, 1200));
+        a.size = 900 * 1200 * 4;
+        a.described = a.described.replace("4 KiB", "4.1 MB");
+    }
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let margin = sigil::tokens::SPACING_MD;
+    Harness::builder()
+        .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(margin as i8)),
+                )
+                .show(ui, |ui| {
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+        })
+}
+
+/// Give egui's loader thread time to decode the tiles.
+fn let_pictures_arrive(h: &mut Harness<'static>) {
+    for _ in 0..20 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_gallery() {
+    let mut h = phone_pictures(3);
+    let_pictures_arrive(&mut h);
+    h.snapshot("phone_gallery");
+}
+
+/// One of them opened: the viewer takes the whole screen, and a phone's
+/// whole screen is what it has to fit.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_viewer() {
+    let mut h = phone_pictures(3);
+    let_pictures_arrive(&mut h);
+    let tile = h.get_by_label("[image 0, 4.1 MB]").rect();
+    press_at(&mut h, tile.center());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_viewer");
 }
 
 /// The gallery, looked at: three tiles two across, cropped to fill.
