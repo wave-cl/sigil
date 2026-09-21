@@ -2119,6 +2119,107 @@ async fn a_credential_written_by_one_device_enrols_the_other() {
     two.stop();
 }
 
+/// **SIP-47's claim has no producer, and this says so.**
+///
+/// The Devices pane offers two ways in for a new device. One is "Use a
+/// credential": the other device writes one, somebody carries it across, and
+/// this device presents it -- `RegisterSelf`, which the test above covers.
+///
+/// The other is "Where the other device sent you": an `sqx-pair:` string,
+/// and `claim_listed`, which finds *this* device already in the account's
+/// list and takes the credential the registration carries. The exchange
+/// supports it -- `/device/register` accepts a posting from "the delegate
+/// itself, **or an already-registered device of the same account**" -- but
+/// nothing registers a sibling. `register_self` is the only caller anywhere,
+/// in sigil and in `sqex-chat`'s CLI both, and it registers the *caller*.
+///
+/// So the claim can only succeed for a device that has already registered,
+/// which by then does not need to claim. That is what this records: the
+/// credential is written and the claim is still refused, because writing one
+/// is not registering anything.
+///
+/// It goes green the day something registers the sibling, which is the one
+/// piece missing from a phone that is meant to be paired by scanning.
+#[tokio::test]
+async fn a_device_that_was_never_registered_cannot_claim_the_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (first_signer, first) = signer(51);
+    let (second_signer, second) = signer(52);
+    let one = start_at(endpoint, first_signer, &dir.path().join("one.db"));
+    let two = start_at(endpoint, second_signer, &dir.path().join("two.db"));
+    assert!(
+        until(
+            || one.state().me == Some(first) && two.state().me == Some(second),
+            15
+        )
+        .await,
+        "both should come up"
+    );
+
+    // The whole of what the pane does for the other device: a credential is
+    // written, and nothing is registered.
+    one.send(Cmd::LinkDevice {
+        device: second,
+        days: 90,
+    });
+    assert!(
+        until(|| one.state().credential.is_some(), 20).await,
+        "no credential was written: {:?}",
+        one.state().trouble
+    );
+
+    // And the account's list does not have it, which is the whole reason the
+    // claim cannot work.
+    one.send(Cmd::Devices);
+    assert!(
+        until(|| !one.state().devices.is_empty(), 20).await,
+        "the exchange listed nothing at all, so this proves nothing"
+    );
+    assert!(
+        !one.state().devices.iter().any(|d| d.device == second),
+        "the other device is listed after all, so the claim below should \
+         succeed and this test is about nothing: {:?}",
+        one.state().devices
+    );
+
+    // The phone's half of SIP-47: it was told where to go and nothing else.
+    two.send(Cmd::ClaimAccount(first.to_string()));
+    let refused = until(|| two.state().trouble.is_some(), 20).await;
+    assert!(
+        refused,
+        "the claim neither succeeded nor failed: {:?}",
+        two.state().note
+    );
+    assert_eq!(
+        two.state().linked,
+        None,
+        "the claim was refused and the device still thinks it is linked"
+    );
+
+    // **And it says why, in a sentence somebody can act on.** A path with no
+    // producer is only a broken button if the refusal is a shrug: this one
+    // names the account, says it has not registered *this* device, and
+    // offers the two reasons that are actually possible -- the wrong key, or
+    // a registration that has not reached this exchange.
+    let said = two.state().trouble.unwrap_or_default();
+    assert!(
+        said.contains(&first.to_string()),
+        "the refusal does not say which account: {said}"
+    );
+    assert!(
+        said.contains("has not registered this device"),
+        "the refusal does not say what is missing: {said}"
+    );
+
+    one.stop();
+    two.stop();
+}
+
 /// A credential that is not one is refused where it was typed.
 #[tokio::test]
 async fn something_that_is_not_a_credential_is_refused_in_words() {
