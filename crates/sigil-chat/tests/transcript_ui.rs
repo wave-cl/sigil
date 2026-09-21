@@ -806,6 +806,56 @@ fn a_long_conversation() -> ChatState {
     state
 }
 
+/// **Nothing on screen is drawn past the phone's edge** -- including the
+/// things `no_phone_pane_is_wider_than_the_phone` cannot see.
+///
+/// That check reads the pane's own ui, which is the right instrument for the
+/// pane and blind to everything on a layer of its own: a dialog, a menu, the
+/// emoji picker, a message's action strip. This one asks the accessibility
+/// tree where every widget actually is, so it covers whatever is up.
+///
+/// A widget a little past the edge is how a control becomes unreachable, and
+/// on a phone there is no window to widen.
+fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
+    // The accesskit node's own bounding box, not `Node::rect`: that one
+    // `expect`s a rectangle and the root has none, so it panics -- a test
+    // failing for a reason that has nothing to do with the layout. The box
+    // is in physical pixels, hence the scale.
+    fn walk(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<(String, (f64, f64))>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box() {
+            out.push((name, (b.x0 / ppp, b.x1 / ppp)));
+        }
+        for c in node.children() {
+            walk(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    walk(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+    assert!(
+        seen.len() > 3,
+        "{what}: only {} widgets on screen, so this proves nothing",
+        seen.len()
+    );
+    let edge = PHONE_WIDTH as f64;
+    let over: Vec<String> = seen
+        .iter()
+        .filter(|(_, (x0, x1))| x1 - x0 > 0.0 && (*x1 > edge + 1.0 || *x0 < -1.0))
+        .map(|(name, (x0, x1))| format!("{name:?} at {x0:.0}..{x1:.0}"))
+        .collect();
+    assert!(
+        over.is_empty(),
+        "{what}: {} widget(s) are drawn outside a {PHONE_WIDTH}-point screen:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
+}
+
 /// **No route draws wider than the phone.**
 ///
 /// The general form of every phone fault found here, and the one check that
@@ -870,6 +920,53 @@ fn no_phone_pane_is_wider_than_the_phone() {
              that wide -- which is how a roster's buttons end up painted over \
              the member above them."
             );
+        }
+    }
+}
+
+/// Every route, and every widget in it, inside the screen.
+///
+/// The companion to `no_phone_pane_is_wider_than_the_phone`. That one reads
+/// the pane's own ui, which catches a ui grown wider than the pane and is
+/// blind to anything on a layer of its own; this one asks where each widget
+/// actually *is*, which catches one positioned outside and covers popups and
+/// menus too. Neither subsumes the other, and both run without a renderer.
+#[test]
+fn no_widget_on_any_route_is_drawn_off_the_screen() {
+    for (what, build) in [
+        ("ordinary", a_conversation as fn() -> ChatState),
+        ("long", a_long_conversation as fn() -> ChatState),
+    ] {
+        for route in [
+            sigil_chat::Route::Conversations,
+            sigil_chat::Route::Directory,
+            sigil_chat::Route::Members,
+            sigil_chat::Route::Settings,
+            sigil_chat::Route::Devices,
+        ] {
+            let mut state = build();
+            state.found = vec![sigil_chat::Found {
+                channel: [4u8; 32],
+                instance: [2u8; 32],
+                name: "elsewhere".into(),
+                topic: "held at another exchange".into(),
+                members: 1,
+                domain: "trunk.exchange".into(),
+                here: false,
+            }];
+            state.searched = true;
+            state.reports = vec![sigil_chat::Report {
+                id: 7,
+                reporter: them(),
+                target: 3,
+                reason: "spam",
+                at: NOW - 3600,
+                note: "links".into(),
+            }];
+            let mut h = harness_phone(state, route.clone());
+            h.run();
+            h.run();
+            nothing_runs_off_the_edge(&h, &format!("{route:?} with {what} names"));
         }
     }
 }
@@ -1717,6 +1814,7 @@ fn phone_dialog_compose() {
     // the dialog.
     h.remove_cursor();
     h.run();
+    nothing_runs_off_the_edge(&h, "the compose dialog");
     h.snapshot("phone_dialog_compose");
 }
 
@@ -1737,6 +1835,7 @@ fn phone_dialog_verify() {
     // the dialog.
     h.remove_cursor();
     h.run();
+    nothing_runs_off_the_edge(&h, "the verify dialog");
     h.snapshot("phone_dialog_verify");
 }
 
@@ -1753,6 +1852,7 @@ fn phone_dialog_report() {
     // the dialog.
     h.remove_cursor();
     h.run();
+    nothing_runs_off_the_edge(&h, "the report dialog");
     h.snapshot("phone_dialog_report");
 }
 
