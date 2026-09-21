@@ -9,3 +9,25 @@ fail-fast = false
 [[profile.default.overrides]]
 filter = 'test(typing_stops_looking_like_typing)'
 threads-required = 'num-cpus'
+
+# **A message that arrived by the knock rather than the backstop.** The
+# assertion is a deadline of two seconds against a ten-second timer, and what
+# it is measuring is two round trips to a loopback exchange -- milliseconds.
+# Two seconds is a wide margin for that and no margin at all for a four-core
+# runner with two hundred tests in flight: it failed on Linux CI the first
+# time a test was added beside it that starts its own exchange. Widening the
+# window would not fix it, it would only move the point at which the backstop
+# and the knock stop being distinguishable, and telling them apart is the
+# whole test.
+[[profile.default.overrides]]
+filter = 'test(a_message_arrives_without_waiting_for_the_tick)'
+threads-required = 'num-cpus'
+
+# **The tightest deadline in the workspace**, and this one is precautionary
+# rather than a fix: it compares the player's own clock to a second of wall
+# time and allows 150 ms between them. It has not failed. It is here because
+# the two that have were both found the same way -- by a neighbour being
+# added -- and a flake in a crate nobody touched is the most confusing kind.
+[[profile.default.overrides]]
+filter = 'test(the_player_advances_while_playing_and_holds_while_paused)'
+threads-required = 'num-cpus'
