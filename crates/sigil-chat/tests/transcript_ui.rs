@@ -1977,6 +1977,129 @@ fn the_settings_pane_still_fits_a_phone_or_needs_what_devices_needed() {
     );
 }
 
+/// **A dialog's own controls stay on the screen.**
+///
+/// The modal bounds its *width* -- "a phone is narrower than a dialog" --
+/// and not its height, and a modal does not scroll. A dialog taller than the
+/// screen is one somebody can neither finish nor leave: the way out is the
+/// Cancel at the foot of it, and Escape only works if they know to try.
+///
+/// The Exchange dialog is the tall one -- three paragraphs, a field, a
+/// checkbox and two buttons -- and it is reached from the directory, which
+/// is where somebody adds the exchange a room they found lives at.
+#[test]
+fn a_dialogs_controls_stay_on_a_phones_screen() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.found = vec![sigil_chat::Found {
+        channel: [4u8; 32],
+        instance: [2u8; 32],
+        name: "elsewhere".into(),
+        topic: "held at another exchange".into(),
+        members: 1,
+        domain: "an-exchange-with-a-long-name.example.org".into(),
+        here: false,
+    }];
+    state.searched = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Directory);
+    h.run();
+    h.run();
+    let add = h
+        .get_all_by_label_contains("Add exchange")
+        .next()
+        .expect("a room living elsewhere offers its exchange")
+        .rect()
+        .center();
+    press_at(&mut h, add);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Add an exchange"),
+        "the dialog did not open, so this says nothing about its controls"
+    );
+
+    for label in ["Add", "Cancel"] {
+        let lowest = h
+            .get_all_by_label(label)
+            .map(|n| n.rect().bottom())
+            .fold(f32::MIN, f32::max);
+        assert!(
+            lowest > f32::MIN,
+            "{label} is not drawn, so this says nothing about reaching it"
+        );
+        assert!(
+            lowest <= PHONE_HEIGHT,
+            "the dialog's {label} sits at y {lowest:.0} of {PHONE_HEIGHT}: \
+             upright, this dialog should need no scrolling at all"
+        );
+    }
+}
+
+/// **A dialog too tall for the screen can still be left.**
+///
+/// A rotated phone is about 360 points tall -- the app is not orientation
+/// locked -- and the Verify dialog is a QR, six words, a key, a checkbox and
+/// two answers, some 660 points. Lying down it is nearly twice the screen,
+/// and it is exactly the dialog somebody opens while holding the phone next
+/// to the person whose words they are reading.
+///
+/// # What this does not claim
+///
+/// That it *fits*. It does not, and the buttons at its foot are off the
+/// bottom. The obvious answer -- a scroll area inside the modal -- was tried
+/// and is worse: in egui 0.36 a `ScrollArea` inside a `Modal` makes every
+/// press inside the dialog dismiss it, which two existing tests caught
+/// immediately. Tried with each `auto_shrink` and inside a sensing scope of
+/// its own; all three dismiss.
+///
+/// So what is asserted is the floor: Escape leaves it, which is what the
+/// phone's Back sends, so a dialog that cannot be completed lying down is
+/// still not a trap. Turning the phone upright is the way to finish it.
+#[test]
+fn a_dialog_too_tall_for_the_screen_can_still_be_left() {
+    const WIDE: f32 = 804.0;
+    const SHORT: f32 = 360.0;
+    let (mut h, _, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    h.set_size(egui::vec2(WIDE, SHORT));
+    h.run();
+    h.run();
+    let verify = h
+        .get_all_by_label("Verify")
+        .map(|n| n.rect())
+        .next()
+        .expect("a member who is not me may be verified")
+        .center();
+    press_at(&mut h, verify);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Read these six words"),
+        "the dialog did not open, so this says nothing: {}",
+        text_of(&h)
+    );
+
+    // The premise: it really does not fit, or this is a test about nothing.
+    let out = h
+        .get_all_by_label("Not yet")
+        .map(|n| n.rect().bottom())
+        .fold(f32::MIN, f32::max);
+    assert!(
+        out > SHORT,
+        "the way out is on screen at {out:.0} of {SHORT}: this dialog fits \
+         lying down after all"
+    );
+
+    // And the floor: Back leaves it.
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Read these six words"),
+        "Back did not leave a dialog whose own controls are off the screen, \
+         which would make it a trap"
+    );
+}
+
 /// The directory on a phone: the search box, and a hit with what may be
 /// done about it. Three of the five routes had no phone render at all,
 /// which is three screens nobody had looked at on a 360-point pane.
