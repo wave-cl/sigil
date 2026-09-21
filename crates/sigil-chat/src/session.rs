@@ -1786,6 +1786,21 @@ async fn run(
     let client =
         sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
     let mut chat = Chat::new(client, seed, me, endpoint.server, store);
+    // **The account, which is not always the device.** `me` above is this
+    // client's own key: what it seals under, publishes prekeys for and counts
+    // messages with. The account it *acts for* is the same key until the
+    // device is linked to one, and from then on it is the account's, which
+    // `Chat` reads from the store.
+    //
+    // Everything below is relative to the account -- the display name, the
+    // handle, whether a message is one's own, which admin is somebody else --
+    // and this took the device's key and never looked again. A linked device
+    // drew itself as its own key, under which there is no name and no handle,
+    // and read its account's other device as a stranger. It can also change
+    // while the session runs (a credential presented here), so `acting_as`
+    // below follows it rather than this being read once.
+    let device = me;
+    let mut me = chat.me;
     // SIP-85: the tunnel is the session's for as long as it lives, and a
     // reconnect that finds it closed opens another before it dials.
     let carried_by = match (&dial, carried) {
@@ -1850,6 +1865,55 @@ async fn run(
     let _ = publish(&chat, &state, &desk, me);
     (wake)();
 
+    // **SIP-44 §The handover: whose device this is, as the registry has it.**
+    // A device can be handed from one account to another while it is away --
+    // a succession, or simply being given to somebody else -- and the
+    // exchange's registry is the one party that knows. The client asks once a
+    // connection, and where the answer is not the account this store names,
+    // it follows: the store's account, its credential and its direct message
+    // aliases all move, as the presenting device's did.
+    //
+    // Cheap in the ordinary case, which is why it is unconditional: a device
+    // that is its own account is told its own key back and stops there, and
+    // an exchange too old to know the route answers 404, which stands for
+    // "the store is right".
+    match chat.follow_account().await {
+        // Two shapes, and they read nothing like each other to whoever is
+        // holding the phone. The registry answering this device its own key
+        // back is a registration that is gone -- revoked, or expired -- and
+        // the device is its own account again, which is what every key is
+        // until a registration says otherwise (SIP-22).
+        Ok(Some(now)) if now == device => {
+            tracing::info!("the registration is gone; this device is its own account again");
+            note(
+                &state,
+                "This device is its own account again: the account it acted for no \
+                 longer lists it. What was said in its conversations stays on this \
+                 machine and cannot be added to."
+                    .into(),
+            );
+        }
+        Ok(Some(now)) => {
+            tracing::info!(account = %now, "the registry moved this device to another account");
+            note(
+                &state,
+                format!(
+                    "This device now acts for {now}. The exchange's registry says it was \
+                     handed over; what is held here followed it."
+                ),
+            );
+        }
+        Ok(None) => {}
+        // Not fatal and not silent. The store's account stands, which is what
+        // every other operation this pass is about to use.
+        Err(e) => tracing::warn!(error = %e, "could not ask whose device this is"),
+    }
+    if acting_as(&chat, &state, &mut me) {
+        desk.restructure = true;
+        sync_local(&mut chat, &mut desk, me);
+        let _ = publish(&chat, &state, &desk, me);
+        (wake)();
+    }
     chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
     // SIP-47 §Catching up in one round trip: everything that moved while this client was away, in one
     // round trip, before the sweep asks channel by channel. On a desktop it
@@ -1873,6 +1937,15 @@ async fn run(
     let mut lent = Link::Retrying;
 
     loop {
+        // Before anything is drawn or published this pass: a command handled
+        // last pass may have linked this device to an account.
+        if acting_as(&chat, &state, &mut me) {
+            desk.restructure = true;
+            desk.dirty.extend(desk.channels.keys().copied());
+            sync_local(&mut chat, &mut desk, me);
+            let _ = publish(&chat, &state, &desk, me);
+            (wake)();
+        }
         // **The connection, for whoever else wants to reach this exchange as
         // this identity.** Written when the link changes rather than every
         // pass: a redial makes a new connection, and what was lent before it
@@ -2790,6 +2863,24 @@ fn ask_about_unfetched(desk: &mut Desk) {
 /// A direct message is derivable as well as never public: its identifier comes
 /// from the two accounts, so the other member of a two-member channel that
 /// derives back to itself is the peer.
+/// Follow the account this client acts for, when it changes under the session.
+///
+/// It changes twice: when a credential is presented here (`RegisterSelf`,
+/// `ClaimAccount`), and when the registry moves this device to another
+/// account (SIP-44 §The handover), which `Chat::follow_account` acts on. Both
+/// happen while the loop is running, so the loop asks rather than remembers.
+///
+/// Answers whether it moved, which is a reason to redraw everything: every
+/// summary, name and "is this mine" was computed against the old key.
+fn acting_as(chat: &Chat, state: &watch::Sender<ChatState>, me: &mut PubKey) -> bool {
+    if chat.me == *me {
+        return false;
+    }
+    *me = chat.me;
+    state.send_modify(|s| s.me = Some(*me));
+    true
+}
+
 fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
     let Ok(channels) = chat.store().channels() else {
         return;
@@ -5343,7 +5434,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                             "This exchange is not taking any more names.".to_string()
                         }
                         other => format!(
-                            "The exchange answered {other}, which this                                           version does not know."
+                            "The exchange answered {other}, which this version does not know."
                         ),
                     };
                     note(state, said);

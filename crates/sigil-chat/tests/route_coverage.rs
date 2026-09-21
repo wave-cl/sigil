@@ -100,16 +100,12 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/device/list", Chat),
     ("POST", "/device/revoke", Chat),
     ("POST", "/device/register", Chat),
-    // SIP-44 §Which account a device is: which account this transport identity is registered to. A
-    // linked device learns that from the pairing claim it was given, and a
-    // desktop opens an identity that is its own account, so nothing asks
-    // yet. The phone will want it after a handover, when its store still
-    // names the key that was retired.
-    (
-        "GET",
-        "/device/account",
-        NotYet("a device learns its account from the pairing claim, not from the registry"),
-    ),
+    // SIP-44 §Which account a device is: which account this transport identity
+    // is registered to. Asked once a connection, because the registry is the
+    // one party that knows after the account changed its mind: a device
+    // handed over, or revoked, has a store that still names the account it
+    // was cut off from. `a_revoked_device_comes_back_up_as_itself_again`.
+    ("GET", "/device/account", Chat),
     ("POST", "/admission/request", Chat),
     ("POST", "/name/resolve", Chat),
     ("POST", "/name/reverse", Beneath),
@@ -510,7 +506,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 78,
+        reached, 79,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

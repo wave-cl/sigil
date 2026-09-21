@@ -4523,3 +4523,181 @@ async fn an_admin_mutes_and_reads_reports_and_a_member_reports() {
     alice.stop();
     bob.stop();
 }
+
+/// **A device that acts for an account says so it is the account.**
+///
+/// `Chat` keeps two keys: the device's, which it seals under and counts
+/// messages with, and the account's, which is what everything drawn is
+/// relative to -- the display name, the handle, whether a message is one's
+/// own, which admin is somebody else. They are the same key until this
+/// device is linked to an account, and from then on they are not.
+///
+/// The session took the account from the signer once, at the top, and never
+/// looked again. So a linked device drew itself as its own key: the identity
+/// in the app bar was the device, the account's name and handle were looked
+/// up under a key that has neither, and every message from the account's
+/// other device read as somebody else's.
+///
+/// Both halves are checked, because they fail separately: the session that
+/// presented the credential, and the next one to open the same store.
+#[tokio::test]
+async fn a_linked_device_acts_as_the_account_it_was_linked_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (first_signer, first) = signer(61);
+    let (second_signer, second) = signer(62);
+    let store = dir.path().join("two.db");
+    let one = start_at(endpoint, first_signer, &dir.path().join("one.db"));
+    let two = start_at(endpoint, second_signer, &store);
+    assert!(
+        until(
+            || one.state().me == Some(first) && two.state().me == Some(second),
+            15
+        )
+        .await,
+        "both should come up"
+    );
+
+    one.send(Cmd::LinkDevice {
+        device: second,
+        days: 90,
+    });
+    assert!(
+        until(|| one.state().credential.is_some(), 20).await,
+        "no credential was written: {:?}",
+        one.state().trouble
+    );
+    let credential = one.state().credential.expect("checked above");
+
+    two.send(Cmd::RegisterSelf(credential));
+    assert!(
+        until(
+            || two
+                .state()
+                .note
+                .is_some_and(|n| n.said.contains("acts for the account")),
+            20
+        )
+        .await,
+        "the credential was refused: {:?} / {:?}",
+        two.state().note,
+        two.state().trouble
+    );
+
+    // The session that presented it.
+    assert!(
+        until(|| two.state().me == Some(first), 20).await,
+        "after enrolling, this device still draws itself as its own key \
+         ({:?}) rather than as the account it acts for ({first})",
+        two.state().me
+    );
+    two.stop();
+
+    // And the next one to open the same store, which learns it from the
+    // store rather than from the command.
+    let (second_again, _) = signer(62);
+    let again = start_at(endpoint, second_again, &store);
+    assert!(
+        until(|| again.state().me.is_some(), 15).await,
+        "the reopened session never came up"
+    );
+    assert_eq!(
+        again.state().me,
+        Some(first),
+        "a session opened on a linked device's store acts as the device \
+         again: the account is in the store and nothing read it"
+    );
+
+    one.stop();
+    again.stop();
+}
+
+/// **SIP-44 §The handover: a revoked device stops acting for the account.**
+///
+/// The account this client acts for lives in two places: this device's store,
+/// which is what it has believed since the credential was presented, and the
+/// exchange's registry, which is the one party that knows after the account
+/// changed its mind. Nothing reconciled them, so a device that had been
+/// revoked came back up still calling itself the account -- drawing the
+/// account's name, sealing as it, reading the account's other device as
+/// itself -- and only the exchange's refusals said otherwise, one operation
+/// at a time.
+///
+/// `follow_account` asks once a connection and the store follows. A revoked
+/// registration is the producible half of the same mechanism a succession
+/// uses: the registry answers the device its own key back, which is what
+/// every key is until a registration says otherwise (SIP-22).
+#[tokio::test]
+async fn a_revoked_device_comes_back_up_as_itself_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (first_signer, first) = signer(63);
+    let (second_signer, second) = signer(64);
+    let store = dir.path().join("two.db");
+    let one = start_at(endpoint, first_signer, &dir.path().join("one.db"));
+    let two = start_at(endpoint, second_signer, &store);
+    assert!(
+        until(
+            || one.state().me == Some(first) && two.state().me == Some(second),
+            15
+        )
+        .await,
+        "both should come up"
+    );
+
+    one.send(Cmd::LinkDevice {
+        device: second,
+        days: 90,
+    });
+    assert!(
+        until(|| one.state().credential.is_some(), 20).await,
+        "no credential was written: {:?}",
+        one.state().trouble
+    );
+    let credential = one.state().credential.expect("checked above");
+    two.send(Cmd::RegisterSelf(credential));
+    assert!(
+        until(|| two.state().me == Some(first), 20).await,
+        "the device never took the account on: {:?}",
+        two.state().trouble
+    );
+    two.stop();
+
+    // The account changes its mind. The exchange's word is the only one that
+    // counts, so this is checked from its own listing rather than from the
+    // command's answer.
+    one.send(Cmd::RevokeDevice(second));
+    one.send(Cmd::Devices);
+    assert!(
+        until(
+            || !one.state().devices.is_empty()
+                && !one.state().devices.iter().any(|d| d.device == second),
+            20
+        )
+        .await,
+        "the exchange still lists the device, so there is nothing to follow: {:?}",
+        one.state().devices
+    );
+
+    // The device knows nothing of this: its store still says it is the
+    // account. It finds out by asking.
+    let (second_again, _) = signer(64);
+    let again = start_at(endpoint, second_again, &store);
+    assert!(
+        until(|| again.state().me == Some(second), 20).await,
+        "a revoked device came back up still acting as the account it was \
+         cut off from: {:?}",
+        again.state().me
+    );
+
+    one.stop();
+    again.stop();
+}
