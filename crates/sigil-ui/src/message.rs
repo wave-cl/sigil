@@ -2103,4 +2103,61 @@ mod tests {
         // words carry no span for it, and the chip will.
         assert_eq!(mention_spans("hi @Eve", &[ada]), vec![]);
     }
+    /// **The one pair the palette's own floor does not reach.**
+    ///
+    /// `theme.rs` checks muted text against the three surfaces, and body
+    /// text against `accent_muted` -- the sent bubble's ground. It does not
+    /// check what `faded` produces on that ground, and `faded`'s own comment
+    /// says so: "that floor is only ever checked against the three
+    /// surfaces". This is that check. The time, "edited", a receipt and a
+    /// quoted reply are all drawn in it, on one's own messages, in both
+    /// themes, and nothing measured them.
+    ///
+    /// **Why 3.0 and not 4.5.** Body text on a sent bubble is 4.59 in the
+    /// dark theme -- barely over its own bar -- so *no* amount of fading
+    /// clears 4.5 for something quieter than it. Reaching 4.5 here would
+    /// mean changing the accent, which is the product's colour and not this
+    /// function's decision. So the floor is the palette's own 3.0, held
+    /// deliberately rather than by accident, and the test says which.
+    #[test]
+    fn quiet_text_on_a_sent_bubble_clears_the_palette_floor() {
+        fn channel(c: u8) -> f32 {
+            let c = c as f32 / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(c: egui::Color32) -> f32 {
+            0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+        }
+        fn ratio(a: egui::Color32, b: egui::Color32) -> f32 {
+            let (x, y) = (luminance(a), luminance(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        }
+
+        for (name, t) in [
+            ("dark", sigil::theme::dark()),
+            ("light", sigil::theme::light()),
+        ] {
+            let fill = t.accent_muted;
+            let quiet = faded(t.text_primary, fill);
+            let r = ratio(quiet, fill);
+            assert!(
+                r >= 3.0,
+                "{name}: the time and the receipt on one's own bubble are \
+                 {r:.2} against it, below the 3.0 this palette holds itself to"
+            );
+            // And it really is quieter than the body beside it, which is the
+            // whole point of fading it: a "quiet" colour that measures the
+            // same as the body is a mix that is doing nothing.
+            let body = ratio(t.text_primary, fill);
+            assert!(
+                r < body,
+                "{name}: quiet text is {r:.2} and the body is {body:.2} -- \
+                 the fade is not fading anything"
+            );
+        }
+    }
 }

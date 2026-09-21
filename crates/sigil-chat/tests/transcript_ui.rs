@@ -553,6 +553,16 @@ fn harness_phone(state: ChatState, route: sigil_chat::Route) -> Harness<'static>
     harness_phone_with(state, route).0
 }
 
+/// The same phone, in the light theme.
+///
+/// Every phone render was dark, so the light one had never been looked at
+/// on a 360-point pane -- and the two themes are two sets of colours, not
+/// one set inverted: a contrast that works on a dark ground can vanish on a
+/// light one without anything else changing.
+fn harness_phone_light(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
+    harness_phone_themed(state, route, egui::Theme::Light).0
+}
+
 /// How wide the pane's contents actually came out, per route.
 ///
 /// egui grows a ui to whatever is drawn in it, and that is the whole
@@ -583,6 +593,19 @@ fn harness_phone_measured(
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
     Drawn,
 ) {
+    harness_phone_themed(state, route, egui::Theme::Dark)
+}
+
+#[allow(clippy::type_complexity)]
+fn harness_phone_themed(
+    state: ChatState,
+    route: sigil_chat::Route,
+    theme_choice: egui::Theme,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::RefCell<ChatApp>>,
+    Drawn,
+) {
     let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
     let width = drawn.clone();
     let mut app = ChatApp::new();
@@ -603,7 +626,7 @@ fn harness_phone_measured(
             let ctx = ui.ctx().clone();
             sigil::Form::install(&ctx, sigil::Form::Phone);
             theme::install(&ctx, theme::light(), theme::dark());
-            ctx.set_theme(egui::Theme::Dark);
+            ctx.set_theme(theme_choice);
             let t = sigil::ColorTheme::current(&ctx);
             let mut nav = Navigator::default();
             let mut app_ctx = AppContext {
@@ -1469,6 +1492,33 @@ fn phone_devices() {
     h.run();
     h.run();
     h.snapshot("phone_devices");
+}
+
+/// The chat list on a phone in the light theme.
+///
+/// Every phone render was dark. The two themes are two sets of colours, not
+/// one inverted, so a contrast that reads on a dark ground can go to nothing
+/// on a light one -- muted text and a disabled control most of all.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_chats_light() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone_light(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_chats_light");
+}
+
+/// And the transcript, where the two bubble grounds and the words on them
+/// are the contrast that matters most.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_conversation_light() {
+    let mut h = harness_phone_light(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_conversation_light");
 }
 
 /// The conversation on a phone with everything in it as long as it gets: a
