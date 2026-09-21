@@ -251,6 +251,28 @@ impl App for VoiceApp {
     }
 }
 
+/// A box in a row, at the width there is.
+///
+/// # Why not the number that was there
+///
+/// Every box here asked for a fixed width chosen against a 900-point window:
+/// 420 for a key, 320 for a passphrase. A 360-point pane has neither, so the
+/// box ran past the right edge and the button after it was off the screen
+/// entirely -- and because egui grows a ui to whatever is drawn in it, the
+/// prose above and below wrapped to that wider ui and was then clipped by the
+/// pane. Both explanations on the Calls screen ended mid-word.
+///
+/// `want` is still what it should be where there is room; this only ever
+/// reduces it, and below [`tokens::NARROW_WIDTH`] gives the box its own line
+/// whole -- a base58 key is 44 characters, and sharing a row with two buttons
+/// leaves nowhere near that.
+fn box_width(ui: &egui::Ui, want: f32, after: f32) -> f32 {
+    if ui.available_width() < tokens::NARROW_WIDTH {
+        return (ui.available_width() - tokens::SPACING_SM).max(120.0);
+    }
+    want.min((ui.available_width() - after).max(120.0))
+}
+
 impl VoiceApp {
     /// Unlocking, without a terminal prompt anywhere in sight.
     fn identity_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui, theme: &ColorTheme) {
@@ -259,11 +281,11 @@ impl VoiceApp {
         ui.add_space(tokens::SPACING_SM);
 
         if let Account::Locked { .. } = ctx.account() {
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut self.passphrase)
-                    .password(true)
-                    .hint_text("passphrase")
-                    .desired_width(320.0),
+            let field = sigil_ui::password_field(
+                ui,
+                &mut self.passphrase,
+                "passphrase",
+                box_width(ui, 320.0, 0.0),
             );
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (entered || ui.button("Unlock").clicked()) && ctx.unlock_active(&self.passphrase) {
@@ -289,7 +311,12 @@ impl VoiceApp {
         if let Some(me) = ctx.account().unlocked().map(|u| u.me()) {
             // In full, and selectable, because a key is the only thing that
             // actually identifies somebody (SIP-21).
-            ui.horizontal(|ui| {
+            // **Wrapped, not on one line.** A base58 key is 44 characters of
+            // monospace, and beside the words "You are" that is wider than a
+            // phone; a `horizontal` never wraps, so the key simply left the
+            // pane and took the ui's width with it, which is what clipped
+            // every explanation under it.
+            ui.horizontal_wrapped(|ui| {
                 ui.colored_label(theme.text_secondary, "You are");
                 ui.add(
                     egui::Label::new(egui::RichText::new(me.to_string()).monospace())
@@ -308,11 +335,12 @@ impl VoiceApp {
         }
         ui.add_space(tokens::SPACING_SM);
 
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.peer_input)
-                    .hint_text("their key, base58")
-                    .desired_width(420.0),
+        ui.horizontal_wrapped(|ui| {
+            sigil_ui::field(
+                ui,
+                &mut self.peer_input,
+                "their key, base58",
+                box_width(ui, 420.0, 90.0),
             );
             if ui.button("Call").clicked() {
                 let held = borrowable(ctx);
@@ -336,11 +364,12 @@ impl VoiceApp {
             "A room is named by a secret, and holding it is what being in the room \
              consists of.",
         );
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.room_input)
-                    .hint_text("room secret, base58")
-                    .desired_width(420.0),
+        ui.horizontal_wrapped(|ui| {
+            sigil_ui::field(
+                ui,
+                &mut self.room_input,
+                "room secret, base58",
+                box_width(ui, 420.0, 190.0),
             );
             if ui.button("Join").clicked() {
                 let held = borrowable(ctx);
@@ -383,7 +412,7 @@ impl VoiceApp {
         }
 
         if let Some(peer) = state.peer {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.colored_label(theme.text_secondary, "with");
                 ui.add(
                     egui::Label::new(egui::RichText::new(peer.to_string()).monospace())

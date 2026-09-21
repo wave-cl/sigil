@@ -14,41 +14,57 @@ use sigil_voice::VoiceApp;
 
 /// Drive the app with a given account, as the shell would.
 fn harness(account: Account, dark: bool) -> Harness<'static> {
+    sized(
+        account,
+        dark,
+        egui::vec2(900.0, 600.0),
+        sigil::Form::Desktop,
+    )
+}
+
+/// The Calls app at 360 points, with the form that says it is touched.
+///
+/// It had no phone render, and it is where a room secret is minted and
+/// pasted -- long strings in boxes, which is the shape that does not fit.
+fn harness_phone(account: Account) -> Harness<'static> {
+    sized(account, true, egui::vec2(360.0, 804.0), sigil::Form::Phone)
+}
+
+fn sized(account: Account, dark: bool, size: egui::Vec2, form: sigil::Form) -> Harness<'static> {
     let mut app = VoiceApp::new();
     let mut accounts = sigil::accounts::Accounts::of(vec![account]);
-    Harness::builder()
-        .with_size(egui::vec2(900.0, 600.0))
-        .build_ui(move |ui| {
-            let ctx = ui.ctx().clone();
-            theme::install(&ctx, theme::light(), theme::dark());
-            ctx.set_theme(if dark {
-                egui::Theme::Dark
-            } else {
-                egui::Theme::Light
+    Harness::builder().with_size(size).build_ui(move |ui| {
+        let ctx = ui.ctx().clone();
+        sigil::Form::install(&ctx, form);
+        theme::install(&ctx, theme::light(), theme::dark());
+        ctx.set_theme(if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        // A panel, as the shell gives it: filling the window, with the
+        // shell's own margin. Rendering straight into the root Ui would
+        // snapshot a layout nobody ever sees.
+        let theme = sigil::ColorTheme::current(&ctx);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme.surface_primary)
+                    .inner_margin(egui::Margin::same(form.body_margin() as i8)),
+            )
+            .show(ui, |ui| {
+                let mut nav = Navigator::default();
+                let mut app_ctx = AppContext {
+                    navigator: &mut nav,
+                    accounts: &mut accounts,
+                    unfocused: false,
+                    away: false,
+                    notify: &sigil::Silent,
+                    connections: &Default::default(),
+                };
+                let _ = app.render(&mut app_ctx, ui);
             });
-            // A panel, as the shell gives it: filling the window, with the
-            // shell's own margin. Rendering straight into the root Ui would
-            // snapshot a layout nobody ever sees.
-            let theme = sigil::ColorTheme::current(&ctx);
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::NONE
-                        .fill(theme.surface_primary)
-                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_LG as i8)),
-                )
-                .show(ui, |ui| {
-                    let mut nav = Navigator::default();
-                    let mut app_ctx = AppContext {
-                        navigator: &mut nav,
-                        accounts: &mut accounts,
-                        unfocused: false,
-                        away: false,
-                        notify: &sigil::Silent,
-                        connections: &Default::default(),
-                    };
-                    let _ = app.render(&mut app_ctx, ui);
-                });
-        })
+    })
 }
 
 /// Everything the interface says, as one string.
@@ -247,4 +263,14 @@ fn the_same_state_draws_the_same_way_twice() {
         read(),
         "something drawn here changes between runs, so no snapshot of it can pass twice"
     );
+}
+
+/// The Calls app on a phone.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn voice_phone() {
+    let mut h = harness_phone(Account::unlocked_for_test([1u8; 32]));
+    h.run();
+    h.run();
+    h.snapshot("voice_phone");
 }

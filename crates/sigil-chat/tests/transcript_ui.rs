@@ -1220,6 +1220,62 @@ fn phone_members() {
     h.snapshot("phone_members");
 }
 
+/// Compose, on a phone: the one dialog that had a render, at a width it
+/// never had. A dialog is bounded by the pane it is in, and a phone is
+/// narrower than a dialog was built for.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_compose() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("New conversation").click();
+    h.run();
+    h.run();
+    // The harness leaves the pointer where it clicked, and it lands on
+    // the dialog.
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_dialog_compose");
+}
+
+/// SIP-41's safety words, on a phone. Six words and two answers, and the
+/// dialog somebody is most likely to open while standing next to the person
+/// they are comparing them with -- which is to say, on a phone.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_verify() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.get_by_label("What may be done about them").click();
+    h.run();
+    h.get_by_label("Verify").click();
+    h.run();
+    h.run();
+    // The harness leaves the pointer where it clicked, and it lands on
+    // the dialog.
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_dialog_verify");
+}
+
+/// SIP-56's report, on a phone: a reason to choose and a note to write.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_report() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.get_by_label("Report this room…").click();
+    h.run();
+    h.run();
+    // The harness leaves the pointer where it clicked, and it lands on
+    // the dialog.
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_dialog_report");
+}
+
 /// The conversation's own settings on a phone: name, topic, retention.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
