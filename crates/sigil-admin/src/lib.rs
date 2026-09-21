@@ -708,7 +708,14 @@ impl AdminApp {
             .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                // **Wrapped.** What was asked is a sentence with an exchange's
+                // domain in it -- "whitelist/list at
+                // an-exchange-with-a-long-name.example.org" -- and a
+                // `horizontal` never wraps, so on a phone this one row took
+                // the whole pane out past its edge and the reply under it
+                // with it. `set_width` above sets the minimum, not a cap on
+                // what children draw.
+                ui.horizontal_wrapped(|ui| {
                     ui.colored_label(theme.text_muted, egui::RichText::new("Last answer").small());
                     ui.colored_label(
                         if answer.refused {

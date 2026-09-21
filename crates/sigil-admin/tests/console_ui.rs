@@ -387,6 +387,60 @@ fn console_phone() {
     h.snapshot("console_phone");
 }
 
+/// The same console with an exchange's reply in it, as long as one really is.
+///
+/// # Why the empty one is not enough
+///
+/// `up()` is a console nobody has asked anything. Every interesting thing on
+/// that screen arrives as an *answer*: a whitelist is a column of base58
+/// keys, an audit tail is lines of JSON, and neither has a space in it for
+/// dozens of characters at a stretch. A width check run on a pane with
+/// nothing in it agrees with itself.
+fn answered() -> AdminState {
+    let mut state = up();
+    let keys: Vec<String> = (1..=4)
+        .map(|i| PubKey::new([i as u8; 32]).to_string())
+        .collect();
+    state.answers = vec![Answer {
+        asked: "whitelist/list at an-exchange-with-a-long-name.example.org".into(),
+        said: format!(
+            "{{\n  \"keys\": [\n    \"{}\"\n  ]\n}}",
+            keys.join("\",\n    \"")
+        ),
+        refused: false,
+    }];
+    state
+}
+
+/// The console with an answer in it fits a phone too.
+#[test]
+fn an_answer_does_not_make_the_console_wider_than_the_phone() {
+    const PHONE: f32 = 360.0;
+    let (mut h, drawn) = sized_measured(answered(), egui::vec2(PHONE, 804.0), sigil::Form::Phone);
+    h.run();
+    h.run();
+    let width = drawn.get();
+    assert!(
+        width > 0.0,
+        "the console drew nothing, so this proves nothing"
+    );
+    assert!(
+        width <= PHONE + 1.0,
+        "an answer makes the console {width} points wide in a {PHONE}-point pane"
+    );
+}
+
+/// And a picture of it, because a key that wraps mid-word is legible and a
+/// key that is cut off is not, and only looking says which this is.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn console_phone_answered() {
+    let mut h = harness_phone(answered());
+    h.run();
+    h.run();
+    h.snapshot("console_phone_answered");
+}
+
 /// The console fits a phone, without anybody rendering it and looking.
 ///
 /// It did not: its rows were a key box, a label box and two buttons at
