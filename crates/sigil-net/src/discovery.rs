@@ -1,8 +1,10 @@
 //! Where to find the exchange.
 //!
 //! The same layers every sqex client speaks through, in the same order: what
-//! the caller was told explicitly, then the environment, then `~/.sqnr/config`,
-//! and last the domain of the identity's primary SIP-38 handle. Resolution
+//! the caller was told explicitly, then the environment, then the home
+//! recorded beside the identity (`<identity>.home`, SIP-59), then
+//! `~/.sqnr/config`, and last the domain of the identity's primary SIP-38
+//! handle. Resolution
 //! itself lives in `sqex_discovery::target`, because — as the CLI's own comment
 //! puts it — three copies of it is what produced two bugs in a day. This only
 //! assembles the layers.
@@ -42,6 +44,16 @@ pub fn layers(
             server: env_nonempty("SQEX_SERVER"),
             host: env_nonempty("SQEX_SERVER_HOST"),
             key: env_nonempty("SQEX_SERVER_KEY"),
+        },
+        // SIP-59: where the identity's account lives, as recorded beside the
+        // identity (`<identity>.home`, written by a Move or a claim). Above
+        // the config, which is one pointer for every identity; below anything
+        // the interface or the environment says for this run.
+        {
+            let home = identity
+                .and_then(sqex_proto::home_file::load)
+                .unwrap_or_default();
+            sqex_discovery::Layer::for_home(home.domain, home.key)
         },
         // The config is `sqnr`'s type and has no `server_host`, so the pairing
         // rule is read off the two fields it does have: a server *with* a key
@@ -102,7 +114,7 @@ mod tests {
         // The environment of the test process may legitimately have SQEX_SERVER
         // set; only assert about the layers we control.
         assert!(l[0].server.is_none() && l[0].host.is_none());
-        assert!(l[2].server.is_none() && l[2].host.is_none());
+        assert!(l[3].server.is_none() && l[3].host.is_none());
     }
 
     #[test]
@@ -112,8 +124,8 @@ mod tests {
             ..Config::default()
         };
         let l = layers(nothing_explicit(), &cfg, None);
-        assert_eq!(l[2].server.as_deref(), Some("ex.squic.org"));
-        assert!(l[2].host.is_none(), "a domain is discovered, not dialled");
+        assert_eq!(l[3].server.as_deref(), Some("ex.squic.org"));
+        assert!(l[3].host.is_none(), "a domain is discovered, not dialled");
         assert!(any_configured(&l));
     }
 
@@ -125,10 +137,10 @@ mod tests {
             ..Config::default()
         };
         let l = layers(nothing_explicit(), &cfg, None);
-        assert_eq!(l[2].host.as_deref(), Some("95.216.183.51:443"));
-        assert_eq!(l[2].key.as_deref(), Some("abc"));
+        assert_eq!(l[3].host.as_deref(), Some("95.216.183.51:443"));
+        assert_eq!(l[3].key.as_deref(), Some("abc"));
         assert!(
-            l[2].server.is_none(),
+            l[3].server.is_none(),
             "an address is dialled, not discovered"
         );
     }
@@ -185,7 +197,7 @@ mod tests {
     #[test]
     fn without_an_identity_there_is_no_handle_layer() {
         let l = layers(nothing_explicit(), &Config::default(), None);
-        assert_eq!(l.len(), 3, "the three original layers and no more");
+        assert_eq!(l.len(), 4, "the four fixed layers and no handle layer");
     }
 
     /// An identity with no sidecar contributes nothing rather than failing: a
@@ -196,7 +208,41 @@ mod tests {
         let identity = dir.path().join("identity");
         std::fs::write(&identity, "x").unwrap();
         let l = layers(nothing_explicit(), &Config::default(), Some(&identity));
-        assert_eq!(l.len(), 3);
+        assert_eq!(l.len(), 4);
+        assert!(
+            l[2].server.is_none() && l[2].host.is_none(),
+            "no home recorded, no home layer"
+        );
+    }
+
+    /// SIP-59: the home recorded beside the identity outranks the config's
+    /// one pointer and the handle's domain, and yields to what was typed.
+    #[test]
+    fn the_recorded_home_outranks_the_config_and_yields_to_the_interface() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity");
+        std::fs::write(&identity, "x").unwrap();
+        std::fs::write(handles_path(&identity), "me@handle.test\n").unwrap();
+        sqex_proto::home_file::set(
+            &identity,
+            &sqex_proto::home_file::Home {
+                domain: Some("home.test".into()),
+                key: None,
+            },
+        )
+        .unwrap();
+        let cfg = Config {
+            server: Some("from-config".into()),
+            ..Config::default()
+        };
+        let l = layers(nothing_explicit(), &cfg, Some(&identity));
+        assert_eq!(crate::domain_of(&l).as_deref(), Some("home.test"));
+        let typed = sqex_discovery::Layer {
+            server: Some("typed-in".into()),
+            ..Default::default()
+        };
+        let l = layers(typed, &cfg, Some(&identity));
+        assert_eq!(crate::domain_of(&l).as_deref(), Some("typed-in"));
     }
 
     fn handles_path(identity: &std::path::Path) -> std::path::PathBuf {
@@ -215,6 +261,6 @@ mod tests {
         };
         let l = layers(explicit, &cfg, None);
         assert_eq!(l[0].server.as_deref(), Some("typed-in"));
-        assert_eq!(l[2].server.as_deref(), Some("from-config"));
+        assert_eq!(l[3].server.as_deref(), Some("from-config"));
     }
 }

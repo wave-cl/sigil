@@ -219,7 +219,10 @@ async fn alice_at_a_writes_to_bob_at_b_by_name_and_domain() {
     up(&bobs, bob).await;
     // Bob lives at B: on record there by his own reach out (to nobody in
     // particular -- a name B cannot find is enough to present the Move).
-    bobs.send(Cmd::OpenRemote(format!("{alice}@a.test")));
+    bobs.send(Cmd::OpenRemote {
+        target: format!("{alice}@a.test"),
+        identity: None,
+    });
     let mut on_record = false;
     for _ in 0..150 {
         if home_on_record(&b, &_b_seed, &bob).await == Some(b.key) {
@@ -238,7 +241,15 @@ async fn alice_at_a_writes_to_bob_at_b_by_name_and_domain() {
         "nothing is presented on start"
     );
 
-    alices.send(Cmd::OpenRemote(format!("{bob}@b.test")));
+    // Her identity file, so the home is recorded beside it (SIP-60 §When a
+    // client presents a Move unasked, 2026-09-21): nothing there before.
+    let identity = dir.path().join("identity-alice");
+    std::fs::write(&identity, "x").unwrap();
+    assert_eq!(sqex_proto::home_file::load(&identity), None);
+    alices.send(Cmd::OpenRemote {
+        target: format!("{bob}@b.test"),
+        identity: Some(identity.clone()),
+    });
     assert!(
         until(|| alices.state().open.is_some(), 20).await,
         "the conversation should open: {:?}",
@@ -249,6 +260,12 @@ async fn alice_at_a_writes_to_bob_at_b_by_name_and_domain() {
         Some(a.key),
         "the first reach put Alice's home on record at A"
     );
+    // Recorded by key: this harness dials by address (`Dial::At`), so the
+    // session has no domain to write; the interface's sessions discover by
+    // name and record both.
+    let recorded = sqex_proto::home_file::load(&identity).expect("the home was recorded");
+    assert_eq!(recorded.key, Some(a.key));
+    assert_eq!(recorded.domain, None);
     // Reached: Bob's session at B sees what Alice says from A.
     alices.send(Cmd::Send("hello from a".into()));
     assert!(
@@ -315,10 +332,10 @@ async fn a_visitor_does_not_reach_out_from_the_exchange_it_is_visiting() {
     let (signer_b, _, _) = signer(0x62);
     let at_b = start_at(&b, signer_b, &dir.path().join("carol.db"));
     up(&at_b, carol).await;
-    at_b.send(Cmd::OpenRemote(format!(
-        "{}@a.test",
-        PubKey::new([9u8; 32])
-    )));
+    at_b.send(Cmd::OpenRemote {
+        target: format!("{}@a.test", PubKey::new([9u8; 32])),
+        identity: None,
+    });
     assert!(
         until(
             || at_b

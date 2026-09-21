@@ -1385,8 +1385,13 @@ pub enum Cmd {
     /// home session: reaching out is carried by the home after this
     /// identity's Move, which is presented here on the first reach if it is
     /// not already on record -- and never from an added exchange, whose
-    /// session must not become the home.
-    OpenRemote(String),
+    /// session must not become the home. `identity` is the identity file,
+    /// so the home is recorded beside it (`<identity>.home`, SIP-60 §When a
+    /// client presents a Move unasked) when the Move is presented.
+    OpenRemote {
+        target: String,
+        identity: Option<std::path::PathBuf>,
+    },
     /// Attach an existing file to another conversation and post the reference.
     ///
     /// **By reference: the bytes stay where they are.** The exchange stores one
@@ -5000,6 +5005,26 @@ mod display_name_tests {
     }
 }
 
+/// SIP-60 §When a client presents a Move unasked (2026-09-21): the home this
+/// identity's account lives at, recorded beside the identity where every
+/// client reads it as the default exchange. Written when a Move naming this
+/// exchange is presented or found on record; left alone when it already
+/// says so, and never an error -- the exchange's record is the authority.
+fn record_home(identity: &std::path::Path, chat: &Chat) {
+    let key = chat.exchange_key();
+    let domain = chat.domain().map(str::to_string);
+    if sqex_proto::home_file::load(identity).is_some_and(|h| h.names(&key, domain.as_deref())) {
+        return;
+    }
+    let home = sqex_proto::home_file::Home {
+        domain,
+        key: Some(key),
+    };
+    if let Err(e) = sqex_proto::home_file::set(identity, &home) {
+        tracing::warn!(%e, "could not record the home beside the identity");
+    }
+}
+
 /// The first eight hex characters of an identifier, for a channel with no name.
 fn hex8(id: &[u8; 32]) -> String {
     id.iter().take(4).map(|b| format!("{b:02x}")).collect()
@@ -5007,13 +5032,27 @@ fn hex8(id: &[u8; 32]) -> String {
 
 async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk: &mut Desk) {
     match cmd {
-        Cmd::OpenRemote(target) => {
+        Cmd::OpenRemote { target, identity } => {
             // SIP-60: the create is carried to the other person's home as
             // this identity's own signed act, after its Move. Presented now
             // if it is not on record; a visitor (a store filed under another
             // exchange) or a linked device does not reach out from here.
-            match chat.ensure_home().await {
-                Ok(HomeSaid::Presented | HomeSaid::OnRecord) => {}
+            // This is the identity's default session (the interface sends
+            // from no other), so a new store claims here: the person chose
+            // this exchange, and the claim is written beside the identity.
+            let said = match chat.ensure_home().await {
+                Ok(HomeSaid::Unclaimed) => chat.claim_home().await,
+                other => other,
+            };
+            match said {
+                Ok(HomeSaid::Presented | HomeSaid::OnRecord) => {
+                    if let Some(id) = &identity {
+                        record_home(id, chat);
+                    }
+                }
+                Ok(HomeSaid::Unclaimed) => {
+                    return trouble(state, "this store has no home yet and could not claim one");
+                }
                 Ok(HomeSaid::Visitor { home, .. }) => {
                     return trouble(
                         state,

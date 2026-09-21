@@ -1167,6 +1167,9 @@ pub struct ChatApp {
     /// When each session was last started, so one that dies is tried again —
     /// and not faster than [`RETRY`].
     started: HashMap<At, std::time::Instant>,
+    /// Each identity's file, by key -- what a session records beside it
+    /// (the home, SIP-60); filled as sessions are reconciled.
+    identity_paths: HashMap<PubKey, std::path::PathBuf>,
     /// How many sessions this app has started, for tests to count.
     starts: usize,
     /// Sessions told to stop that still hold their store lock. One of these
@@ -1293,6 +1296,7 @@ impl ChatApp {
         Self {
             sessions: HashMap::new(),
             started: HashMap::new(),
+            identity_paths: HashMap::new(),
             starts: 0,
             closing: Vec::new(),
             panes: HashMap::new(),
@@ -1666,6 +1670,9 @@ impl ChatApp {
         }
 
         for (at, path, via) in held {
+            // Where the identity file is, for what the session records
+            // beside it (the home, SIP-60).
+            self.identity_paths.insert(at.0, path.clone());
             if self.sessions.contains_key(&at) {
                 continue;
             }
@@ -3506,7 +3513,14 @@ impl ChatApp {
                     pane.add_trouble = None;
                     pane.adding.clear();
                     pane.dialog = None;
-                    self.send_as(Some(at), Cmd::OpenRemote(typed));
+                    let identity = self.identity_paths.get(&at.0).cloned();
+                    self.send_as(
+                        Some(at),
+                        Cmd::OpenRemote {
+                            target: typed,
+                            identity,
+                        },
+                    );
                 } else {
                     self.pane(at).add_trouble = Some(format!(
                         "{domain} is another exchange: write to people there from your \
