@@ -568,6 +568,117 @@ enum MemberAct {
     Block(bool),
 }
 
+/// What may be done about one member, decided once.
+///
+/// A free function rather than a method: it reads the state and the member
+/// and nothing else, and keeping it out of the row's closure is what lets
+/// the row borrow `ui` mutably twice over.
+fn member_acts(
+    state: &ChatState,
+    member: &session::Member,
+) -> Vec<(String, &'static str, MemberAct)> {
+    let verified = state.verified.contains_key(&member.account);
+    let blocked = state.blocked.contains(&member.account);
+    let mut acts: Vec<(String, &'static str, MemberAct)> = Vec::new();
+    acts.push((
+        if verified { "Verified" } else { "Verify" }.to_string(),
+        if verified {
+            "You compared safety words with them. Open to see them again, or to take \
+             the mark back."
+        } else {
+            "Compare six words with them, in person or over a call, and mark their key \
+             as theirs."
+        },
+        MemberAct::Verify,
+    ));
+    if state.i_am_admin {
+        acts.push((
+            "Remove".to_string(),
+            "Removes them and mints a new key, so what follows is not theirs. What they \
+             already hold, they keep.",
+            MemberAct::Kick,
+        ));
+        acts.push((
+            if member.admin { "Demote" } else { "Make admin" }.to_string(),
+            if member.admin {
+                "They stop being an admin of this room."
+            } else {
+                "They may invite, remove and mute here."
+            },
+            MemberAct::Grant(!member.admin),
+        ));
+        // SIP-56. An admin cannot be muted (the SIP says demote first), so
+        // this is for members.
+        if !member.admin {
+            acts.push((
+                if member.muted { "Unmute" } else { "Mute" }.to_string(),
+                if member.muted {
+                    "They may write again. Everybody sees this."
+                } else {
+                    "An admin's act, seen by all: they read, and may not write. Not the \
+                     same as muting this conversation for yourself."
+                },
+                MemberAct::Mute(!member.muted),
+            ));
+        }
+    }
+    // **Anybody's, not an admin's.** SIP-21's list is "per account, applies
+    // everywhere" -- a personal act, and the hover says as much: *you* stop
+    // hearing from them. It sat after the admin check's early return, so the
+    // one control a member being harassed in somebody else's room actually
+    // needs was the one they could not reach.
+    acts.push((
+        if blocked { "Unblock" } else { "Block" }.to_string(),
+        if blocked {
+            "They can reach you again."
+        } else {
+            // Never over-claimed: the exchange answers on your behalf and
+            // tells them nothing, but a delivery mark that stops moving is a
+            // thing somebody can notice.
+            "You stop hearing from them. They are told nothing, though it can be worked \
+             out."
+        },
+        MemberAct::Block(!blocked),
+    ));
+    acts
+}
+
+/// The same list drawn two ways: a row of buttons where there is room, a
+/// menu where there is not.
+///
+/// One list either way, so the phone cannot quietly lose a control the
+/// desktop has, which is how the two drift apart.
+fn member_actions_ui(
+    ui: &mut egui::Ui,
+    acts: &[(String, &'static str, MemberAct)],
+    narrow: bool,
+    key: &str,
+) -> Option<MemberAct> {
+    let mut chose = None;
+    if narrow {
+        let more =
+            sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "What may be done about them");
+        egui::Popup::menu(&more).show(|ui| {
+            for (label, hover, act) in acts {
+                if ui.button(label.as_str()).on_hover_text(*hover).clicked() {
+                    chose = Some(*act);
+                }
+            }
+            // The whole key, which the row itself has no width for.
+            if ui.button("Copy key").clicked() {
+                ui.ctx().copy_text(key.to_string());
+            }
+        });
+    } else {
+        for (label, hover, act) in acts {
+            if ui.button(label.as_str()).on_hover_text(*hover).clicked() {
+                chose = Some(*act);
+            }
+        }
+    }
+    chose
+}
+
 fn field_width(ui: &egui::Ui, want: f32) -> f32 {
     /// Room for the button that follows the field.
     const CONTROL: f32 = 130.0;
@@ -6424,194 +6535,166 @@ impl ChatApp {
                             &hover,
                         );
                         ui.add_space(tokens::SPACING_SM);
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                // Only when there is one to show. `label`
-                                // falls back to the first characters of the
-                                // key, and the whole key is on the very next
-                                // line -- so an unnamed member would read as a
-                                // prefix of themselves, above themselves.
-                                if let Some(named) = person.named() {
-                                    ui.label(named);
-                                }
-                                if member.admin {
-                                    // The exchange attests this one, so it may
-                                    // be drawn as a role. A SIP-21 title may
-                                    // not, which is why it is not here.
-                                    ui.colored_label(theme.accent, "admin");
-                                }
-                                if member.muted {
-                                    // SIP-56: the exchange's own signed entry
-                                    // says so; drawn as the roster's word.
-                                    ui.colored_label(theme.text_muted, "muted")
-                                        .on_hover_text("They read, and may not write.");
-                                }
-                                if member.account == me {
-                                    ui.colored_label(theme.text_muted, "you");
-                                }
-                                if state.verified.contains_key(&member.account) {
-                                    sigil_ui::verified_mark(ui);
-                                }
-                            });
-                            // This is the only thing that identifies them;
-                            // everything above it is a claim. In full on a
-                            // desktop -- but 44 base58 characters wrap to two
-                            // lines on a phone and make the roster a wall of
-                            // key, so there it is the short form, with the
-                            // whole of it a press away on the row's menu.
-                            let shown = if narrow {
-                                sigil_ui::short(&key)
-                            } else {
-                                key.clone()
-                            };
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(shown).monospace().small())
-                                    .selectable(true),
-                            );
-                        });
-                        if member.account != me {
-                            // One list of decisions, drawn two ways. A row of
-                            // buttons where there is room, a menu where there
-                            // is not -- but the same list either way, so the
-                            // phone cannot quietly lose a control the desktop
-                            // has, which is how the two drift apart.
-                            let verified = state.verified.contains_key(&member.account);
-                            let blocked = state.blocked.contains(&member.account);
-                            let mut acts: Vec<(String, &str, MemberAct)> = Vec::new();
-                            acts.push((
-                                if verified { "Verified" } else { "Verify" }.to_string(),
-                                if verified {
-                                    "You compared safety words with them. Open to see them \
-                                     again, or to take the mark back."
-                                } else {
-                                    "Compare six words with them, in person or over a call, \
-                                     and mark their key as theirs."
-                                },
-                                MemberAct::Verify,
-                            ));
-                            if state.i_am_admin {
-                                acts.push((
-                                    "Remove".to_string(),
-                                    "Removes them and mints a new key, so what follows is \
-                                     not theirs. What they already hold, they keep.",
-                                    MemberAct::Kick,
-                                ));
-                                acts.push((
-                                    if member.admin { "Demote" } else { "Make admin" }.to_string(),
+                        // **The actions first, from the right; the text in
+                        // what is left.** A `vertical` given the row takes
+                        // the whole of it, so the name inside it had nothing
+                        // to be truncated *to*: it drew at whatever length
+                        // somebody had typed and carried the roster out past
+                        // the pane with it. Laying the menu out first bounds
+                        // the text, which is what makes `truncate` mean
+                        // anything -- the same order the directory's rows
+                        // use, and for the same reason.
+                        let acts = member_acts(&state, member);
+                        let mut chose = None;
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if member.account != me {
+                                chose = member_actions_ui(ui, &acts, narrow, &key);
+                            }
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                // **Pinned, not merely available.** A child
+                                // ui in a right-to-left row is given the rest
+                                // of the row as its *max* rect, and a
+                                // `horizontal` inside it still reports the
+                                // parent's width to a `truncate` -- so the
+                                // name drew in full and pushed the menu
+                                // button off the row it was supposed to sit
+                                // beside. Setting the width makes the bound
+                                // one the label can see.
+                                ui.set_max_width(ui.available_width());
+                                // **The badges measured, the name given the
+                                // rest.** `truncate` shrinks a label to what
+                                // is available *at the moment it is added* --
+                                // which was the whole row -- so a long name
+                                // took all of it and "admin", "muted" and
+                                // "you" went past the edge after it.
+                                //
+                                // Laying the badges out first from the right
+                                // fixed the phone and broke the desktop: a
+                                // right-to-left row spans what it is given,
+                                // so on a 990-point window the words flew to
+                                // the far edge, a pane away from the member
+                                // they belong to. So they are *measured*
+                                // instead, the name is given the remainder,
+                                // and the reading order is the one it always
+                                // was. Same shape as `labelled_field`: the
+                                // fixed part is measured, the variable part
+                                // gets what is left.
+                                let badges = {
+                                    let gap = ui.spacing().item_spacing.x;
+                                    let mut w = 0.0f32;
+                                    let mut word = |text: &str| {
+                                        let font = egui::TextStyle::Body.resolve(ui.style());
+                                        w += gap
+                                            + ui.ctx().fonts_mut(|f| {
+                                                f.layout_no_wrap(
+                                                    text.to_string(),
+                                                    font,
+                                                    egui::Color32::PLACEHOLDER,
+                                                )
+                                                .rect
+                                                .width()
+                                            });
+                                    };
                                     if member.admin {
-                                        "They stop being an admin of this room."
-                                    } else {
-                                        "They may invite, remove and mute here."
-                                    },
-                                    MemberAct::Grant(!member.admin),
-                                ));
-                                // SIP-56. An admin cannot be muted (the SIP
-                                // says demote first), so this is for members.
-                                if !member.admin {
-                                    acts.push((
-                                        if member.muted { "Unmute" } else { "Mute" }.to_string(),
-                                        if member.muted {
-                                            "They may write again. Everybody sees this."
-                                        } else {
-                                            "An admin's act, seen by all: they read, and may \
-                                             not write. Not the same as muting this \
-                                             conversation for yourself."
-                                        },
-                                        MemberAct::Mute(!member.muted),
-                                    ));
-                                }
-                            }
-                            // **Anybody's, not an admin's.** SIP-21's list is
-                            // "per account, applies everywhere" -- a personal
-                            // act, and the hover says as much: *you* stop
-                            // hearing from them. It sat after the admin
-                            // check's early return, so the one control a
-                            // member being harassed in somebody else's room
-                            // actually needs was the one they could not reach.
-                            acts.push((
-                                if blocked { "Unblock" } else { "Block" }.to_string(),
-                                if blocked {
-                                    "They can reach you again."
-                                } else {
-                                    // Never over-claimed: the exchange answers
-                                    // on your behalf and tells them nothing,
-                                    // but a delivery mark that stops moving is
-                                    // a thing somebody can notice.
-                                    "You stop hearing from them. They are told nothing, \
-                                     though it can be worked out."
-                                },
-                                MemberAct::Block(!blocked),
-                            ));
-
-                            let mut chose = None;
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if narrow {
-                                        let more = sigil_ui::icon_button_named(
-                                            ui,
-                                            sigil_ui::Icon::More,
-                                            "What may be done about them",
-                                        );
-                                        egui::Popup::menu(&more).show(|ui| {
-                                            for (label, hover, act) in &acts {
-                                                if ui
-                                                    .button(label.as_str())
-                                                    .on_hover_text(*hover)
-                                                    .clicked()
-                                                {
-                                                    chose = Some(*act);
-                                                }
-                                            }
-                                            // The whole key, which the row
-                                            // itself has no width for.
-                                            if ui.button("Copy key").clicked() {
-                                                ui.ctx().copy_text(key.clone());
-                                            }
-                                        });
-                                    } else {
-                                        for (label, hover, act) in &acts {
-                                            if ui
-                                                .button(label.as_str())
-                                                .on_hover_text(*hover)
-                                                .clicked()
-                                            {
-                                                chose = Some(*act);
-                                            }
-                                        }
+                                        word("admin");
                                     }
-                                },
-                            );
-                            match chose {
-                                Some(MemberAct::Verify) => {
-                                    self.pane(at).dialog = Some(Dialog::Verify(member.account));
-                                }
-                                Some(MemberAct::Kick) => {
-                                    self.send_as(Some(at), Cmd::Kick(member.account));
-                                }
-                                Some(MemberAct::Grant(admin)) => self.send_as(
-                                    Some(at),
-                                    Cmd::Grant {
-                                        who: member.account,
-                                        admin,
-                                    },
-                                ),
-                                Some(MemberAct::Mute(on)) => self.send_as(
-                                    Some(at),
-                                    Cmd::Mute {
-                                        who: member.account,
-                                        on,
-                                    },
-                                ),
-                                Some(MemberAct::Block(blocked)) => self.send_as(
-                                    Some(at),
-                                    Cmd::SetBlocked {
-                                        who: member.account,
-                                        blocked,
-                                    },
-                                ),
-                                None => {}
+                                    if member.muted {
+                                        word("muted");
+                                    }
+                                    if member.account == me {
+                                        word("you");
+                                    }
+                                    if state.verified.contains_key(&member.account) {
+                                        w += gap + ui.text_style_height(&egui::TextStyle::Body);
+                                    }
+                                    w
+                                };
+                                ui.horizontal(|ui| {
+                                    // Only when there is one to show. `label`
+                                    // falls back to the first characters of
+                                    // the key, and the whole key is on the
+                                    // very next line -- so an unnamed member
+                                    // would read as a prefix of themselves,
+                                    // above themselves.
+                                    if let Some(named) = person.named() {
+                                        let room = (ui.available_width() - badges).max(60.0);
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(room, ui.spacing().interact_size.y),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.add(egui::Label::new(named).truncate());
+                                            },
+                                        );
+                                    }
+                                    if member.admin {
+                                        // The exchange attests this one, so it
+                                        // may be drawn as a role. A SIP-21
+                                        // title may not, which is why it is
+                                        // not here.
+                                        ui.colored_label(theme.accent, "admin");
+                                    }
+                                    if member.muted {
+                                        // SIP-56: the exchange's own signed
+                                        // entry says so; the roster's word.
+                                        ui.colored_label(theme.text_muted, "muted")
+                                            .on_hover_text("They read, and may not write.");
+                                    }
+                                    if member.account == me {
+                                        ui.colored_label(theme.text_muted, "you");
+                                    }
+                                    if state.verified.contains_key(&member.account) {
+                                        sigil_ui::verified_mark(ui);
+                                    }
+                                });
+                                // This is the only thing that identifies
+                                // them; everything above it is a claim. In
+                                // full on a desktop -- but 44 base58
+                                // characters wrap to two lines on a phone and
+                                // make the roster a wall of key, so there it
+                                // is the short form, with the whole of it a
+                                // press away on the row's menu.
+                                let shown = if narrow {
+                                    sigil_ui::short(&key)
+                                } else {
+                                    key.clone()
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(shown).monospace().small(),
+                                    )
+                                    .selectable(true),
+                                );
+                            });
+                        });
+                        match chose {
+                            Some(MemberAct::Verify) => {
+                                self.pane(at).dialog = Some(Dialog::Verify(member.account));
                             }
+                            Some(MemberAct::Kick) => {
+                                self.send_as(Some(at), Cmd::Kick(member.account));
+                            }
+                            Some(MemberAct::Grant(admin)) => self.send_as(
+                                Some(at),
+                                Cmd::Grant {
+                                    who: member.account,
+                                    admin,
+                                },
+                            ),
+                            Some(MemberAct::Mute(on)) => self.send_as(
+                                Some(at),
+                                Cmd::Mute {
+                                    who: member.account,
+                                    on,
+                                },
+                            ),
+                            Some(MemberAct::Block(blocked)) => self.send_as(
+                                Some(at),
+                                Cmd::SetBlocked {
+                                    who: member.account,
+                                    blocked,
+                                },
+                            ),
+                            None => {}
                         }
                     });
                     ui.separator();

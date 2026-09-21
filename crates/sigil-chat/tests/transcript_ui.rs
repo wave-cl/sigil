@@ -622,7 +622,20 @@ fn harness_phone_measured(
                 .frame(egui::Frame::NONE.fill(t.surface_secondary))
                 .show(ui, |ui| {
                     let whole = ui.max_rect();
-                    let left = whole.shrink2(egui::vec2(sigil::tokens::SPACING_MD, 0.0));
+                    // **The corner first, and measured**, exactly as the
+                    // shell does it: both used to be given the whole bar and
+                    // drawn one over the other, so a long conversation name
+                    // was painted under the call and More buttons.
+                    let corner = whole.shrink2(egui::vec2(sigil::tokens::SPACING_SM, 0.0));
+                    let drawn = ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(corner)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| app.chrome_ui(&mut app_ctx, ui),
+                    );
+                    let used = drawn.response.rect.width();
+                    let mut left = whole.shrink2(egui::vec2(sigil::tokens::SPACING_MD, 0.0));
+                    left.max.x = (left.max.x - used - sigil::tokens::SPACING_SM).max(left.min.x);
                     ui.scope_builder(
                         egui::UiBuilder::new()
                             .max_rect(left)
@@ -632,13 +645,6 @@ fn harness_phone_measured(
                                 ui.label(egui::RichText::new(sigil::NAME).heading());
                             }
                         },
-                    );
-                    let corner = whole.shrink2(egui::vec2(sigil::tokens::SPACING_SM, 0.0));
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(corner)
-                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                        |ui| app.chrome_ui(&mut app_ctx, ui),
                     );
                 });
             // The phone's Back, as the shell handles it: a menu closes; else
@@ -712,6 +718,71 @@ fn finger_up(h: &mut Harness<'static>, at: egui::Pos2) {
     input.events.push(egui::Event::PointerGone);
 }
 
+/// The same conversation with everything in it as long as it can really be.
+///
+/// # Why the benign fixture is not enough
+///
+/// `a_conversation()` is "Ada", "release check", "notes.txt". Nothing in it
+/// is longer than a phone, so a pane could pass the width check on it and
+/// still be torn apart by the first person with a long display name, a room
+/// with a sentence for a topic, or a photo straight off a camera. A width
+/// check run only on data that fits is a check that agrees with itself.
+///
+/// Nothing here is invented for the test: these are the shapes real data
+/// takes. A base58 key used as a name is what an unnamed contact reads as; a
+/// camera's filename is what an attachment is called; a URL is a single word
+/// with no break in it, which is the one thing wrapping cannot help.
+fn a_long_conversation() -> ChatState {
+    let mut state = a_conversation();
+    const LONG_NAME: &str = "Alexandra Constantinopoulos-Whitmore";
+    const LONG_TOPIC: &str =
+        "everything about the release, including what we decided not to do and why";
+    const URL: &str =
+        "https://example.org/a/very/long/path/that/never/breaks?and=a&query=string&too=yes";
+
+    state.conversations[0].label = LONG_NAME.into();
+    state.conversations[0].preview = Some(URL.into());
+    state.conversations[1].label = LONG_TOPIC.into();
+    for line in &mut state.lines {
+        if line.name.is_some() {
+            line.name = Some(LONG_NAME.into());
+        }
+        for a in &mut line.attachments {
+            a.described = "[PXL_20260921_184433912.MP.long-name-from-a-camera.jpg, 8.4 MB]".into();
+        }
+    }
+    if let Some(first) = state.lines.first_mut() {
+        first.text = URL.into();
+    }
+    for member in &mut state.members {
+        state
+            .people
+            .entry(member.account)
+            .or_default()
+            .name
+            .clone_from(&Some(LONG_NAME.to_string()));
+    }
+    state.found = vec![sigil_chat::Found {
+        channel: [4u8; 32],
+        instance: [2u8; 32],
+        name: LONG_TOPIC.into(),
+        topic: LONG_TOPIC.into(),
+        members: 1,
+        domain: "an-exchange-with-a-long-name.example.org".into(),
+        here: false,
+    }];
+    state.searched = true;
+    state.reports = vec![sigil_chat::Report {
+        id: 7,
+        reporter: them(),
+        target: 3,
+        reason: "harassment",
+        at: NOW - 3600,
+        note: LONG_TOPIC.into(),
+    }];
+    state
+}
+
 /// **No route draws wider than the phone.**
 ///
 /// The general form of every phone fault found here, and the one check that
@@ -726,51 +797,57 @@ fn finger_up(h: &mut Harness<'static>, at: egui::Pos2) {
 /// job somebody runs before a release.
 #[test]
 fn no_phone_pane_is_wider_than_the_phone() {
-    for route in [
-        sigil_chat::Route::Conversations,
-        sigil_chat::Route::Directory,
-        sigil_chat::Route::Members,
-        sigil_chat::Route::Settings,
-        sigil_chat::Route::Devices,
+    for (what, build) in [
+        ("ordinary", a_conversation as fn() -> ChatState),
+        ("long", a_long_conversation as fn() -> ChatState),
     ] {
-        let mut state = a_conversation();
-        // A hit to find, a report to show: a pane that draws nothing cannot
-        // overflow, and an empty pass would be a vacuous pass.
-        state.found = vec![sigil_chat::Found {
-            channel: [4u8; 32],
-            instance: [2u8; 32],
-            name: "elsewhere".into(),
-            topic: "held at another exchange".into(),
-            members: 1,
-            domain: "trunk.exchange".into(),
-            here: false,
-        }];
-        state.searched = true;
-        state.reports = vec![sigil_chat::Report {
-            id: 7,
-            reporter: them(),
-            target: 3,
-            reason: "spam",
-            at: NOW - 3600,
-            note: "links".into(),
-        }];
-        let (mut h, _, drawn) = harness_phone_measured(state, route.clone());
-        h.run();
-        h.run();
-        let width = drawn.get();
-        assert!(
-            width > 0.0,
-            "{route:?} drew nothing, so this proves nothing about it"
-        );
-        // A point of slack for the rounding egui does on a margin; the
-        // faults this catches were tens of points, not fractions.
-        assert!(
-            width <= PHONE_WIDTH + 1.0,
-            "{route:?} draws {width} points wide in a {PHONE_WIDTH}-point pane. \
-             egui grows a ui to what is drawn in it, so every row after the one \
-             that overflowed is laid out for a pane that wide -- which is how a \
-             roster's buttons end up painted over the member above them."
-        );
+        for route in [
+            sigil_chat::Route::Conversations,
+            sigil_chat::Route::Directory,
+            sigil_chat::Route::Members,
+            sigil_chat::Route::Settings,
+            sigil_chat::Route::Devices,
+        ] {
+            let mut state = build();
+            // A hit to find, a report to show: a pane that draws nothing cannot
+            // overflow, and an empty pass would be a vacuous pass.
+            state.found = vec![sigil_chat::Found {
+                channel: [4u8; 32],
+                instance: [2u8; 32],
+                name: "elsewhere".into(),
+                topic: "held at another exchange".into(),
+                members: 1,
+                domain: "trunk.exchange".into(),
+                here: false,
+            }];
+            state.searched = true;
+            state.reports = vec![sigil_chat::Report {
+                id: 7,
+                reporter: them(),
+                target: 3,
+                reason: "spam",
+                at: NOW - 3600,
+                note: "links".into(),
+            }];
+            let (mut h, _, drawn) = harness_phone_measured(state, route.clone());
+            h.run();
+            h.run();
+            let width = drawn.get();
+            assert!(
+                width > 0.0,
+                "{route:?} ({what}) drew nothing, so this proves nothing about it"
+            );
+            // A point of slack for the rounding egui does on a margin; the
+            // faults this catches were tens of points, not fractions.
+            assert!(
+                width <= PHONE_WIDTH + 1.0,
+                "{route:?} with {what} names draws {width} points wide in a \
+             {PHONE_WIDTH}-point pane. egui grows a ui to what is drawn in it, \
+             so every row after the one that overflowed is laid out for a pane \
+             that wide -- which is how a roster's buttons end up painted over \
+             the member above them."
+            );
+        }
     }
 }
 
@@ -1392,6 +1469,29 @@ fn phone_devices() {
     h.run();
     h.run();
     h.snapshot("phone_devices");
+}
+
+/// The conversation on a phone with everything in it as long as it gets: a
+/// display name, a filename from a camera, a URL that cannot be broken.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_long_conversation() {
+    let mut h = harness_phone(a_long_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_long_conversation");
+}
+
+/// The same, with the list showing rather than a conversation.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_long_chats() {
+    let mut state = a_long_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_long_chats");
 }
 
 /// The directory on a phone: the search box, and a hit with what may be
@@ -7910,4 +8010,13 @@ fn an_admin_mutes_from_the_members_view_and_a_member_only_reports() {
     );
     assert!(!said.contains("Dismiss"), "{said}");
     assert!(said.contains("Report this room"), "{said}");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_long_members() {
+    let mut h = harness_phone(a_long_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    h.snapshot("phone_long_members");
 }
