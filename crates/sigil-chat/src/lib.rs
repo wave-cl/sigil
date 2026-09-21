@@ -7989,7 +7989,10 @@ impl ChatApp {
                 let words = self.pane(at).restoring.trim().to_string();
                 if !words.is_empty() {
                     self.pane(at).restoring.clear();
-                    self.send_as(Some(at), Cmd::Restore(words));
+                    // The identity file, so the restore records the home
+                    // beside it (SIP-60): a backup lives at the home.
+                    let identity = self.identity_paths.get(&at.0).cloned();
+                    self.send_as(Some(at), Cmd::Restore { words, identity });
                 }
             }
             if backup.held.is_some() {
