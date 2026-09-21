@@ -301,6 +301,19 @@ pub trait App {
         false
     }
 
+    /// Act on a `sigil://` link, if it is this app's: a contact to write to,
+    /// somebody to call, a room to join.
+    ///
+    /// **Somebody has already said yes.** The shell asks
+    /// [`deeplink::confirmation`](crate::deeplink::confirmation) out loud and
+    /// waits, because a link is a thing somebody else wrote and put where you
+    /// would press it. By the time this is called that question has been
+    /// answered, so this acts. The shell switches to the app that says yes,
+    /// and tells whoever offered it when nothing did.
+    fn follow(&mut self, _ctx: &mut AppContext<'_>, _link: &crate::Link) -> bool {
+        false
+    }
+
     /// Whether [`update`](App::update) should run before this app has ever
     /// been looked at.
     ///

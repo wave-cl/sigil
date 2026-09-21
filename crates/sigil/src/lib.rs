@@ -15,6 +15,7 @@ pub mod account;
 pub mod accounts;
 pub mod app;
 pub mod deck;
+pub mod deeplink;
 /// What the product is called, where a bar has to say so.
 pub const NAME: &str = "Sigil";
 
@@ -34,6 +35,7 @@ pub use app::{
     TabNotifications, Target,
 };
 pub use deck::{Layout, layout};
+pub use deeplink::Link;
 pub use form::{Form, Insets};
 pub use icon::{Icon, icon_button, icon_button_named, icon_button_tinted};
 pub use nav::{Discarded, NavStack};

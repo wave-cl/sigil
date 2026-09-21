@@ -434,3 +434,124 @@ async fn the_control_that_ends_a_call_stays_on_a_phones_screen() {
         text_of(&h)
     );
 }
+
+/// **A `sigil://room/<secret>` link, once somebody has said yes to it.**
+///
+/// Two of the three kinds of link are this app's, and both are dangerous in
+/// the same quiet way: a room's membership *is* holding its secret, so
+/// joining one cannot be taken back and there is nobody to remove you. The
+/// shell asks first; by the time `follow` is called the question has been
+/// answered.
+///
+/// What is asserted is that it goes through the same door the button does --
+/// the field is filled and the press is made on the next pass, with the same
+/// refusals in the same words. A second way in that refused differently is
+/// how the CLI's two copies of this drifted apart.
+#[test]
+fn a_room_link_fills_the_field_and_presses_join() {
+    // One identity, opened again for each `AppContext`: generating a second
+    // is refused, and rightly -- `sqnr` will not write over one.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity");
+    sqnr::identity::generate(&path, None).unwrap();
+    let account = || Account::discover(Some(path.clone()));
+    let (mut h, app) = shared(account());
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains(ROOM),
+        "the room secret is on screen before any link was followed, so this \
+         test cannot tell the two apart"
+    );
+
+    let took = {
+        let mut app = app.borrow_mut();
+        let mut nav = Navigator::default();
+        let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+        let mut ctx = AppContext {
+            navigator: &mut nav,
+            accounts: &mut accounts,
+            unfocused: false,
+            away: false,
+            notify: &sigil::Silent,
+            connections: &Default::default(),
+        };
+        app.follow(&mut ctx, &sigil::Link::Room(ROOM.to_string()))
+    };
+    assert!(took, "the Calls app did not take a room link");
+    h.run();
+    h.run();
+    let after = text_of(&h);
+    assert!(
+        after.contains(ROOM),
+        "the secret from the link is not in the room field: {after}"
+    );
+    // **And the press was made.** The fixture is forty-four base58
+    // characters, which is what `sigil::deeplink` insists on, and thirty-three
+    // bytes, which is not a room -- so `join_room` refuses it where it parses
+    // it, in the same words the Join button would, and reaches no network.
+    // That refusal is the proof that the button was pressed: the field alone
+    // would be there whether anything happened or not.
+    assert!(
+        after.contains("that is not a room secret"),
+        "the field was filled and Join was never pressed: {after}"
+    );
+
+    // A contact is not this app's errand, and saying so is what lets the
+    // shell hand it to the one whose it is.
+    let mine = {
+        let mut app = app.borrow_mut();
+        let mut nav = Navigator::default();
+        let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+        let mut ctx = AppContext {
+            navigator: &mut nav,
+            accounts: &mut accounts,
+            unfocused: false,
+            away: false,
+            notify: &sigil::Silent,
+            connections: &Default::default(),
+        };
+        app.follow(
+            &mut ctx,
+            &sigil::Link::Contact(sqnr_core::PubKey::new([4u8; 32])),
+        )
+    };
+    assert!(!mine, "the Calls app took a link that belongs to the chat");
+}
+
+/// A room secret shaped the way `sigil::deeplink` insists on: forty or more
+/// base58 characters, and nothing else.
+const ROOM: &str = "TestRoomSecretNotARea1RoomDoNotUseAAAAAAAAAA";
+
+/// The same harness as [`sized`], with the app shared so a test can call the
+/// `App` trait on it between passes.
+#[allow(clippy::type_complexity)]
+fn shared(account: Account) -> (Harness<'static>, std::rc::Rc<std::cell::RefCell<VoiceApp>>) {
+    let app = std::rc::Rc::new(std::cell::RefCell::new(VoiceApp::new()));
+    let drawn = app.clone();
+    let mut accounts = sigil::accounts::Accounts::of(vec![account]);
+    let h = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Desktop);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let theme = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(theme.surface_primary))
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &sigil::Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = drawn.borrow_mut().render(&mut app_ctx, ui);
+                });
+        });
+    (h, app)
+}

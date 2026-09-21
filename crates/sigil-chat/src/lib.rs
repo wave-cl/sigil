@@ -1984,6 +1984,30 @@ impl App for ChatApp {
         true
     }
 
+    /// **A `sigil://contact/<key>` link, once somebody has said yes to it.**
+    ///
+    /// A conversation with that key on the identity that is showing: the same
+    /// `OpenDm` the compose dialog sends, so it creates one where there is
+    /// none and opens the one there is. The other two kinds of link are the
+    /// Calls app's.
+    ///
+    /// No when there is no session to send it to -- nothing is open, or the
+    /// identity is sealed -- and then the shell says so rather than leaving a
+    /// yes that did nothing.
+    fn follow(&mut self, ctx: &mut AppContext<'_>, link: &sigil::Link) -> bool {
+        let sigil::Link::Contact(who) = link else {
+            return false;
+        };
+        let Some(at) = self.showing_at(ctx) else {
+            return false;
+        };
+        if !self.sessions.contains_key(&at) {
+            return false;
+        }
+        self.send_as(Some(&at), Cmd::OpenDm(*who));
+        true
+    }
+
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
         self.take_choices(egui_ctx);

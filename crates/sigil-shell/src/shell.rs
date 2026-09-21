@@ -181,6 +181,12 @@ pub struct Shell {
     ask_desktop_idle: bool,
     /// A tray in all but fact, for tests of closing to it.
     hideable: bool,
+    /// The `sigil://` link being asked about, if any.
+    ///
+    /// One at a time: two questions about two rooms, stacked, is two rooms
+    /// joined by whoever presses through them. The rest wait in
+    /// `sigil_platform::deeplink`'s queue until this one is answered.
+    offered: Option<sigil::Link>,
     /// The opening screen's state: which identity is chosen, and what has been
     /// typed at it. See [`Shell::welcome`].
     welcome: Welcome,
@@ -276,6 +282,7 @@ impl Shell {
             away: false,
             ask_desktop_idle: true,
             hideable: false,
+            offered: None,
             welcome: Welcome::default(),
             remember: true,
             identities: None,
@@ -508,6 +515,110 @@ impl Shell {
                     self.opened[i] = true;
                     self.navigator.switch_to(AppId(i));
                     break;
+                }
+            }
+        }
+    }
+
+    /// A `sigil://` link offered since last pass: the window comes up and
+    /// the question is asked.
+    ///
+    /// **One at a time.** Whatever hands these over is outside sigil, and
+    /// two questions stacked on each other is two rooms joined by somebody
+    /// pressing through them. The rest stay in the queue.
+    fn take_a_link(&mut self, egui_ctx: &egui::Context) {
+        if self.offered.is_some() {
+            return;
+        }
+        if let Some(link) = sigil_platform::deeplink::offered().into_iter().next() {
+            self.present(egui_ctx);
+            self.offered = Some(link);
+        }
+    }
+
+    /// Whether a link is waiting to be asked about, for a test that wants to
+    /// know without reading the screen.
+    #[doc(hidden)]
+    pub fn asking_about_a_link(&self) -> bool {
+        self.offered.is_some()
+    }
+
+    /// The question a link asks, and the two answers.
+    ///
+    /// A link is a thing somebody else wrote and put where you would press
+    /// it, so nothing acts until this is answered -- see
+    /// `sigil::deeplink`. The wording is the link's own
+    /// (`deeplink::confirmation`), which says what joining a room cannot
+    /// take back.
+    fn link_ui(&mut self, egui_ctx: &egui::Context) {
+        // Drained here rather than beside the notifications, because this is
+        // the pass that can draw the question: a link taken off the queue on
+        // a pass that does not ask about it is a link nobody is told about
+        // until something else happens.
+        self.take_a_link(egui_ctx);
+        let Some(link) = self.offered.clone() else {
+            return;
+        };
+        let t = sigil::ColorTheme::current(egui_ctx);
+        let mut answered = None;
+        let response = egui::Modal::new(egui::Id::new("sigil-link"))
+            .frame(
+                egui::Frame::NONE
+                    .fill(t.surface_primary)
+                    .corner_radius(tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(tokens::SPACING_LG as i8)),
+            )
+            .show(egui_ctx, |ui| {
+                // As wide as a dialog likes, or as wide as the screen has
+                // once a margin is kept: a phone is narrower than a dialog.
+                let screen = ui.ctx().content_rect().width();
+                ui.set_width(360.0f32.min(screen - 2.0 * tokens::SPACING_XL).max(200.0));
+                ui.heading("A sigil link");
+                ui.add_space(tokens::SPACING_SM);
+                ui.label(sigil_platform::deeplink::confirmation(&link));
+                ui.add_space(tokens::SPACING_MD);
+                ui.horizontal(|ui| {
+                    if ui.button("Yes").clicked() {
+                        answered = Some(true);
+                    }
+                    if ui.button("No").clicked() {
+                        answered = Some(false);
+                    }
+                });
+            });
+        // Pressing away from it is the same as No: a question nobody
+        // answered has not been said yes to.
+        if response.should_close() && answered.is_none() {
+            answered = Some(false);
+        }
+        match answered {
+            None => {}
+            Some(false) => self.offered = None,
+            Some(true) => {
+                self.offered = None;
+                let mut taken = false;
+                for i in 0..self.apps.len() {
+                    let mut ctx = AppContext {
+                        navigator: &mut self.navigator,
+                        accounts: &mut self.accounts,
+                        unfocused: false,
+                        away: self.away,
+                        notify: self.platform.as_ref(),
+                        connections: &self.connections,
+                    };
+                    if self.apps[i].follow(&mut ctx, &link) {
+                        self.opened[i] = true;
+                        self.navigator.switch_to(AppId(i));
+                        taken = true;
+                        break;
+                    }
+                }
+                // **Said out loud when nothing took it.** A yes that does
+                // nothing looks exactly like a yes that worked, and the
+                // reason is usually that the app it belongs to is not in
+                // this build.
+                if !taken {
+                    tracing::warn!(?link, "no app took the link");
                 }
             }
         }
@@ -982,6 +1093,11 @@ impl Shell {
                     .inner_margin(egui::Margin::same(form.body_margin() as i8)),
             )
             .show(ui, |ui| self.body(ui));
+
+        // Over everything, because it is a question about something from
+        // outside and the answer decides whether anything happens at all.
+        let egui_ctx = ui.ctx().clone();
+        self.link_ui(&egui_ctx);
 
         self.handle_fallback_keys(ui.ctx());
         self.remember_focus(ui.ctx());

@@ -45,6 +45,22 @@ pub struct VoiceApp {
     log: Vec<String>,
     /// The exchange, read once at startup. Re-read when settings can change it.
     config: Config,
+    /// A `sigil://` link somebody has already said yes to, waiting for a pass
+    /// that has a `Ui` to act in.
+    ///
+    /// `App::follow` is handed neither the account's held connection nor an
+    /// egui context to wake, and both are wanted; and starting a call from
+    /// outside the draw would be a second way in beside the button, which is
+    /// how two paths that refuse differently get written. So the link sets
+    /// the field the button reads and `render` presses it.
+    asked: Option<Asked>,
+}
+
+/// What a followed link asked for. See [`VoiceApp::asked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Call,
+    Room,
 }
 
 impl Default for VoiceApp {
@@ -81,6 +97,7 @@ impl VoiceApp {
             call: None,
             log: Vec::new(),
             config: Config::load(),
+            asked: None,
         }
     }
 
@@ -227,6 +244,32 @@ impl VoiceApp {
 }
 
 impl App for VoiceApp {
+    /// **A `sigil://` link, once somebody has said yes to it.** Two of the
+    /// three kinds are this app's: somebody to call, and a room to join. It
+    /// fills the field the button reads and asks for the press; `render`
+    /// makes it, on a pass that has a `Ui` and the account's held connection.
+    /// See [`VoiceApp::asked`].
+    fn follow(&mut self, _ctx: &mut AppContext<'_>, link: &sigil::Link) -> bool {
+        match link {
+            sigil::Link::Call(who) => {
+                self.peer_input = who.to_string();
+                self.peer_trouble = None;
+                self.asked = Some(Asked::Call);
+                true
+            }
+            sigil::Link::Room(secret) => {
+                self.room_input = secret.clone();
+                self.room_trouble = None;
+                self.asked = Some(Asked::Room);
+                true
+            }
+            // A contact is the chat app's: writing to somebody is not this
+            // tab's errand, and a link that opened the Calls tab to show a
+            // key would be a link that went to the wrong place.
+            sigil::Link::Contact(_) => false,
+        }
+    }
+
     /// Runs every pass, for every opened app, and while the window is hidden.
     /// Draining here rather than in `render` is what keeps a call's history
     /// intact while you are reading messages in the other tab.
@@ -245,6 +288,21 @@ impl App for VoiceApp {
         if !ctx.account().is_unlocked() {
             self.identity_ui(ctx, ui, &theme);
             return AppResponse::default();
+        }
+        // A link somebody said yes to, acted on exactly as the button does:
+        // same refusals, same words, and not while a call is already up --
+        // a link that hung up a call in progress would be a link that could.
+        // The phase first, and `take` second: with the take first, a link
+        // followed while a call is up would be swallowed by the pass that
+        // could not act on it. Held instead, and pressed when the call ends.
+        if matches!(self.state().phase, Phase::Idle | Phase::Ended)
+            && let Some(asked) = self.asked.take()
+        {
+            let held = borrowable(ctx);
+            match asked {
+                Asked::Call => self.place_call(ctx.account(), held, ui.ctx()),
+                Asked::Room => self.join_room(ctx.account(), held, ui.ctx()),
+            }
         }
         match self.state().phase {
             Phase::Idle | Phase::Ended => self.idle_ui(ctx, ui, &theme),

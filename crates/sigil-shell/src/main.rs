@@ -96,11 +96,15 @@ fn main() -> eframe::Result<()> {
     // is refused before a window opens, and never acted on: `sigil://room/...`
     // joining silently would put somebody in a conversation they did not
     // choose, which cannot be undone because membership is holding the secret.
+    // Queued rather than kept here: the interface drains the queue, asks the
+    // question out loud and waits. It *was* parsed here and then dropped,
+    // which is not the same as offering it -- `sigil sigil://contact/<key>`
+    // opened a window that said nothing about the link at all.
     let offered = std::env::args().nth(1).and_then(|arg| {
         if !arg.starts_with("sigil://") {
             return None;
         }
-        match sigil_platform::deeplink::parse(&arg) {
+        match sigil_platform::deeplink::offer(&arg) {
             Ok(link) => Some(link),
             Err(why) => {
                 eprintln!("sigil: {why}");
