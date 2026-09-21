@@ -555,6 +555,78 @@ fn the_windows_own_buttons_leave_the_rail_alone() {
     );
 }
 
+/// The opening screen, on a phone.
+///
+/// The first thing anybody sees there, and it had no phone render at all --
+/// only a 900-point desktop one, which is the width at which a row of
+/// controls always fits.
+fn sealed_phone(account: sigil::Account) -> Harness<'static> {
+    let apps: Vec<Box<dyn App>> = vec![
+        Box::new(Stub::named("Calls", 0)),
+        Box::new(Stub::named("Chat", 3)),
+    ];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![account]));
+    Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.set_insets(sigil::Insets {
+                top: 24.0,
+                bottom: 48.0,
+                ..sigil::Insets::NONE
+            });
+            shell.ui(ui);
+        })
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn welcome_phone() {
+    let mut h = sealed_phone(sigil::Account::Locked {
+        path: "/tmp/sigil-test/identity".into(),
+        trouble: None,
+    });
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("welcome_phone");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn making_phone() {
+    let dir = tempfile::tempdir().unwrap();
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Calls", 0))];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Missing {
+                path: dir.path().join("nothing-here"),
+            },
+        ]))
+        .with_identities(dir.path().to_path_buf());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+    h.get_by_label("Create a new identity").click();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("making_phone");
+}
+
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn shell_phone() {

@@ -490,7 +490,7 @@ impl AdminApp {
             "A closed set of transport keys. Enabled, the exchange accepts connections only \
              from keys on it, its administrators and its peers, and closes the rest.",
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("List").clicked() {
                 self.propose(me, vec![Op::WhitelistList]);
             }
@@ -501,16 +501,21 @@ impl AdminApp {
                 self.propose(me, vec![Op::WhitelistDisable]);
             }
         });
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().key)
-                    .hint_text("key, base58")
-                    .desired_width(260.0),
+        ui.horizontal_wrapped(|ui| {
+            // Room kept for the label box and the two buttons that follow.
+            let key = Self::box_width(ui, 260.0, 260.0);
+            sigil_ui::field(
+                ui,
+                &mut self.panes.entry(me).or_default().key,
+                "key, base58",
+                key,
             );
-            ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().label)
-                    .hint_text("label")
-                    .desired_width(120.0),
+            let label = Self::box_width(ui, 120.0, 140.0);
+            sigil_ui::field(
+                ui,
+                &mut self.panes.entry(me).or_default().label,
+                "label",
+                label,
             );
             if ui.button("Add").clicked()
                 && let Some(key) = self.take_key(me)
@@ -533,6 +538,33 @@ impl AdminApp {
         self.key_trouble_ui(me, ui, theme);
     }
 
+    /// A box in an operation row, at the width there is.
+    ///
+    /// # Why not a number
+    ///
+    /// Every field here asked for a fixed width -- 260 for a key, 120 for a
+    /// label, 160 for a name -- chosen against a 900-point window. On a
+    /// 360-point pane the row holding two of them plus two buttons was half
+    /// again as wide as the pane, so it ran off the right edge; and because
+    /// egui grows a ui to whatever is drawn in it, the *prose* above and
+    /// below then wrapped to that wider ui and was clipped by the pane
+    /// instead. Every explanation on the console ended mid-word.
+    ///
+    /// `want` is still what it should be where there is room. It is only ever
+    /// reduced, so a desktop is what it was.
+    ///
+    /// Below [`tokens::NARROW_WIDTH`] it is the whole line instead. Sharing a
+    /// row was still wrong once it stopped overflowing: the key box came out
+    /// ninety points, and a base58 key is forty-four characters. In a
+    /// `horizontal_wrapped` a full-width box takes its own line and what
+    /// follows wraps under it, which is the form a phone wants anyway.
+    fn box_width(ui: &egui::Ui, want: f32, after: f32) -> f32 {
+        if ui.available_width() < tokens::NARROW_WIDTH {
+            return (ui.available_width() - tokens::SPACING_SM).max(90.0);
+        }
+        want.min((ui.available_width() - after).max(90.0))
+    }
+
     /// Under a key box: why the last press did nothing, until one does.
     fn key_trouble_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
         if let Some(why) = self.panes.get(&me).and_then(|p| p.key_trouble.clone()) {
@@ -548,7 +580,7 @@ impl AdminApp {
             "A credential is evidence, not authority: it says which account vouches for a \
              key, and entitles that key to nothing. Admitting one is a decision.",
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Pending").clicked() {
                 self.propose(me, vec![Op::AdmissionList]);
             }
@@ -579,11 +611,13 @@ impl AdminApp {
             "SIP-38. Assigning reassigns an existing binding and is not subject to the \
              per-account cap — it is how a squatted name is corrected.",
         );
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.panes.entry(me).or_default().name)
-                    .hint_text("name")
-                    .desired_width(160.0),
+        ui.horizontal_wrapped(|ui| {
+            let name = Self::box_width(ui, 160.0, 210.0);
+            sigil_ui::field(
+                ui,
+                &mut self.panes.entry(me).or_default().name,
+                "name",
+                name,
             );
             if ui.button("List").clicked() {
                 self.propose(me, vec![Op::NameList]);
@@ -612,7 +646,7 @@ impl AdminApp {
             theme.text_secondary,
             "SIP-39. Removing one stops the next call across it, not one already up.",
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("List").clicked() {
                 self.propose(me, vec![Op::PeerList]);
             }
@@ -640,7 +674,7 @@ impl AdminApp {
     fn audit_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
         ui.heading("Audit and status");
         let _ = theme;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::DragValue::new(&mut self.panes.entry(me).or_default().tail)
                     .range(1..=500)

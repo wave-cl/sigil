@@ -32,108 +32,107 @@
 
 use crate::{ColorTheme, tokens};
 
-/// What an icon depicts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Icon {
-    /// Place a call.
-    Call,
-    /// End one.
-    HangUp,
-    /// Channel settings.
-    Settings,
-    /// Who is in this conversation.
-    People,
-    /// This account's devices.
-    Device,
-    /// Make something new.
-    Plus,
-    /// Start a new conversation.
-    Compose,
-    /// There is a menu under this.
-    Chevron,
-    /// Show or hide the column beside this.
-    Menu,
-    /// Search.
-    Search,
-    /// Send a file.
-    Attach,
-    /// Send what is written.
-    Send,
-    /// Go back.
-    Back,
-    /// Put away, cancel, dismiss.
-    Close,
-    /// Ask again.
-    Refresh,
-    /// Edit.
-    Pencil,
-    /// A public channel.
-    Public,
-    /// Reply to a message.
-    Reply,
-    /// React to one.
-    React,
-    /// More, on one message.
-    More,
-    /// Be somebody else: back to the opening screen to choose an identity.
-    Switch,
-    /// Play a video, or carry on with one.
-    Play,
-    /// Hold a video where it is.
-    Pause,
-    /// The sound is on; press to mute it.
-    Sound,
-    /// The sound is off; press to hear it.
-    Muted,
-    /// See it as large as the window allows.
-    Enlarge,
-    /// This conversation is said out loud; press to mute it.
-    Bell,
-    /// This conversation is muted; press to hear about it again.
-    BellOff,
-    /// This key was verified: its safety words were compared with its
-    /// owner (SIP-41).
-    Verified,
-    /// Apply what has been typed beside it.
-    Check,
+/// The icon set, declared once.
+///
+/// # Why a macro and not three lists
+///
+/// The enum, the list the sheet draws, and the word each one says were three
+/// hand-written copies of the same set, and the two that were not the enum
+/// went stale in silence. Nine icons -- everything added after `Switch` --
+/// were missing from the sheet, so they had never been *looked at* at the
+/// size they are used, which is the only thing that sheet exists for; and the
+/// test that every icon reaches the accessibility tree by its word looped
+/// over the same stale list, so it passed by not asking about them. A check
+/// that enumerates from a copy of the table checks the copy.
+///
+/// Declared here, an icon cannot be added without its word and its place in
+/// [`Icon::ALL`]. See `crates/sigil/tests/icon_ui.rs` for the sheet.
+macro_rules! icons {
+    ($($(#[$doc:meta])* $name:ident => $word:expr),* $(,)?) => {
+        /// What an icon depicts.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Icon {
+            $($(#[$doc])* $name),*
+        }
+
+        impl Icon {
+            /// Every icon there is, in the order they were added.
+            ///
+            /// Derived from the same declaration as the enum, so it cannot
+            /// fall behind it.
+            pub const ALL: &'static [Icon] = &[$(Icon::$name),*];
+
+            /// The word for it. The tooltip, and what the accessibility tree
+            /// carries.
+            pub fn word(self) -> &'static str {
+                match self { $(Icon::$name => $word),* }
+            }
+        }
+    };
 }
 
-impl Icon {
-    /// The word for it. The tooltip, and what the accessibility tree carries.
-    pub fn word(self) -> &'static str {
-        match self {
-            Icon::Call => "Call",
-            Icon::HangUp => "Hang up",
-            Icon::Settings => "Settings",
-            Icon::People => "Members",
-            Icon::Device => "Devices",
-            Icon::Plus => "New",
-            Icon::Compose => "New conversation",
-            Icon::Chevron => "More choices",
-            Icon::Menu => "Chats",
-            Icon::Search => "Search",
-            Icon::Attach => "Attach a file",
-            Icon::Send => "Send",
-            Icon::Back => "Back",
-            Icon::Close => "Close",
-            Icon::Refresh => "Refresh",
-            Icon::Pencil => "Edit",
-            Icon::Public => "Public channel",
-            Icon::Reply => "Reply",
-            Icon::React => "React",
-            Icon::More => "More",
-            Icon::Switch => "Switch identity",
-            Icon::Play => "Play",
-            Icon::Pause => "Pause",
-            Icon::Sound => "Mute",
-            Icon::Muted => "Unmute",
-            Icon::Enlarge => "See it full size",
-            Icon::Bell => "Mute this conversation",
-            Icon::BellOff => "Unmute this conversation",
-            Icon::Verified => "verified",
-            Icon::Check => "Set",
-        }
-    }
+icons! {
+    /// Place a call.
+    Call => "Call",
+    /// End one.
+    HangUp => "Hang up",
+    /// Channel settings.
+    Settings => "Settings",
+    /// Who is in this conversation.
+    People => "Members",
+    /// This account's devices.
+    Device => "Devices",
+    /// Make something new.
+    Plus => "New",
+    /// Start a new conversation.
+    Compose => "New conversation",
+    /// There is a menu under this.
+    Chevron => "More choices",
+    /// Show or hide the column beside this.
+    Menu => "Chats",
+    /// Search.
+    Search => "Search",
+    /// Send a file.
+    Attach => "Attach a file",
+    /// Send what is written.
+    Send => "Send",
+    /// Go back.
+    Back => "Back",
+    /// Put away, cancel, dismiss.
+    Close => "Close",
+    /// Ask again.
+    Refresh => "Refresh",
+    /// Edit.
+    Pencil => "Edit",
+    /// A public channel.
+    Public => "Public channel",
+    /// Reply to a message.
+    Reply => "Reply",
+    /// React to one.
+    React => "React",
+    /// More, on one message.
+    More => "More",
+    /// Be somebody else: back to the opening screen to choose an identity.
+    Switch => "Switch identity",
+    /// Play a video, or carry on with one.
+    Play => "Play",
+    /// Hold a video where it is.
+    Pause => "Pause",
+    /// The sound is on; press to mute it.
+    Sound => "Mute",
+    /// The sound is off; press to hear it.
+    Muted => "Unmute",
+    /// See it as large as the window allows.
+    Enlarge => "See it full size",
+    /// This conversation is said out loud; press to mute it.
+    Bell => "Mute this conversation",
+    /// This conversation is muted; press to hear about it again.
+    BellOff => "Unmute this conversation",
+    /// This key was verified: its safety words were compared with its
+    /// owner (SIP-41).
+    Verified => "verified",
+    /// Apply what has been typed beside it.
+    Check => "Set",
 }
 
 /// Paint one inside `rect`, in `colour`.

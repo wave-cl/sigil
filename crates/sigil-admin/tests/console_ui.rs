@@ -13,35 +13,47 @@ fn account() -> Account {
 }
 
 fn harness(state: AdminState) -> Harness<'static> {
+    sized(state, egui::vec2(900.0, 700.0), sigil::Form::Desktop)
+}
+
+/// The same console on a phone: 360 points, and the form that says the
+/// controls are pressed with a finger.
+///
+/// The console had no phone render at all, and it is the pane most likely to
+/// be a desktop's: it is rows of operations with their buttons beside them.
+fn harness_phone(state: AdminState) -> Harness<'static> {
+    sized(state, egui::vec2(360.0, 804.0), sigil::Form::Phone)
+}
+
+fn sized(state: AdminState, size: egui::Vec2, form: sigil::Form) -> Harness<'static> {
     let mut app = AdminApp::new();
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
-    Harness::builder()
-        .with_size(egui::vec2(900.0, 700.0))
-        .build_ui(move |ui| {
-            let ctx = ui.ctx().clone();
-            theme::install(&ctx, theme::light(), theme::dark());
-            ctx.set_theme(egui::Theme::Dark);
-            let t = sigil::ColorTheme::current(&ctx);
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::NONE
-                        .fill(t.surface_primary)
-                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_LG as i8)),
-                )
-                .show(ui, |ui| {
-                    let mut nav = Navigator::default();
-                    let mut app_ctx = AppContext {
-                        navigator: &mut nav,
-                        accounts: &mut accounts,
-                        unfocused: false,
-                        away: false,
-                        notify: &sigil::Silent,
-                        connections: &Default::default(),
-                    };
-                    let _ = app.render(&mut app_ctx, ui);
-                });
-        })
+    Harness::builder().with_size(size).build_ui(move |ui| {
+        let ctx = ui.ctx().clone();
+        sigil::Form::install(&ctx, form);
+        theme::install(&ctx, theme::light(), theme::dark());
+        ctx.set_theme(egui::Theme::Dark);
+        let t = sigil::ColorTheme::current(&ctx);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(t.surface_primary)
+                    .inner_margin(egui::Margin::same(form.body_margin() as i8)),
+            )
+            .show(ui, |ui| {
+                let mut nav = Navigator::default();
+                let mut app_ctx = AppContext {
+                    navigator: &mut nav,
+                    accounts: &mut accounts,
+                    unfocused: false,
+                    away: false,
+                    notify: &sigil::Silent,
+                    connections: &Default::default(),
+                };
+                let _ = app.render(&mut app_ctx, ui);
+            });
+    })
 }
 
 fn text_of(h: &Harness<'static>) -> String {
@@ -334,4 +346,27 @@ fn a_key_that_is_not_one_is_refused_in_words() {
     let said = text_of(&h);
     assert!(said.contains("Sign this?"), "{said}");
     assert!(!said.contains("not a key"), "{said}");
+}
+
+/// The console on a desktop.
+///
+/// Its partner, so the narrow arm cannot be improved at the wide one's
+/// expense without the diff saying so. There was no render of either.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn console_dark() {
+    let mut h = harness(up());
+    h.run();
+    h.run();
+    h.snapshot("console_dark");
+}
+
+/// The console, drawn on a phone.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn console_phone() {
+    let mut h = harness_phone(up());
+    h.run();
+    h.run();
+    h.snapshot("console_phone");
 }
