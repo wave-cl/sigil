@@ -2255,6 +2255,57 @@ impl Known {
     }
 }
 
+/// Why a blob could not be fetched.
+///
+/// # Why this is not a set of ids
+///
+/// It was, and every failure was final: the fetch's `Err(_)` arm put the
+/// blob in a set and nothing took it out until the reader pressed Refetch or
+/// the session restarted. The comment said what it was for -- "a blob past
+/// its retention window is gone, and asking again four times a second will
+/// not bring it back" -- and that is true of a blob that is *gone*. It is not
+/// true of a radio that dropped for a second, which is the ordinary condition
+/// of a phone, and both arrived here as the same `Err`.
+///
+/// So a failed fetch asks `/blob/head` (SIP-18) what actually happened. The
+/// exchange answering `found: false` is the only thing that makes a file
+/// missing; everything else is worth trying again, after a pause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unfetched {
+    /// The exchange says it does not hold this blob. Nothing will bring it
+    /// back, and the row says so.
+    Gone,
+    /// The fetch failed and the blob is still there, or the exchange could
+    /// not be asked. Tried again once [`RETRY_AFTER`] has passed.
+    Later(std::time::Instant),
+}
+
+/// How long to leave a blob alone after a fetch that failed for a reason
+/// that was not the blob.
+///
+/// Long enough that a link which is down does not turn into a fetch on every
+/// pass -- which is what the original set was for, and the part of it worth
+/// keeping. Short enough that a reader looking at a picture does not have to
+/// press anything for it to arrive once the radio comes back.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a failed fetch means, given what `/blob/head` said about the blob.
+///
+/// Its own function because it is the whole decision, and the case that
+/// matters -- a transient failure on a blob the exchange still holds -- is
+/// one a test cannot easily produce against a real exchange. Here it can be
+/// asked directly.
+fn after_a_failed_fetch(head: Option<bool>, now: std::time::Instant) -> Unfetched {
+    match head {
+        // The exchange was asked and says it does not have it.
+        Some(false) => Unfetched::Gone,
+        // It does have it, so the fetch failed for some other reason; or it
+        // could not be asked at all, which is itself a link that is down.
+        // Neither says the file is gone.
+        Some(true) | None => Unfetched::Later(now),
+    }
+}
+
 /// The session's own view of the world, kept between ticks.
 struct Desk {
     channels: HashMap<[u8; 32], Known>,
@@ -2314,9 +2365,13 @@ struct Desk {
     files: HashMap<[u8; 32], std::sync::Arc<[u8]>>,
     /// The order they were fetched in, for [`to_put_down`].
     fetched: Vec<[u8; 32]>,
-    /// Blobs we tried and could not get, so a broken one is not retried on
-    /// every pass for as long as the conversation is open.
-    unfetchable: HashSet<[u8; 32]>,
+    /// Blobs a fetch has failed on, and whether the failure was final.
+    ///
+    /// See [`Unfetched`]: a file the exchange no longer holds is different from
+    /// one a radio dropped, and until this told them apart every fetch that
+    /// failed for any reason was remembered as "gone" for the rest of the
+    /// session.
+    unfetchable: HashMap<[u8; 32], Unfetched>,
     /// Files over [`AUTO_FETCH_MAX`] the reader pressed Fetch on. A file
     /// that is already on the disc -- this session's own upload, or one
     /// fetched last time -- needs no entry here: the store is asked directly,
@@ -2349,7 +2404,7 @@ impl Default for Desk {
             answered: HashSet::new(),
             files: HashMap::new(),
             fetched: Vec::new(),
-            unfetchable: HashSet::new(),
+            unfetchable: HashMap::new(),
             wanted: HashSet::new(),
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
@@ -3728,7 +3783,7 @@ async fn fetch_files(
         .timeline
         .messages()
         .flat_map(|m| m.post.attachments())
-        .filter(|a| !desk.files.contains_key(&a.blob) && !desk.unfetchable.contains(&a.blob))
+        .filter(|a| !desk.files.contains_key(&a.blob) && !held_back(desk, &a.blob))
         .map(|a| (a, chat.store().has_blob(&a.blob).unwrap_or(false)))
         .filter(|(a, on_disc)| match a.effective_kind() {
             sqex_proto::blob::KIND_IMAGE => {
@@ -3794,16 +3849,29 @@ async fn fetch_files(
     }
     match chat.download(&a).await {
         Ok(bytes) => land(desk, a.blob, bytes),
-        // Remembered as a failure rather than retried every pass. A blob that
-        // has passed its retention window is gone, and asking again four times
-        // a second will not bring it back.
+        // **Ask what actually happened.** A fetch that failed because the
+        // blob is gone and one that failed because the link blinked arrive
+        // here as the same `Err`, and treating them alike meant a picture
+        // lost to one dropped packet read as "no longer at the exchange" for
+        // the rest of the session. `/blob/head` is the difference (SIP-18).
         Err(_) => {
-            desk.unfetchable.insert(a.blob);
+            let head = chat.head(&a.blob).await.ok().map(|h| h.found);
+            let trouble = after_a_failed_fetch(head, std::time::Instant::now());
+            desk.unfetchable.insert(a.blob, trouble);
         }
     }
     Fetching {
         more: waiting > 1,
         landed,
+    }
+}
+
+/// Whether a blob is being left alone: gone for good, or waiting out a retry.
+fn held_back(desk: &Desk, blob: &[u8; 32]) -> bool {
+    match desk.unfetchable.get(blob) {
+        Some(Unfetched::Gone) => true,
+        Some(Unfetched::Later(when)) => when.elapsed() < RETRY_AFTER,
+        None => false,
     }
 }
 
@@ -4238,7 +4306,11 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
                             // Asked for and refused, as against not reached
                             // yet. The two look the same on screen otherwise,
                             // and only one of them is worth waiting for.
-                            missing: desk.unfetchable.contains(&a.blob),
+                            // Only a blob the exchange says it does not hold.
+                            // One waiting out a retry is not missing; it is
+                            // on its way, and saying otherwise is the fault
+                            // this told apart.
+                            missing: matches!(desk.unfetchable.get(&a.blob), Some(Unfetched::Gone)),
                             held: !fetch_unasked(
                                 a.size,
                                 desk.wanted.contains(&a.blob),
@@ -6627,6 +6699,79 @@ mod verified_tests {
             verified_holder("ada@squic.org", &k(9), [k(2)], handle),
             None,
             "ada was never verified, only bob"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::{Desk, RETRY_AFTER, Unfetched, after_a_failed_fetch, held_back};
+    use std::time::Duration;
+
+    /// **A dropped radio is not a deleted file.**
+    ///
+    /// Every failed fetch used to be remembered as final: the `Err(_)` arm
+    /// put the blob in a set, nothing took it out, and the row said "no
+    /// longer at the exchange" until the reader pressed Refetch or restarted.
+    /// That is right for a blob past its retention window and wrong for a
+    /// phone, where a link that blinks for one packet is the ordinary
+    /// condition and arrives as the same `Err`.
+    ///
+    /// The exchange answering `found: false` is now the only thing that makes
+    /// a file missing. Tested here rather than against a real exchange
+    /// because the case that matters -- a fetch that fails on a blob the
+    /// exchange still holds -- is one a test cannot easily produce, and this
+    /// is the whole of the decision.
+    #[test]
+    fn only_the_exchange_saying_it_has_no_such_blob_makes_a_file_missing() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            after_a_failed_fetch(Some(false), now),
+            Unfetched::Gone,
+            "the exchange says it does not hold it: that file is gone"
+        );
+        assert_eq!(
+            after_a_failed_fetch(Some(true), now),
+            Unfetched::Later(now),
+            "the exchange still holds it, so the fetch failed for some other \
+             reason and the file is not missing"
+        );
+        assert_eq!(
+            after_a_failed_fetch(None, now),
+            Unfetched::Later(now),
+            "the exchange could not even be asked, which is a link that is \
+             down -- the least likely moment to conclude a file is gone"
+        );
+    }
+
+    /// And a blob waiting out a retry is left alone until it has.
+    ///
+    /// The part of the old set worth keeping: a link that is down must not
+    /// turn into a fetch on every pass, which is sixty a second.
+    #[test]
+    fn a_blob_that_failed_is_left_alone_and_then_tried_again() {
+        let mut desk = Desk::default();
+        let blob = [7u8; 32];
+        assert!(!held_back(&desk, &blob), "nothing has failed yet");
+
+        desk.unfetchable
+            .insert(blob, Unfetched::Later(std::time::Instant::now()));
+        assert!(held_back(&desk, &blob), "just failed: not straight away");
+
+        desk.unfetchable.insert(
+            blob,
+            Unfetched::Later(std::time::Instant::now() - RETRY_AFTER - Duration::from_secs(1)),
+        );
+        assert!(
+            !held_back(&desk, &blob),
+            "the pause has passed, so it is tried again without anybody \
+             pressing anything"
+        );
+
+        desk.unfetchable.insert(blob, Unfetched::Gone);
+        assert!(
+            held_back(&desk, &blob),
+            "gone stays gone, however long anybody waits"
         );
     }
 }

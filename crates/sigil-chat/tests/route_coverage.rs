@@ -89,11 +89,10 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/blob/get", Chat),
     ("POST", "/blob/attach", Chat),
     ("POST", "/blob/detach", Beneath),
-    (
-        "POST",
-        "/blob/head",
-        NotYet("nothing asks whether a file is still there before fetching it"),
-    ),
+    // SIP-18: a fetch that failed asks whether the blob is still there, which
+    // is what tells a file past its retention window from a radio that
+    // dropped -- both of which arrive at the client as the same error.
+    ("POST", "/blob/head", Chat),
     ("POST", "/profile/put", Chat),
     ("POST", "/profile/get", Chat),
     ("POST", "/block/set", Chat),
@@ -502,7 +501,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 76,
+        reached, 77,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );
