@@ -28,21 +28,45 @@ fn rows() -> Vec<Row> {
 }
 
 fn harness(rows: Vec<Row>, connecting: usize) -> Harness<'static> {
-    Harness::builder()
-        .with_size(egui::vec2(900.0, 260.0))
-        .build_ui(move |ui| {
-            let ctx = ui.ctx().clone();
-            theme::install(&ctx, theme::light(), theme::dark());
-            ctx.set_theme(egui::Theme::Dark);
-            let t = sigil::ColorTheme::current(&ctx);
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::NONE
-                        .fill(t.surface_primary)
-                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_LG as i8)),
-                )
-                .show(ui, |ui| roster(ui, &rows, connecting));
-        })
+    sized(
+        rows,
+        connecting,
+        egui::vec2(900.0, 260.0),
+        sigil::Form::Desktop,
+    )
+}
+
+/// The same roster on a phone. Its rows carry a key, a meter and a sentence
+/// about the path, which at 360 points is more than a row holds.
+fn harness_phone(rows: Vec<Row>, connecting: usize) -> Harness<'static> {
+    sized(
+        rows,
+        connecting,
+        egui::vec2(360.0, 320.0),
+        sigil::Form::Phone,
+    )
+}
+
+fn sized(
+    rows: Vec<Row>,
+    connecting: usize,
+    size: egui::Vec2,
+    form: sigil::Form,
+) -> Harness<'static> {
+    Harness::builder().with_size(size).build_ui(move |ui| {
+        let ctx = ui.ctx().clone();
+        sigil::Form::install(&ctx, form);
+        theme::install(&ctx, theme::light(), theme::dark());
+        ctx.set_theme(egui::Theme::Dark);
+        let t = sigil::ColorTheme::current(&ctx);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(t.surface_primary)
+                    .inner_margin(egui::Margin::same(form.body_margin() as i8)),
+            )
+            .show(ui, |ui| roster(ui, &rows, connecting));
+    })
 }
 
 fn text_of(h: &Harness<'static>) -> String {
@@ -126,4 +150,18 @@ fn roster_dark() {
     let mut h = harness(rows(), 1);
     h.run();
     h.snapshot("roster_dark");
+}
+
+/// The roster on a phone: the path's detail under its row rather than after
+/// it, because after it was 572 points in a 360-point pane.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn roster_phone() {
+    let mut rows = rows();
+    // What the engine really reports, rather than the abbreviation the
+    // desktop fixture uses: this is the string that did not fit.
+    rows[0].detail = "2.1% lost, 180 ms of buffer, concealing 3 frames in 100".into();
+    let mut h = harness_phone(rows, 1);
+    h.run();
+    h.snapshot("roster_phone");
 }

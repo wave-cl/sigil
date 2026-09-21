@@ -77,8 +77,32 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
                         theme.border_default
                     }),
             );
-            ui.colored_label(theme.text_muted, &row.detail);
+            // **On a phone the detail goes under the row, not after it.**
+            // It is a sentence about the path -- "2.1% lost, 180 ms of
+            // buffer, concealing 3 frames in 100" -- and a `horizontal` never
+            // wraps, so after a key and a meter it took a 360-point pane out
+            // to 572 and every row after it with it. There is no shortening
+            // it either: each clause is a separate fact somebody is reading
+            // it for.
+            if !narrow {
+                ui.colored_label(theme.text_muted, &row.detail);
+            }
         });
+        if narrow && !row.detail.is_empty() {
+            ui.horizontal(|ui| {
+                // Indented to the key, so it reads as belonging to the row
+                // above rather than as a line of its own.
+                ui.add_space(tokens::SPACING_MD + tokens::SPACING_SM);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&row.detail)
+                            .small()
+                            .color(theme.text_muted),
+                    )
+                    .wrap(),
+                );
+            });
+        }
     }
 
     if connecting > 0 {
