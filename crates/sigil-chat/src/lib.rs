@@ -7926,7 +7926,10 @@ impl ChatApp {
                 "Its key",
                 &mut self.panes.entry(at.clone()).or_default().linking,
                 "the new device's key, in base58",
-                Some(sigil_ui::Action::Word("Write credential")),
+                Some(sigil_ui::Action::Mark(
+                    sigil_ui::Icon::Check,
+                    "Write credential",
+                )),
             );
             if write {
                 // A phone shows its key as `sqx-device:<key>` (SIP-47), and
@@ -7995,7 +7998,7 @@ impl ChatApp {
             "",
             &mut self.panes.entry(at.clone()).or_default().pairing,
             "sqx-pair:<account>@<domain>, or name@domain",
-            Some(sigil_ui::Action::Word("Go there")),
+            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Check, "Go there")),
         );
         if go {
             let typed = self.pane(at).pairing.trim().to_string();
@@ -8051,7 +8054,10 @@ impl ChatApp {
             "",
             &mut self.panes.entry(at.clone()).or_default().presenting,
             "the credential your other device wrote, in base58",
-            Some(sigil_ui::Action::Word("Register this device")),
+            Some(sigil_ui::Action::Mark(
+                sigil_ui::Icon::Check,
+                "Register this device",
+            )),
         );
         if register {
             let typed = self.pane(at).presenting.trim().to_string();
