@@ -353,6 +353,70 @@ mod tests {
     /// Muted text must still be legible against the surface it sits on. A
     /// contrast floor is the one property of a palette worth asserting: it is
     /// the failure that looks fine to whoever picked the colours.
+    /// **The touch scale reaches a phone and not a desktop.**
+    ///
+    /// `phone_style` is a third again on every control, a bigger hit radius
+    /// and body text a size up. Applied to a desktop it would grow the whole
+    /// interface; left off a phone it would leave every target pointer-sized
+    /// on the one device that has no pointer. Neither says anything: both
+    /// are an interface that draws.
+    #[test]
+    fn the_touch_scale_is_a_phones_and_only_a_phones() {
+        let desktop = egui::Context::default();
+        install(&desktop, light(), dark());
+        let pointer = desktop.style_of(egui::Theme::Dark).spacing.interact_size.y;
+
+        let phone = egui::Context::default();
+        crate::Form::install(&phone, crate::Form::Phone);
+        install(&phone, light(), dark());
+        let finger = phone.style_of(egui::Theme::Dark).spacing.interact_size.y;
+
+        assert_eq!(
+            finger,
+            tokens::BUTTON_LG,
+            "a phone's controls are a finger tall"
+        );
+        assert!(
+            pointer < finger,
+            "a desktop got the touch scale too: {pointer} against {finger}"
+        );
+        assert!(
+            phone.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size
+                > desktop.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size,
+            "a phone's body text is a size up"
+        );
+    }
+
+    /// **The form has to be installed before the theme**, and a form
+    /// installed after takes effect on the next one.
+    ///
+    /// `install` reads the form once, while it is building the style. A host
+    /// that sets the form afterwards gets a phone with pointer-sized targets
+    /// -- on the device only, and silently, because an interface with small
+    /// buttons is an interface. Both are installed every pass in the shell
+    /// and in the harnesses, which is what makes the order recoverable
+    /// rather than permanent; this says so out loud.
+    #[test]
+    fn a_form_installed_after_the_theme_arrives_with_the_next_theme() {
+        let ctx = egui::Context::default();
+        install(&ctx, light(), dark());
+        crate::Form::install(&ctx, crate::Form::Phone);
+        assert!(
+            ctx.style_of(egui::Theme::Dark).spacing.interact_size.y < tokens::BUTTON_LG,
+            "the style was built before the form was known, so it is still \
+             the pointer's -- the order matters and this is the wrong one"
+        );
+
+        // The next pass installs both again, as every host does.
+        install(&ctx, light(), dark());
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark).spacing.interact_size.y,
+            tokens::BUTTON_LG,
+            "and the pass after picks it up, which is what makes the wrong \
+             order a flicker rather than a phone nobody can press"
+        );
+    }
+
     #[test]
     fn muted_text_stays_legible_on_every_surface() {
         fn luminance(c: Color32) -> f32 {
