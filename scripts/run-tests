@@ -38,7 +38,9 @@ trap 'rm -f "$log"' EXIT
 set +e
 if cargo nextest --version >/dev/null 2>&1; then
     runner=nextest
-    cargo nextest run --workspace ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
+    # No colour into the log: CI sets CARGO_TERM_COLOR=always, and the
+    # escape codes land between the numbers the floor is read from.
+    cargo nextest run --workspace --color never ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
 else
     runner=test
     cargo test --workspace ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
@@ -55,7 +57,7 @@ fi
 # empty suites report zero and contribute nothing, which is what we want:
 # only real assertions count towards the floor.
 if [[ "$runner" == nextest ]]; then
-    passed=$(grep -Eo '[0-9]+ tests? run: [0-9]+ passed' "$log" | tail -1 \
+    passed=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -Eo '[0-9]+ tests? run: [0-9]+ passed' | tail -1 \
              | grep -Eo '[0-9]+ passed' | grep -Eo '[0-9]+')
 else
     passed=$(grep -Eo '^test result: ok\. [0-9]+ passed' "$log" \

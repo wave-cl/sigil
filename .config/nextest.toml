@@ -1,0 +1,11 @@
+# nextest runs every test binary at once, which is what makes it three times
+# faster than `cargo test` here -- and what starves a test whose assertion is
+# a deadline. A typing signal lives a few seconds at the exchange; on a
+# four-core runner with two hundred tests in flight, the other side's poll
+# came after it had expired. Such a test takes the whole machine.
+[profile.default]
+fail-fast = false
+
+[[profile.default.overrides]]
+filter = 'test(typing_stops_looking_like_typing)'
+threads-required = 'num-cpus'
