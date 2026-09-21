@@ -229,6 +229,7 @@ fn a_conversation() -> ChatState {
         i_am_admin: true,
         reports: Vec::new(),
         reports_pending: 0,
+        backup: None,
         topic: String::new(),
         home: None,
         ringing: Vec::new(),
@@ -3716,7 +3717,7 @@ fn an_account_with_no_second_device_is_told_the_store_is_the_only_copy() {
         not_after: NOW + 90 * DAY,
         is_this_one: true,
     }];
-    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Devices);
     h.run();
     let said = text_of(&h);
     assert!(
@@ -3724,9 +3725,76 @@ fn an_account_with_no_second_device_is_told_the_store_is_the_only_copy() {
         "the warning has to say the store is unrecoverable: {said}"
     );
     assert!(
-        said.contains("Link a second device"),
+        said.contains("Back it up below, or link a second device"),
         "and what to do about it: {said}"
     );
+    // SIP-48: backed up, the warning is withdrawn.
+    state.backup = Some(sigil_chat::Backup {
+        has_key: true,
+        held: Some(sigil_chat::HeldBackup {
+            generation: 3,
+            written: NOW - DAY,
+            device: me(),
+        }),
+        used: 1234,
+        quota: 1 << 20,
+        words: None,
+    });
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("only copy"),
+        "backed up, and still warned: {said}"
+    );
+}
+
+/// SIP-48 in the Devices view: nothing backed up says so and offers to make
+/// a key, with Back up now disabled; a key shown is 24 words under the
+/// caveat; a backup held says its generation and offers Drop.
+#[test]
+fn the_backup_section_says_what_the_exchange_holds_and_shows_the_words_once() {
+    let mut state = a_conversation();
+    state.backup = Some(sigil_chat::Backup {
+        has_key: false,
+        held: None,
+        used: 0,
+        quota: 1 << 20,
+        words: None,
+    });
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Nothing backed up at this exchange."),
+        "{said}"
+    );
+    assert!(said.contains("Make a backup key"), "{said}");
+    assert!(said.contains("Back up now"), "{said}");
+    assert!(!said.contains("Drop backup"), "nothing to drop: {said}");
+
+    let words: Vec<String> = (1..=24).map(|i| format!("word{i}")).collect();
+    state.backup.as_mut().unwrap().has_key = true;
+    state.backup.as_mut().unwrap().words = Some(words);
+    let mut h = harness_at(state.clone(), sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Write these words down"), "{said}");
+    assert!(said.contains("word1") && said.contains("word24"), "{said}");
+    assert!(said.contains("Hide"), "{said}");
+
+    state.backup.as_mut().unwrap().words = None;
+    state.backup.as_mut().unwrap().held = Some(sigil_chat::HeldBackup {
+        generation: 2,
+        written: NOW - DAY,
+        device: me(),
+    });
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Backed up: generation 2"), "{said}");
+    assert!(said.contains("Show backup key"), "{said}");
+    assert!(said.contains("Drop backup"), "{said}");
 }
 
 /// A revoked device says so, rather than looking broken.

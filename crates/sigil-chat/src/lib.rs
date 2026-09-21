@@ -10,9 +10,9 @@ pub mod siblings;
 
 use session::RING_WINDOW;
 pub use session::{
-    Attached, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, Hit, Line, LinkState,
-    Linked, Member, Person, Posted, Quoted, Receipt, Report, Ring, Standing, Summary, Thumb,
-    Trouble,
+    Attached, Backup, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, HeldBackup, Hit,
+    Line, LinkState, Linked, Member, Person, Posted, Quoted, Receipt, Report, Ring, Standing,
+    Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -915,6 +915,9 @@ struct Pane {
     /// SIP-56: the report dialog's reason and note.
     report_reason: u8,
     report_note: String,
+    /// SIP-48: the words typed to restore from, and the drop's second step.
+    restoring: String,
+    confirming_drop: bool,
     /// The message whose file is being forwarded.
     forwarding: Option<(u64, usize)>,
     /// The picture being looked at full size: a message and which of its
@@ -1076,6 +1079,8 @@ impl Default for Pane {
             exchange_via: false,
             report_reason: 1,
             report_note: String::new(),
+            restoring: String::new(),
+            confirming_drop: false,
             claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
@@ -2552,6 +2557,7 @@ impl ChatApp {
         match go {
             Some(Route::Devices) => {
                 self.send_as(Some(at), Cmd::Devices);
+                self.send_as(Some(at), Cmd::BackupStatus);
                 ctx.navigator.push_here(Route::Devices);
             }
             Some(Route::Members) => {
@@ -6046,6 +6052,7 @@ impl ChatApp {
             }
             Command::Devices => {
                 self.send_as(Some(at), Cmd::Devices);
+                self.send_as(Some(at), Cmd::BackupStatus);
                 ctx.navigator.push_here(Route::Devices);
             }
             Command::Search(text) => {
@@ -7470,6 +7477,7 @@ impl ChatApp {
             ui.heading("Devices");
             if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
                 self.send_as(Some(at), Cmd::Devices);
+                self.send_as(Some(at), Cmd::BackupStatus);
             }
         });
 
@@ -7485,12 +7493,13 @@ impl ChatApp {
         }
 
         ui.add_space(tokens::SPACING_SM);
-        if state.devices.len() <= 1 {
+        let backed_up = state.backup.as_ref().is_some_and(|b| b.held.is_some());
+        if state.devices.len() <= 1 && !backed_up {
             ui.colored_label(
                 theme.warning,
                 "Nothing else is linked. The conversations on this machine cannot be \
                  recovered from the exchange — opening a key spends it, so what is here \
-                 is the only copy. Link a second device and it becomes the backup.",
+                 is the only copy. Back it up below, or link a second device.",
             );
             ui.add_space(tokens::SPACING_SM);
         }
@@ -7702,7 +7711,146 @@ impl ChatApp {
             )
             .small(),
         );
+
+        self.backup_ui(at, &state, ui, &theme);
         AppResponse::default()
+    }
+
+    /// SIP-48: the account's sealed backup at the exchange. A key the exchange
+    /// never sees, shown once as 24 words to write down; a copy written on
+    /// demand; restored into any store of the account with the words.
+    fn backup_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.add_space(tokens::SPACING_MD);
+        ui.separator();
+        ui.add_space(tokens::SPACING_SM);
+        ui.heading("Backup");
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "A sealed copy of this account's conversations and contacts, kept at the \
+                 exchange under a key it never sees. The 24 words are the whole of what \
+                 opens it.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        let Some(backup) = state.backup.as_ref() else {
+            ui.colored_label(theme.text_secondary, "Asking the exchange…");
+            return;
+        };
+        match &backup.held {
+            Some(held) => {
+                ui.label(format!(
+                    "Backed up: generation {}, written {} by {}.",
+                    held.generation,
+                    sigil_ui::brief(held.written, self.now()),
+                    sigil_ui::message::short(&held.device.to_string())
+                ));
+            }
+            None => {
+                ui.colored_label(theme.text_secondary, "Nothing backed up at this exchange.");
+            }
+        }
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(format!("{} of {} bytes used.", backup.used, backup.quota)).small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(backup.has_key, egui::Button::new("Back up now"))
+                .on_disabled_hover_text("Make a backup key first, and write its words down.")
+                .on_hover_text("Write what is here to the exchange, sealed under the key.")
+                .clicked()
+            {
+                self.send_as(Some(at), Cmd::BackupNow);
+            }
+            let key_label = if backup.has_key {
+                "Show backup key"
+            } else {
+                "Make a backup key"
+            };
+            if backup.words.is_none() && ui.button(key_label).clicked() {
+                self.send_as(Some(at), Cmd::BackupKey);
+            }
+            if backup.words.is_some() && ui.button("Hide").clicked() {
+                self.send_as(Some(at), Cmd::HideBackupKey);
+            }
+        });
+        if let Some(words) = &backup.words {
+            ui.add_space(tokens::SPACING_SM);
+            ui.colored_label(
+                theme.warning,
+                "Write these words down, in order, where this machine is not. They are \
+                 the whole of what opens the backup, and nothing can get them back.",
+            );
+            egui::Grid::new("backup-words")
+                .num_columns(6)
+                .spacing([tokens::SPACING_MD, tokens::SPACING_XS])
+                .show(ui, |ui| {
+                    for (i, word) in words.iter().enumerate() {
+                        ui.label(egui::RichText::new(format!("{:>2}. {word}", i + 1)).monospace());
+                        if (i + 1) % 6 == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+        }
+
+        ui.add_space(tokens::SPACING_MD);
+        ui.label("Restore");
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Restoring adds what the backup holds to what is here; nothing here is \
+                 removed. On a fresh install, this is how the conversations come back.",
+            )
+            .small(),
+        );
+        let width = field_width(ui, 420.0);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.panes.entry(at.clone()).or_default().restoring)
+                .hint_text("the 24 words, in order")
+                .desired_rows(2)
+                .desired_width(width),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Restore").clicked() {
+                let words = self.pane(at).restoring.trim().to_string();
+                if !words.is_empty() {
+                    self.pane(at).restoring.clear();
+                    self.send_as(Some(at), Cmd::Restore(words));
+                }
+            }
+            if backup.held.is_some() {
+                // Two steps, as destroying a conversation is: releasing the
+                // copy is not undone by anything but writing another.
+                let confirming = self.pane(at).confirming_drop;
+                if !confirming {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("Drop backup").color(theme.destructive),
+                        ))
+                        .on_hover_text("Release the copy the exchange holds. What is here stays.")
+                        .clicked()
+                    {
+                        self.pane(at).confirming_drop = true;
+                    }
+                } else {
+                    ui.colored_label(
+                        theme.destructive,
+                        "This releases the copy at the exchange. What is on this machine stays.",
+                    );
+                    if ui.button("Yes, drop it").clicked() {
+                        self.pane(at).confirming_drop = false;
+                        self.send_as(Some(at), Cmd::DropBackup);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pane(at).confirming_drop = false;
+                    }
+                }
+            }
+        });
     }
 }
 

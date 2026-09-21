@@ -205,23 +205,11 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/rendezvous/introduce",
         NotYet("SIP-25 introductions"),
     ),
-    // SIP-48: the sealed backup is written and restored from sqex-chat's
-    // command line; sigil has no backup surface yet.
-    (
-        "POST",
-        "/backup/write",
-        NotYet("SIP-48 sealed backup, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/backup/read",
-        NotYet("SIP-48 sealed backup, from sqex-chat"),
-    ),
-    (
-        "POST",
-        "/backup/drop",
-        NotYet("SIP-48 sealed backup, from sqex-chat"),
-    ),
+    // SIP-48, since v0.1.39: the Backup section of the Devices view -- the
+    // key as 24 words, Back up now, Restore with the words, Drop.
+    ("POST", "/backup/write", Chat),
+    ("POST", "/backup/read", Chat),
+    ("POST", "/backup/drop", Chat),
     // SIP-53: a channel's origin moves; sigil reads across a move through
     // sqex-chat's client, which verifies under former origins, but does
     // not post one.
@@ -514,7 +502,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 73,
+        reached, 76,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

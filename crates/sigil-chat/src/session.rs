@@ -637,6 +637,9 @@ pub struct ChatState {
     /// only backup of it there can be. Losing this store with no second device
     /// loses those conversations permanently, for everybody in them.
     pub devices: Vec<Linked>,
+    /// SIP-48: what the exchange holds of this account's sealed backup, and
+    /// whether this store has the key to write one. `None` until asked.
+    pub backup: Option<Backup>,
     /// Whether this client still acts for its account.
     ///
     /// `None` when it was never linked: an account with no registered device
@@ -705,6 +708,28 @@ pub struct Hit {
 }
 
 /// One device registered to this account.
+/// SIP-48: the account's backup as the exchange and this store see it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Backup {
+    /// This store holds a backup key, so it can write one.
+    pub has_key: bool,
+    /// What the exchange holds, when it holds anything.
+    pub held: Option<HeldBackup>,
+    pub used: u64,
+    pub quota: u64,
+    /// The 24 words, while shown. Cleared by `Cmd::HideBackupKey`; never
+    /// kept in the state longer than the person asked to see them.
+    pub words: Option<Vec<String>>,
+}
+
+/// SIP-48: one backup, as the exchange describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldBackup {
+    pub generation: u64,
+    pub written: u64,
+    pub device: PubKey,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linked {
     pub device: PubKey,
@@ -1298,6 +1323,20 @@ pub enum Cmd {
     // ---- devices (SIP-20/22) --------------------------------------------
     /// Re-read the device list.
     Devices,
+    /// SIP-48: what the exchange holds of this account's backup, and whether
+    /// this store can write one.
+    BackupStatus,
+    /// SIP-48: show the backup key as 24 words, making one if there is none.
+    BackupKey,
+    /// Take the words off the state.
+    HideBackupKey,
+    /// SIP-48: write the store to the exchange now, sealed under the key.
+    BackupNow,
+    /// SIP-48: take the account's backup into this store, with the words.
+    /// Merges: nothing here is removed.
+    Restore(String),
+    /// SIP-48: release what the exchange holds. What is here stays.
+    DropBackup,
     /// Write a credential for another device to register itself with.
     ///
     /// The credential names both keys in the clear to whoever holds it, and it
@@ -5551,6 +5590,89 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
 
         Cmd::Devices => refresh_devices(chat, state, desk).await,
+        Cmd::BackupStatus => backup_status(chat, state).await,
+        Cmd::BackupKey => {
+            let key = match chat.backup_key() {
+                Ok(Some(key)) => Ok(key),
+                Ok(None) => chat.new_backup_key(),
+                Err(e) => Err(e),
+            };
+            match key {
+                Ok(key) => {
+                    let words: Vec<String> = Chat::backup_words(&key)
+                        .iter()
+                        .map(|w| w.to_string())
+                        .collect();
+                    state.send_modify(|s| {
+                        let b = s.backup.get_or_insert_with(Backup::default);
+                        b.has_key = true;
+                        b.words = Some(words);
+                    });
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::HideBackupKey => state.send_modify(|s| {
+            if let Some(b) = s.backup.as_mut() {
+                b.words = None;
+            }
+        }),
+        Cmd::BackupNow => {
+            let key = match chat.backup_key() {
+                Ok(Some(key)) => key,
+                Ok(None) => {
+                    return trouble(state, "make a backup key first, and write its words down");
+                }
+                Err(e) => return trouble(state, e),
+            };
+            match chat.backup(&key).await {
+                Ok(done) => {
+                    note(
+                        state,
+                        format!(
+                            "Backed up: generation {}, {} channel(s) uploaded, {} kept, \
+                             {} contact(s), {} bytes.",
+                            done.generation, done.uploaded, done.kept, done.contacts, done.bytes
+                        ),
+                    );
+                    backup_status(chat, state).await;
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Restore(words) => {
+            let split: Vec<&str> = words.split_whitespace().collect();
+            let key = match sqex_proto::backup::from_words(&split) {
+                Ok(key) => key,
+                Err(e) => return trouble(state, e),
+            };
+            match chat.restore(&key, None).await {
+                Ok(got) => {
+                    // The words that opened it are this store's key from now
+                    // on, so the next backup from here continues the line.
+                    let _ = chat.set_backup_key(&key);
+                    let mut said = format!(
+                        "Restored generation {}: {} channel(s), {} entries, {} keys, \
+                         {} contact(s).",
+                        got.generation, got.channels, got.entries, got.keys, got.contacts
+                    );
+                    if !got.skipped.is_empty() {
+                        said.push_str(&format!(" Skipped: {}.", got.skipped.join(", ")));
+                    }
+                    note(state, said);
+                    desk.restructure = true;
+                    backup_status(chat, state).await;
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::DropBackup => match chat.drop_backup().await {
+            Ok(()) => {
+                note(state, "Dropped. What is on this machine stays.".into());
+                backup_status(chat, state).await;
+            }
+            Err(e) => trouble(state, e),
+        },
         Cmd::ClaimAccount(owner) => {
             let account = match owner.trim().parse::<PubKey>() {
                 Ok(key) => Ok(key),
@@ -6048,6 +6170,30 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
 /// a trouble is about a state, and the state is rebuilt by every refresh — so
 /// keeping the two in one field puts every confirmation on screen for less than
 /// a tick, which is to say it is never read.
+/// SIP-48: what the exchange holds of this account's backup, and whether
+/// this store can write one. The words, if shown, stay shown.
+async fn backup_status(chat: &mut Chat, state: &watch::Sender<ChatState>) {
+    let has_key = chat.backup_key().ok().flatten().is_some();
+    let me = chat.me;
+    match chat.backup_held(&me).await {
+        Ok(held) => state.send_modify(|s| {
+            let words = s.backup.as_ref().and_then(|b| b.words.clone());
+            s.backup = Some(Backup {
+                has_key,
+                held: held.is_some().then_some(HeldBackup {
+                    generation: held.generation,
+                    written: held.written,
+                    device: held.device,
+                }),
+                used: held.used,
+                quota: held.quota,
+                words,
+            });
+        }),
+        Err(e) => trouble(state, e),
+    }
+}
+
 /// SIP-56: read the room's reports for an admin, and clear the badge.
 async fn load_reports(chat: &mut Chat, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
     match chat.reports(&channel).await {
