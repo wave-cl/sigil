@@ -496,3 +496,97 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
         "and stays ended without being said again"
     );
 }
+
+/// A call in progress, on a phone.
+///
+/// The call bar had never been drawn at 360 points -- the test above uses a
+/// 1000-point window, which is the width at which a row of controls always
+/// fits. It is also the one screen somebody is looking at *while* holding the
+/// phone to their ear, so a control that has slid off the edge is a call they
+/// cannot end.
+fn phone_call(
+    with: &str,
+) -> (
+    egui_kittest::Harness<'static>,
+    std::rc::Rc<std::cell::Cell<f32>>,
+    tempfile::TempDir,
+) {
+    use egui_kittest::Harness;
+
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = one.unlocked().expect("an open account").me();
+    let mut accounts = Accounts::of(vec![one]);
+    pass(&mut app, &mut accounts, &egui_ctx);
+
+    let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+        phase: sigil_net::Phase::Live,
+        path: Some(sigil_net::Path::Direct),
+        me: Some(me),
+        ..Default::default()
+    });
+    app.hold_call_for_test(me, [3u8; 32], 9, handle);
+    let _ = with;
+
+    let drawn = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
+    let width = drawn.clone();
+    let margin = sigil::Form::Phone.body_margin();
+    let h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(margin as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                    width.set(ui.min_rect().width() + 2.0 * margin);
+                });
+        });
+    (h, drawn, dir)
+}
+
+/// The call bar fits a phone, and its controls are on the screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_call_bar_fits_a_phone() {
+    const PHONE: f32 = 360.0;
+    let (mut h, drawn, _dir) = phone_call("Alexandra Constantinopoulos-Whitmore");
+    h.run_steps(3);
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "In a call"),
+        "no call on screen, so this proves nothing about its width: {said:?}"
+    );
+    let width = drawn.get();
+    assert!(
+        width <= PHONE + 1.0,
+        "a call draws {width} points wide in a {PHONE}-point pane: a control \
+         that has slid off the edge is a call somebody cannot end"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+async fn phone_in_a_call() {
+    let (mut h, _, _dir) = phone_call("Alexandra Constantinopoulos-Whitmore");
+    h.run_steps(3);
+    h.snapshot("phone_in_a_call");
+}
