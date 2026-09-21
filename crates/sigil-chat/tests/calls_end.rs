@@ -23,16 +23,50 @@ use sigil_chat::ChatApp;
 use sqnr_core::{PubKey, SoftwareSigner};
 
 fn pass(app: &mut ChatApp, accounts: &mut Accounts, egui_ctx: &egui::Context) {
+    pass_telling(app, accounts, egui_ctx, &Silent);
+}
+
+/// A pass whose platform is watching, for the one test about what it is told.
+fn pass_telling(
+    app: &mut ChatApp,
+    accounts: &mut Accounts,
+    egui_ctx: &egui::Context,
+    notify: &dyn sigil::app::Notify,
+) {
     let mut nav = Navigator::default();
     let mut ctx = AppContext {
         navigator: &mut nav,
         accounts,
         unfocused: true,
         away: false,
-        notify: &Silent,
+        notify,
         connections: &Default::default(),
     };
     app.update(&mut ctx, egui_ctx);
+}
+
+/// A platform that writes down whether it was told a call is up.
+///
+/// Not `Silent`, which is what every other test here uses: silence is what a
+/// working notifier looks like from inside a test, and this test is about
+/// something being said.
+#[derive(Default)]
+struct Watching(std::cell::RefCell<Vec<Option<String>>>);
+
+impl Watching {
+    /// What it was told since it was last asked.
+    fn told(&self) -> Vec<Option<String>> {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
+}
+
+impl sigil::app::Notify for Watching {
+    fn notice(&self, _notice: sigil::Notice<'_>) -> bool {
+        false
+    }
+    fn calling(&self, with: Option<&str>) {
+        self.0.borrow_mut().push(with.map(|s| s.to_string()));
+    }
 }
 
 fn app_at(root: PathBuf) -> ChatApp {
@@ -373,4 +407,92 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
     };
     assert!(!app.open(&mut ctx, &stranger));
     assert_eq!(accounts.active_index(), 1);
+}
+
+/// **The platform is told a call began, and told once.**
+///
+/// `CallService.kt` was written for Android and nothing ever started it:
+/// `Notify` had no call-began hook, so there was nowhere for it to be started
+/// *from*. Android stops an app that is not in front -- microphone or no
+/// microphone -- unless a foreground service says otherwise, so without this
+/// a call on the phone ends when the screen does.
+///
+/// Once is the whole difficulty. This is derived from the calls the window
+/// holds, on every pass, and a pass is sixty a second; telling the platform
+/// each time would post a notification sixty times a second, which is not a
+/// call, it is a fault -- and it would look identical to working, because the
+/// last one posted is the one on the screen.
+///
+/// Through `update`, not by calling the method: the fault being fixed is that
+/// nothing *reached* the hook, and a test that calls it directly would have
+/// passed the whole time it was unreachable.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_platform_is_told_a_call_began_and_ended_once_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let me = PubKey::new([1u8; 32]);
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let mut app = app_at(dir.path().to_path_buf());
+    let mut accounts = Accounts::of(vec![one]);
+    let watching = Watching::default();
+
+    pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+    assert_eq!(
+        watching.told(),
+        Vec::<Option<String>>::new(),
+        "with no call, the platform is told nothing at all -- not told 'no call'"
+    );
+
+    // A real handle to an address nothing answers on, as the tests above use.
+    let handle = sigil_net::spawn_call(
+        sigil_net::Endpoint {
+            address: "127.0.0.1:1".parse().unwrap(),
+            server: PubKey::new([7u8; 32]),
+        },
+        SoftwareSigner::new(SigningKey::from_bytes(&[1u8; 32])),
+        PubKey::new([2u8; 32]),
+        1,
+        Default::default(),
+        || {},
+    );
+    app.hold_call_for_test(me, [3u8; 32], 9, handle);
+    pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+    let told = watching.told();
+    assert_eq!(told.len(), 1, "the call beginning is said once: {told:?}");
+    assert!(
+        told[0].is_some(),
+        "a call with no conversation to name is still a call: {told:?}"
+    );
+
+    // Passes with nothing changed.
+    for _ in 0..3 {
+        pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+    }
+    assert_eq!(
+        watching.told(),
+        Vec::<Option<String>>::new(),
+        "a call that is still up is not announced again"
+    );
+
+    // And it ends, on its own, because nothing answered. The reaper runs in
+    // `update`, so the same pass that notices also says so.
+    for _ in 0..40 {
+        pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+        if app.calls_for_test().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        app.calls_for_test().is_empty(),
+        "the call never ended, so this says nothing about what was announced"
+    );
+    assert_eq!(watching.told(), vec![None], "the call ending is said once");
+
+    pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+    assert_eq!(
+        watching.told(),
+        Vec::<Option<String>>::new(),
+        "and stays ended without being said again"
+    );
 }

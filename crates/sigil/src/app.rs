@@ -251,6 +251,21 @@ pub trait Notify {
     ///
     /// Platforms whose notifications expire on their own may do nothing.
     fn withdraw(&self, _target: &Target) {}
+
+    /// A call is up, with whoever is named; `None` when it is not.
+    ///
+    /// **For the platforms that have to be told a process is busy.** Android
+    /// will stop an app that is not in front, microphone or no microphone,
+    /// unless a foreground service says otherwise -- so a call there is a
+    /// service with a notification, and without one the call ends when the
+    /// screen does. `CallService.kt` was written for this and nothing ever
+    /// started it, because there was nowhere for it to be started *from*.
+    ///
+    /// Told on change, not on the clock: the caller compares what is true
+    /// now against what it last said, so a platform that turns this into a
+    /// notification does not repost one every frame. A desktop, where a
+    /// process stays alive because nobody is killing it, does nothing.
+    fn calling(&self, _with: Option<&str>) {}
 }
 
 /// Says nothing, for tests and for a session with no desktop at all.

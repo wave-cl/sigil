@@ -1283,6 +1283,9 @@ pub struct ChatApp {
     identity_paths: HashMap<PubKey, std::path::PathBuf>,
     /// How many sessions this app has started, for tests to count.
     starts: usize,
+    /// What the platform was last told about a call being up, so it is told
+    /// on change rather than on every pass. See [`ChatApp::announce_calling`].
+    told_calling: Option<String>,
     /// Sessions told to stop that still hold their store lock. One of these
     /// must not be reopened yet; see [`Closing`].
     closing: Vec<(At, Closing)>,
@@ -1409,6 +1412,7 @@ impl ChatApp {
             started: HashMap::new(),
             identity_paths: HashMap::new(),
             starts: 0,
+            told_calling: None,
             closing: Vec::new(),
             panes: HashMap::new(),
             switching: false,
@@ -1996,6 +2000,7 @@ impl App for ChatApp {
         self.join_answered_calls(ctx, egui_ctx);
         self.answer_pressed(ctx, egui_ctx);
         self.end_calls_nobody_is_in();
+        self.announce_calling(ctx);
         // **A window carrying audio is not idle.** Everything else here sleeps
         // until something happens, which is what makes a quiet sigil cost
         // nothing -- but a call that nobody is in produces no events at all,
@@ -7228,6 +7233,43 @@ impl ChatApp {
     /// and never announced, and no test caught it, because a missing notifier
     /// produces silence and silence is what a working one looks like from
     /// inside a test.
+    /// Tell the platform whether a call is up, and with whom.
+    ///
+    /// **Derived from `self.calls`, not hooked onto the two sites that change
+    /// it.** There is one place a call is joined and one place it is left,
+    /// and that is true today; a third would be a platform that thinks a call
+    /// is still running, which on Android is a notification that will not go
+    /// away. Reading the state each pass cannot drift from it.
+    ///
+    /// Said only when it differs from what was last said, because on Android
+    /// this starts a foreground service with a notification and doing that
+    /// sixty times a second is not a call, it is a fault.
+    fn announce_calling(&mut self, ctx: &mut AppContext<'_>) {
+        // Whoever the call is with, as the conversation is named -- the same
+        // label the transcript uses, so the notification and the screen agree.
+        let now = self.calls.iter().next().and_then(|(me, live)| {
+            let at = self.at_for(*me)?;
+            let state = self.state_of(Some(&at));
+            state
+                .conversations
+                .iter()
+                .find(|c| c.channel == live.channel)
+                .map(|c| c.label.clone())
+        });
+        // A call whose conversation this window cannot name is still a call:
+        // the service exists to keep the process alive, and a missing label
+        // must not be the reason it is not started.
+        let now = match (self.calls.is_empty(), now) {
+            (true, _) => None,
+            (false, Some(label)) => Some(label),
+            (false, None) => Some(String::new()),
+        };
+        if now != self.told_calling {
+            ctx.notify.calling(now.as_deref());
+            self.told_calling = now;
+        }
+    }
+
     fn announce_rings(&mut self, ctx: &mut AppContext<'_>) {
         // **Which identity is being called.** Every session is walked, so a
         // call arriving at one identity reaches somebody looking at another —
