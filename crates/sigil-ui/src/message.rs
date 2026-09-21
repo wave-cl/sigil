@@ -1559,10 +1559,19 @@ fn author_line(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme) {
     // vertical would put the shield on a line of its own under the name.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = tokens::SPACING_XS;
-        let line = ui.label(text);
+        // **Truncated, because a `horizontal` never wraps.** `fit` measures
+        // the author and then clamps the bubble to three quarters of the
+        // pane, so a display name longer than that was measured, capped, and
+        // then drawn at its full length anyway -- and the frame grew to it.
+        // On a phone "Alexandra Constantinopoulos-Whitmore" put every bubble
+        // after it ten points past the right edge. An ellipsis is what the
+        // chat list already does with the same name, so the two agree; the
+        // whole of it is in Members, in full and selectable.
+        let mut line = ui.add(egui::Label::new(text).truncate());
         if let Some(title) = b.title {
-            line.on_hover_text(format!("{title} — self-declared, verified by nobody"));
+            line = line.on_hover_text(format!("{title} — self-declared, verified by nobody"));
         }
+        let _ = line;
         if b.verified {
             verified_mark(ui);
         }

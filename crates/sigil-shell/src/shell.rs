@@ -754,6 +754,40 @@ impl Shell {
                 // rail -- a column of icons beside a 360-point screen was a
                 // sixth of it -- so the apps are a menu on the title, and a
                 // phone that only chats never sees it.
+                // The app's corner of it, drawn **over** the drag region --
+                // a later widget wins the press -- from the right edge in, and
+                // inset from it the way the buttons are inset from the left.
+                //
+                // **Before the head, and measured.** Both were given the whole
+                // bar and drawn one over the other, which is invisible while
+                // the name is short and wrong the moment it is not: a
+                // conversation with a long display name had its name painted
+                // *under* the call and More buttons. The drag region above is
+                // the only thing the corner has to come after, and that is
+                // drawn on a desktop only -- so on a phone the corner goes
+                // first and the head is given what it did not use.
+                let mut corner_used = 0.0f32;
+                if app_on_screen {
+                    let corner = whole.shrink2(egui::vec2(tokens::SPACING_SM, 0.0));
+                    let active = self.active();
+                    let drawn = ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(corner)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| {
+                            let mut ctx = AppContext {
+                                navigator: &mut self.navigator,
+                                accounts: &mut self.accounts,
+                                unfocused: false,
+                                away: self.away,
+                                notify: self.platform.as_ref(),
+                                connections: &self.connections,
+                            };
+                            self.apps[active].chrome_ui(&mut ctx, ui);
+                        },
+                    );
+                    corner_used = drawn.response.rect.width();
+                }
                 if form.is_phone() && app_on_screen {
                     let entry = self.nav.top().clone();
                     let active = self.active();
@@ -769,7 +803,10 @@ impl Shell {
                                 self.apps[active].title().to_string()
                             }
                         });
-                    let left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
+                    // What the corner left. A gap between them, so a
+                    // truncated name does not read as running into a button.
+                    let mut left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
+                    left.max.x = (left.max.x - corner_used - tokens::SPACING_SM).max(left.min.x);
                     let mut switch = None;
                     ui.scope_builder(
                         egui::UiBuilder::new()
@@ -821,29 +858,6 @@ impl Shell {
                     if let Some(i) = switch {
                         self.navigator.switch_to(AppId(i));
                     }
-                }
-                // The app's corner of it, drawn **over** the drag region --
-                // a later widget wins the press -- from the right edge in, and
-                // inset from it the way the buttons are inset from the left.
-                if app_on_screen {
-                    let corner = whole.shrink2(egui::vec2(tokens::SPACING_SM, 0.0));
-                    let active = self.active();
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(corner)
-                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                        |ui| {
-                            let mut ctx = AppContext {
-                                navigator: &mut self.navigator,
-                                accounts: &mut self.accounts,
-                                unfocused: false,
-                                away: self.away,
-                                notify: self.platform.as_ref(),
-                                connections: &self.connections,
-                            };
-                            self.apps[active].chrome_ui(&mut ctx, ui);
-                        },
-                    );
                 }
             });
         // The notice band: what an app has to say to everybody, whichever

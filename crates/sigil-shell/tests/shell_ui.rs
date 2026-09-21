@@ -25,6 +25,8 @@ struct Stub {
     /// What the background work asks of the shell on the next pass; a
     /// test puts something here.
     asks: std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>,
+    /// A name for the app bar's left half, when a test wants one.
+    head: Option<&'static str>,
 }
 
 impl Stub {
@@ -36,6 +38,15 @@ impl Stub {
             unopened: false,
             updates: Default::default(),
             asks: Default::default(),
+            head: None,
+        }
+    }
+
+    /// The same, drawing `name` in the bar's left half.
+    fn heading(title: &'static str, name: &'static str) -> Self {
+        Stub {
+            head: Some(name),
+            ..Stub::named(title, 0)
         }
     }
 }
@@ -61,6 +72,16 @@ impl App for Stub {
     /// whose corner was drawn.
     fn chrome_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) {
         let _ = ui.button(format!("{} corner", self.title));
+    }
+    /// A head of its own, for the one test about the bar's two halves. Off
+    /// by default: every other test here wants the shell's own title, which
+    /// is what an app that names nothing gets.
+    fn head_ui(&mut self, _ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> bool {
+        let Some(name) = self.head else {
+            return false;
+        };
+        ui.add(egui::Label::new(egui::RichText::new(name).heading()).truncate());
+        true
     }
     fn title(&self) -> &str {
         self.title
@@ -2081,4 +2102,50 @@ fn do_not_disturb_from_the_tray_flips_the_setting() {
     h.step();
     h.step();
     assert!(!dnd.get(), "and off again");
+}
+
+/// **The bar's two halves do not overlap**, however long the left one is.
+///
+/// They were given the same rectangle -- the whole strip -- and drawn one
+/// over the other, which is invisible while the name is short and wrong the
+/// moment it is not. A conversation whose display name ran the width of the
+/// phone had that name painted *under* the call and More buttons: both were
+/// there, one on top of the other, and neither was readable.
+///
+/// The corner is measured now and the head is given what is left. No
+/// renderer: this asks the accessibility tree where two widgets are.
+#[test]
+fn a_long_head_does_not_run_under_the_corner() {
+    use egui_kittest::kittest::Queryable;
+    const LONG: &str = "Alexandra Constantinopoulos-Whitmore and the rest of it too";
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::heading("Chat", LONG))];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+    h.run();
+    let head = h.get_by_label_contains("Alexandra").rect();
+    let corner = h.get_by_label("Chat corner").rect();
+    assert!(
+        head.width() > 0.0 && corner.width() > 0.0,
+        "one of the two halves was not drawn, so this proves nothing: \
+         head {head:?}, corner {corner:?}"
+    );
+    assert!(
+        head.right() <= corner.left(),
+        "the bar's name runs to {} and its corner starts at {}: the name is \
+         drawn under the buttons",
+        head.right(),
+        corner.left()
+    );
 }
