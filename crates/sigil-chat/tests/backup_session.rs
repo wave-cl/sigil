@@ -178,7 +178,14 @@ async fn a_backup_made_here_restores_a_fresh_store_with_the_words() {
     // Wrong words are refused with why.
     let mut wrong = words.clone();
     wrong[0] = "zzzz".into();
-    a2.send(Cmd::Restore(wrong.join(" ")));
+    // Her identity file: a restore records the home beside it (SIP-60), and
+    // a refused one records nothing.
+    let identity = dir.path().join("identity-alice");
+    std::fs::write(&identity, "x").unwrap();
+    a2.send(Cmd::Restore {
+        words: wrong.join(" "),
+        identity: Some(identity.clone()),
+    });
     assert!(
         until(
             || a2
@@ -194,7 +201,15 @@ async fn a_backup_made_here_restores_a_fresh_store_with_the_words() {
     );
 
     // The right ones bring the conversation back, readable.
-    a2.send(Cmd::Restore(words.join(" ")));
+    assert_eq!(
+        sqex_proto::home_file::load(&identity),
+        None,
+        "a refused restore recorded a home"
+    );
+    a2.send(Cmd::Restore {
+        words: words.join(" "),
+        identity: Some(identity.clone()),
+    });
     assert!(
         until(
             || a2
@@ -208,6 +223,9 @@ async fn a_backup_made_here_restores_a_fresh_store_with_the_words() {
         "{:?}",
         a2.state().trouble
     );
+    // The exchange the backup was read from is recorded as her home.
+    let recorded = sqex_proto::home_file::load(&identity).expect("the restore recorded no home");
+    assert_eq!(recorded.key, Some(endpoint.server));
     let dm = a1.state().open.unwrap();
     assert!(
         until(
@@ -257,7 +275,10 @@ async fn a_backup_made_here_restores_a_fresh_store_with_the_words() {
     let (a_signer3, _) = signer(0x48);
     let a3 = start_at(endpoint, a_signer3, &dir.path().join("alice-3.db"));
     up(&a3, alice).await;
-    a3.send(Cmd::Restore(words.join(" ")));
+    a3.send(Cmd::Restore {
+        words: words.join(" "),
+        identity: None,
+    });
     assert!(
         until(
             || a3

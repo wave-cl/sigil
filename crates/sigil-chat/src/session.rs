@@ -1334,7 +1334,12 @@ pub enum Cmd {
     BackupNow,
     /// SIP-48: take the account's backup into this store, with the words.
     /// Merges: nothing here is removed.
-    Restore(String),
+    Restore {
+        words: String,
+        /// The identity file: the exchange restored from is recorded beside
+        /// it as the home (SIP-60), since a backup lives at the home.
+        identity: Option<std::path::PathBuf>,
+    },
     /// SIP-48: release what the exchange holds. What is here stays.
     DropBackup,
     /// Write a credential for another device to register itself with.
@@ -5010,17 +5015,8 @@ mod display_name_tests {
 /// client reads it as the default exchange. Written when a Move naming this
 /// exchange is presented or found on record; left alone when it already
 /// says so, and never an error -- the exchange's record is the authority.
-fn record_home(identity: &std::path::Path, chat: &Chat) {
-    let key = chat.exchange_key();
-    let domain = chat.domain().map(str::to_string);
-    if sqex_proto::home_file::load(identity).is_some_and(|h| h.names(&key, domain.as_deref())) {
-        return;
-    }
-    let home = sqex_proto::home_file::Home {
-        domain,
-        key: Some(key),
-    };
-    if let Err(e) = sqex_proto::home_file::set(identity, &home) {
+async fn record_home(identity: &std::path::Path, chat: &mut Chat) {
+    if let Err(e) = chat.record_home_beside(identity).await {
         tracing::warn!(%e, "could not record the home beside the identity");
     }
 }
@@ -5047,7 +5043,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             match said {
                 Ok(HomeSaid::Presented | HomeSaid::OnRecord) => {
                     if let Some(id) = &identity {
-                        record_home(id, chat);
+                        record_home(id, chat).await;
                     }
                 }
                 Ok(HomeSaid::Unclaimed) => {
@@ -5679,7 +5675,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Err(e) => trouble(state, e),
             }
         }
-        Cmd::Restore(words) => {
+        Cmd::Restore { words, identity } => {
             let split: Vec<&str> = words.split_whitespace().collect();
             let key = match sqex_proto::backup::from_words(&split) {
                 Ok(key) => key,
@@ -5690,6 +5686,9 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     // The words that opened it are this store's key from now
                     // on, so the next backup from here continues the line.
                     let _ = chat.set_backup_key(&key);
+                    if let Some(id) = &identity {
+                        record_home(id, chat).await;
+                    }
                     let mut said = format!(
                         "Restored generation {}: {} channel(s), {} entries, {} keys, \
                          {} contact(s).",
