@@ -409,7 +409,7 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
     assert_eq!(accounts.active_index(), 1);
 }
 
-/// **The platform is told a call began, and told once.**
+/// **The platform is told a call began and ended, once each.**
 ///
 /// `CallService.kt` was written for Android and nothing ever started it:
 /// `Notify` had no call-began hook, so there was nowhere for it to be started
@@ -423,15 +423,29 @@ async fn a_pressed_notification_switches_to_its_identity_and_opens_its_conversat
 /// call, it is a fault -- and it would look identical to working, because the
 /// last one posted is the one on the screen.
 ///
-/// Through `update`, not by calling the method: the fault being fixed is that
-/// nothing *reached* the hook, and a test that calls it directly would have
-/// passed the whole time it was unreachable.
+/// # Why the call does not die on its own here
+///
+/// Two earlier versions used a real call to an address nothing answers on,
+/// as the tests above do, and both were flaky on CI in opposite directions:
+/// on macOS the call outlived the first assertion and died during the next
+/// three passes, so the *ending* was announced there; on Linux, where a
+/// refused connection is immediate, it was already gone before the first
+/// pass and nothing was announced at all. The lifetime of that handle is how
+/// fast a machine refuses a connection, and no arrangement of passes around
+/// it is a fixed point.
+///
+/// So the call is a `for_test` one, which stays up until something ends it,
+/// and what ends it is the Hang up button -- the path a person takes, and
+/// deterministic because it is a press rather than a race.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_platform_is_told_a_call_began_and_ended_once_each() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
     let dir = tempfile::tempdir().unwrap();
     let egui_ctx = egui::Context::default();
-    let me = PubKey::new([1u8; 32]);
     let one = Account::unlocked_for_test([1u8; 32]);
+    let me = one.unlocked().expect("an open account").me();
     let mut app = app_at(dir.path().to_path_buf());
     let mut accounts = Accounts::of(vec![one]);
     let watching = Watching::default();
@@ -443,67 +457,89 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
         "with no call, the platform is told nothing at all -- not told 'no call'"
     );
 
-    // A real handle to an address nothing answers on, as the tests above
-    // use. It fails and is reaped, which is how the call ends here.
-    let handle = sigil_net::spawn_call(
-        sigil_net::Endpoint {
-            address: "127.0.0.1:1".parse().unwrap(),
-            server: PubKey::new([7u8; 32]),
-        },
-        SoftwareSigner::new(SigningKey::from_bytes(&[1u8; 32])),
-        PubKey::new([2u8; 32]),
-        1,
-        Default::default(),
-        || {},
+    // A call that stays up: `Phase::Live`, and nothing reaps it.
+    app.hold_call_for_test(
+        me,
+        [3u8; 32],
+        9,
+        sigil_net::CallHandle::for_test(sigil_net::CallState {
+            phase: sigil_net::Phase::Live,
+            me: Some(me),
+            ..Default::default()
+        }),
     );
-    app.hold_call_for_test(me, [3u8; 32], 9, handle);
-
-    // **Everything said from here until the call is gone**, rather than a
-    // fixed number of passes with an assertion after each. The first version
-    // of this took three passes and asserted nothing was said in them, which
-    // passed on this machine and failed on CI: the call is a real one that
-    // fails, the reaper runs in the same `update`, and on a slower machine it
-    // died inside those three passes and the ending was announced there. That
-    // is a race in the test, not in the code, and widening the loop would
-    // only move it.
-    //
-    // The sequence is the claim anyway: one Some when it begins, one None
-    // when it ends, and nothing in between however many passes that takes.
-    let mut said: Vec<Option<String>> = Vec::new();
-    let mut ended = false;
-    for _ in 0..200 {
-        pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
-        said.extend(watching.told());
-        if app.calls_for_test().is_empty() {
-            ended = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
+    let told = watching.told();
+    assert_eq!(told.len(), 1, "the call beginning is said once: {told:?}");
     assert!(
-        ended,
-        "the call never ended, so this says nothing about what was announced: \
-         {said:?}"
+        told[0].is_some(),
+        "a call with no conversation to name is still a call: {told:?}"
     );
-    assert_eq!(
-        said.len(),
-        2,
-        "a call is announced twice in its life, beginning and ending: {said:?}"
-    );
-    assert!(
-        said[0].is_some(),
-        "a call with no conversation to name is still a call: {said:?}"
-    );
-    assert_eq!(said[1], None, "and the ending says there is no call");
 
-    // And it stays ended without being said again.
-    for _ in 0..3 {
+    // Four more passes with the call still up.
+    for _ in 0..4 {
         pass_telling(&mut app, &mut accounts, &egui_ctx, &watching);
     }
+    assert!(
+        !app.calls_for_test().is_empty(),
+        "the call ended by itself, so the next assertion would be about \
+         nothing"
+    );
     assert_eq!(
         watching.told(),
         Vec::<Option<String>>::new(),
-        "a call that has ended is not announced again"
+        "a call that is still up is not announced again"
+    );
+
+    // Ended the way a person ends one: the button on the call bar. A harness
+    // is needed because the control is drawn rather than called.
+    let held = std::rc::Rc::new(std::cell::RefCell::new(app));
+    let shared = held.clone();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Option<String>>::new()));
+    let noted = seen.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let telling = Watching::default();
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &telling,
+                connections: &Default::default(),
+            };
+            let mut app = shared.borrow_mut();
+            app.update(&mut app_ctx, &ctx);
+            let _ = app.render(&mut app_ctx, ui);
+            noted.borrow_mut().extend(telling.told());
+        });
+    harness.run_steps(3);
+    seen.borrow_mut().clear();
+
+    harness.get_by_label("Hang up").click();
+    harness.run_steps(3);
+    let after = seen.borrow().clone();
+    assert!(
+        held.borrow().calls_for_test().is_empty(),
+        "Hang up did not end the call, so this says nothing: {after:?}"
+    );
+    assert_eq!(
+        after,
+        vec![None],
+        "the ending is said once, and says there is no call: {after:?}"
+    );
+
+    // And stays ended without being said again.
+    harness.run_steps(3);
+    assert_eq!(
+        seen.borrow().clone(),
+        vec![None],
+        "a call that has ended is announced again on later passes"
     );
 }
 
