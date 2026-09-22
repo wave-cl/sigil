@@ -1573,6 +1573,13 @@ impl ChatHandle {
         self.state.borrow().clone()
     }
 
+    /// The state's own channel, to be read without this handle: what the
+    /// announcer holds, so a ring can be said from a session's wake with no
+    /// frame to read it in.
+    pub fn watch(&self) -> watch::Receiver<ChatState> {
+        self.state.clone()
+    }
+
     /// The connection this session holds, for a call or a console to use.
     ///
     /// A call used to dial its own, which cost a handshake at the moment

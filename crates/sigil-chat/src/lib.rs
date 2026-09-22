@@ -1,5 +1,6 @@
 //! Messaging, as a sigil app.
 
+pub mod announce;
 pub mod command;
 pub mod files;
 pub mod frequent;
@@ -17,9 +18,7 @@ pub use session::{
 
 use std::collections::{HashMap, HashSet};
 
-use sigil::app::{
-    App, AppAction, AppContext, AppResponse, Notice, Sound, TabNotifications, Target,
-};
+use sigil::app::{App, AppAction, AppContext, AppResponse, Notify, TabNotifications, Target};
 use sigil::{ColorTheme, tokens};
 use sigil_net::discovery;
 use sqnr::config::Config;
@@ -254,7 +253,7 @@ const RETRY: std::time::Duration = std::time::Duration::from_secs(3);
 /// ring here is keyed on one. The bridge is sixteen bytes and a channel is
 /// thirty-two; the bridge in the first half and nothing in the second is a
 /// key no real channel has, since a channel is a hash.
-fn cross_key(bridge: [u8; 16]) -> [u8; 32] {
+pub(crate) fn cross_key(bridge: [u8; 16]) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[..16].copy_from_slice(&bridge);
     key
@@ -270,7 +269,7 @@ fn cross_key(bridge: [u8; 16]) -> [u8; 32] {
 /// holding. With one there is nothing to tell apart, and naming it states a
 /// fact nobody was in doubt about — the same rule as the exchange switcher
 /// that is not drawn over a single exchange.
-fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
+pub(crate) fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
     let who = sigil_ui::message::short(&from.to_string());
     if held > 1 {
         format!("{label} — from {who}, to {called}")
@@ -384,7 +383,7 @@ fn ring_card(
 /// conversation as it is called here, `#` before a public one; the identity
 /// it arrived at only when this host holds several. The body carries what
 /// was said, shortened, so the notification is worth reading on its own.
-fn mention_said(m: &session::Mention, called: &str, held: usize) -> (String, String) {
+pub(crate) fn mention_said(m: &session::Mention, called: &str, held: usize) -> (String, String) {
     let room = if m.public {
         format!("#{}", m.conversation)
     } else {
@@ -407,7 +406,11 @@ fn mention_said(m: &session::Mention, called: &str, held: usize) -> (String, Str
 /// One or several messages arrived in one conversation, in words: who and
 /// where, and what the last one said. With several identities held, which
 /// one it came to.
-fn arrivals_said(together: &[session::Arrival], called: &str, held: usize) -> (String, String) {
+pub(crate) fn arrivals_said(
+    together: &[session::Arrival],
+    called: &str,
+    held: usize,
+) -> (String, String) {
     let last = together.last().expect("at least one arrival");
     let room = if last.public {
         format!("#{}", last.conversation)
@@ -432,7 +435,7 @@ fn arrivals_said(together: &[session::Arrival], called: &str, held: usize) -> (S
 }
 
 /// Where a notification about `channel` at `at` leads.
-fn target(at: &At, channel: [u8; 32]) -> Target {
+pub(crate) fn target(at: &At, channel: [u8; 32]) -> Target {
     Target {
         identity: at.0,
         exchange: at.1.clone(),
@@ -1491,15 +1494,10 @@ pub struct ChatApp {
     /// Held with the moment it was pressed so a ring that never turns up
     /// stops being waited for rather than latching forever.
     answering: Option<(At, [u8; 32], std::time::Instant)>,
-    /// Rings announced and not yet withdrawn, each with where it was posted.
-    ///
-    /// Announcing is half of it. A ring is posted **ongoing** -- unswipeable,
-    /// carrying an Answer -- so when the call goes, the notification has to
-    /// go with it or it stands there offering to answer nothing.
-    ringing_out: std::collections::HashMap<([u8; 32], u64), Target>,
-    /// Calls already announced, so a ring is said out loud once and not on
-    /// every pass for as long as it rings.
-    announced: std::collections::HashSet<([u8; 32], u64)>,
+    /// What tells the platform about rings, mentions and arrivals -- from a
+    /// frame, or from a session's wake when no frame is coming. See
+    /// [`announce::Announcer`].
+    announcer: std::sync::Arc<announce::Announcer>,
     /// SIP-44: the other parties whose succession the registry has been
     /// asked about, per session, so a direct message asks once on opening
     /// and not on every pass. The answer lives in the state.
@@ -1574,8 +1572,7 @@ impl ChatApp {
             calls: HashMap::new(),
             left: HashSet::new(),
             answering: None,
-            ringing_out: std::collections::HashMap::new(),
-            announced: std::collections::HashSet::new(),
+            announcer: announce::Announcer::new(None),
             asked_succession: std::collections::HashSet::new(),
             picking: None,
             saving: None,
@@ -1591,6 +1588,20 @@ impl ChatApp {
     /// The emoji counts go with them: a test that reacts must not add to
     /// the counts on the machine it runs on.
     #[doc(hidden)]
+    /// **A notifier for when no frame is coming.** A phone stops drawing the
+    /// moment it is not in front, and everything that says a call arrived
+    /// ran from a frame -- so a ring that reached a phone in the background
+    /// was said to nobody. With this, a session's wake waits for the frame
+    /// it asked for and, if none comes, says it through here. A desktop
+    /// passes nothing: it draws a frame whenever it is asked.
+    pub fn with_off_frame_notify(
+        mut self,
+        notify: std::sync::Arc<dyn Notify + Send + Sync>,
+    ) -> Self {
+        self.announcer = announce::Announcer::new(Some(notify));
+        self
+    }
+
     pub fn set_store_root_for_test(&mut self, root: std::path::PathBuf) {
         self.frequent = frequent::Frequent::at(root.join("emoji.txt"));
         self.store_root = Some(root);
@@ -2041,9 +2052,14 @@ impl ChatApp {
                 .as_ref()
                 .map(|root| root.join(format!("{me}.db")));
             let wake = egui_ctx.clone();
+            let announcer = self.announcer.clone();
             let session = session::start(dial, unlocked.signer(), store_at, move || {
-                wake.request_repaint()
+                // The frame first; then, if it never comes, the announcer
+                // says what changed itself. See `announce`.
+                wake.request_repaint();
+                announcer.woken();
             });
+            self.announcer.watch(at.clone(), session.watch());
             // **The connection this session is about to hold, offered to the
             // rest of the window.** A call and the administrative console
             // borrow it rather than dialling their own -- see
@@ -2264,9 +2280,17 @@ impl App for ChatApp {
                 self.send_as(Some(&at), Cmd::Away(ctx.away));
             }
         }
-        self.announce_rings(ctx);
-        self.announce_mentions(ctx);
-        self.announce_arrivals(ctx);
+        // What the frame knows, then what has not been said. The same
+        // announcer speaks from a session's wake when no frame is coming.
+        self.announcer.frame(
+            self.sessions
+                .iter()
+                .map(|(at, s)| (at.clone(), s.watch()))
+                .collect(),
+            &ctx.accounts.quiet,
+        );
+        self.announcer.run(ctx.notify, ctx.unfocused);
+        self.asked.extend(self.announcer.take_wants());
         self.join_answered_calls(ctx, egui_ctx);
         self.answer_pressed(ctx, egui_ctx);
         self.end_calls_nobody_is_in();
@@ -7788,246 +7812,53 @@ impl ChatApp {
         }
     }
 
-    fn announce_rings(&mut self, ctx: &mut AppContext<'_>) {
-        // **Which identity is being called.** Every session is walked, so a
-        // call arriving at one identity reaches somebody looking at another —
-        // and the notification then has to say which, or it names a caller,
-        // a conversation, and no way to tell where either of them is.
-        let held = self.sessions.len();
-        let mut fresh: Vec<(String, Target)> = Vec::new();
-        for (at, session) in &self.sessions {
-            // The rings, not the whole state: this runs for every identity on
-            // every pass, and what it wants is a list that is nearly always
-            // empty.
-            let ringing = session.ringing();
-            for ring in &ringing {
-                if ring.mine || self.announced.contains(&(ring.channel, ring.seq)) {
-                    continue;
-                }
-                self.announced.insert((ring.channel, ring.seq));
-                self.ringing_out
-                    .insert((ring.channel, ring.seq), target(at, ring.channel));
-                // The whole state, but only for a ring nobody has been told
-                // about yet -- which happens about as often as a telephone
-                // rings, rather than sixty times a second.
-                let me = session.state().mine.label(&at.0);
-                fresh.push((
-                    ring_said(&ring.from, &ring.label, &me, held),
-                    target(at, ring.channel),
-                ));
-            }
-            // SIP-39: a call carried here from another exchange rings the
-            // same way -- the phone has to make a sound and come forward for
-            // it, or a ring nobody is looking at is a ring nobody hears. It
-            // has no conversation, so its notification is keyed on the
-            // bridge; pressing it brings the window up, which is where the
-            // ring is drawn whatever else is on screen.
-            if let Some(cross) = session.cross_ring() {
-                let key = cross_key(cross.bridge);
-                if !self.announced.contains(&(key, 0)) {
-                    self.announced.insert((key, 0));
-                    self.ringing_out.insert((key, 0), target(at, key));
-                    let state = session.state();
-                    let me = state.mine.label(&at.0);
-                    // The caller first, by the name this client has for
-                    // them, and where from after: "another exchange — from
-                    // HR2v…" led with the one word that says the least and
-                    // was cut before the caller on the phone's shade.
-                    let who = state
-                        .people
-                        .get(&cross.caller)
-                        .map(|p| p.label(&cross.caller))
-                        .unwrap_or_else(|| sigil_ui::message::short(&cross.caller.to_string()));
-                    let said = if held > 1 {
-                        format!("{who}, from another exchange — to {me}")
-                    } else {
-                        format!("{who}, from another exchange")
-                    };
-                    fresh.push((said, target(at, key)));
-                }
-            }
-        }
-        self.announce_rings_in(ctx, fresh);
-        self.withdraw_gone_rings(ctx);
-    }
-
-    /// Take down the notification for a ring that has stopped ringing.
-    ///
-    /// **Nothing did this, on any platform.** The Android glue has had the
-    /// call to withdraw a ring since rings existed and no Rust ever made it,
-    /// so every ring posted on that phone stayed on the notification shade
-    /// for good: ongoing, so it could not be swiped away, and still offering
-    /// Answer for a call that had ended minutes before. Pressing it opened
-    /// the conversation and did nothing else, which is exactly what a broken
-    /// button looks like.
-    ///
-    /// A ring that is no longer in the session's list has been answered,
-    /// declined, cancelled or missed. All four mean the same thing here.
-    fn withdraw_gone_rings(&mut self, ctx: &mut AppContext<'_>) {
-        if self.ringing_out.is_empty() {
-            return;
-        }
-        let mut live: std::collections::HashSet<([u8; 32], u64)> = self
-            .sessions
-            .values()
-            .flat_map(|s| s.ringing())
-            .map(|r| (r.channel, r.seq))
-            .collect();
-        live.extend(
-            self.sessions
-                .values()
-                .filter_map(|s| s.cross_ring())
-                .map(|c| (cross_key(c.bridge), 0)),
-        );
-        let gone: Vec<([u8; 32], u64)> = self
-            .ringing_out
-            .keys()
-            .filter(|k| !live.contains(*k))
-            .copied()
-            .collect();
-        for key in gone {
-            if let Some(to) = self.ringing_out.remove(&key) {
-                ctx.notify.withdraw(&to);
-            }
-        }
-    }
-
-    /// The deciding half: rings nobody has been told about yet are said,
-    /// with a sound, leading to the conversation ringing; and the window
-    /// is asked for.
+    /// The deciding halves, for the tests that hand them lists. The walks
+    /// live in [`announce`].
+    #[cfg(test)]
     fn announce_rings_in(&mut self, ctx: &mut AppContext<'_>, fresh: Vec<(String, Target)>) {
-        // A muted conversation, or do-not-disturb: it rings on the screen,
-        // and nowhere else.
-        let fresh: Vec<(String, Target)> = fresh
-            .into_iter()
-            .filter(|(_, to)| !ctx.accounts.quiet.silenced(&to.exchange, &to.channel))
-            .collect();
-        if !fresh.is_empty() {
-            // A call reaches somebody looking at something else: the window
-            // comes forward, and where the desktop will not let it, the
-            // icon asks until it is answered.
-            self.asked.push(AppAction::Present);
-            self.asked
-                .push(AppAction::Attention(sigil::Attention::Critical));
-        }
-        for (said, to) in fresh {
-            ctx.notify.notice(Notice {
-                summary: "Incoming call",
-                body: &said,
-                target: Some(to),
-                sound: Sound::Ring,
-            });
-        }
+        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer.rings_in(ctx.notify, fresh);
+        self.asked.extend(self.announcer.take_wants());
     }
 
-    /// Say out loud that somebody mentioned us, when we are not looking.
-    ///
-    /// The same shape as [`announce_rings`](Self::announce_rings), and from
-    /// the same place, for the same reason. Told once per message, whether or
-    /// not it is posted: a mention read on screen as it arrived is not owed a
-    /// notification later.
-    fn announce_mentions(&mut self, ctx: &mut AppContext<'_>) {
-        let held = self.sessions.len();
-        let mut found: Vec<(At, String, Vec<session::Mention>)> = Vec::new();
-        for (at, session) in &self.sessions {
-            let mentions = session.mentions();
-            if mentions.is_empty() {
-                continue;
-            }
-            let me = session.state().mine.label(&at.0);
-            found.push((at.clone(), me, mentions));
-        }
-        self.announce_mentions_in(ctx, held, found);
-    }
-
-    /// The deciding half, over what the sessions said: posted when the
-    /// window is not in front or the conversation is not the one on screen,
-    /// and once.
+    #[cfg(test)]
     fn announce_mentions_in(
         &mut self,
         ctx: &mut AppContext<'_>,
         held: usize,
         found: Vec<(At, String, Vec<session::Mention>)>,
     ) {
-        for (at, me, mentions) in found {
-            for m in mentions {
-                if !self.announced.insert((m.channel, m.seq)) {
-                    continue;
-                }
-                if ctx.accounts.quiet.silenced(&at.1, &m.channel) {
-                    continue;
-                }
-                if ctx.unfocused || !m.in_open {
-                    let (summary, body) = mention_said(&m, &me, held);
-                    ctx.notify.notice(Notice {
-                        summary: &summary,
-                        body: &body,
-                        target: Some(target(&at, m.channel)),
-                        sound: Sound::Default,
-                    });
-                }
-                // Worth noticing, not worth interrupting for: the icon
-                // bounces once while the window is not in front.
-                if ctx.unfocused {
-                    self.asked
-                        .push(AppAction::Attention(sigil::Attention::Informational));
-                }
-            }
-        }
+        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .mentions_in(ctx.notify, ctx.unfocused, held, found);
+        self.asked.extend(self.announcer.take_wants());
     }
 
-    /// Say out loud that a message arrived, when we are not looking.
-    ///
-    /// The same shape as the mentions, and after them: a mention has its
-    /// own words and is not said twice. Only while the window is not in
-    /// front -- in front, a message in another conversation is what the
-    /// list's count is for. Several arriving together in one conversation
-    /// are one notification.
-    fn announce_arrivals(&mut self, ctx: &mut AppContext<'_>) {
-        let held = self.sessions.len();
-        let mut found: Vec<(At, String, Vec<session::Arrival>)> = Vec::new();
-        for (at, session) in &self.sessions {
-            let arrivals = session.arrivals();
-            if arrivals.is_empty() {
-                continue;
-            }
-            let me = session.state().mine.label(&at.0);
-            found.push((at.clone(), me, arrivals));
-        }
-        self.announce_arrivals_in(ctx, held, found);
-    }
-
-    /// The deciding half. Told once per message whether or not it is
-    /// posted: one read on screen as it arrived is not owed a notification
-    /// later.
+    #[cfg(test)]
     fn announce_arrivals_in(
         &mut self,
         ctx: &mut AppContext<'_>,
         held: usize,
         found: Vec<(At, String, Vec<session::Arrival>)>,
     ) {
-        for (at, me, arrivals) in found {
-            let mut fresh: std::collections::BTreeMap<[u8; 32], Vec<session::Arrival>> =
-                Default::default();
-            for a in arrivals {
-                // Mentions are said with their own words, before this.
-                if a.mentions_me || !self.announced.insert((a.channel, a.seq)) {
-                    continue;
-                }
-                if ctx.unfocused && !ctx.accounts.quiet.silenced(&at.1, &a.channel) {
-                    fresh.entry(a.channel).or_default().push(a);
-                }
-            }
-            for (channel, together) in fresh {
-                let (summary, body) = arrivals_said(&together, &me, held);
-                ctx.notify.notice(Notice {
-                    summary: &summary,
-                    body: &body,
-                    target: Some(target(&at, channel)),
-                    sound: Sound::Default,
-                });
-            }
-        }
+        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .arrivals_in(ctx.notify, ctx.unfocused, held, found);
+        self.asked.extend(self.announcer.take_wants());
+    }
+
+    /// The rings walk, with the withdrawals, as a frame runs it.
+    #[cfg(test)]
+    fn announce_rings(&mut self, ctx: &mut AppContext<'_>) {
+        self.announcer.frame(
+            self.sessions
+                .iter()
+                .map(|(at, s)| (at.clone(), s.watch()))
+                .collect(),
+            &ctx.accounts.quiet,
+        );
+        self.announcer.rings_only(ctx.notify);
+        self.asked.extend(self.announcer.take_wants());
     }
 
     /// A call we are placing, drawn where a call arriving is drawn.
@@ -9308,6 +9139,7 @@ mod ring_tests {
 #[cfg(test)]
 mod mention_notice_tests {
     use super::*;
+    use sigil::app::Sound;
     use std::cell::RefCell;
 
     fn key(b: u8) -> PubKey {
@@ -9523,8 +9355,10 @@ mod mention_notice_tests {
         // Two rings posted. No session holds either, so both have gone.
         let gone = target(&at(), [8u8; 32]);
         let other = target(&at(), [9u8; 32]);
-        app.ringing_out.insert(([8u8; 32], 1), gone.clone());
-        app.ringing_out.insert(([9u8; 32], 7), other.clone());
+        app.announcer
+            .post_ring_for_test(([8u8; 32], 1), gone.clone());
+        app.announcer
+            .post_ring_for_test(([9u8; 32], 7), other.clone());
 
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
         // **Through `announce_rings`, not straight into the pass.** The
@@ -9535,7 +9369,7 @@ mod mention_notice_tests {
         let mut taken = noted.withdrawn();
         taken.sort_by_key(|t| t.channel);
         assert_eq!(taken, vec![gone, other], "both rings should be taken down");
-        assert!(app.ringing_out.is_empty());
+        assert!(app.announcer.ringing_out_for_test().is_empty());
 
         // And not again: an ongoing notification withdrawn twice is a second
         // call into the platform for a notification that is already gone.

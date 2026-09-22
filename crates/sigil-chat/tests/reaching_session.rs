@@ -948,3 +948,154 @@ async fn the_notifications_answer_takes_a_call_from_another_exchange() {
     );
     call.hang_up();
 }
+
+/// A platform that writes down what it was told, from any thread.
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<String>>);
+
+impl sigil::app::Notify for Recorder {
+    fn notice(&self, notice: sigil::app::Notice<'_>) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{}: {}", notice.summary, notice.body));
+        true
+    }
+}
+
+/// **A ring that arrives while nothing is drawing is still said.**
+///
+/// Seen on the phone: sigil in the background, its session up -- the
+/// caller's exchange did not refuse -- and silence, because everything that
+/// says a call arrived ran from a frame and a phone in the background draws
+/// none. The announcer now speaks from the session's wake when the frame it
+/// asked for does not come. Here no frame is drawn after the ring, and the
+/// off-frame notifier hears "Incoming call" anyway; the control is the same
+/// app with no off-frame notifier, which is a desktop, and says nothing
+/// until a frame.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ring_is_said_with_no_frame_drawn_when_a_host_gives_an_off_frame_notifier() {
+    let (a, b) = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    async fn ring_bob_with_no_frames(
+        a: &Exchange,
+        b: &Exchange,
+        dir: &std::path::Path,
+        seed: u8,
+        off_frame: Option<std::sync::Arc<Recorder>>,
+    ) -> (sigil_chat::ChatApp, sigil_net::CallHandle) {
+        let (a_signer, _, _) = signer(seed);
+        let (_, bob, _) = signer(seed + 1);
+        let egui_ctx = egui::Context::default();
+        let mut app = sigil_chat::ChatApp::new();
+        if let Some(r) = &off_frame {
+            let r: std::sync::Arc<dyn sigil::app::Notify + Send + Sync> = r.clone();
+            app = app.with_off_frame_notify(r);
+        }
+        let root = dir.join(format!("{seed}"));
+        std::fs::create_dir_all(&root).unwrap();
+        app.set_store_root_for_test(root);
+        app.set_exchange_for_test(&b.endpoint.address.to_string(), &b.key.to_string());
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([seed + 1; 32])]);
+        // Frames, until the session is up -- then none.
+        for _ in 0..100 {
+            let mut nav = sigil::navigator::Navigator::default();
+            let mut ctx = sigil::app::AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: true,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            sigil::app::App::update(&mut app, &mut ctx, &egui_ctx);
+            if b.server.events.count(&bob) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            b.server.events.count(&bob) > 0,
+            "Bob's session never subscribed"
+        );
+        let call = sigil_net::spawn_cross_call(
+            a.endpoint,
+            a_signer,
+            format!("{bob}@b.test"),
+            20,
+            sigil_net::CallOpts {
+                source: sqex_voice::audio::Source::Tone,
+                sink: sqex_voice::audio::Sink::Null,
+                seconds: Some(2),
+                ..sigil_net::CallOpts::default()
+            },
+            || {},
+        );
+        (app, call)
+    }
+
+    // With the off-frame notifier: said, with no frame drawn.
+    let heard = std::sync::Arc::new(Recorder::default());
+    let (_app, call) = ring_bob_with_no_frames(&a, &b, dir.path(), 0xa0, Some(heard.clone())).await;
+    let said = until(
+        || {
+            heard
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.starts_with("Incoming call"))
+        },
+        20,
+    )
+    .await;
+    assert!(
+        said,
+        "the ring reached the session and was said to nobody: {:?} / caller says {:?} / \
+         the session holds {:?}",
+        heard.0.lock().unwrap(),
+        call.state().trouble,
+        _app.cross_ring_target_for_test().map(|t| t.channel)
+    );
+    call.hang_up();
+
+    // The control: no off-frame notifier, no frame, nothing said -- the
+    // desktop's shape, where a frame always comes and does the saying.
+    let quiet = std::sync::Arc::new(Recorder::default());
+    let (mut app, call) = ring_bob_with_no_frames(&a, &b, dir.path(), 0xa4, None).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        quiet.0.lock().unwrap().is_empty(),
+        "nothing should have been said with no notifier and no frame"
+    );
+    // And the very next frame says it, through the frame's own notifier.
+    let egui_ctx = egui::Context::default();
+    let (_, bob, _) = signer(0xa5);
+    let mut accounts =
+        sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([0xa5; 32])]);
+    let _ = bob;
+    let mut nav = sigil::navigator::Navigator::default();
+    let mut ctx = sigil::app::AppContext {
+        navigator: &mut nav,
+        accounts: &mut accounts,
+        unfocused: true,
+        away: false,
+        notify: &*quiet,
+        connections: &Default::default(),
+    };
+    sigil::app::App::update(&mut app, &mut ctx, &egui_ctx);
+    assert!(
+        quiet
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("Incoming call")),
+        "a frame did not say the ring: {:?} / caller says {:?}",
+        quiet.0.lock().unwrap(),
+        call.state().trouble
+    );
+    call.hang_up();
+}
