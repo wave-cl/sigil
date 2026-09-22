@@ -178,7 +178,7 @@ fn exchange_row(
         ui.scope_builder(egui::UiBuilder::new().max_rect(square), |ui| {
             removed = sigil::icon::icon_button_named(ui, sigil::Icon::Close, "Remove")
                 .on_hover_text(
-                    "Stop connecting to this exchange. Nothing said there is deleted -- the \
+                    "Stop connecting to this exchange. Nothing said there is deleted — the \
                      conversations stay in this store and come back if it is added again.",
                 )
                 .clicked();

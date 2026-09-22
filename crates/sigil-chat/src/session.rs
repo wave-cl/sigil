@@ -6039,7 +6039,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     state,
                     format!(
                         "A will: {successor} may take this account by presenting it. Keep it \
-                         apart from that key's secret -- together they are the account."
+                         apart from that key's secret — together they are the account."
                     ),
                 );
             }

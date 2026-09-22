@@ -39,7 +39,7 @@ fn main() {
     sound.seek(0);
     match sound.decode_next() {
         Some(c) => println!("after the end, seek to 0: first chunk at {} ms", c.at_ms),
-        None => println!("after the end, seek to 0: NOTHING -- the reader is stuck at the end"),
+        None => println!("after the end, seek to 0: NOTHING — the reader is stuck at the end"),
     }
     sound.seek(1_000);
     match sound.decode_next() {

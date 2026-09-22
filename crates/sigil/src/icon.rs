@@ -135,6 +135,8 @@ icons! {
     Check => "Set",
     /// The other way from [`Icon::Back`]: the next of a set.
     Forward => "Next",
+    /// Put the text beside it on the clipboard.
+    Copy => "Copy",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -305,6 +307,23 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
         Icon::Forward => {
             line(p(0.20, 0.50), p(0.76, 0.50));
             path(vec![p(0.56, 0.30), p(0.78, 0.50), p(0.56, 0.70)]);
+        }
+        Icon::Copy => {
+            // Two sheets, the front one whole and the back one showing at
+            // its top-left: the shape every clipboard has taught.
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.36, 0.36), p(0.78, 0.78)),
+                s * 0.06,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            path(vec![
+                p(0.28, 0.60),
+                p(0.22, 0.60),
+                p(0.22, 0.22),
+                p(0.60, 0.22),
+                p(0.60, 0.28),
+            ]);
         }
         Icon::Close => {
             line(p(0.26, 0.26), p(0.74, 0.74));

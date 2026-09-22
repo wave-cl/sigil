@@ -6379,28 +6379,33 @@ fn a_kept_ask_is_answered_when_the_page_arrives() {
     );
 }
 
-/// "Edit your profile" sits beside "Switch identity", in the same shape.
+/// "Edit your profile", "Your devices" and "Switch identity" are one run of
+/// rows in the same shape.
 ///
-/// It was a plain button on its own, between your key and the exchange --
+/// Editing was a plain button on its own, between your key and the exchange --
 /// among the facts about the identity rather than the things done to it.
-/// Now it is the row above the other action, and drawn the same way: full
-/// width, with an icon.
+/// Now the things done to it are together at the foot, drawn the same way:
+/// full width, with an icon, and the way out last.
 #[test]
 fn editing_your_profile_is_beside_switching_identity_and_shaped_like_it() {
     let mut h = harness(true);
     h.run();
     open_identity(&mut h);
 
-    let edit = h.get_by_label("Edit your profile").rect();
-    let switch = h.get_by_label("Switch identity").rect();
-    assert!(
-        (edit.left() - switch.left()).abs() < 1.0 && (edit.width() - switch.width()).abs() < 1.0,
-        "the two are not the same shape: edit {edit:?}, switch {switch:?}"
-    );
-    assert!(
-        edit.bottom() <= switch.top() && switch.top() - edit.bottom() < 12.0,
-        "the two are not beside each other: edit {edit:?}, switch {switch:?}"
-    );
+    let rows = ["Edit your profile", "Your devices", "Switch identity"]
+        .map(|label| h.get_by_label(label).rect());
+    for pair in rows.windows(2) {
+        let (above, below) = (pair[0], pair[1]);
+        assert!(
+            (above.left() - below.left()).abs() < 1.0
+                && (above.width() - below.width()).abs() < 1.0,
+            "the two are not the same shape: {above:?}, {below:?}"
+        );
+        assert!(
+            above.bottom() <= below.top() && below.top() - above.bottom() < 12.0,
+            "the two are not beside each other: {above:?}, {below:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -9402,4 +9407,35 @@ fn phone_succession() {
     h.remove_cursor();
     h.run();
     h.snapshot("phone_succession");
+}
+
+// ---------------------------------------------------------------------------
+// Devices, from the identity rather than from a conversation.
+// ---------------------------------------------------------------------------
+
+/// Your devices are reachable with nothing open.
+///
+/// The Devices pane -- linking a phone, the backup, the will and the
+/// guardians of SIP-44 -- was reachable from an open conversation's header
+/// and from nowhere else. On a phone the list is the whole screen, so a
+/// person who wanted to link a phone first had to open a chat with somebody.
+/// Devices are the identity's, and the identity menu is where they are.
+#[test]
+fn the_identity_menu_reaches_devices_with_no_conversation_open() {
+    let mut state = a_conversation();
+    state.open = None;
+    let routes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_watching_routes(state, routes.clone());
+    h.run();
+    routes.borrow_mut().clear();
+
+    open_identity(&mut h);
+    h.get_by_label("Your devices").click();
+    h.run();
+
+    assert!(
+        routes.borrow().contains(&sigil_chat::Route::Devices),
+        "the menu did not lead to Devices: {:?}",
+        routes.borrow()
+    );
 }

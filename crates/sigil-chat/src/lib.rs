@@ -675,7 +675,7 @@ fn member_actions_ui(
                 }
             }
             // The whole key, which the row itself has no width for.
-            if ui.button("Copy key").clicked() {
+            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy key").clicked() {
                 ui.ctx().copy_text(key.to_string());
             }
         });
@@ -2305,7 +2305,7 @@ impl App for ChatApp {
                 true
             }
             _ => {
-                self.me_ui(&at, &state, ctx.away, ui, &theme, true);
+                self.me_ui(ctx, &at, &state, ui, &theme, true);
                 false
             }
         }
@@ -2612,7 +2612,7 @@ impl ChatApp {
         ui.horizontal(|ui| {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.me_ui(at, state, ctx.away, ui, theme, narrow);
+                self.me_ui(ctx, at, state, ui, theme, narrow);
                 if let Some(c) = open {
                     // A rule between what is yours and what is the
                     // conversation's.
@@ -2774,23 +2774,24 @@ impl ChatApp {
                 if state.i_am_admin && state.reports_pending > 0 {
                     who.push_str(&format!(" · {} new report(s)", state.reports_pending));
                 }
-                if ui.button(who).clicked() {
+                // The same rows as the wide bar's buttons, each with its
+                // icon: the menu is that bar folded, and the identity menu
+                // beside it draws its rows this way.
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::People, &who).clicked() {
                     go = Some(Route::Members);
                 }
-                if ui
-                    .button(if muted {
-                        "Unmute this conversation"
-                    } else {
-                        "Mute this conversation"
-                    })
-                    .clicked()
-                {
+                let (bell, word) = if muted {
+                    (sigil_ui::Icon::BellOff, "Unmute this conversation")
+                } else {
+                    (sigil_ui::Icon::Bell, "Mute this conversation")
+                };
+                if sigil_ui::icon_item(ui, bell, word).clicked() {
                     ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
                 }
-                if ui.button("Devices").clicked() {
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Device, "Devices").clicked() {
                     go = Some(Route::Devices);
                 }
-                if ui.button("Settings").clicked() {
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Settings, "Settings").clicked() {
                     go = Some(Route::Settings);
                 }
             });
@@ -2986,13 +2987,14 @@ impl ChatApp {
     /// somebody who wants to write to you.
     fn me_ui(
         &mut self,
+        ctx: &mut AppContext<'_>,
         at: &At,
         state: &ChatState,
-        away: bool,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
         compact: bool,
     ) {
+        let away = ctx.away;
         let me = at.0;
         let key = me.to_string();
 
@@ -3062,12 +3064,19 @@ impl ChatApp {
         egui::Popup::menu(&anchor).show(|ui| {
             let screen = ui.ctx().content_rect().width();
             ui.set_min_width(320.0f32.min(screen - 2.0 * tokens::SPACING_LG).max(200.0));
-            self.identity_menu(at, state, ui, theme);
+            self.identity_menu(ctx, at, state, ui, theme);
         });
     }
 
     /// What used to be the top of the column, behind the chevron.
-    fn identity_menu(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn identity_menu(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         let me = at.0;
 
         // The head: your name, or -- with no name published -- the first
@@ -3158,7 +3167,6 @@ impl ChatApp {
                     }
                 });
             });
-            ui.separator();
         }
 
         ui.separator();
@@ -3180,6 +3188,21 @@ impl ChatApp {
             .clicked()
         {
             self.open_profile(at, state);
+            ui.close();
+        }
+        // **Devices are the identity's, so the way to them is here.** They
+        // were reachable only from an open conversation's header, which on
+        // a phone meant the list had no way to them at all: to link a
+        // phone, write a will or name guardians (SIP-44) one first had to
+        // open a chat with somebody. The header keeps its button; this is
+        // the one that does not need a conversation.
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Device, "Your devices")
+            .on_hover_text("Every key that acts as you, and what happens if you lose this one")
+            .clicked()
+        {
+            self.send_as(Some(at), Cmd::Devices);
+            self.send_as(Some(at), Cmd::BackupStatus);
+            ctx.navigator.push_here(Route::Devices);
             ui.close();
         }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Switch, "Switch identity")
@@ -4160,7 +4183,7 @@ impl ChatApp {
                     theme.text_muted,
                     egui::RichText::new(format!(
                         "{} said at this exchange that they compared them: {}. Their word, \
-                         not a check -- the words above are.",
+                         not a check — the words above are.",
                         if issuers.len() == 1 {
                             "One person has".to_string()
                         } else {
@@ -4471,7 +4494,7 @@ impl ChatApp {
             ui.set_min_height(tokens::AVATAR_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if identity {
-                    self.me_ui(at, state, ctx.away, ui, theme, false);
+                    self.me_ui(ctx, at, state, ui, theme, false);
                     ui.add_space(tokens::SPACING_XS);
                 }
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
@@ -5859,7 +5882,7 @@ impl ChatApp {
                 ui.colored_label(
                     theme.destructive,
                     egui::RichText::new(format!(
-                        "Not sent: \"{}\" -- {why}",
+                        "Not sent: \"{}\" — {why}",
                         sigil_ui::message::preview(&unsent.composing, 32)
                     ))
                     .small(),
@@ -6145,7 +6168,7 @@ impl ChatApp {
             let attach = |ui: &mut egui::Ui| {
                 sigil_ui::icon_button(ui, sigil_ui::Icon::Attach)
                     .on_hover_text(
-                        "Attach files -- pictures, clips, anything, up to four in a message. \
+                        "Attach files — pictures, clips, anything, up to four in a message. \
                          They are sealed before they leave this machine.",
                     )
                     .clicked()
@@ -8304,7 +8327,7 @@ impl ChatApp {
                     .desired_rows(3)
                     .desired_width(f32::INFINITY),
             );
-            if ui.button("Copy").clicked() {
+            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy").clicked() {
                 ui.ctx().copy_text(credential.clone());
             }
             // **Where the phone goes next.** A phone paired by SIP-47 has
@@ -8316,14 +8339,16 @@ impl ChatApp {
                 ui.add_space(tokens::SPACING_SM);
                 ui.colored_label(
                     theme.text_secondary,
-                    "Then show the other device where to go -- a phone scans this:",
+                    "Then show the other device where to go — a phone scans this:",
                 );
                 sigil_ui::qr(ui, &pair, 160.0);
                 ui.add(
                     egui::Label::new(egui::RichText::new(&pair).monospace().small())
                         .selectable(true),
                 );
-                if ui.button("Copy where to go").clicked() {
+                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy where to go")
+                    .clicked()
+                {
                     ui.ctx().copy_text(pair);
                 }
             }
@@ -8338,7 +8363,7 @@ impl ChatApp {
         ui.colored_label(
             theme.text_secondary,
             "If another of your devices read this one's key and showed you an \
-             sqx-pair: string -- or you know your name at an exchange -- put it here.",
+             sqx-pair: string — or you know your name at an exchange — put it here.",
         );
         ui.add_space(tokens::SPACING_SM);
         let (_, go) = sigil_ui::labelled_field(
@@ -8488,7 +8513,9 @@ impl ChatApp {
             if backup.words.is_none() && ui.button(key_label).clicked() {
                 self.send_as(Some(at), Cmd::BackupKey);
             }
-            if backup.words.is_some() && ui.button("Hide").clicked() {
+            if backup.words.is_some()
+                && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Hide").clicked()
+            {
                 self.send_as(Some(at), Cmd::HideBackupKey);
             }
         });
@@ -8554,28 +8581,47 @@ impl ChatApp {
             )
             .small(),
         );
-        // The whole width: `field_width` keeps room for a control beside the
-        // box, and the ones here are on the row *under* it -- so a third of a
-        // phone's pane sat empty next to a box for twenty-four words.
-        let width = ui.available_width();
-        ui.add(
-            egui::TextEdit::multiline(&mut self.panes.entry(at.clone()).or_default().restoring)
-                .hint_text("the 24 words, in order")
-                .desired_rows(2)
-                .desired_width(width),
+        // The same row as every field on this pane: the box given what the
+        // mark beside it leaves, two lines tall for twenty-four words. It was
+        // a full-width box with a named button on the row under it, the one
+        // field here whose action was not a mark at its right.
+        let mut restore = false;
+        let rows = ui.text_style_height(&egui::TextStyle::Body) * 2.0
+            + 2.0 * ui.spacing().button_padding.y
+            + tokens::SPACING_SM;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), rows),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                restore = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Restore")
+                    .on_hover_text("Open the backup with these words and add what it holds")
+                    .clicked();
+                ui.add_space(tokens::SPACING_SM);
+                let width = ui.available_width();
+                ui.add(
+                    egui::TextEdit::multiline(
+                        &mut self.panes.entry(at.clone()).or_default().restoring,
+                    )
+                    .hint_text("the 24 words, in order")
+                    .desired_rows(2)
+                    .desired_width(width),
+                );
+            },
         );
-        ui.horizontal(|ui| {
-            if ui.button("Restore").clicked() {
-                let words = self.pane(at).restoring.trim().to_string();
-                if !words.is_empty() {
-                    self.pane(at).restoring.clear();
-                    // The identity file, so the restore records the home
-                    // beside it (SIP-60): a backup lives at the home.
-                    let identity = self.identity_paths.get(&at.0).cloned();
-                    self.send_as(Some(at), Cmd::Restore { words, identity });
-                }
+        if restore {
+            let words = self.pane(at).restoring.trim().to_string();
+            if !words.is_empty() {
+                self.pane(at).restoring.clear();
+                // The identity file, so the restore records the home
+                // beside it (SIP-60): a backup lives at the home.
+                let identity = self.identity_paths.get(&at.0).cloned();
+                self.send_as(Some(at), Cmd::Restore { words, identity });
             }
-            if backup.held.is_some() {
+        }
+        // Only when there is a row to draw: an empty `horizontal` still
+        // takes a row's height, which was a gap under the field.
+        if backup.held.is_some() {
+            ui.horizontal(|ui| {
                 // Two steps, as destroying a conversation is: releasing the
                 // copy is not undone by anything but writing another.
                 let confirming = self.pane(at).confirming_drop;
@@ -8602,8 +8648,8 @@ impl ChatApp {
                         self.pane(at).confirming_drop = false;
                     }
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -8837,14 +8883,34 @@ impl ChatApp {
             )
             .small(),
         );
-        let width = ui.available_width();
-        ui.add(
-            egui::TextEdit::multiline(&mut self.panes.entry(at.clone()).or_default().claiming)
-                .hint_text("a will, or an account's key and the vouches for you")
-                .desired_rows(2)
-                .desired_width(width),
+        // The same shape as every field above it -- the action is a mark at
+        // the field's right -- only taller, since a claim by vouches is one
+        // line per guardian. It was a named button under the field, the one
+        // control on the pane that did not look like the others.
+        let rows = ui.text_style_height(&egui::TextStyle::Body) * 2.0
+            + 2.0 * ui.spacing().button_padding.y
+            + tokens::SPACING_SM;
+        let mut take = false;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), rows),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                take = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Take it")
+                    .on_hover_text("Present this and become the account")
+                    .clicked();
+                ui.add_space(tokens::SPACING_SM);
+                let width = ui.available_width();
+                ui.add(
+                    egui::TextEdit::multiline(
+                        &mut self.panes.entry(at.clone()).or_default().claiming,
+                    )
+                    .hint_text("a will, or an account's key and the vouches for you")
+                    .desired_rows(2)
+                    .desired_width(width),
+                );
+            },
         );
-        if ui.button("Take it").clicked() {
+        if take {
             let pasted = self.pane(at).claiming.trim().to_string();
             if !pasted.is_empty() {
                 self.pane(at).claiming.clear();
@@ -8879,10 +8945,10 @@ impl ChatApp {
                         .selectable(true),
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Copy").clicked() {
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy").clicked() {
                         ui.ctx().copy_text(text.to_string());
                     }
-                    if ui.button("Hide").clicked() {
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Hide").clicked() {
                         self.send_as(Some(at), Cmd::HideSuccession);
                     }
                     ui.colored_label(
