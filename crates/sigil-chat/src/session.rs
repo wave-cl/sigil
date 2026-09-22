@@ -4975,7 +4975,18 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                                 desk.wanted.contains(&a.blob),
                                 chat.store().has_blob(&a.blob).unwrap_or(false),
                             ),
-                            id: bs58::encode(a.blob).into_string(),
+                            // **The name says what is drawn, not just which
+                            // blob.** A texture is cached under a URI built
+                            // from this, and a preview that changes from the
+                            // sender's thumbnail to this device's own still
+                            // under the same name is a picture nobody sees
+                            // change. The old name stops being drawn, and
+                            // `forget_what_is_gone` puts its texture down.
+                            id: if desk.stills.contains_key(&a.blob) {
+                                format!("{}-still", bs58::encode(a.blob).into_string())
+                            } else {
+                                bs58::encode(a.blob).into_string()
+                            },
                         })
                         .collect(),
                     standing: standing.get(&m.seq).copied().unwrap_or_default(),
