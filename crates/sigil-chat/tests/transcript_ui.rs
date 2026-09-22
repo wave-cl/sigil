@@ -233,6 +233,7 @@ fn a_conversation() -> ChatState {
         topic: String::new(),
         home: None,
         ringing: Vec::new(),
+        cross_ring: None,
         over: Vec::new(),
         arrivals: Vec::new(),
         unseen: Vec::new(),
@@ -9230,4 +9231,40 @@ fn phone_dialog_verify_sideways() {
     h.remove_cursor();
     h.run();
     h.snapshot("phone_dialog_verify_sideways");
+}
+
+/// **SIP-39's ring is drawn like any other, and says where it is from.**
+///
+/// A call carried here from another exchange has no conversation to ring in,
+/// so the incoming-call frame is the one place it can: who, their key in
+/// full, and two answers. The key matters more here than anywhere -- a
+/// caller from another exchange is one this exchange cannot vouch for -- and
+/// the one thing about it that is different is said in words.
+#[test]
+fn a_call_from_another_exchange_rings_on_screen_with_a_way_to_answer_or_refuse() {
+    let mut state = a_conversation();
+    state.cross_ring = Some(sigil_chat::CrossRing {
+        bridge: [7u8; 16],
+        caller: them(),
+    });
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("is calling"), "nothing is ringing: {said}");
+    assert!(
+        said.contains("from another exchange"),
+        "the ring does not say where it is from: {said}"
+    );
+    assert!(
+        said.contains(&them().to_string()),
+        "the caller's key is not shown in full: {said}"
+    );
+    for button in ["Answer", "Decline"] {
+        assert!(
+            h.get_all_by_label(button).next().is_some(),
+            "{button} is not offered"
+        );
+    }
+    nothing_runs_off_the_edge(&h, "the cross-exchange ring");
 }

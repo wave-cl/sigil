@@ -554,6 +554,108 @@ pub fn spawn_cross_call(
     }
 }
 
+/// **SIP-39, the other half: answer a call that another exchange carried
+/// here.**
+///
+/// The ring arrived on this identity's event stream as a `CrossCall` naming
+/// the caller and the bridge our exchange holds for it. Answering is opening
+/// a session back toward the caller *at our own exchange* -- which matches
+/// the open to the ringing bridge, so a single rendezvous suffices -- and
+/// then the same call as any other. Nothing is dialled: the caller's
+/// exchange already did that, which is why the connection this rides is the
+/// one this identity already holds.
+pub fn spawn_cross_answer(
+    dial: impl Into<Dial>,
+    signer: SoftwareSigner,
+    caller: PubKey,
+    wait: u64,
+    opts: CallOpts,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> CallHandle {
+    let dial = dial.into();
+    let (state_tx, state_rx) = watch::channel(CallState {
+        phase: Phase::Connecting,
+        peer: Some(caller),
+        ..CallState::default()
+    });
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let wake = Arc::new(wake);
+
+    let ending = state_tx.clone();
+    let ending_wake = wake.clone();
+    let hanging_up = state_tx.clone();
+    let hanging_up_wake = wake.clone();
+    let task = tokio::spawn(async move {
+        let mut bridge = Bridge {
+            state: state_tx,
+            events: events_tx,
+            wake,
+        };
+        let result = async {
+            let mut client = match dial {
+                Dial::On(held) => {
+                    let (client, _) = held.now().ok_or("not connected to the exchange")?;
+                    engine::adopt(client, &signer, &mut bridge)?
+                }
+                Dial::At(e) => engine::connect(e, &signer, &mut bridge).await?,
+                Dial::Discover(layers) => {
+                    let e = engine::resolve(&layers[..], &mut bridge).await?;
+                    engine::connect(e, &signer, &mut bridge).await?
+                }
+                Dial::Via { .. } => return Err(NO_CALL_TUNNEL.to_string()),
+            };
+            let (session, id) =
+                engine::rendezvous(&mut client, &signer, caller, wait, &mut bridge).await?;
+            engine::call(client, session, id, opts, &mut bridge).await
+        }
+        .await;
+
+        match &result {
+            Ok(_) => tracing::info!("call over"),
+            Err(e) => tracing::warn!("call over with trouble: {e}"),
+        }
+        ending.send_modify(|s| {
+            s.phase = Phase::Ended;
+            if let Err(e) = &result {
+                s.trouble = Some(e.clone());
+            }
+        });
+        (ending_wake)();
+        result
+    });
+
+    CallHandle {
+        state: state_rx,
+        events: events_rx,
+        task,
+        ending: hanging_up,
+        wake: hanging_up_wake,
+    }
+}
+
+/// **Refuse a call another exchange carried here** (SIP-39). A refusal is a
+/// message of its own: the caller is told, rather than left polling until
+/// their exchange gives up on ours. On the connection this identity already
+/// holds, since that is where the bridge is.
+pub async fn decline_cross(held: &Held, bridge: [u8; 16]) -> Result<(), String> {
+    let (mut client, _) = held.now().ok_or("not connected to the exchange")?;
+    let decline = sqex_proto::session::CallDecline {
+        bridge,
+        reason: sqex_proto::relay::REASON_DECLINED,
+    };
+    let (code, body) = client
+        .post("/session/decline", decline.encode())
+        .await
+        .map_err(|e| e.to_string())?;
+    if code != 200 {
+        return Err(format!(
+            "decline failed ({code}): {}",
+            String::from_utf8_lossy(&body)
+        ));
+    }
+    Ok(())
+}
+
 /// Join a room, on a task of its own.
 ///
 /// A room is not a call with more people in it. Nobody is dialled: holding the

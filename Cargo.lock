@@ -6040,6 +6040,7 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "tracing",
+ "tracing-subscriber",
  "x25519-dalek",
 ]
 

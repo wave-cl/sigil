@@ -125,15 +125,12 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // from the Calls tab whenever what was typed is a name rather than a key
     // -- which it refused as "that is not a key" until now.
     ("POST", "/session/call", Voice),
-    (
-        "POST",
-        "/session/decline",
-        // The other half: refusing a cross-exchange call that is ringing
-        // *here*. `sqex_voice::engine::answer` takes it, and nothing in
-        // sigil stands that watch yet -- a call from another exchange is
-        // placed and never answered.
-        NotYet("SIP-39's answering half: nothing subscribes for a CrossCall ring"),
-    ),
+    // The other half: a call carried *here* arrives as a `CrossCall` on the
+    // event stream the chat session already holds, rings in the interface,
+    // and is answered on that connection (`sigil_net::spawn_cross_answer`)
+    // or refused on it -- `decline_cross`, which is this route. Both ends
+    // are proven against two federated exchanges in `reaching_session`.
+    ("POST", "/session/decline", Voice),
     // ---- mailbox: retired ------------------------------------------------
     //
     // sigil rang over the SIP-5 mailbox until SIP-36 gave calls an event of
@@ -518,7 +515,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 80,
+        reached, 81,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

@@ -523,3 +523,173 @@ async fn mine_at(ex: &Exchange, seed: &[u8; 32]) -> Vec<[u8; 32]> {
         .map(|m| m.channels.into_iter().map(|r| r.channel).collect())
         .unwrap_or_default()
 }
+
+/// **SIP-39, the other half: a call carried here rings.**
+///
+/// Alice at A places a call for Bob by name at B. A carries it to B, B holds
+/// a bridge for it and tells Bob's session -- a `CrossCall` on the event
+/// stream Bob's session already holds for everything else -- and the session
+/// had been dropping that event on the floor. Now it is the ring the
+/// interface draws, with the caller's key and the bridge to answer or refuse
+/// on.
+///
+/// What is asserted is the ring reaching Bob's *state*, with the right
+/// caller: that is the whole of what the session contributes, and the part
+/// that was missing. The call itself is `sigil_net::spawn_cross_answer`'s,
+/// which is the same engine every other call here runs on. Alice's call is
+/// given three seconds and then gives up, which is also what a caller does.
+#[tokio::test]
+async fn a_call_from_another_exchange_rings_here() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let (a, b) = pair().await;
+    let (a_signer, alice, _) = signer(0x70);
+    let (b_signer, bob, _) = signer(0x71);
+    let dir = tempfile::tempdir().unwrap();
+
+    // Bob's session at B, and nothing else: no reaching out first. A Move
+    // presented from here makes the session reconnect, and a call that
+    // arrives in the gap is refused by B as *unreachable* -- B counts the
+    // account's open event streams, and for a moment there were none. That
+    // was the first thing this test found, about itself.
+    let bobs = start_at(&b, b_signer, &dir.path().join("bob.db"));
+    up(&bobs, bob).await;
+    assert!(
+        bobs.state().cross_ring.is_none(),
+        "something is ringing before anybody called, so this proves nothing"
+    );
+    // **And his event stream is open at B**, which `up` does not wait for:
+    // the link is up before the stream is subscribed, and B refuses a call
+    // for an account with no stream as *unreachable* -- correctly, since
+    // there is nothing to ring. This is the far side's own count, which is
+    // the thing that decides.
+    assert!(
+        until(|| b.server.events.count(&bob) > 0, 15).await,
+        "Bob's session never subscribed to B's events, so nothing could ring it"
+    );
+
+    // Alice, at A, calls him by name -- not through a session, because the
+    // Calls tab does not need one; on a connection of its own to A.
+    let call = sigil_net::spawn_cross_call(
+        a.endpoint,
+        a_signer,
+        format!("{bob}@b.test"),
+        10,
+        sigil_net::CallOpts {
+            source: sqex_voice::audio::Source::Tone,
+            sink: sqex_voice::audio::Sink::Null,
+            seconds: Some(2),
+            ..sigil_net::CallOpts::default()
+        },
+        || {},
+    );
+
+    assert!(
+        until(|| bobs.state().cross_ring.is_some(), 20).await,
+        "the call was carried to B and Bob's session did not ring: Alice's \
+         call says {:?}",
+        call.state().trouble
+    );
+    let ring = bobs.state().cross_ring.expect("checked above");
+    assert_eq!(ring.caller, alice, "somebody else is ringing");
+
+    // **And Bob answers**, on the connection his session already holds --
+    // which is what the Answer button does -- and the two connect. Alice's
+    // call was given three seconds to be answered in; her patience is the
+    // test's clock.
+    let (bob_signer, _, _) = signer(0x71);
+    let answered = sigil_net::spawn_cross_answer(
+        sigil_net::Dial::On(bobs.connection()),
+        bob_signer,
+        alice,
+        10,
+        sigil_net::CallOpts {
+            source: sqex_voice::audio::Source::Tone,
+            sink: sqex_voice::audio::Sink::Null,
+            seconds: Some(2),
+            ..sigil_net::CallOpts::default()
+        },
+        || {},
+    );
+    let live = until(
+        || {
+            call.state().phase == sigil_net::Phase::Live
+                && answered.state().phase == sigil_net::Phase::Live
+        },
+        20,
+    )
+    .await;
+    assert!(
+        live,
+        "the two never connected: Alice says {:?}, Bob says {:?}",
+        call.state().trouble,
+        answered.state().trouble
+    );
+
+    call.hang_up();
+    answered.hang_up();
+    bobs.stop();
+}
+
+/// **And refusing one tells the caller so.** A refusal is a message of its
+/// own (SIP-39): the caller hears *declined* rather than polling until their
+/// exchange gives up on ours. This is the Decline button, and the word Alice
+/// gets back is the assertion -- a timeout would mean the refusal was posted
+/// nowhere, or to the wrong bridge.
+#[tokio::test]
+async fn refusing_a_call_from_another_exchange_tells_the_caller() {
+    let (a, b) = pair().await;
+    let (a_signer, alice, _) = signer(0x72);
+    let (b_signer, bob, _) = signer(0x73);
+    let dir = tempfile::tempdir().unwrap();
+    let bobs = start_at(&b, b_signer, &dir.path().join("bob.db"));
+    up(&bobs, bob).await;
+    assert!(
+        until(|| b.server.events.count(&bob) > 0, 15).await,
+        "Bob's session never subscribed to B's events, so nothing could ring it"
+    );
+
+    let call = sigil_net::spawn_cross_call(
+        a.endpoint,
+        a_signer,
+        format!("{bob}@b.test"),
+        10,
+        sigil_net::CallOpts {
+            source: sqex_voice::audio::Source::Tone,
+            sink: sqex_voice::audio::Sink::Null,
+            seconds: Some(2),
+            ..sigil_net::CallOpts::default()
+        },
+        || {},
+    );
+    assert!(
+        until(|| bobs.state().cross_ring.is_some(), 20).await,
+        "Bob's session did not ring: {:?}",
+        call.state().trouble
+    );
+    let ring = bobs.state().cross_ring.expect("checked above");
+    assert_eq!(ring.caller, alice);
+
+    sigil_net::decline_cross(&bobs.connection(), ring.bridge)
+        .await
+        .expect("the refusal is posted");
+    bobs.send(Cmd::CrossRingHandled);
+
+    assert!(
+        until(|| call.state().phase == sigil_net::Phase::Ended, 20).await,
+        "Alice's call did not end after Bob declined"
+    );
+    let said = call.state().trouble.unwrap_or_default();
+    assert!(
+        said.contains("declined"),
+        "Alice was not told she was declined: {said}"
+    );
+    // And Bob's side stopped ringing.
+    assert!(
+        until(|| bobs.state().cross_ring.is_none(), 10).await,
+        "the ring is still showing after it was refused"
+    );
+    bobs.stop();
+}

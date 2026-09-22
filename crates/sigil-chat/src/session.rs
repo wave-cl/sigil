@@ -661,6 +661,15 @@ pub struct ChatState {
     /// Not only the one on screen: a call is the thing that most needs to
     /// reach somebody who is looking elsewhere.
     pub ringing: Vec<Ring>,
+    /// SIP-39: a call another exchange carried here, ringing now.
+    ///
+    /// Not a [`Ring`]: there is no conversation, no invitation and no room
+    /// secret, only who is calling and the bridge our exchange is holding
+    /// for them. Answering opens a session back toward the caller here and
+    /// our exchange matches it to the bridge; declining tells them so.
+    /// One at a time, because one is what a bridge can carry, and the
+    /// interface has one place to ring.
+    pub cross_ring: Option<CrossRing>,
     /// Calls that have ended, by conversation and ring: the other side's
     /// hangup is an entry in the channel, and a call this window is still
     /// in that the channel says is over is one to leave. Without this the
@@ -788,6 +797,10 @@ pub struct Attached {
     pub id: String,
 }
 
+/// How long a SIP-39 ring is shown for, nobody having answered or refused
+/// it. See [`ChatState::cross_ring`].
+const CROSS_RING_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A call, as the interface needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ring {
@@ -819,6 +832,17 @@ pub struct Ring {
     /// The other person, when this is a direct message -- who a direct
     /// connection would be made to. `None` in a group, which is relayed.
     pub peer: Option<PubKey>,
+}
+
+/// SIP-39: somebody at another exchange is calling, and this is what their
+/// exchange told ours. See [`ChatState::cross_ring`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossRing {
+    /// What our exchange is holding the call open under, for the answer or
+    /// the refusal.
+    pub bridge: [u8; 16],
+    /// Who is calling, as their exchange named them.
+    pub caller: PubKey,
 }
 
 /// A public channel the directory turned up.
@@ -1301,6 +1325,11 @@ pub enum Cmd {
         channel: [u8; 32],
         seq: u64,
     },
+    /// SIP-39: the cross-exchange ring was answered or refused. Both happen
+    /// on the interface's own connection -- the answer is a call of its
+    /// own, the refusal a post to the bridge -- so all the session has to
+    /// do is stop ringing.
+    CrossRingHandled,
     /// End one that is up, or cancel one that never connected.
     Hangup {
         channel: [u8; 32],
@@ -1506,6 +1535,12 @@ impl ChatHandle {
     /// says what it wants.
     pub fn ringing(&self) -> Vec<Ring> {
         self.state.borrow().ringing.clone()
+    }
+
+    /// SIP-39: the cross-exchange call ringing, if one is. The same shape as
+    /// [`ringing`](Self::ringing), for the same reason.
+    pub fn cross_ring(&self) -> Option<CrossRing> {
+        self.state.borrow().cross_ring.clone()
     }
 
     /// Messages mentioning us that arrived while this session was up. The
@@ -2389,6 +2424,9 @@ struct Desk {
     dirty: HashSet<[u8; 32]>,
     /// SIP-56: reports announced since the admin last read them.
     reports_pending: usize,
+    /// SIP-39: a cross-exchange call ringing, and when it began, so one
+    /// nobody answers stops ringing on its own.
+    cross_ring: Option<(CrossRing, std::time::Instant)>,
     /// Channels whose roster changed by somebody else's act -- a join, a
     /// removal -- and is re-read on its own, without rebuilding everything.
     roster_dirty: HashSet<[u8; 32]>,
@@ -2471,6 +2509,7 @@ impl Default for Desk {
             open: None,
             dirty: HashSet::new(),
             reports_pending: 0,
+            cross_ring: None,
             roster_dirty: HashSet::new(),
             cursors_moved: HashSet::new(),
             restale: HashSet::new(),
@@ -2587,7 +2626,16 @@ impl Desk {
             Event::Ringing { channel, .. } => {
                 self.dirty.insert(channel);
             }
-            Event::Admission | Event::Heartbeat | Event::CrossCall { .. } | Event::Unknown(_) => {}
+            // SIP-39: another exchange carried a call here and ours is
+            // holding a bridge for it. Nothing else arrives about it -- no
+            // entry, no channel -- so this is the whole of what the
+            // interface has to ring with. A second while the first still
+            // rings replaces it: a bridge is for one call, and the caller
+            // whose bridge lapsed is told by their own exchange.
+            Event::CrossCall { bridge, caller } => {
+                self.cross_ring = Some((CrossRing { bridge, caller }, std::time::Instant::now()));
+            }
+            Event::Admission | Event::Heartbeat | Event::Unknown(_) => {}
         }
     }
 
@@ -4650,6 +4698,14 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     // thing taken from a signal is `answered`, because answering writes no
     // entry and the log therefore cannot say it.
     let mut ringing: Vec<Ring> = Vec::new();
+    // SIP-39: a cross-exchange ring lasts as long as the caller's exchange
+    // keeps asking, which is bounded by their patience and not by anything
+    // this side is told. A minute is longer than anybody rings for.
+    let cross_ring = desk
+        .cross_ring
+        .as_ref()
+        .filter(|(_, since)| since.elapsed() < CROSS_RING_FOR)
+        .map(|(ring, _)| ring.clone());
     let mut over: Vec<([u8; 32], u64)> = Vec::new();
     for (channel, known) in &desk.channels {
         for call in known.timeline.calls() {
@@ -4827,6 +4883,7 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
         set!(topic, topic);
         set!(home, home);
         set!(ringing, ringing);
+        set!(cross_ring, cross_ring);
         set!(over, over);
         set!(arrivals, arrivals);
         set!(unseen, unseen);
@@ -5874,6 +5931,9 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
             Err(e) => trouble(state, e),
         },
+        Cmd::CrossRingHandled => {
+            desk.cross_ring = None;
+        }
         Cmd::ClaimAccount(owner) => {
             let account = match owner.trim().parse::<PubKey>() {
                 Ok(key) => Ok(key),

@@ -9,8 +9,8 @@ pub mod discovery;
 pub mod held;
 
 pub use call::{
-    CallHandle, CallState, Dial, Path, Phase, spawn_call, spawn_cross_call, spawn_dm_call,
-    spawn_room,
+    CallHandle, CallState, Dial, Path, Phase, decline_cross, spawn_call, spawn_cross_answer,
+    spawn_cross_call, spawn_dm_call, spawn_room,
 };
 pub use held::{Connections, Held};
 pub use sqex_voice::engine::{CallOpts, Endpoint, Event, PeerStatus};

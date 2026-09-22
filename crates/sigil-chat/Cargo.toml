@@ -34,6 +34,9 @@ rfd = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
+# `RUST_LOG=sqexd=debug cargo test ...` shows what the in-process exchanges
+# decided, which is the only way to see why one refused a call.
+tracing-subscriber = { workspace = true }
 sigil-emoji = { path = "../sigil-emoji" }
 sqexd = { workspace = true }
 squic = { workspace = true }

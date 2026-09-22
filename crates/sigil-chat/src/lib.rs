@@ -10,9 +10,9 @@ pub mod siblings;
 
 use session::RING_WINDOW;
 pub use session::{
-    Attached, Backup, ChatHandle, ChatState, Closing, Cmd, Draft, Found, Happened, HeldBackup, Hit,
-    Line, LinkState, Linked, Member, Person, Posted, Quoted, Receipt, Report, Ring, Standing,
-    Summary, Thumb, Trouble,
+    Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Found, Happened,
+    HeldBackup, Hit, Line, LinkState, Linked, Member, Person, Posted, Quoted, Receipt, Report,
+    Ring, Standing, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -249,6 +249,16 @@ fn to_join<'a>(
 /// Long enough that a store lock or a handshake has time to come good, short
 /// enough that somebody watching does not conclude it is broken.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// SIP-39: a cross-exchange ring has no conversation, and everything about a
+/// ring here is keyed on one. The bridge is sixteen bytes and a channel is
+/// thirty-two; the bridge in the first half and nothing in the second is a
+/// key no real channel has, since a channel is a hash.
+fn cross_key(bridge: [u8; 16]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(&bridge);
+    key
+}
 
 /// The words for a ringing call.
 ///
@@ -1403,6 +1413,10 @@ struct Live {
     handle: sigil_net::CallHandle,
     /// When we joined, for the duration written into the closing entry.
     since: std::time::Instant,
+    /// SIP-39: a call another exchange carried here. It has no
+    /// conversation, so there is no entry to record its end in --
+    /// `channel` and `seq` are zero and `leave_call` writes nothing.
+    cross: bool,
 }
 
 impl Default for ChatApp {
@@ -1544,6 +1558,7 @@ impl ChatApp {
                 handle,
                 since: std::time::Instant::now(),
                 saw_peer: false,
+                cross: false,
             },
         );
     }
@@ -7195,6 +7210,7 @@ impl ChatApp {
                 handle,
                 since: std::time::Instant::now(),
                 saw_peer: false,
+                cross: false,
             },
         );
     }
@@ -7361,10 +7377,82 @@ impl ChatApp {
     /// Stop carrying audio, and say how long it lasted.
     fn leave_call(&mut self, me: PubKey) -> Option<([u8; 32], u64, u32)> {
         let live = self.calls.remove(&me)?;
-        self.left.insert((live.channel, live.seq));
         let seconds = live.since.elapsed().as_secs().min(u32::MAX as u64) as u32;
         live.handle.hang_up();
+        // A cross-exchange call has no conversation to record its end in:
+        // nothing to write, and `None` is what every caller reads as that.
+        if live.cross {
+            return None;
+        }
+        self.left.insert((live.channel, live.seq));
         Some((live.channel, live.seq, seconds))
+    }
+
+    /// **SIP-39: take a call another exchange carried here.** A session is
+    /// opened back toward the caller on the connection this identity already
+    /// holds -- our exchange matches it to the bridge it is holding for them
+    /// -- and then it is a call like any other. Nothing is dialled: the
+    /// caller's exchange did that, which is the whole reason the ring
+    /// arrived on this connection and not another.
+    fn answer_cross(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        caller: PubKey,
+        egui_ctx: &egui::Context,
+    ) {
+        let me = at.0;
+        if self.calls.contains_key(&me) {
+            return;
+        }
+        let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
+            return;
+        };
+        let signer = unlocked.signer();
+        let Some(held) = self
+            .sessions
+            .get(at)
+            .map(|s| s.connection())
+            .filter(|h| h.is_live())
+        else {
+            return;
+        };
+        let wake = egui_ctx.clone();
+        let handle = sigil_net::spawn_cross_answer(
+            sigil_net::Dial::On(held),
+            signer,
+            caller,
+            120,
+            Default::default(),
+            move || wake.request_repaint(),
+        );
+        self.calls.insert(
+            me,
+            Live {
+                channel: [0u8; 32],
+                seq: 0,
+                handle,
+                since: std::time::Instant::now(),
+                saw_peer: false,
+                cross: true,
+            },
+        );
+        self.send_as(Some(at), Cmd::CrossRingHandled);
+    }
+
+    /// **SIP-39: refuse one.** A refusal is a message of its own -- the
+    /// caller is told, rather than left until their exchange gives up on
+    /// ours. Posted on the held connection, where the bridge is, and off
+    /// the draw: it is a round trip.
+    fn decline_cross(&mut self, at: &At, bridge: [u8; 16]) {
+        if let Some(held) = self.sessions.get(at).map(|s| s.connection()) {
+            tokio::spawn(async move {
+                if let Err(e) = sigil_net::decline_cross(&held, bridge).await {
+                    tracing::warn!("could not decline the call: {e}");
+                }
+            });
+        }
+        self.send_as(Some(at), Cmd::CrossRingHandled);
     }
 }
 
@@ -7443,6 +7531,24 @@ impl ChatApp {
                     target(at, ring.channel),
                 ));
             }
+            // SIP-39: a call carried here from another exchange rings the
+            // same way -- the phone has to make a sound and come forward for
+            // it, or a ring nobody is looking at is a ring nobody hears. It
+            // has no conversation, so its notification is keyed on the
+            // bridge; pressing it brings the window up, which is where the
+            // ring is drawn whatever else is on screen.
+            if let Some(cross) = session.cross_ring() {
+                let key = cross_key(cross.bridge);
+                if !self.announced.contains(&(key, 0)) {
+                    self.announced.insert((key, 0));
+                    self.ringing_out.insert((key, 0), target(at, key));
+                    let me = session.state().mine.label(&at.0);
+                    fresh.push((
+                        ring_said(&cross.caller, "another exchange", &me, held),
+                        target(at, key),
+                    ));
+                }
+            }
         }
         self.announce_rings_in(ctx, fresh);
         self.withdraw_gone_rings(ctx);
@@ -7464,12 +7570,18 @@ impl ChatApp {
         if self.ringing_out.is_empty() {
             return;
         }
-        let live: std::collections::HashSet<([u8; 32], u64)> = self
+        let mut live: std::collections::HashSet<([u8; 32], u64)> = self
             .sessions
             .values()
             .flat_map(|s| s.ringing())
             .map(|r| (r.channel, r.seq))
             .collect();
+        live.extend(
+            self.sessions
+                .values()
+                .filter_map(|s| s.cross_ring())
+                .map(|c| (cross_key(c.bridge), 0)),
+        );
         let gone: Vec<([u8; 32], u64)> = self
             .ringing_out
             .keys()
@@ -7633,6 +7745,61 @@ impl ChatApp {
     /// "Answer" on a call you are making is nonsense, so this shape has one
     /// button and not two, and it names the conversation being called rather
     /// than a caller.
+    /// SIP-39's ring. See `ringing_ui`, which this is the first branch of.
+    fn cross_ring_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        cross: &CrossRing,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let key = cross.caller.to_string();
+        egui::Frame::NONE
+            .fill(theme.surface_elevated)
+            .corner_radius(tokens::RADIUS_LG)
+            .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.vertical(|ui| {
+                        let named = state
+                            .people
+                            .get(&cross.caller)
+                            .map(|p| p.label(&cross.caller))
+                            .unwrap_or_else(|| key.clone());
+                        ui.label(egui::RichText::new(format!("{named} is calling")).strong());
+                        ui.colored_label(
+                            theme.text_secondary,
+                            egui::RichText::new("from another exchange").small(),
+                        );
+                        // The key in full, on the ring, always -- and here
+                        // more than anywhere: a caller from another exchange
+                        // is one this exchange cannot vouch for.
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&key).monospace().small())
+                                .selectable(true),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("Decline").color(theme.destructive),
+                            ))
+                            .clicked()
+                        {
+                            self.decline_cross(at, cross.bridge);
+                        }
+                        if ui.button("Answer").clicked() {
+                            self.answer_cross(ctx, at, cross.caller, ui.ctx());
+                        }
+                    });
+                });
+            });
+    }
+
     fn calling_ui(
         &mut self,
         at: &At,
@@ -7705,6 +7872,17 @@ impl ChatApp {
         // **Incoming first.** Answering matters more than cancelling, and the
         // two cannot both be true of one conversation without somebody having
         // called somebody who was already calling them.
+        //
+        // SIP-39 first of all: a call carried here from another exchange has
+        // no conversation of its own to ring in, so this is the one place it
+        // can. It is drawn as any other ring -- who, their key in full, and
+        // two answers -- and says where it is from, because that is the one
+        // thing about it that is different.
+        if let Some(cross) = &state.cross_ring {
+            let cross = cross.clone();
+            self.cross_ring_ui(ctx, at, state, &cross, ui, theme);
+            return true;
+        }
         let Some(ring) = state.ringing.iter().find(|r| !r.mine && !r.answered) else {
             return self.calling_ui(at, state, ui, theme);
         };

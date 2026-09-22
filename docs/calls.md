@@ -75,7 +75,11 @@ Neither exchange hears the call. The session key is derived over the two
 identities and the two ephemerals, the same way a call at one exchange is,
 and no exchange on the path — near or far — ever holds it.
 
-**Placing one works; answering one does not yet.** A call carried *to* this
-exchange arrives as a `CrossCall` ring on the event stream, and nothing in
-sigil is subscribed for it, so a call from another exchange is placed and
-never answered. That is SIP-39's other half and it is not built.
+A call carried *to* your exchange rings here like any other — who is
+calling, their key in full, Answer and Decline — and says it is from another
+exchange, because that is the one thing about it that is different: it is a
+caller your exchange cannot vouch for, which is why the key is the thing to
+read. Answering opens a session back toward them on the connection you
+already hold, and your exchange matches it to the call it is holding.
+Declining tells them so, rather than leaving them ringing until their
+exchange gives up on yours.
