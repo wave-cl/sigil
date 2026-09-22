@@ -9826,3 +9826,112 @@ fn phone_devices_light() {
     h.run();
     h.snapshot("phone_devices_light");
 }
+
+// ---------------------------------------------------------------------------
+// Back to the newest message.
+// ---------------------------------------------------------------------------
+
+/// A transcript scrolled up offers the way back, and pressing it takes it.
+///
+/// The transcript sticks to the bottom while the reader is at it and stays
+/// put once they have scrolled -- which left a phone dragging a whole
+/// history back to reach what was just said. Not offered at the foot, where
+/// it would do nothing.
+#[test]
+fn a_scrolled_transcript_offers_the_way_back_to_the_newest() {
+    let mut h = harness_phone(a_page(50, 120), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    // A transcript opens at its foot, where there is nothing to go back to.
+    assert!(
+        h.query_by_label_contains("Go to the latest").is_none(),
+        "offered at the foot, where it does nothing: {}",
+        text_of(&h)
+    );
+
+    // Up a few screens, as a finger does.
+    h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 300.0));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 240.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    let up = h
+        .query_by_label_contains("Go to the latest")
+        .expect("the way back is offered once the reader has scrolled");
+    // Over the foot of the transcript, not over the composer -- a control
+    // over the box takes a press meant for it. The attach button is the
+    // composer's row; a hint is not in the tree to ask about.
+    let spot = up.rect();
+    let composer = h.get_by_label_contains("Attach a file").rect();
+    assert!(
+        spot.bottom() <= composer.top() + 1.0,
+        "the control at {spot:?} is over the composer at {composer:?}"
+    );
+
+    up.click();
+    h.run();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label_contains("Go to the latest").is_none(),
+        "pressing it did not go back to the newest: {}",
+        text_of(&h)
+    );
+}
+
+/// And it says how many arrived while the reader was away.
+#[test]
+fn the_way_back_counts_what_arrived() {
+    let mut state = a_page(50, 120);
+    if let Some(open) = state.open
+        && let Some(c) = state.conversations.iter_mut().find(|c| c.channel == open)
+    {
+        c.unread = 3;
+    }
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 300.0));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 240.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    let said = text_of(&h);
+    assert!(
+        said.contains("Go to the latest — 3 new"),
+        "the control does not say what is waiting: {said}"
+    );
+}
+
+/// The way back, over a scrolled transcript on a phone. A picture, because
+/// the control is new and it floats over what it is about.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_way_back() {
+    let mut h = harness_phone(a_page(50, 120), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 300.0));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 240.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_way_back");
+}

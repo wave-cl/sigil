@@ -5092,6 +5092,9 @@ impl ChatApp {
                 let paged =
                     self.pane(at).saw.0 == state.open && state.earlier < self.pane(at).saw.1;
 
+                // Asked for before the pass that answers it: the end of the
+                // content is only a position once the content is drawn, so
+                // the control below sets this and the next pass acts on it.
                 let out = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
@@ -5100,6 +5103,7 @@ impl ChatApp {
                             self.messages_ui(at, state, ui, theme, now);
                         });
                     });
+                self.way_back_ui(state, &out, ui, theme);
 
                 // **The pass that discovered it is thrown away.**
                 //
@@ -5161,6 +5165,95 @@ impl ChatApp {
                     self.pane(at).scrolled = (out.content_size.y, out.state.offset.y);
                 }
             });
+    }
+
+    /// **Back to the newest message.** A transcript sticks to the bottom
+    /// while the reader is at it, and stays where it is put once they have
+    /// scrolled up -- which is right, and leaves a phone dragging a
+    /// conversation's whole history back to reach what was just said. Every
+    /// messenger answers this with one control, and it is the one thing on
+    /// the transcript that is *not* about a message.
+    ///
+    /// Only while it does something: at the bottom there is nothing to go
+    /// back to, and a control that is always there is a control nobody
+    /// reads. `SLACK` is a message's height, so it neither flickers at the
+    /// foot nor hides while a screen of conversation is still below.
+    ///
+    /// It says how many arrived while the reader was away, when any did:
+    /// the number is the reason to press it.
+    fn way_back_ui(
+        &mut self,
+        state: &ChatState,
+        out: &egui::scroll_area::ScrollAreaOutput<()>,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        /// How far from the foot counts as away from it.
+        const SLACK: f32 = 48.0;
+        let below = out.content_size.y - (out.state.offset.y + out.inner_rect.height());
+        if below <= SLACK {
+            return;
+        }
+        let unread = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open)
+            .map(|c| c.unread)
+            .unwrap_or(0);
+        // **One name, with the count after it.** The word is what anything
+        // that cannot see the shape is given, and a name that changes with
+        // the count is one nobody -- and no test -- can ask for by name.
+        let word = match unread {
+            0 => "Go to the latest".to_string(),
+            1 => "Go to the latest — 1 new".to_string(),
+            n => format!("Go to the latest — {n} new"),
+        };
+        // Over the foot of the transcript, from the right, and inside it:
+        // the composer is below, and a control over the composer is one
+        // that takes a press meant for the box.
+        let side = tokens::BUTTON_LG + tokens::SPACING_SM;
+        let spot = egui::Rect::from_min_max(
+            out.inner_rect.right_bottom() - egui::vec2(side + tokens::SPACING_MD, side),
+            out.inner_rect.right_bottom() - egui::vec2(tokens::SPACING_MD, 0.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                // Its own id: the transcript above it allocates a widget per
+                // message, and a control that lands on an id already used
+                // this pass is drawn and reaches no accessibility tree --
+                // which is how a button nobody can find by name looks from a
+                // test, and how a screen reader finds nothing.
+                .id_salt("to_the_latest")
+                .max_rect(spot)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                egui::Frame::NONE
+                    .fill(theme.surface_elevated)
+                    .corner_radius(side / 2.0)
+                    .inner_margin(egui::Margin::symmetric(tokens::SPACING_XS as i8, 0))
+                    .show(ui, |ui| {
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, &word).clicked()
+                        {
+                            // The offset put where the content ends -- the
+                            // same way a page arriving above the reader is
+                            // corrected. Scrolling from inside the content
+                            // is the other way round and a pass late: the
+                            // content is drawn before this is pressed.
+                            let mut moved = out.state;
+                            moved.offset.y =
+                                (out.content_size.y - out.inner_rect.height()).max(0.0);
+                            moved.store(ui.ctx(), out.id);
+                            ui.ctx().request_repaint();
+                        }
+                        if unread > 0 {
+                            ui.colored_label(
+                                theme.accent,
+                                egui::RichText::new(unread.to_string()).small().strong(),
+                            );
+                        }
+                    });
+            },
+        );
     }
 
     /// What is wrong with this conversation, said in words.
