@@ -10822,3 +10822,40 @@ fn a_tap_on_a_picture_leaves_the_phones_viewer() {
         text_of(&h)
     );
 }
+
+/// **A clip opens on the whole screen too**, with the same two things
+/// beside the way out: hand it on, or keep it.
+///
+/// The phone's viewer used to be the window's dialog -- margins, rounded
+/// corners and a small video in the middle of a 360-point screen -- and
+/// the only way to save a clip was the message's More menu, behind a long
+/// press on a bubble the clip fills.
+#[test]
+fn a_clip_opens_on_the_whole_screen_with_its_own_controls() {
+    let mut state = with_pictures(1);
+    let last = state.lines.len() - 1;
+    state.lines[last].attachments[0].kind = sigil_ui::attachment::VIDEO;
+    state.lines[last].attachments[0].described = "[video 2s, 1.2 MiB]".into();
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let tile = h.get_by_label_contains("[video 2s").rect();
+    finger_down(&mut h, tile.center());
+    h.run();
+    finger_up(&mut h, tile.center());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Save…").is_some() && h.query_by_label("Forward it").is_some(),
+        "the clip's viewer offers neither: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Close").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Save…").is_none(),
+        "the viewer would not close: {}",
+        text_of(&h)
+    );
+}
