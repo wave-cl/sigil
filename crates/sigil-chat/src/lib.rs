@@ -5227,8 +5227,14 @@ impl ChatApp {
                 .max_rect(spot)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
+                // **It floats over the transcript, so it must not read as
+                // part of it.** On the phone it lands over the last bubble
+                // -- seen on the device, sitting on a message's time -- and
+                // an elevated ground is the bubbles' own. The pane's ground
+                // with a rule around it is a thing *over* the conversation.
                 egui::Frame::NONE
-                    .fill(theme.surface_elevated)
+                    .fill(theme.surface_primary)
+                    .stroke(egui::Stroke::new(1.0, theme.border_strong))
                     .corner_radius(side / 2.0)
                     .inner_margin(egui::Margin::symmetric(tokens::SPACING_XS as i8, 0))
                     .show(ui, |ui| {
