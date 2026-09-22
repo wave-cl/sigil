@@ -59,17 +59,23 @@ procedure.
 
 ## Somebody at another exchange
 
-A call reaches a key at *your* exchange: both of you have a session there,
-and the exchange introduces you. Somebody whose account lives somewhere else
-has no session at yours to be introduced in — so the call is placed at your
-exchange **for their name**, `ada@b.test`, and your exchange carries the
-request to theirs, which rings them (SIP-39).
+A call is placed from the conversation with the person being called, and
+that is as true of somebody at another exchange as of anybody else. Reach
+them first: *New conversation*, and their name where you would put a key —
+`ada@b.test`. A key is base58 and base58 has no `@` in it, so the two cannot
+be confused. The conversation opens at whichever exchange the two of you are
+introduced at (SIP-60), reached through your home, and its call button places
+the call there: the invitation goes into the conversation, their session
+rings wherever it is, and both of you join on the connections your sessions
+already hold (`a_call_inside_a_conversation_across_exchanges_connects` proves
+the round trip against two federated exchanges). There is no field to type a
+name into on its own — there was, on a Calls app no window loads — because a
+call that has a conversation belongs in it.
 
-Type the name where you would type a key. A key is base58 and base58 has no
-`@` in it, so the two cannot be confused; anything that is neither is still
-refused as a key. Until this, `ada@b.test` was refused with "that is not a
-key", which is true and useless: a name is exactly how you reach somebody
-whose exchange is not yours.
+Your exchange can also carry a call *for a name* to theirs without any
+conversation (SIP-39's bridge, `sigil_net::spawn_cross_call`), which is how
+one arrives from the command line, and how one arrives here from an exchange
+whose client did it that way.
 
 Neither exchange hears the call. The session key is derived over the two
 identities and the two ephemerals, the same way a call at one exchange is,

@@ -693,3 +693,136 @@ async fn refusing_a_call_from_another_exchange_tells_the_caller() {
     );
     bobs.stop();
 }
+
+/// **A call placed inside a conversation that spans two exchanges.** A call
+/// is placed from the conversation with the person being called -- there is
+/// no Calls tab -- so somebody at another exchange is called from the
+/// conversation SIP-60 opened with them. Alice at A rings Bob at B from it;
+/// Bob's session rings; and both join on the connections their sessions
+/// hold, which is what Answer does (`join_call`: at an exchange reached
+/// through the home, the call rides the session's own connection).
+///
+/// This is the interface's whole path to somebody elsewhere. Before it was
+/// written, the *placing* half of SIP-39 was a field on a Calls app no shell
+/// loads.
+#[tokio::test]
+async fn a_call_inside_a_conversation_across_exchanges_connects() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let (a, b) = pair().await;
+    let (a_signer, alice, _) = signer(0x80);
+    let (b_signer, bob, b_seed) = signer(0x81);
+    let dir = tempfile::tempdir().unwrap();
+
+    let bobs = start_at(&b, b_signer, &dir.path().join("bob.db"));
+    up(&bobs, bob).await;
+    bobs.send(Cmd::OpenRemote {
+        target: format!("{alice}@a.test"),
+        identity: None,
+    });
+    let mut on_record = false;
+    for _ in 0..150 {
+        if home_on_record(&b, &b_seed, &bob).await == Some(b.key) {
+            on_record = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        on_record,
+        "Bob's Move should be on record at B: {:?}",
+        bobs.state().trouble,
+    );
+
+    let alices = start_at(&a, a_signer, &dir.path().join("alice.db"));
+    up(&alices, alice).await;
+    alices.send(Cmd::OpenRemote {
+        target: format!("{bob}@b.test"),
+        identity: None,
+    });
+    assert!(
+        until(|| alices.state().open.is_some(), 20).await,
+        "the conversation should open: {:?}",
+        alices.state().trouble
+    );
+    // Bob sees it: the conversation is in his list before anything rings,
+    // so a ring that never arrives is about the call and not the reach.
+    assert!(
+        until(
+            || bobs
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.peer == Some(alice)),
+            20
+        )
+        .await,
+        "Bob never saw the conversation: {:?}",
+        bobs.state().trouble
+    );
+    assert!(bobs.state().ringing.is_empty(), "ringing before the call");
+
+    alices.send(Cmd::Call { direct: false });
+    assert!(
+        until(|| bobs.state().ringing.iter().any(|r| !r.mine), 20).await,
+        "Bob's session did not ring: Alice says {:?}, Bob says {:?}",
+        alices.state().trouble,
+        bobs.state().trouble
+    );
+    let ring = bobs
+        .state()
+        .ringing
+        .into_iter()
+        .find(|r| !r.mine)
+        .expect("checked above");
+    assert_eq!(ring.from, alice);
+    assert_eq!(ring.peer, Some(alice), "a direct message names its peer");
+
+    // Both join on their sessions' connections, as Answer does.
+    let opts = || sigil_net::CallOpts {
+        source: sqex_voice::audio::Source::Tone,
+        sink: sqex_voice::audio::Sink::Null,
+        seconds: Some(2),
+        ..sigil_net::CallOpts::default()
+    };
+    let room = sigil_net::RoomId::new(ring.secret);
+    let (a_signer, _, _) = signer(0x80);
+    let (b_signer, _, _) = signer(0x81);
+    let hers = sigil_net::spawn_dm_call(
+        sigil_net::Dial::On(alices.connection()),
+        a_signer,
+        bob,
+        room,
+        false,
+        opts(),
+        || {},
+    );
+    let his = sigil_net::spawn_dm_call(
+        sigil_net::Dial::On(bobs.connection()),
+        b_signer,
+        alice,
+        room,
+        false,
+        opts(),
+        || {},
+    );
+    let live = until(
+        || hers.state().phase == sigil_net::Phase::Live && his.state().phase == sigil_net::Phase::Live,
+        20,
+    )
+    .await;
+    assert!(
+        live,
+        "the two never connected: Alice says {:?} ({:?}), Bob says {:?} ({:?})",
+        hers.state().trouble,
+        hers.state().phase,
+        his.state().trouble,
+        his.state().phase
+    );
+    hers.hang_up();
+    his.hang_up();
+    alices.stop();
+    bobs.stop();
+}
