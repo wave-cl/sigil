@@ -279,6 +279,102 @@ fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
     }
 }
 
+/// What was pressed on a ring's card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RingPress {
+    Answer,
+    Decline,
+}
+
+/// The card a ring is drawn as, from anywhere: who, by the name this client
+/// has for them and by their key in full; what it is under them -- the
+/// conversation, or "from another exchange"; and the two handsets.
+///
+/// **One shape for both kinds of ring, and one that fits a phone.** Each
+/// ring drew its own, as a row of identicon, a text column carrying the key,
+/// and two named buttons at the right -- and a 44-character key beside two
+/// buttons is wider than a 360-point pane, so on the phone the buttons were
+/// painted over the key and the words under the name. Seen on the device,
+/// with a real call from another exchange. Now the handsets end the name's
+/// row, where a long name truncates rather than pushes, and the key has a
+/// row of its own, wrapped: the key in full, on the ring, always, because a
+/// name is an assertion and this is the one screen where acting on the
+/// wrong one puts somebody in a call with a stranger who chose a confusable
+/// name.
+fn ring_card(
+    ui: &mut egui::Ui,
+    theme: &ColorTheme,
+    caller: &PubKey,
+    named: &str,
+    under: &str,
+) -> Option<RingPress> {
+    let key = caller.to_string();
+    let mut pressed = None;
+    egui::Frame::NONE
+        .fill(theme.surface_elevated)
+        .corner_radius(tokens::RADIUS_LG)
+        .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
+                ui.add_space(tokens::SPACING_SM);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The handsets: the struck-through one in the destructive
+                    // colour, the whole one in the colour of a thing going
+                    // well. Each carries its word for anything that cannot
+                    // see a shape.
+                    if sigil_ui::icon_button_as_named(
+                        ui,
+                        sigil_ui::Icon::HangUp,
+                        "Decline",
+                        Some(theme.destructive),
+                        false,
+                    )
+                    .clicked()
+                    {
+                        pressed = Some(RingPress::Decline);
+                    }
+                    if sigil_ui::icon_button_as_named(
+                        ui,
+                        sigil_ui::Icon::Call,
+                        "Answer",
+                        Some(theme.success),
+                        false,
+                    )
+                    .clicked()
+                    {
+                        pressed = Some(RingPress::Answer);
+                    }
+                    ui.add_space(tokens::SPACING_SM);
+                    // What the handsets left, and no more: a name that would
+                    // not fit is cut, not laid over them.
+                    ui.vertical(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{named} is calling")).strong(),
+                            )
+                            .truncate(),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(under)
+                                    .small()
+                                    .color(theme.text_secondary),
+                            )
+                            .truncate(),
+                        );
+                    });
+                });
+            });
+            ui.add(
+                egui::Label::new(egui::RichText::new(&key).monospace().small())
+                    .wrap()
+                    .selectable(true),
+            );
+        });
+    pressed
+}
+
 /// The words for a mention: the summary and the body of the notification.
 ///
 /// The same rules as [`ring_said`]: the sender by the name this client has
@@ -1739,6 +1835,18 @@ impl ChatApp {
 
     /// Everything the interface has asked the session for, as `Debug` writes
     /// it. Recorded only while a fixed state is installed; see `send_as`.
+    /// The notification a ring from another exchange would be pressed
+    /// under, if one is ringing on any session: what the platform hands
+    /// back to [`App::open`] when its Answer is pressed.
+    pub fn cross_ring_target_for_test(&self) -> Option<Target> {
+        self.sessions.iter().find_map(|(at, s)| {
+            let cross = s.cross_ring()?;
+            let mut to = target(at, cross_key(cross.bridge));
+            to.answer = true;
+            Some(to)
+        })
+    }
+
     pub fn asked_for_test(&self) -> &[String] {
         &self.sent
     }
@@ -1990,6 +2098,25 @@ impl App for ChatApp {
         token: &std::rc::Rc<dyn std::any::Any>,
     ) -> AppResponse {
         let route = Self::route(token);
+        // **A ring is drawn wherever the eye is.** It was drawn at the top of
+        // the transcript and nowhere else, so a call arriving while the list,
+        // Devices or Members was on screen -- which on a phone is most of the
+        // time -- showed nothing but the notification, and the words "drawn
+        // over whatever is on screen" beside the cross ring were not true.
+        // Seen on the device: the card appeared only because a broken Answer
+        // had opened a conversation to draw it in. Incoming only: a call
+        // *being placed* belongs to the conversation it is placed from.
+        if let Some(at) = self.showing_at(ctx) {
+            let state = self.state_of(Some(&at));
+            let incoming =
+                state.cross_ring.is_some() || state.ringing.iter().any(|r| !r.mine && !r.answered);
+            if incoming && (route != Route::Conversations || state.open.is_none()) {
+                let theme = ColorTheme::current(ui.ctx());
+                if self.ringing_ui(ctx, &at, &state, ui, &theme) {
+                    ui.add_space(tokens::SPACING_SM);
+                }
+            }
+        }
         let response = match route {
             Route::Conversations => self.render(ctx, ui),
             Route::Directory => self.directory_view(ctx, ui),
@@ -2044,7 +2171,22 @@ impl App for ChatApp {
             target.identity,
             (!target.exchange.is_empty()).then(|| target.exchange.clone()),
         );
-        self.send_as(Some(&at), Cmd::Show(target.channel));
+        // SIP-39: a ring from another exchange is notified under the key of
+        // its bridge, which is not a conversation. Showing it opened a
+        // conversation that did not exist -- "Loading this conversation…"
+        // for ever -- and the answer then looked for a ring in a list the
+        // cross ring is not in, so pressing Answer on the phone's
+        // notification answered nothing and the caller gave up. Seen on
+        // the device. The ring is drawn over whatever is on screen, so
+        // there is nothing to show; the answer is deferred as any other.
+        let is_cross = self
+            .sessions
+            .get(&at)
+            .and_then(|s| s.cross_ring())
+            .is_some_and(|c| cross_key(c.bridge) == target.channel);
+        if !is_cross {
+            self.send_as(Some(&at), Cmd::Show(target.channel));
+        }
         if target.answer {
             self.answering = Some((at, target.channel, std::time::Instant::now()));
         }
@@ -7362,6 +7504,16 @@ impl ChatApp {
         let Some(session) = self.sessions.get(&at) else {
             return;
         };
+        // A ring from another exchange first: it is keyed on its bridge,
+        // and answered on the connection this session holds.
+        if let Some(cross) = session
+            .cross_ring()
+            .filter(|c| cross_key(c.bridge) == channel)
+        {
+            self.answering = None;
+            self.answer_cross(ctx, &at, cross.caller, egui_ctx);
+            return;
+        }
         let Some(ring) = session
             .ringing()
             .into_iter()
@@ -7626,11 +7778,23 @@ impl ChatApp {
                 if !self.announced.contains(&(key, 0)) {
                     self.announced.insert((key, 0));
                     self.ringing_out.insert((key, 0), target(at, key));
-                    let me = session.state().mine.label(&at.0);
-                    fresh.push((
-                        ring_said(&cross.caller, "another exchange", &me, held),
-                        target(at, key),
-                    ));
+                    let state = session.state();
+                    let me = state.mine.label(&at.0);
+                    // The caller first, by the name this client has for
+                    // them, and where from after: "another exchange — from
+                    // HR2v…" led with the one word that says the least and
+                    // was cut before the caller on the phone's shade.
+                    let who = state
+                        .people
+                        .get(&cross.caller)
+                        .map(|p| p.label(&cross.caller))
+                        .unwrap_or_else(|| sigil_ui::message::short(&cross.caller.to_string()));
+                    let said = if held > 1 {
+                        format!("{who}, from another exchange — to {me}")
+                    } else {
+                        format!("{who}, from another exchange")
+                    };
+                    fresh.push((said, target(at, key)));
                 }
             }
         }
@@ -7839,49 +8003,18 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
-        let key = cross.caller.to_string();
-        egui::Frame::NONE
-            .fill(theme.surface_elevated)
-            .corner_radius(tokens::RADIUS_LG)
-            .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
-                    ui.add_space(tokens::SPACING_SM);
-                    ui.vertical(|ui| {
-                        let named = state
-                            .people
-                            .get(&cross.caller)
-                            .map(|p| p.label(&cross.caller))
-                            .unwrap_or_else(|| key.clone());
-                        ui.label(egui::RichText::new(format!("{named} is calling")).strong());
-                        ui.colored_label(
-                            theme.text_secondary,
-                            egui::RichText::new("from another exchange").small(),
-                        );
-                        // The key in full, on the ring, always -- and here
-                        // more than anywhere: a caller from another exchange
-                        // is one this exchange cannot vouch for.
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&key).monospace().small())
-                                .selectable(true),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("Decline").color(theme.destructive),
-                            ))
-                            .clicked()
-                        {
-                            self.decline_cross(at, cross.bridge);
-                        }
-                        if ui.button("Answer").clicked() {
-                            self.answer_cross(ctx, at, cross.caller, ui.ctx());
-                        }
-                    });
-                });
-            });
+        let named = state
+            .people
+            .get(&cross.caller)
+            .map(|p| p.label(&cross.caller))
+            .unwrap_or_else(|| cross.caller.to_string());
+        // The one thing about it that is different, said in words: a caller
+        // from another exchange is one this exchange cannot vouch for.
+        match ring_card(ui, theme, &cross.caller, &named, "from another exchange") {
+            Some(RingPress::Answer) => self.answer_cross(ctx, at, cross.caller, ui.ctx()),
+            Some(RingPress::Decline) => self.decline_cross(at, cross.bridge),
+            None => {}
+        }
     }
 
     fn calling_ui(
@@ -7970,64 +8103,34 @@ impl ChatApp {
         let Some(ring) = state.ringing.iter().find(|r| !r.mine && !r.answered) else {
             return self.calling_ui(at, state, ui, theme);
         };
-        let key = ring.from.to_string();
-        egui::Frame::NONE
-            .fill(theme.surface_elevated)
-            .corner_radius(tokens::RADIUS_LG)
-            .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
-                    ui.add_space(tokens::SPACING_SM);
-                    ui.vertical(|ui| {
-                        let named = state
-                            .people
-                            .get(&ring.from)
-                            .map(|p| p.label(&ring.from))
-                            .unwrap_or_else(|| key.clone());
-                        ui.label(egui::RichText::new(format!("{named} is calling")).strong());
-                        ui.colored_label(
-                            theme.text_secondary,
-                            egui::RichText::new(&ring.label).small(),
-                        );
-                        // The key in full, on the ring, always. A name is an
-                        // assertion and this is the one screen where acting on
-                        // the wrong one puts somebody in a call with a stranger
-                        // who chose a confusable name.
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&key).monospace().small())
-                                .selectable(true),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("Decline").color(theme.destructive),
-                            ))
-                            .clicked()
-                        {
-                            self.send_as(
-                                Some(at),
-                                Cmd::Decline {
-                                    channel: ring.channel,
-                                    seq: ring.seq,
-                                },
-                            );
-                        }
-                        if ui.button("Answer").clicked() {
-                            let ring = ring.clone();
-                            self.send_as(
-                                Some(at),
-                                Cmd::Answer {
-                                    channel: ring.channel,
-                                    seq: ring.seq,
-                                },
-                            );
-                            self.join_call(ctx, at, &ring, ui.ctx());
-                        }
-                    });
-                });
-            });
+        let named = state
+            .people
+            .get(&ring.from)
+            .map(|p| p.label(&ring.from))
+            .unwrap_or_else(|| ring.from.to_string());
+        match ring_card(ui, theme, &ring.from, &named, &ring.label) {
+            Some(RingPress::Decline) => {
+                self.send_as(
+                    Some(at),
+                    Cmd::Decline {
+                        channel: ring.channel,
+                        seq: ring.seq,
+                    },
+                );
+            }
+            Some(RingPress::Answer) => {
+                let ring = ring.clone();
+                self.send_as(
+                    Some(at),
+                    Cmd::Answer {
+                        channel: ring.channel,
+                        seq: ring.seq,
+                    },
+                );
+                self.join_call(ctx, at, &ring, ui.ctx());
+            }
+            None => {}
+        }
         true
     }
 

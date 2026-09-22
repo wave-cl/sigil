@@ -9439,3 +9439,95 @@ fn the_identity_menu_reaches_devices_with_no_conversation_open() {
         routes.borrow()
     );
 }
+
+// ---------------------------------------------------------------------------
+// A ring on a phone: the handsets beside the name, the key on its own row.
+// ---------------------------------------------------------------------------
+
+/// The handsets never lie over the caller's key.
+///
+/// Seen on the device, with a real call from another exchange: the ring was
+/// a row of identicon, a text column carrying the 44-character key, and two
+/// named buttons, and on a 360-point pane the buttons were painted over the
+/// key and the words under the name. Both kinds of ring, since both drew
+/// that row.
+#[test]
+fn a_rings_handsets_do_not_lie_over_its_key_on_a_phone() {
+    let ordinary = {
+        let mut state = a_conversation();
+        state.open = None;
+        state.ringing = vec![sigil_chat::Ring {
+            channel: [9u8; 32],
+            seq: 7,
+            from: them(),
+            mine: false,
+            secret: [3u8; 32],
+            answered: false,
+            label: "Ada".into(),
+            direct: false,
+            peer: None,
+        }];
+        state
+    };
+    let cross = {
+        let mut state = a_conversation();
+        state.open = None;
+        state.cross_ring = Some(sigil_chat::CrossRing {
+            bridge: [7u8; 16],
+            caller: them(),
+        });
+        state
+    };
+    for (what, state) in [
+        ("an ordinary ring", ordinary),
+        ("a ring from another exchange", cross),
+    ] {
+        let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+        h.run();
+        h.run();
+        let answer = h.get_by_label("Answer").rect();
+        let decline = h.get_by_label("Decline").rect();
+        let key = h
+            .get_all_by_label_contains(&them().to_string())
+            .map(|n| n.rect())
+            .max_by(|a, b| a.width().total_cmp(&b.width()))
+            .expect("the key is drawn");
+        for (name, button) in [("Answer", answer), ("Decline", decline)] {
+            assert!(
+                button.width() > 0.0 && key.width() > 0.0,
+                "{what}: a box is empty, so this checks nothing"
+            );
+            assert!(
+                !button.intersects(key),
+                "{what}: {name} at {button:?} lies over the key at {key:?}"
+            );
+            assert!(
+                button.right() <= PHONE_WIDTH + 0.5,
+                "{what}: {name} at {button:?} runs off a {PHONE_WIDTH}-point pane"
+            );
+        }
+        // And the key is under the handsets, in full: a row of its own.
+        assert!(
+            key.top() >= answer.bottom() - 1.0,
+            "{what}: the key at {key:?} is not under the handsets at {answer:?}"
+        );
+        nothing_runs_off_the_edge(&h, what);
+    }
+}
+
+/// A ring from another exchange over the list, on a phone. A picture,
+/// because the card is new and the old one was seen broken on the device.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_ring() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.cross_ring = Some(sigil_chat::CrossRing {
+        bridge: [7u8; 16],
+        caller: them(),
+    });
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_ring");
+}

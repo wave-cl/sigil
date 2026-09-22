@@ -829,3 +829,111 @@ async fn a_call_inside_a_conversation_across_exchanges_connects() {
     alices.stop();
     bobs.stop();
 }
+
+/// **The notification's Answer takes a call from another exchange.**
+///
+/// Seen on the phone: a ring from another exchange is notified under the key
+/// of its bridge, which is not a conversation. Pressing Answer on the shade
+/// opened "Loading this conversation…" for a channel that did not exist and
+/// answered nothing -- the app looked for the ring among the conversation
+/// rings, which a cross ring is not -- and the caller gave up. This is that
+/// press, through the app's own `open` and `update`, against two federated
+/// exchanges: Bob's app at B, rung by Alice at A, answers on the connection
+/// its session holds and the two connect.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_notifications_answer_takes_a_call_from_another_exchange() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let (a, b) = pair().await;
+    let (a_signer, _, _) = signer(0x90);
+    let (_, bob, _) = signer(0x91);
+    let dir = tempfile::tempdir().unwrap();
+
+    // Bob's whole app, pointed at B, running its session the way the window
+    // does: `update` starts it, and every later pass is a frame.
+    let egui_ctx = egui::Context::default();
+    let mut app = sigil_chat::ChatApp::new();
+    app.set_store_root_for_test(dir.path().to_path_buf());
+    app.set_exchange_for_test(&b.endpoint.address.to_string(), &b.key.to_string());
+    let mut accounts =
+        sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([0x91u8; 32])]);
+    let pass = |app: &mut sigil_chat::ChatApp, accounts: &mut sigil::accounts::Accounts| {
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut ctx = sigil::app::AppContext {
+            navigator: &mut nav,
+            accounts,
+            unfocused: true,
+            away: false,
+            notify: &sigil::Silent,
+            connections: &Default::default(),
+        };
+        sigil::app::App::update(app, &mut ctx, &egui_ctx);
+    };
+    pass(&mut app, &mut accounts);
+    assert!(
+        until(|| b.server.events.count(&bob) > 0, 20).await,
+        "Bob's app never subscribed to B's events"
+    );
+
+    let call = sigil_net::spawn_cross_call(
+        a.endpoint,
+        a_signer,
+        format!("{bob}@b.test"),
+        20,
+        sigil_net::CallOpts {
+            source: sqex_voice::audio::Source::Tone,
+            sink: sqex_voice::audio::Sink::Null,
+            seconds: Some(2),
+            ..sigil_net::CallOpts::default()
+        },
+        || {},
+    );
+    // The app sees the ring on a pass, as the window would.
+    let mut to = None;
+    for _ in 0..200 {
+        pass(&mut app, &mut accounts);
+        to = app.cross_ring_target_for_test();
+        if to.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let to = to.unwrap_or_else(|| panic!("Bob's app never rang: {:?}", call.state().trouble));
+    assert!(to.answer, "the notification offers Answer");
+
+    // The press, as the platform delivers it.
+    {
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut ctx = sigil::app::AppContext {
+            navigator: &mut nav,
+            accounts: &mut accounts,
+            unfocused: true,
+            away: false,
+            notify: &sigil::Silent,
+            connections: &Default::default(),
+        };
+        assert!(sigil::app::App::open(&mut app, &mut ctx, &to), "this app's");
+    }
+    // And the passes that follow it, which is where a deferred answer is
+    // made. The call is held by the app -- `calls_for_test` -- and Alice's
+    // end reaches Live, which is the far side's own word that it connected.
+    let mut live = false;
+    for _ in 0..200 {
+        pass(&mut app, &mut accounts);
+        if app.calls_for_test().contains(&bob) && call.state().phase == sigil_net::Phase::Live {
+            live = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        live,
+        "the notification's Answer did not connect the call: Bob holds {:?}, Alice says {:?} ({:?})",
+        app.calls_for_test(),
+        call.state().trouble,
+        call.state().phase
+    );
+    call.hang_up();
+}
