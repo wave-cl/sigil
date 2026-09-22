@@ -25,6 +25,12 @@ pub struct Video<'a> {
     /// The picture due now, once there is a player. `None` shows the
     /// thumbnail.
     pub frame: Option<&'a egui::TextureHandle>,
+    /// The clip's own first frame, decoded from the blob once it is here.
+    /// Drawn in a bubble in place of the sender's thumbnail, which SIP-18
+    /// caps at eight kilobytes and which a phone therefore draws at four
+    /// times its own size. **Not a frame that moves**: a bubble still does
+    /// not play, it just has a sharper still to show.
+    pub still: Option<&'a egui::TextureHandle>,
     /// The sender's thumbnail, empty if none.
     pub preview: &'a std::sync::Arc<[u8]>,
     /// A stable name, for the thumbnail's texture.
@@ -113,10 +119,11 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
         .rect_filled(rect, tokens::RADIUS_MD, egui::Color32::BLACK);
 
     // The picture: the frame, or the thumbnail until there is one. In a
-    // bubble, always the thumbnail: the frames are the viewer's.
+    // bubble the frames that move are the viewer's, but the clip's own
+    // first frame is a still and is what the thumbnail is a small copy of.
     let mut drew = false;
     let frame = match v.place {
-        Place::Bubble => None,
+        Place::Bubble => v.still,
         Place::Viewer => v.frame,
     };
     if let Some(texture) = frame {

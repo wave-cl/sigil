@@ -928,12 +928,11 @@ fn video_view<'a>(
         sigil_ui::Standing::Held
     };
     sigil_ui::Video {
-        // The player's picture while one is playing; otherwise the clip's
-        // own first frame if it has been decoded, and the sender's small
-        // preview only until it has.
-        frame: playing
-            .and_then(|p| p.texture.as_ref())
-            .or_else(|| pane.stills.get(&a.id)),
+        frame: playing.and_then(|p| p.texture.as_ref()),
+        // The clip's own first frame, for the bubble, once the blob is
+        // here: the sender's thumbnail is 96 pixels and a bubble draws it
+        // over seven hundred.
+        still: pane.stills.get(&a.id),
         preview: &a.preview,
         id: &a.id,
         standing,

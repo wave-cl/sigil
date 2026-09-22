@@ -55,6 +55,7 @@ fn drawn_at(
             let empty = sigil_ui::attachment::no_preview();
             let v = sigil_ui::Video {
                 frame: None,
+                still: None,
                 preview: empty,
                 id: "clip",
                 standing,
@@ -230,4 +231,68 @@ fn a_playing_video_can_be_paused_muted_enlarged_and_scrubbed() {
     h.run();
     assert!(h.query_by_label("Unmute").is_some());
     assert!(h.query_by_label("Mute").is_none());
+}
+
+/// **A bubble draws the clip's own first frame when there is one.**
+///
+/// The sender's thumbnail is capped at eight kilobytes by SIP-18, which
+/// makes it 96 pixels across; a phone draws a clip in a bubble over seven
+/// hundred device pixels, and the blur is the first thing anybody sees of
+/// a video. Once the blob is here the client decodes a still of its own.
+/// The frames that *move* are still the viewer's alone -- a bubble does
+/// not play -- which is what the `frame` beside this one is.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn a_bubble_draws_the_clips_own_still_when_there_is_one() {
+    // **Held across passes.** A `TextureHandle` frees its texture when it is
+    // dropped, so one loaded inside the closure is gone before anything is
+    // rendered -- and the test then reads a screen with no still on it for
+    // a reason that has nothing to do with the code under test.
+    let kept: std::cell::RefCell<Option<egui::TextureHandle>> = std::cell::RefCell::new(None);
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(400.0, 400.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+            // A still of a colour nothing else on this screen is.
+            let mut held = kept.borrow_mut();
+            let still = held.get_or_insert_with(|| {
+                ctx.load_texture(
+                    "still",
+                    egui::ColorImage::new([8, 8], vec![egui::Color32::from_rgb(9, 200, 9); 64]),
+                    egui::TextureOptions::NEAREST,
+                )
+            });
+            let preview: std::sync::Arc<[u8]> = std::sync::Arc::from(Vec::new());
+            let v = sigil_ui::Video {
+                frame: None,
+                still: Some(still),
+                preview: &preview,
+                id: "clip",
+                standing: sigil_ui::Standing::Held,
+                position_ms: 0,
+                duration_ms: 2_000,
+                playing: false,
+                ended: false,
+                volume: 1.0,
+                trouble: None,
+                shape: Some((16, 9)),
+                described: "[video 2s, 1.2 MiB]",
+                place: sigil_ui::video::Place::Bubble,
+            };
+            sigil_ui::video(ui, &v, 320.0, 320.0);
+        });
+    h.run();
+    h.run();
+    // The still is what is on screen: the pixels say so, since a texture
+    // draws nothing to the accessibility tree.
+    let image = h.render().expect("a renderer");
+    let green = image
+        .pixels()
+        .filter(|p| p.0[1] > 150 && p.0[0] < 60 && p.0[2] < 60)
+        .count();
+    assert!(
+        green > 1000,
+        "the clip's own still is not what the bubble drew: {green} pixels of it"
+    );
 }
