@@ -555,3 +555,84 @@ fn shared(account: Account) -> (Harness<'static>, std::rc::Rc<std::cell::RefCell
         });
     (h, app)
 }
+
+/// **Nothing in a call is drawn where a finger cannot get to it.**
+///
+/// The fault this exists for was here: the call view draws the roster and
+/// *then* the control that ends the call, so a room of a dozen put Leave at
+/// y=1344 of an 804-point screen with nothing to scroll. A call somebody
+/// cannot end is a microphone that stays open, and the only way out is
+/// force-stopping the app. `the_control_that_ends_a_call_stays_on_a_phones_screen`
+/// asks about Leave by name; this asks about everything else, which is the
+/// half that has no name to ask about.
+///
+/// The sweep goes down the screen rather than across its middle: a wheel
+/// turns whatever is under the pointer, and a widget inside a box that was
+/// never scrolled reports a content position far below the screen, which
+/// reads exactly like one nothing reaches.
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_in_a_call_is_out_of_reach_on_a_phone() {
+    const TALL: f32 = 804.0;
+    let mut h = phone_with(a_room_of(12));
+    h.run();
+    h.run();
+    let before = deepest(&h);
+    // The control, inside the test: a pane that already fits has nothing to
+    // scroll, and then scrolling proves nothing about it.
+    assert!(
+        before.1 > TALL as f64,
+        "a room of twelve drew only {:.0} points on an {TALL}-point screen, \
+         so the scroll below is not being asked anything",
+        before.1
+    );
+    for y in [100.0f32, 300.0, 500.0, 700.0] {
+        for _ in 0..40 {
+            h.hover_at(egui::pos2(180.0, y));
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -400.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            // Not `run`: a call redraws for ever, and `run` panics when it
+            // exceeds its step budget.
+            h.run_steps(2);
+        }
+    }
+    let after = deepest(&h);
+    assert!(
+        after.1 <= TALL as f64 + 1.0,
+        "{:?} still ends at y={:.0} on an {TALL}-point screen after scrolling \
+         to the end, so nothing reaches it",
+        after.0,
+        after.1
+    );
+}
+
+/// The deepest thing drawn, and what it is, in points.
+///
+/// The accesskit node's own bounding box, not `Node::rect`: that one
+/// `expect`s a rectangle and the root has none, so it panics -- a test
+/// failing for a reason that has nothing to do with the layout.
+fn deepest(h: &Harness<'static>) -> (String, f64) {
+    fn walk(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<(String, f64)>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box()
+            && b.y1 > b.y0
+        {
+            out.push((name, b.y1 / ppp));
+        }
+        for c in node.children() {
+            walk(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    walk(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+    seen.sort_by(|a, b| b.1.total_cmp(&a.1));
+    seen.first().cloned().unwrap_or_default()
+}
