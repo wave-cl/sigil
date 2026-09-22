@@ -53,6 +53,11 @@ pub enum Route {
     Settings,
     /// Which devices act for this account, and how to link or revoke one.
     Devices,
+    /// Searching what has been said: the box and what it found, on a card
+    /// of its own. A phone's list heading has room for a magnifier and not
+    /// for a box, and a box that pushes the list down is a search that
+    /// costs something to have open.
+    Search,
 }
 
 /// The exchange to suggest to an identity that names none.
@@ -1191,10 +1196,6 @@ struct Pane {
     claim_pending: Option<String>,
     /// The message search box.
     searching: String,
-    /// The search box is on screen. A phone's list heading has room for a
-    /// magnifier and not for a box, so the box is what the magnifier opens;
-    /// on a wider pane it is always there and this is not read.
-    search_open: bool,
     /// The box was just opened and has not been given the finger yet: a box
     /// that opens without the keyboard is a box you have to press twice.
     search_focus: bool,
@@ -1420,7 +1421,6 @@ impl Default for Pane {
             linking: String::new(),
             presenting: String::new(),
             searching: String::new(),
-            search_open: false,
             search_focus: false,
             exchange: String::new(),
             forwarding: None,
@@ -2271,6 +2271,7 @@ impl App for ChatApp {
             Route::Members => self.members_view(ctx, ui),
             Route::Settings => self.settings_view(ctx, ui),
             Route::Devices => self.devices_view(ctx, ui),
+            Route::Search => self.search_view(ctx, ui),
         };
         // A dialog opened from a view -- verifying somebody from Members --
         // is drawn over that view. `render` draws its own.
@@ -2292,6 +2293,7 @@ impl App for ChatApp {
                 Route::Members => "Members",
                 Route::Settings => "Channel settings",
                 Route::Devices => "Devices",
+                Route::Search => "Search",
             }
             .to_string(),
         )
@@ -2683,7 +2685,7 @@ impl App for ChatApp {
                     }
                     return;
                 }
-                Route::Directory | Route::Members | Route::Settings => return,
+                Route::Directory | Route::Members | Route::Settings | Route::Search => return,
                 Route::Conversations => {}
             }
         }
@@ -4878,16 +4880,9 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::Search(String::new()));
                 }
             } else if pressed {
-                if phone {
-                    // Nothing typed and the magnifier pressed again: the row
-                    // goes away, which is what the same press in the heading
-                    // did to open it.
-                    self.pane(at).search_open = false;
-                } else {
-                    // Focuses the box rather than doing nothing: it is beside
-                    // a field and the obvious thing to press first.
-                    field.request_focus();
-                }
+                // Focuses the box rather than doing nothing: it is beside a
+                // field and the obvious thing to press first.
+                field.request_focus();
             }
         });
     }
@@ -4947,19 +4942,19 @@ impl ChatApp {
                             ui.close();
                         }
                     });
-                    // The magnifier opens the box and puts the finger in
-                    // it; pressing it again puts both away, search and all.
+                    // The magnifier is the way to the search card, and it
+                    // opens on an empty box with the finger already in it:
+                    // a search is a thing one goes to do, not a row the
+                    // list carries about in case.
                     if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Search, "Find a chat")
                         .clicked()
                     {
                         let pane = self.panes.entry(at.clone()).or_default();
-                        pane.search_open = !pane.search_open;
-                        pane.search_focus = pane.search_open;
-                        if !pane.search_open && !pane.searching.is_empty() {
-                            pane.searching.clear();
-                            pane.chosen = None;
-                            self.send_as(Some(at), Cmd::Search(String::new()));
-                        }
+                        pane.searching.clear();
+                        pane.chosen = None;
+                        pane.search_focus = true;
+                        self.send_as(Some(at), Cmd::Search(String::new()));
+                        ctx.navigator.push_here(Route::Search);
                     }
                 } else {
                     if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
@@ -4995,15 +4990,16 @@ impl ChatApp {
         });
         ui.add_space(tokens::SPACING_XS);
 
-        let show_search = !phone || self.pane(at).search_open;
-        if show_search {
+        if !phone {
             self.search_ui(at, state, ui);
             ui.add_space(tokens::SPACING_SM);
         }
 
         // A search replaces the list while there is one. The list is still
-        // there underneath, and clearing the box brings it back.
-        if !self.pane(at).searching.trim().is_empty() {
+        // there underneath, and clearing the box brings it back. Not on a
+        // phone: there the search is its own card, and what it found is
+        // shown there.
+        if !phone && !self.pane(at).searching.trim().is_empty() {
             self.hits_ui(at, state, ui, theme, now);
             return;
         }
@@ -8589,6 +8585,40 @@ impl ChatApp {
     ///
     /// Losing this store with nothing else linked loses those conversations
     /// permanently, for everybody in them and not only for you.
+    /// Searching what has been said: the box, and what it found.
+    ///
+    /// A card of its own on a phone, reached by the list's magnifier. The
+    /// box is the same one a wide pane keeps above its list -- one search,
+    /// drawn in two places -- and choosing a hit leaves the card for the
+    /// conversation it is in, which is what pressing a result means.
+    fn search_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+        let now = self.now();
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Search");
+            });
+        }
+        let before = self.pane(at).chosen;
+        self.search_ui(at, &state, ui);
+        ui.add_space(tokens::SPACING_SM);
+        self.hits_ui(at, &state, ui, &theme, now);
+        // A hit was pressed, or Enter took the newest: the conversation is
+        // what was asked for, and it is on the card behind this one.
+        if self.pane(at).chosen != before {
+            ctx.navigator.back();
+        }
+        AppResponse::default()
+    }
+
     fn devices_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
         let Some(at) = self.showing_at(ctx) else {

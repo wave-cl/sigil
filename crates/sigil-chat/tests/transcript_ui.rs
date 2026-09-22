@@ -622,8 +622,30 @@ type Asks = std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>;
 /// on a phone includes Back, since the shell is what a Back key reaches.
 fn harness_phone_asks(state: ChatState, route: sigil_chat::Route) -> (Harness<'static>, Asks) {
     let asks = Asks::default();
-    let (h, _, _) = harness_phone_recording(state, route, egui::Theme::Dark, asks.clone());
+    let (h, _, _) = harness_phone_recording(
+        state,
+        route,
+        egui::Theme::Dark,
+        asks.clone(),
+        Routes::default(),
+    );
     (h, asks)
+}
+
+/// Where a press on this phone asked to go.
+type Routes = std::rc::Rc<std::cell::RefCell<Vec<sigil_chat::Route>>>;
+
+/// The phone, for a test about which card a press leads to.
+fn harness_phone_routes(state: ChatState, route: sigil_chat::Route) -> (Harness<'static>, Routes) {
+    let routes = Routes::default();
+    let (h, _, _) = harness_phone_recording(
+        state,
+        route,
+        egui::Theme::Dark,
+        Asks::default(),
+        routes.clone(),
+    );
+    (h, routes)
 }
 
 #[allow(clippy::type_complexity)]
@@ -636,7 +658,13 @@ fn harness_phone_themed(
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
     Drawn,
 ) {
-    harness_phone_recording(state, route, theme_choice, Asks::default())
+    harness_phone_recording(
+        state,
+        route,
+        theme_choice,
+        Asks::default(),
+        Routes::default(),
+    )
 }
 
 #[allow(clippy::type_complexity)]
@@ -645,6 +673,7 @@ fn harness_phone_recording(
     route: sigil_chat::Route,
     theme_choice: egui::Theme,
     asks: Asks,
+    routes: Routes,
 ) -> (
     Harness<'static>,
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
@@ -763,6 +792,20 @@ fn harness_phone_recording(
                     // number `no_phone_pane_is_wider_than_the_phone` reads.
                     width.set(ui.min_rect().width() + 2.0 * sigil::tokens::SPACING_MD);
                 });
+            // Where a press asked to go, downcast back to this app's own
+            // routes, which is what the shell hands to `render_nav`.
+            for request in nav.take() {
+                let token = match request {
+                    sigil::navigator::NavRequest::PushActive(e)
+                    | sigil::navigator::NavRequest::ReplaceActive(e) => e.token,
+                    sigil::navigator::NavRequest::Push(e)
+                    | sigil::navigator::NavRequest::Replace(e) => e.token,
+                    _ => continue,
+                };
+                if let Some(route) = token.downcast_ref::<sigil_chat::Route>() {
+                    routes.borrow_mut().push(route.clone());
+                }
+            }
         });
     (h, shared, drawn)
 }
@@ -1137,16 +1180,12 @@ fn on_a_phone_the_composer_is_the_whole_width_with_the_paperclip_inside() {
 }
 
 /// On a phone the search box is the whole width, with the magnifier
-/// inside it at the right.
+/// inside it at the right. On its own card, which is where it now is.
 #[test]
 fn on_a_phone_the_search_box_is_the_whole_width_with_the_magnifier_inside() {
     let mut state = a_conversation();
     state.open = None;
-    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
-    h.run();
-    h.run();
-    // The heading's magnifier is what puts the box on screen there.
-    h.get_by_label("Find a chat").click();
+    let mut h = harness_phone(state, sigil_chat::Route::Search);
     h.run();
     h.run();
     let field = h
@@ -1156,11 +1195,13 @@ fn on_a_phone_the_search_box_is_the_whole_width_with_the_magnifier_inside() {
         .expect("the search box");
     let edge = PHONE_WIDTH - 2.0 * sigil::tokens::SPACING_MD;
     assert!(field.right() >= edge, "the box stops short: {field:?}");
-    let glass = h.get_by_label("Search").rect();
-    assert!(
-        field.contains_rect(glass),
-        "the magnifier is not in the box: {glass:?} vs {field:?}"
-    );
+    // The card's own name is "Search" too, in the bar above: the one in
+    // the box is the one inside the box.
+    let glass = h
+        .get_all_by_label("Search")
+        .map(|n| n.rect())
+        .find(|r| field.contains_rect(*r))
+        .expect("the magnifier is not in the box");
     assert!(
         glass.right() > field.center().x,
         "the magnifier is at the right"
@@ -1740,7 +1781,7 @@ fn phone_devices() {
 fn phone_search() {
     let mut state = a_search();
     state.open = None;
-    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    let mut h = harness_phone(state, sigil_chat::Route::Search);
     h.run();
     search_for(&mut h, "release");
     h.run();
@@ -1758,7 +1799,7 @@ fn the_search_results_fit_a_phone() {
     for hit in &mut state.hits {
         hit.label = "Alexandra Constantinopoulos-Whitmore".into();
     }
-    let (mut h, _, drawn) = harness_phone_measured(state, sigil_chat::Route::Conversations);
+    let (mut h, _, drawn) = harness_phone_measured(state, sigil_chat::Route::Search);
     h.run();
     search_for(&mut h, "release");
     h.run();
@@ -1778,13 +1819,6 @@ fn the_search_results_fit_a_phone() {
 /// text field on screen. Typed rather than set, because what puts the
 /// results on screen is the box being changed.
 fn search_for(h: &mut Harness<'static>, what: &str) {
-    // On a phone the box is behind the heading's magnifier: the heading has
-    // room for the word and two controls, and a box is neither.
-    if let Some(magnifier) = h.query_by_label("Find a chat") {
-        magnifier.click();
-        h.run();
-        h.run();
-    }
     let field = h
         .get_all(
             egui_kittest::kittest::by()
@@ -10347,29 +10381,54 @@ fn the_chat_lists_heading_is_a_magnifier_and_a_menu() {
     );
 }
 
-/// And the magnifier opens the box, which was the point of moving it.
+/// And the magnifier goes to the search card, which is where the box is:
+/// a search is something one goes off to do, and the list is not pushed
+/// down by a row it carries about in case.
 #[test]
-fn the_magnifier_opens_the_search_box_and_closes_it_again() {
+fn the_magnifier_goes_to_the_search_card() {
     let mut state = a_conversation();
     state.open = None;
-    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
-    h.run();
-    h.run();
-    h.get_by_label("Find a chat").click();
+    let (mut h, routes) = harness_phone_routes(state, sigil_chat::Route::Conversations);
     h.run();
     h.run();
     assert!(
-        h.query_by_label("Search").is_some(),
-        "the magnifier opened nothing: {}",
+        h.query_by_label("Search").is_none(),
+        "the box is on the list card: {}",
         text_of(&h)
     );
     h.get_by_label("Find a chat").click();
     h.run();
     h.run();
+    assert_eq!(
+        routes.borrow().clone(),
+        vec![sigil_chat::Route::Search],
+        "the magnifier went somewhere else, or nowhere"
+    );
+}
+
+/// The card has the box, and it has the finger: a search card that opens
+/// without the keyboard is a card you have to press twice.
+#[test]
+fn the_search_card_opens_with_the_box_ready() {
+    let mut state = a_conversation();
+    state.open = None;
+    let (mut h, _) = harness_phone_routes(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.get_by_label("Find a chat").click();
+    h.run();
+    // The card, as the shell draws it after the push.
+    let mut state = a_conversation();
+    state.open = None;
+    let mut card = harness_phone(state, sigil_chat::Route::Search);
+    card.run();
+    card.run();
     assert!(
-        h.query_by_label("Search").is_none(),
-        "the box stayed open: {}",
-        text_of(&h)
+        card.get_all_by_role(egui::accesskit::Role::TextInput)
+            .count()
+            == 1,
+        "the card has no box, or more than one: {}",
+        text_of(&card)
     );
 }
 
