@@ -9657,3 +9657,51 @@ fn phone_devices_linked() {
     h.run();
     h.snapshot("phone_devices_linked");
 }
+
+/// A guardian added but not yet lodged is a key beside a Remove, and on a
+/// phone the key wraps rather than running off the edge.
+#[test]
+fn a_pending_guardians_key_wraps_on_a_phone() {
+    let mut state = a_conversation();
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        ..Default::default()
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    for _ in 0..40 {
+        h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        });
+        h.run_steps(2);
+    }
+    // The field on the Add-a-guardian row: the text input nearest it.
+    let add = h.get_by_label("Add a guardian").rect();
+    let field = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .min_by(|a, b| {
+            (a.rect().center().y - add.center().y)
+                .abs()
+                .total_cmp(&(b.rect().center().y - add.center().y).abs())
+        })
+        .expect("the guardian field");
+    field.focus();
+    field.type_text(&them().to_string());
+    h.run();
+    h.get_by_label("Add a guardian").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Remove").is_some(),
+        "the guardian was not added: {}",
+        text_of(&h)
+    );
+    nothing_runs_off_the_edge(&h, "the Devices pane with a pending guardian");
+}

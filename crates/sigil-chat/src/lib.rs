@@ -8950,10 +8950,13 @@ impl ChatApp {
                         {
                             drop = Some(*g);
                         }
+                        // Wrapped: a label in a horizontal does not, and a
+                        // key beside a button is wider than a phone.
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(g.to_string()).monospace().small(),
                             )
+                            .wrap()
                             .selectable(true),
                         );
                     });
