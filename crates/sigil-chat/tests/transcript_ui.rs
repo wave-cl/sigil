@@ -1301,6 +1301,26 @@ fn a_menu_does_not_conjure_a_strip_that_was_never_shown() {
     );
 }
 
+/// A point on the transcript that is not on the strip.
+///
+/// The strip hangs off the bubble's top-outer corner and reaches back over
+/// it, so a point "beside the bubble" is often on the strip -- and a tap
+/// there is the strip's, not a tap away from it. This is below the pill and
+/// out in the margin, and it asserts as much, so a test cannot quietly
+/// start measuring nothing.
+fn away_from_the_strip(h: &Harness<'static>) -> egui::Pos2 {
+    let pill = h
+        .get_by_label(sigil_emoji::QUICK[0])
+        .rect()
+        .union(h.get_by_label("Reply").rect());
+    let away = egui::pos2(6.0, pill.bottom() + 60.0);
+    assert!(
+        !pill.contains(away),
+        "the point meant to be away from the strip is on it: {away:?} in {pill:?}"
+    );
+    away
+}
+
 /// A strip that has been put away stays away when some other menu opens.
 /// The strip holds while *its* menu is open, by remembering which message
 /// it was -- and it remembered after the strip had gone, so the phone's
@@ -1322,7 +1342,7 @@ fn a_hidden_strip_does_not_come_back_when_another_menu_opens() {
         h.query_by_label("Reply").is_some(),
         "the tap did not reveal"
     );
-    let away = egui::pos2(bubble.left() - 60.0, bubble.center().y);
+    let away = away_from_the_strip(&h);
     finger_down(&mut h, away);
     h.run();
     finger_up(&mut h, away);
@@ -1597,10 +1617,9 @@ fn a_tap_reveals_a_messages_actions_and_a_second_tap_hides_them() {
         h.query_by_label("Reply").is_some(),
         "a tap on the message reveals its strip"
     );
-    // Tap beside the bubble -- it is ours, so it sits at the right and the
-    // left of its row is empty -- and it goes away. Below it is another
-    // message, and a tap there would reveal that one instead.
-    let away = egui::pos2((bubble.left() - 60.0).max(8.0), bubble.center().y);
+    // A tap away -- below the strip and out in the margin, where there is
+    // neither strip nor bubble -- puts it away.
+    let away = away_from_the_strip(&h);
     finger_down(&mut h, away);
     h.run();
     finger_up(&mut h, away);
@@ -2949,6 +2968,40 @@ fn the_anchor_holds_while_the_page_is_still_arriving() {
 }
 
 /// A harness that keeps what the interface asked the session for.
+/// The same, a phone's size and form: a touch screen, where the strip is
+/// revealed by a tap rather than by hovering.
+fn harness_recording_commands_phone(
+    state: ChatState,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let token: std::rc::Rc<dyn std::any::Any> =
+                std::rc::Rc::new(sigil_chat::Route::Conversations);
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
+            *asked.borrow_mut() = app.asked_for_test().to_vec();
+        })
+}
+
 fn harness_recording_commands(
     state: ChatState,
     asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
@@ -4182,6 +4235,7 @@ fn a_moving_message_gets_no_strip_until_it_holds_still_and_an_up_strip_follows()
             .find(|(_, r)| r.contains(pointer))
             .map(|(l, r)| (l, r.top()))
     };
+    let before_top = h.get_by_label("filler 30").rect().top();
     wheel(&mut h, 240.0);
     let mut arrived = None;
     let mut last = under(&h);
@@ -4197,6 +4251,10 @@ fn a_moving_message_gets_no_strip_until_it_holds_still_and_an_up_strip_follows()
         }
         last = now;
     }
+    assert!(
+        h.get_by_label("filler 30").rect().top() != before_top,
+        "the wheel scrolled nothing, so this tests nothing"
+    );
     let arrived = arrived.expect("no other message came under the pointer, so this tests nothing");
     assert!(
         !text_of(&h).contains("Reply"),
@@ -9993,4 +10051,80 @@ fn a_messages_menu_stays_out_of_the_systems_own_row() {
         "the menu's last row ends at {:.0}, inside the system's own {BOTTOM} points",
         last.bottom()
     );
+}
+
+/// **A finger on a quick reaction reacts.**
+///
+/// Seen on the phone: tapping a message reveals the strip, and tapping an
+/// emoji on it put the strip away and did nothing else. The existing test
+/// pressed the cell through the accessibility tree, which is a click
+/// delivered straight to the widget -- it never went near the press and
+/// release a finger makes, which is where this goes wrong.
+#[test]
+fn a_finger_on_a_quick_reaction_sends_it() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands_phone(a_conversation(), asked.clone());
+    h.run();
+    h.run();
+    // A tap on the message reveals the strip, as a finger does.
+    let bubble = topmost(&h, "mine, on the other side");
+    finger_down(&mut h, bubble.center());
+    h.run();
+    finger_up(&mut h, bubble.center());
+    h.run();
+    h.run();
+    let quick = h
+        .query_by_label(sigil_emoji::QUICK[0])
+        .expect("the strip is revealed by a tap")
+        .rect();
+
+    // And a tap on the emoji sends it.
+    finger_down(&mut h, quick.center());
+    h.run();
+    finger_up(&mut h, quick.center());
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("React"),
+        "a finger on the quick reaction sent nothing: {sent}"
+    );
+}
+
+/// **A message is on screen the moment it is sent.**
+///
+/// Sending hands the words to the session, which posts them and only then
+/// publishes a transcript with them in it. On a slow link that is a round
+/// trip during which the message is nowhere -- a press that did nothing.
+/// What is in flight is drawn until the real one lands.
+#[test]
+fn a_sent_message_is_on_screen_before_the_exchange_answers() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands_phone(a_conversation(), asked.clone());
+    h.run();
+    h.run();
+    assert!(!text_of(&h).contains("half a second later"));
+
+    let field = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the composer");
+    field.focus();
+    field.type_text("half a second later");
+    h.run();
+    // The dart, which is what the phone's slot becomes with something to
+    // send: no exchange answers here, so nothing will ever come back.
+    h.get_by_label("Send").click();
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("half a second later"),
+        "the message is nowhere until the exchange answers: {}",
+        text_of(&h)
+    );
+    let sent = asked.borrow().join(" | ");
+    assert!(sent.contains("Post"), "and it was sent: {sent}");
 }

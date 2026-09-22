@@ -198,6 +198,11 @@ pub fn strip_layer(id: egui::Id) -> egui::LayerId {
 /// same row; it is the caller's because what it offers depends on the
 /// message. An emoji chosen from the strip or the picker lands in
 /// `action.react`.
+/// Returns the rectangle it drew in: a press there is the strip's, and the
+/// message underneath must not read it as a press elsewhere and put the
+/// strip away before the control under the finger has been drawn -- which
+/// is exactly what a reaction that did nothing was. Empty where the strip
+/// was not drawn at all.
 pub fn strip(
     ui: &mut egui::Ui,
     Strip {
@@ -209,15 +214,20 @@ pub fn strip(
     }: Strip<'_>,
     action: &mut BubbleAction,
     more: impl FnOnce(&mut egui::Ui, &mut BubbleAction),
-) {
+) -> egui::Rect {
     if bubble.bottom() < clip.top() || bubble.top() > clip.bottom() {
-        return;
+        return egui::Rect::NOTHING;
     }
     let theme = ColorTheme::current(ui.ctx());
     let gap = tokens::SPACING_XXS;
     let pad = tokens::SPACING_XS;
-    // Five, ➕, Reply, More: eight cells.
-    let width = 8.0 * CELL + 7.0 * gap + 2.0 * pad;
+    // The quick reactions, then ➕, Reply and More. **Counted, not written
+    // down**: it said eight while there were five quick ones, and a sixth
+    // made the strip wider than the placement thought -- so it reached
+    // further across the message, over the pointer that had revealed it,
+    // and swallowed the wheel that should have scrolled the transcript.
+    let cells = (sigil_emoji::QUICK.len() + 3) as f32;
+    let width = cells * CELL + (cells - 1.0) * gap + 2.0 * pad;
     let height = CELL + 2.0 * pad;
     let x = if mine {
         bubble.left() + OVERLAP - width
@@ -243,7 +253,7 @@ pub fn strip(
 
     let picker_id = id.with("picker");
     let mut open_picker = false;
-    egui::Area::new(id)
+    let drawn = egui::Area::new(id)
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .constrain(false)
@@ -273,6 +283,9 @@ pub fn strip(
     if let Some(chosen) = picker(ui, picker_id, bubble, frequent, open_picker) {
         action.react = Some(chosen);
     }
+    // The rectangle as it was just drawn, not the one remembered from a
+    // pass when the strip was somewhere else.
+    drawn.response.rect
 }
 
 /// A painted icon in a strip cell, the size of an emoji cell rather than of

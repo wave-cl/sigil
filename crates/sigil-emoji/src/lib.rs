@@ -111,19 +111,24 @@ impl Group {
     }
 }
 
-/// The five on the strip that hangs off every message.
+/// The six on the strip that hangs off every message.
 ///
-/// The most-sent yellow emoji, in the order Unicode's frequency data puts
-/// them. A constant, not a preference: the strip is the same on every
-/// message and every machine so the hand learns where things are. What the
-/// *person* sends most is the picker's "Frequently used" row, and that is
-/// theirs.
-pub const QUICK: [&str; 5] = [
-    "\u{1f602}", // face with tears of joy
-    "\u{1f923}", // rolling on the floor laughing
-    "\u{1f62d}", // loudly crying face
-    "\u{1f64f}", // folded hands
-    "\u{1f618}", // face blowing a kiss
+/// The six answers a message gets: yes, no, that is funny, that is sad,
+/// really?, and love. A constant, not a preference: the strip is the same
+/// on every message and every machine so the hand learns where things are.
+/// What the *person* sends most is the picker's "Frequently used" row, and
+/// that is theirs.
+///
+/// **Chosen, not taken from a frequency table.** The first set was the five
+/// most-sent yellow faces, which was three kinds of laughing and no way to
+/// say no.
+pub const QUICK: [&str; 6] = [
+    "\u{2764}\u{fe0f}", // red heart
+    "\u{1f44d}",        // thumbs up
+    "\u{1f44e}",        // thumbs down
+    "\u{1f602}",        // face with tears of joy
+    "\u{1f62e}",        // face with open mouth
+    "\u{1f622}",        // crying face
 ];
 
 /// The entry for a string, if it is one of ours — exactly as sent, variation

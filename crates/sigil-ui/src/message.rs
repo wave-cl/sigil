@@ -616,6 +616,9 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     let revealed = egui::Id::new("sigil-message-revealed");
     let mut shown = ui.ctx().data(|d| d.get_temp::<egui::Id>(revealed)) == Some(me);
     let menu = id.with("long-press");
+    // Where the tap that asked for the strip to go away landed, if one
+    // did: checked against the strip once it has been drawn.
+    let mut hide_after: Option<egui::Pos2> = None;
     if touched && !b.redacted {
         let (tap, at, long, press) = ui.input(|i| {
             let p = &i.pointer;
@@ -644,13 +647,28 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         // agree with what can actually be seen and pressed.
         let hittable = reach.intersect(ui.clip_rect());
         let inside = at.is_some_and(|p| hittable.contains(p));
+        // **A tap on the strip is not a tap away from the message.** The
+        // strip is put away by a tap anywhere else -- and "anywhere else"
+        // included the strip itself, so the release that should have sent a
+        // reaction took the strip down *before* it was drawn that frame, and
+        // the emoji under the finger never existed to be clicked. Seen on the
+        // phone: the strip closed and nothing was sent. The strip's own
+        // rectangle, as it was drawn last pass, is what says where it is;
+        // `layer_id_at` answers about layers built this pass and is not it.
         if tap {
             if inside && !shown {
                 ui.ctx().data_mut(|d| d.insert_temp(revealed, me));
                 shown = true;
             } else if shown {
-                ui.ctx().data_mut(|d| d.remove::<egui::Id>(revealed));
-                shown = false;
+                // **Decided after the strip is drawn, not before.** A tap
+                // anywhere else puts the strip away -- and "anywhere else"
+                // included the strip itself, so the release that should
+                // have sent a reaction took the strip down first and the
+                // emoji under the finger was never drawn to be clicked.
+                // Seen on the phone: the strip closed and nothing was sent.
+                // The strip says whether the pointer is on it; the strip
+                // stays up this pass either way, which nobody can see.
+                hide_after = at;
             }
         }
         // Once per press: the press that opened the menu goes on being
@@ -744,6 +762,11 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     }
     let holding = any_open && ui.ctx().data(|d| d.get_temp::<egui::Id>(slot)) == Some(me);
     if !(over || holding) || b.redacted {
+        // A tap away from a strip that is not even drawn this pass: there
+        // is nothing under the finger to have taken it.
+        if hide_after.is_some() {
+            hide_strip(ui.ctx());
+        }
         return;
     }
 
@@ -754,13 +777,24 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         clip: ui.clip_rect(),
         frequent: b.frequent,
     };
-    crate::emoji::strip(ui, strip, action, |ui, action| {
+    let strip_rect = crate::emoji::strip(ui, strip, action, |ui, action| {
         if crate::emoji::cell_icon(ui, crate::Icon::Reply, "Reply").clicked() {
             action.reply = true;
         }
         let more = crate::emoji::cell_icon(ui, crate::Icon::More, "More");
         egui::Popup::menu(&more).show(|ui| more_menu(ui, b, action));
     });
+    // The press the tap ended, against the strip as it was just drawn: the
+    // position, not a layer test, because a release leaves no pointer over
+    // anything by the time this runs.
+    if hide_after.is_some_and(|p| !strip_rect.contains(p)) {
+        hide_strip(ui.ctx());
+    }
+}
+
+/// Put away whatever message's strip is showing.
+fn hide_strip(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<egui::Id>(egui::Id::new("sigil-message-revealed")));
 }
 
 /// How long a finger holds still before it is a long press and not a tap.

@@ -82,15 +82,21 @@ fn strip_at(clip_top: f32, mine: bool) -> (egui::Rect, egui::Rect, bool) {
     // Room on the side the strip reaches into: theirs to the right, one's
     // own to the left. (Without it the strip is clamped back over the
     // bubble, which is right on a narrow pane and not what this measures.)
-    let left = if mine { 240.0 } else { 20.0 };
+    // **Measured against the strip, not a number**: it grew a cell when a
+    // sixth quick reaction was added, and a pane that had room for eight
+    // cells clamped it back over the bubble -- which this read as the
+    // placement being wrong.
+    let cells = (sigil_emoji::QUICK.len() + 3) as f32;
+    let wide = cells * 44.0 + 40.0;
+    let pane = wide + 260.0;
+    let left = if mine { wide + 20.0 } else { 20.0 };
     let bubble = egui::Rect::from_min_size(egui::pos2(left, 100.0), egui::vec2(160.0, 44.0));
     let mut h = Harness::builder()
-        .with_size(egui::vec2(420.0, 300.0))
+        .with_size(egui::vec2(pane, 300.0))
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             theme::install(&ctx, theme::light(), theme::dark());
-            let clip =
-                egui::Rect::from_min_max(egui::pos2(0.0, clip_top), egui::pos2(420.0, 300.0));
+            let clip = egui::Rect::from_min_max(egui::pos2(0.0, clip_top), egui::pos2(pane, 300.0));
             let mut action = sigil_ui::BubbleAction::default();
             let seen = seen.clone();
             sigil_ui::emoji::strip(

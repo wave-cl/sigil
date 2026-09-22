@@ -267,6 +267,11 @@ const STAYED_UP: std::time::Duration = std::time::Duration::from_secs(60);
 /// seconds.
 const PARKED_RETRY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// Where the sequence numbers of messages *this client is still sending*
+/// start: above anything an exchange will ever order, so an echo cannot be
+/// confused with a message, and so the two sort in the order they happened.
+const ECHO_SEQ: u64 = u64::MAX - 1024;
+
 /// SIP-39: a cross-exchange ring has no conversation, and everything about a
 /// ring here is keyed on one. The bridge is sixteen bytes and a channel is
 /// thirty-two; the bridge in the first half and nothing in the second is a
@@ -5216,17 +5221,17 @@ impl ChatApp {
             out.inner_rect.right_bottom() - egui::vec2(side + tokens::SPACING_MD, side),
             out.inner_rect.right_bottom() - egui::vec2(tokens::SPACING_MD, 0.0),
         );
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                // Its own id: the transcript above it allocates a widget per
-                // message, and a control that lands on an id already used
-                // this pass is drawn and reaches no accessibility tree --
-                // which is how a button nobody can find by name looks from a
-                // test, and how a screen reader finds nothing.
-                .id_salt("to_the_latest")
-                .max_rect(spot)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            |ui| {
+        // **A layer of its own, not a scope in the transcript's ui.** A
+        // scope advances the parent's cursor to the rectangle it was given,
+        // so the pill -- drawn at the foot of the transcript -- pushed the
+        // composer down by its own height whenever it appeared, and the
+        // transcript's height changed under the reader. An area floats.
+        egui::Area::new(ui.id().with("way_back"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(spot.min)
+            .constrain_to(out.inner_rect)
+            .show(ui.ctx(), |ui| {
+                ui.set_max_size(spot.size());
                 // **It floats over the transcript, so it must not read as
                 // part of it.** On the phone it lands over the last bubble
                 // -- seen on the device, sitting on a message's time -- and
@@ -5258,8 +5263,7 @@ impl ChatApp {
                             );
                         }
                     });
-            },
-        );
+            });
     }
 
     /// What is wrong with this conversation, said in words.
@@ -5569,7 +5573,49 @@ impl ChatApp {
         // message to build.
         let mut events = state.events.iter().peekable();
 
-        for line in &state.lines {
+        // **What was just sent, before the exchange has answered.** A press
+        // on Send takes the words out of the box and hands them to the
+        // session, which posts them and only then publishes a transcript
+        // with them in it -- a round trip during which the message is
+        // nowhere at all, and on a phone with a slow link that reads as a
+        // press that did nothing. `in_flight` already holds exactly what was
+        // sent, for putting back if it fails; drawn here, it is the message
+        // itself, without a tick, until the real one lands.
+        //
+        // Not an edit: a rewrite has a message of its own on screen already,
+        // and drawing the new words under it would read as two messages.
+        let echo: Vec<session::Line> = self
+            .pane(at)
+            .in_flight
+            .iter()
+            .filter(|u| u.editing.is_none() && !u.composing.trim().is_empty())
+            .enumerate()
+            .map(|(i, u)| session::Line {
+                seq: ECHO_SEQ + i as u64,
+                who: at.0,
+                name: None,
+                mine: true,
+                at: now,
+                text: u.composing.clone(),
+                redacted: false,
+                edited: false,
+                via: None,
+                reactions: Vec::new(),
+                reply_to: None,
+                receipt: None,
+                attachments: Vec::new(),
+                standing: session::Standing::Sound,
+                mentions: Vec::new(),
+                me_mentioned: false,
+            })
+            .collect();
+
+        for line in state.lines.iter().chain(echo.iter()) {
+            // Nothing is done *to* a message that is not there yet: its
+            // sequence number is this client's invention, and a reaction or
+            // a deletion aimed at it would name a message the exchange has
+            // never heard of.
+            let waiting = line.seq >= ECHO_SEQ;
             // Everything the exchange recorded before this message. `previous_
             // author` is cleared so the next message starts its own group: a
             // bubble grouped across a membership change reads as having been
@@ -5749,7 +5795,7 @@ impl ChatApp {
             self.pane(at)
                 .tall
                 .insert(line.seq, (shape, width, rect.height()));
-            if !did.is_none() {
+            if !did.is_none() && !waiting {
                 acted = Some((line, did));
             }
 
@@ -6501,7 +6547,7 @@ impl ChatApp {
                 let (field, slot) = sigil_ui::field_with_slot(
                     ui,
                     &mut self.panes.entry(at.clone()).or_default().composing,
-                    "write a message, @ to mention, or / for a command",
+                    "Write message",
                     width,
                     tokens::FIELD_LG,
                     button,
@@ -6512,7 +6558,7 @@ impl ChatApp {
                     sigil_ui::field(
                         ui,
                         &mut self.panes.entry(at.clone()).or_default().composing,
-                        "write a message, @ to mention, or / for a command",
+                        "Write message",
                         width,
                     ),
                     None,
@@ -6559,22 +6605,42 @@ impl ChatApp {
                     )
                     .clicked()
             };
-            let attaching = match slot {
-                Some(slot) => sigil_ui::in_slot(ui, slot, attach),
-                None => attach(ui),
+            // **On a phone the slot commits once there is something to
+            // commit.** The clip becomes the dart: a phone keyboard's
+            // Enter is the keyboard's to define -- several send a newline
+            // the box swallows, and then nothing happens at all -- so a
+            // messenger that relies on it has no way to send. Empty, the
+            // slot is the paperclip, which is what an empty box is for.
+            let ready =
+                !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
+            let commits = phone && ready;
+            let word = if editing.is_some() {
+                "Save the rewrite"
+            } else {
+                "Send"
             };
-            if attaching {
+            let in_the_slot = |ui: &mut egui::Ui| {
+                if commits {
+                    sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
+                        .on_hover_text(word)
+                        .clicked()
+                } else {
+                    attach(ui)
+                }
+            };
+            let pressed = match slot {
+                Some(slot) => sigil_ui::in_slot(ui, slot, in_the_slot),
+                None => in_the_slot(ui),
+            };
+            if pressed && !commits {
                 self.picking = Some((at.clone(), files::pick_files()));
                 ui.ctx().request_repaint();
             }
-            let send = !phone
-                && sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
-                    .on_hover_text(if editing.is_some() {
-                        "Save the rewrite"
-                    } else {
-                        "Send"
-                    })
-                    .clicked();
+            let send = (pressed && commits)
+                || (!phone
+                    && sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
+                        .on_hover_text(word)
+                        .clicked());
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             // Words, or files -- the original's included, on a rewrite, so
             // a picture's caption can be taken off and a picture without
