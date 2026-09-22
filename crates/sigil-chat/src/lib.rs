@@ -4009,28 +4009,28 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_MD);
         ui.separator();
         ui.add_space(tokens::SPACING_SM);
-        ui.horizontal(|ui| {
-            if ui.button("New group").clicked() {
-                // A group's name is a sealed entry, so it is named after it
-                // exists rather than before.
-                self.pane(at).dialog = None;
-                self.send_as(Some(at), Cmd::NewGroup("New group".into()));
-            }
-            if ui
-                .button("New public channel")
-                .on_hover_text("Anybody may find and join it, and nothing said in it is encrypted.")
-                .clicked()
-            {
-                self.pane(at).dialog = None;
-                self.send_as(
-                    Some(at),
-                    Cmd::NewPublic {
-                        name: "New channel".into(),
-                        topic: String::new(),
-                    },
-                );
-            }
-        });
+        // Two rows with their icons, the shape every menu in sigil has:
+        // they were two named buttons side by side under a field whose
+        // action is a mark.
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Plus, "New group").clicked() {
+            // A group's name is a sealed entry, so it is named after it
+            // exists rather than before.
+            self.pane(at).dialog = None;
+            self.send_as(Some(at), Cmd::NewGroup("New group".into()));
+        }
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "New public channel")
+            .on_hover_text("Anybody may find and join it, and nothing said in it is encrypted.")
+            .clicked()
+        {
+            self.pane(at).dialog = None;
+            self.send_as(
+                Some(at),
+                Cmd::NewPublic {
+                    name: "New channel".into(),
+                    topic: String::new(),
+                },
+            );
+        }
         // Said beside the control, not in a help page. A public channel is
         // plaintext by design -- anybody may join, so any key in it is public.
         ui.colored_label(
