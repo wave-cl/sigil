@@ -4143,6 +4143,46 @@ impl ChatApp {
             });
             ui.add_space(tokens::SPACING_SM);
         }
+        // SIP-27: what others have said at this exchange about this key --
+        // the statement the checkbox below offers to make, read back. Their
+        // word, shown to be read and not acted on: a name is an assertion
+        // and so is this, and the words above are the only check. Absent
+        // until the exchange has answered, so an empty line is never drawn
+        // for a question still in flight.
+        if let Some(issuers) = state.attested.get(&who) {
+            if issuers.is_empty() {
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new("Nobody else has said they compared these words.").small(),
+                );
+            } else {
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(format!(
+                        "{} said at this exchange that they compared them: {}. Their word, \
+                         not a check -- the words above are.",
+                        if issuers.len() == 1 {
+                            "One person has".to_string()
+                        } else {
+                            format!("{} people have", issuers.len())
+                        },
+                        issuers
+                            .iter()
+                            .map(|k| {
+                                state
+                                    .people
+                                    .get(k)
+                                    .map(|p| p.label(k))
+                                    .unwrap_or_else(|| sigil_ui::message::short(&k.to_string()))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .small(),
+                );
+            }
+            ui.add_space(tokens::SPACING_SM);
+        }
         let pane = self.panes.entry(at.clone()).or_default();
         ui.checkbox(
             &mut pane.attest_too,
@@ -5431,6 +5471,7 @@ impl ChatApp {
                     (MentionDo::CopyKey, _) => ui.ctx().copy_text(m.key.clone()),
                     (MentionDo::Verify, Ok(key)) => {
                         self.pane(at).dialog = Some(Dialog::Verify(key));
+                        self.send_as(Some(at), Cmd::Attested(key));
                     }
                     (MentionDo::Mention, Ok(key)) => {
                         // Into the box, the way the picker puts one: the
@@ -5452,6 +5493,7 @@ impl ChatApp {
             }
             if did.verify {
                 self.pane(at).dialog = Some(Dialog::Verify(line.who));
+                self.send_as(Some(at), Cmd::Attested(line.who));
             }
             if did.report {
                 let pane = self.pane(at);
@@ -6359,6 +6401,7 @@ impl ChatApp {
                     .peer
                     .ok_or("Safety words are for two people: open a direct message.")?;
                 self.pane(at).dialog = Some(Dialog::Verify(peer));
+                self.send_as(Some(at), Cmd::Attested(peer));
             }
             Command::Members => {
                 here()?;
@@ -6849,6 +6892,7 @@ impl ChatApp {
                         match chose {
                             Some(MemberAct::Verify) => {
                                 self.pane(at).dialog = Some(Dialog::Verify(member.account));
+                                self.send_as(Some(at), Cmd::Attested(member.account));
                             }
                             Some(MemberAct::Kick) => {
                                 self.send_as(Some(at), Cmd::Kick(member.account));

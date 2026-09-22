@@ -279,11 +279,38 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/channel/folded",
         NotYet("SIP-60 §Reading the folded log, from sqex-chat"),
     ),
-    ("POST", "/attest/lodge", NotYet("SIP-27 attestation")),
-    ("POST", "/attest/read", NotYet("SIP-27 attestation")),
-    ("POST", "/resolve/publish", NotYet("SIP-28 resolution")),
-    ("POST", "/resolve/get", NotYet("SIP-28 resolution")),
-    ("POST", "/resolve/successor", NotYet("SIP-28 resolution")),
+    // SIP-27, both ways, from SIP-41's dialog: "Say at the exchange that we
+    // compared them" lodges the one claim sigil makes, and opening the
+    // dialog reads who else has made it about that key -- their word, shown
+    // to be read and not acted on. The lodge had been reached for as long as
+    // the checkbox existed, and was listed here as unreached the whole time.
+    ("POST", "/attest/lodge", Chat),
+    ("POST", "/attest/read", Chat),
+    // SIP-28: an identity publishes where it can be reached -- host:port,
+    // and what it speaks -- for others to look up. That is an identity that
+    // runs something at a stable address. A chat client on a phone has no
+    // address worth publishing (it changes with every network, sits behind
+    // NAT, and advertising it would advertise the phone), reaches people
+    // through the exchange, and finds a direct path for a call by SIP-25's
+    // introduction, not by a published address. Deliberately not surfaced;
+    // the CLI has it for the identities it is for.
+    (
+        "POST",
+        "/resolve/publish",
+        NotYet("SIP-28 is for an identity with a stable address to publish; a phone has none"),
+    ),
+    (
+        "POST",
+        "/resolve/get",
+        NotYet(
+            "nothing in sigil reaches a key by a published address; a call is introduced (SIP-25)",
+        ),
+    ),
+    (
+        "POST",
+        "/resolve/successor",
+        NotYet("SIP-28's move notice; sigil's successions are SIP-44's, which move the account"),
+    ),
     // SIP-44, from the Devices pane since sqex 0.104.3 gave `Chat` the
     // methods: a will and guardians written by the account, a vouch as a
     // guardian, and the successor's claim -- `WriteWill`, `NameGuardians`,
@@ -509,7 +536,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 84,
+        reached, 86,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

@@ -615,6 +615,12 @@ pub struct ChatState {
     /// compared with their owner. By key, with when. From this machine's
     /// store and nowhere else.
     pub verified: HashMap<PubKey, u64>,
+    /// SIP-27: who else has said, at this exchange, that they compared safety
+    /// words with a key -- the statements sigil itself lodges with `Attest`,
+    /// read back for whoever is being verified. By subject, the issuers whose
+    /// statements verify and are still standing, this identity's own left
+    /// out. **Others' word, to be read and not acted on**: the dialog says so.
+    pub attested: HashMap<PubKey, Vec<PubKey>>,
     /// Whether we may rename, invite, remove and rotate here.
     pub i_am_admin: bool,
     /// SIP-56: the open conversation's reports, as last loaded (admins).
@@ -1501,6 +1507,9 @@ pub enum Cmd {
     /// Say, to the exchange, that the words were compared: a SIP-27 claim
     /// others may read and must not act on. Never sent without asking.
     Attest(PubKey),
+    /// SIP-27: read who has said that of `who`, for the dialog that offers
+    /// to say it too.
+    Attested(PubKey),
     /// Open a conversation with one of its messages in the window: what a
     /// search result does. [`Show`](Cmd::Show) opens on the last page and a
     /// hit can be anywhere before it; this widens the window so the message
@@ -5814,6 +5823,49 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     state,
                     format!("the exchange refused the statement ({code})"),
                 ),
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::Attested(who) => {
+            let Some(mut client) = chat.connection() else {
+                return trouble(state, "not connected");
+            };
+            let me = chat.me;
+            let query = sqex_proto::attest::Query {
+                subject: who,
+                issuer: None,
+            };
+            match client.post("/attest/read", query.encode()).await {
+                Ok((200, body)) => match sqex_proto::attest::Held::decode(&body) {
+                    Ok(held) => {
+                        // Verified here, not taken on the exchange's word:
+                        // the whole point of a signature is that the reader
+                        // checks it. Only the one claim sigil knows how to
+                        // read, and not our own, which the dialog already
+                        // shows as *verified*.
+                        let mut issuers: Vec<PubKey> = held
+                            .attestations
+                            .iter()
+                            .filter(|a| a.verify(held.now).is_ok())
+                            .filter(|a| a.claim == sqex_proto::attest::CLAIM_VERIFIED_IN_PERSON)
+                            .filter(|a| a.readable())
+                            .filter(|a| a.issuer != me)
+                            .map(|a| a.issuer)
+                            .collect();
+                        issuers.sort();
+                        issuers.dedup();
+                        state.send_modify(|s| {
+                            s.attested.insert(who, issuers);
+                        });
+                    }
+                    Err(e) => trouble(state, e),
+                },
+                // An exchange from before SIP-27 has nothing to say, which is
+                // the same as nobody having said anything.
+                Ok((404, _)) => state.send_modify(|s| {
+                    s.attested.insert(who, Vec::new());
+                }),
+                Ok((code, _)) => trouble(state, format!("could not read what was said ({code})")),
                 Err(e) => trouble(state, e),
             }
         }

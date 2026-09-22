@@ -4958,3 +4958,95 @@ async fn guardians_named_from_the_pane_vouch_and_the_successor_takes_the_account
     g2.stop();
     erin.stop();
 }
+
+/// **SIP-27, read back.** sigil has lodged "we compared the words" at the
+/// exchange since SIP-41's dialog offered to (`Attest`), and never read what
+/// anybody else had lodged. Now the dialog that offers to say it also shows
+/// who already has -- their word, to be read and not acted on, and the
+/// dialog says so.
+///
+/// Alice says it of Bob; Carol, opening Bob's dialog, is told one person
+/// has, and that it was Alice. Before Alice says it, Carol is told nobody
+/// has -- the control -- and Alice's own statement is never shown back to
+/// Alice, whose dialog already shows Bob as verified.
+#[tokio::test]
+async fn who_else_compared_the_words_is_read_back_for_the_dialog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (alice_signer, alice_key) = signer(91);
+    let (_, bob_key) = signer(92);
+    let (carol_signer, carol_key) = signer(93);
+    let alice = start_at(endpoint, alice_signer, &dir.path().join("alice.db"));
+    let carol = start_at(endpoint, carol_signer, &dir.path().join("carol.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(alice_key) && carol.state().me == Some(carol_key),
+            15
+        )
+        .await
+    );
+
+    // Nobody has said anything yet, and Carol is told exactly that rather
+    // than left with a question in flight.
+    carol.send(Cmd::Attested(bob_key));
+    assert!(
+        until(
+            || carol
+                .state()
+                .attested
+                .get(&bob_key)
+                .is_some_and(|v| v.is_empty()),
+            15
+        )
+        .await,
+        "Carol was not told that nobody has said anything: {:?}",
+        carol.state().trouble
+    );
+
+    alice.send(Cmd::Attest(bob_key));
+    assert!(
+        until(
+            || alice
+                .state()
+                .note
+                .is_some_and(|n| n.said.contains("Said, at this exchange")),
+            15
+        )
+        .await,
+        "Alice's statement was not lodged: {:?}",
+        alice.state().trouble
+    );
+
+    carol.send(Cmd::Attested(bob_key));
+    assert!(
+        until(
+            || carol.state().attested.get(&bob_key) == Some(&vec![alice_key]),
+            15
+        )
+        .await,
+        "Carol was not told Alice said so: {:?}",
+        carol.state().attested.get(&bob_key)
+    );
+    // Alice's own statement is not shown back to her.
+    alice.send(Cmd::Attested(bob_key));
+    assert!(
+        until(
+            || alice
+                .state()
+                .attested
+                .get(&bob_key)
+                .is_some_and(|v| v.is_empty()),
+            15
+        )
+        .await,
+        "Alice was shown her own statement: {:?}",
+        alice.state().attested.get(&bob_key)
+    );
+
+    alice.stop();
+    carol.stop();
+}
