@@ -39,6 +39,12 @@ const L_DESTRUCTIVE: Color32 = Color32::from_rgb(0xB5, 0x49, 0x57);
 const L_WARNING: Color32 = Color32::from_rgb(0x99, 0x60, 0x00);
 const L_SUCCESS: Color32 = Color32::from_rgb(0x1A, 0x7D, 0x4F);
 
+// What a selected row sits on: the accent at a fifth over each theme's
+// base. Its words are the accent (`selection_stroke`), so the fill has to
+// be something the accent reads on -- the dimmed accent was not.
+const D_SELECTION: Color32 = Color32::from_rgb(0x24, 0x2A, 0x42);
+const L_SELECTION: Color32 = Color32::from_rgb(0xEC, 0xF0, 0xFF);
+
 // Dark surfaces, lightest last.
 const D_BASE: Color32 = Color32::from_rgb(0x14, 0x15, 0x19);
 const D_SURFACE: Color32 = Color32::from_rgb(0x1B, 0x1D, 0x22);
@@ -124,7 +130,15 @@ pub fn dark() -> ColorTheme {
         hyperlink_color: ACCENT,
         error_fg_color: DESTRUCTIVE,
         warn_fg_color: WARNING,
-        selection_bg: ACCENT_DIM,
+        // **A tint, not the accent.** egui draws a selected
+        // `selectable_label` with `selection.bg_fill` under it and
+        // `selection.stroke` for its words, and this was the dimmed accent
+        // under the accent -- 1.74 to one, seen on the phone as the chosen
+        // app in the title menu, "Chat" in blue on blue. The stroke also
+        // outlines a focused field, and that should stay the accent, so it
+        // is the *fill* that moves: the accent at a fifth over the base,
+        // which the accent reads on at 4.58 and text at 12.
+        selection_bg: D_SELECTION,
         selection_stroke: ACCENT,
 
         surface_primary: D_BASE,
@@ -164,7 +178,8 @@ pub fn light() -> ColorTheme {
         hyperlink_color: ACCENT_DIM,
         error_fg_color: L_DESTRUCTIVE,
         warn_fg_color: L_WARNING,
-        selection_bg: Color32::from_rgb(0xD4, 0xDC, 0xFF),
+        // As above, paler: the accent read on the old one at 3.96.
+        selection_bg: L_SELECTION,
         selection_stroke: ACCENT_DIM,
 
         surface_primary: L_BASE,
@@ -473,6 +488,16 @@ mod tests {
                 r >= 4.5,
                 "{name}: body text on a sent bubble is {r:.2}, below 4.5"
             );
+
+            // **A selected row's words.** egui writes a selected
+            // `selectable_label` in `selection.stroke` over `selection.bg`,
+            // and that pair was the accent on the dimmed accent: 1.74 in the
+            // dark theme, the chosen app in the phone's title menu drawn in
+            // blue on blue.
+            let r = ratio(t.selection_stroke, t.selection_bg);
+            if r < 4.5 {
+                thin.push(format!("{name}: selected text on its fill is {r:.2}"));
+            }
 
             // **Every other colour sigil writes words in.** The three above
             // were the ones somebody had thought about; these are the rest,
