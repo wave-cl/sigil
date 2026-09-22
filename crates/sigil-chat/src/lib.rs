@@ -348,20 +348,22 @@ fn ring_card(
                     ui.add_space(tokens::SPACING_SM);
                     // What the handsets left, and no more: a name that would
                     // not fit is cut, not laid over them.
+                    // The name alone on its line: "Claude Marlow is ca…"
+                    // is what the phone made of the name and the verb
+                    // together beside two handsets. The verb goes under,
+                    // with where the call is from or in.
                     ui.vertical(|ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(named).strong()).truncate());
+                        // Wrapped, not cut: "is calling from another
+                        // exchange" is a line and a half beside two
+                        // handsets, and the half is the part that matters.
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(format!("{named} is calling")).strong(),
-                            )
-                            .truncate(),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(under)
+                                egui::RichText::new(format!("is calling {under}"))
                                     .small()
                                     .color(theme.text_secondary),
                             )
-                            .truncate(),
+                            .wrap(),
                         );
                     });
                 });
@@ -2158,8 +2160,20 @@ impl App for ChatApp {
     fn open(&mut self, ctx: &mut AppContext<'_>, target: &Target) -> bool {
         let at: At = (target.identity, target.exchange.clone());
         if !self.sessions.contains_key(&at) {
+            // Said, because a press that goes nowhere looks like a broken
+            // button and the phone's log was the only place to read why.
+            tracing::info!(
+                identity = %target.identity, exchange = %target.exchange,
+                held = ?self.sessions.keys().map(|k| k.1.clone()).collect::<Vec<_>>(),
+                "a notification was pressed for a session this window does not hold"
+            );
             return false;
         }
+        tracing::info!(
+            identity = %target.identity, exchange = %target.exchange,
+            channel = ?target.channel, answer = target.answer,
+            "a notification was pressed"
+        );
         let held = ctx
             .accounts
             .iter()
@@ -7511,6 +7525,7 @@ impl ChatApp {
             .filter(|c| cross_key(c.bridge) == channel)
         {
             self.answering = None;
+            tracing::info!(caller = %cross.caller, "answering a call from another exchange, from its notification");
             self.answer_cross(ctx, &at, cross.caller, egui_ctx);
             return;
         }
@@ -7639,9 +7654,11 @@ impl ChatApp {
     ) {
         let me = at.0;
         if self.calls.contains_key(&me) {
+            tracing::info!("not answering: already in a call");
             return;
         }
         let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
+            tracing::warn!(%me, "not answering: this identity is not unlocked here");
             return;
         };
         let signer = unlocked.signer();
@@ -7651,8 +7668,10 @@ impl ChatApp {
             .map(|s| s.connection())
             .filter(|h| h.is_live())
         else {
+            tracing::warn!("not answering: the session holds no live connection");
             return;
         };
+        tracing::info!(%caller, "answering a call from another exchange");
         let wake = egui_ctx.clone();
         let handle = sigil_net::spawn_cross_answer(
             sigil_net::Dial::On(held),
@@ -8108,7 +8127,7 @@ impl ChatApp {
             .get(&ring.from)
             .map(|p| p.label(&ring.from))
             .unwrap_or_else(|| ring.from.to_string());
-        match ring_card(ui, theme, &ring.from, &named, &ring.label) {
+        match ring_card(ui, theme, &ring.from, &named, &format!("in {}", ring.label)) {
             Some(RingPress::Decline) => {
                 self.send_as(
                     Some(at),
