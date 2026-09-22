@@ -242,6 +242,7 @@ fn a_conversation() -> ChatState {
         peers: Vec::new(),
         verified: std::collections::HashMap::new(),
         attested: std::collections::HashMap::new(),
+        succeeded: std::collections::HashMap::new(),
         devices: Vec::new(),
         linked: None,
         credential: None,
@@ -2833,8 +2834,10 @@ fn the_next_page_is_asked_for_a_screen_early() {
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut h = harness_recording_commands(state, asked.clone());
     h.run();
+    // Nothing about *the transcript*: a direct message does ask the
+    // registry once whether the other party moved, which is not a page.
     assert!(
-        asked.borrow().is_empty(),
+        !asked.borrow().iter().any(|c| c == "Earlier"),
         "a conversation opened at the bottom asked for more of it: {:?}",
         asked.borrow()
     );
@@ -9704,4 +9707,64 @@ fn a_pending_guardians_key_wraps_on_a_phone() {
         text_of(&h)
     );
     nothing_runs_off_the_edge(&h, "the Devices pane with a pending guardian");
+}
+
+// ---------------------------------------------------------------------------
+// SIP-44: the other party's account has moved.
+// ---------------------------------------------------------------------------
+
+/// A direct message asks the registry once whether the other party was
+/// succeeded, and when they were, says so and offers the new key.
+///
+/// A transcript says "X's account is now Y" only where the move was written
+/// into a channel both are in; a contact who moved while nothing was said
+/// read as merely silent. The registry knows, and `/account/succession` was
+/// the one SIP-44 route nothing in the interface asked.
+#[test]
+fn a_direct_message_asks_once_whether_the_other_party_moved_and_says_where() {
+    // Asked once, on opening, and not on every pass.
+    // The fixture's open conversation is the direct message with Ada.
+    let state = a_conversation();
+    let peer = state
+        .conversations
+        .iter()
+        .find(|c| Some(c.channel) == state.open)
+        .and_then(|c| c.peer)
+        .expect("the fixture's open conversation is a direct message");
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(state.clone(), asked.clone());
+    h.run();
+    h.run();
+    h.run();
+    let wanted = format!("SuccessionOf({peer:?})");
+    let times = asked.borrow().iter().filter(|a| **a == wanted).count();
+    assert_eq!(times, 1, "asked {times} times: {:?}", asked.borrow());
+    assert!(
+        !text_of(&h).contains("account is now"),
+        "nothing is said before the registry answers"
+    );
+
+    // Not succeeded: nothing said.
+    let mut not = state.clone();
+    not.succeeded.insert(peer, None);
+    let mut h = harness_with(not, true);
+    h.run();
+    assert!(!text_of(&h).contains("account is now"), "{}", text_of(&h));
+
+    // Succeeded: said, and the new key offered.
+    let successor = PubKey::new([0x44u8; 32]);
+    let mut moved = state.clone();
+    moved.succeeded.insert(peer, Some(successor));
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands(moved, asked.clone());
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("account is now"), "{said}");
+    h.get_by_label("Write to them there").click();
+    h.run();
+    let all = asked.borrow().join(" | ");
+    assert!(
+        all.contains(&format!("OpenDm({successor:?})")),
+        "the offer did not open a conversation with the successor: {all}"
+    );
 }

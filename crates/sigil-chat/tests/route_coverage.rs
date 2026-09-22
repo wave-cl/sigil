@@ -319,14 +319,11 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/account/succeed", Chat),
     ("POST", "/account/lodge", Chat),
     ("POST", "/account/lodged", Chat),
-    // What the exchange recorded of a succession. sigil hears of one from
-    // the transcript and from the old key's refusal, both of which name the
-    // successor; `Chat::succession_of` exists and nothing here asks it yet.
-    (
-        "POST",
-        "/account/succession",
-        NotYet("sigil learns a succession from the transcript, not the registry"),
-    ),
+    // What the exchange recorded of a succession: asked once when a direct
+    // message opens (`Cmd::SuccessionOf`), the proof checked on the way in,
+    // and said in the conversation with the old key. A transcript says so
+    // only where the move was written into a room both were in.
+    ("POST", "/account/succession", Chat),
     // SIP-45: a desktop holds its stream and needs no waking; the phone
     // client that will register an endpoint does not exist yet.
     (
@@ -536,7 +533,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 86,
+        reached, 87,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

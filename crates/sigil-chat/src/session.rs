@@ -621,6 +621,12 @@ pub struct ChatState {
     /// statements verify and are still standing, this identity's own left
     /// out. **Others' word, to be read and not acted on**: the dialog says so.
     pub attested: HashMap<PubKey, Vec<PubKey>>,
+    /// SIP-44: accounts the registry says were succeeded, and by whom --
+    /// asked for the other party when a direct message opens. A transcript
+    /// says so only where the move was written into a channel both are in;
+    /// the registry is what knows for a contact who moved while nothing was
+    /// said. `None` is the registry's answer that they were not.
+    pub succeeded: HashMap<PubKey, Option<PubKey>>,
     /// Whether we may rename, invite, remove and rotate here.
     pub i_am_admin: bool,
     /// SIP-56: the open conversation's reports, as last loaded (admins).
@@ -1510,6 +1516,8 @@ pub enum Cmd {
     /// SIP-27: read who has said that of `who`, for the dialog that offers
     /// to say it too.
     Attested(PubKey),
+    /// SIP-44: ask the registry whether `who` was succeeded, and by whom.
+    SuccessionOf(PubKey),
     /// Open a conversation with one of its messages in the window: what a
     /// search result does. [`Show`](Cmd::Show) opens on the last page and a
     /// hit can be anywhere before it; this widens the window so the message
@@ -5826,6 +5834,22 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Err(e) => trouble(state, e),
             }
         }
+        Cmd::SuccessionOf(who) => match chat.succession_of(&who).await {
+            Ok(found) => {
+                // Checked here, not taken on the exchange's word: the proof
+                // is the account's own will, or its guardians' vouches under
+                // its own policy, and either verifies without the exchange.
+                // A record whose proof does not prove what it says is no
+                // record.
+                let successor = found
+                    .filter(|s| s.proof.account() == who && s.proof.proves(&s.successor))
+                    .map(|s| s.successor);
+                state.send_modify(|s| {
+                    s.succeeded.insert(who, successor);
+                });
+            }
+            Err(e) => trouble(state, e),
+        },
         Cmd::Attested(who) => {
             let Some(mut client) = chat.connection() else {
                 return trouble(state, "not connected");

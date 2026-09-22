@@ -4809,6 +4809,17 @@ async fn an_account_arranges_its_succession_from_the_pane_and_the_successor_take
         .await
     );
 
+    // **Before the claim, the registry says Alice was not succeeded** --
+    // the answer a direct message with her would draw, and the control for
+    // the answer after.
+    bob.send(Cmd::SuccessionOf(alice_key));
+    assert!(
+        until(|| bob.state().succeeded.contains_key(&alice_key), 15).await,
+        "the registry was never asked: {:?}",
+        bob.state().trouble
+    );
+    assert_eq!(bob.state().succeeded.get(&alice_key), Some(&None));
+
     // **Carol takes it**, by pasting the will and nothing else.
     carol.send(Cmd::Succeed(will));
     assert!(
@@ -4848,6 +4859,29 @@ async fn an_account_arranges_its_succession_from_the_pane_and_the_successor_take
         "{:?}",
         alice.state().trouble
     );
+
+    // **And the registry, asked again, names Carol** -- with the proof
+    // checked on the way in, which is what a direct message with Alice
+    // opened tomorrow, by somebody who was in no room with her, has to go
+    // on. A key nobody succeeded still reads as not succeeded.
+    bob.send(Cmd::SuccessionOf(alice_key));
+    assert!(
+        until(
+            || bob.state().succeeded.get(&alice_key) == Some(&Some(carol_key)),
+            15
+        )
+        .await,
+        "the registry did not name the successor: {:?} / {:?}",
+        bob.state().succeeded.get(&alice_key),
+        bob.state().trouble
+    );
+    bob.send(Cmd::SuccessionOf(bob_key));
+    assert!(
+        until(|| bob.state().succeeded.contains_key(&bob_key), 15).await,
+        "{:?}",
+        bob.state().trouble
+    );
+    assert_eq!(bob.state().succeeded.get(&bob_key), Some(&None));
 
     alice.stop();
     bob.stop();

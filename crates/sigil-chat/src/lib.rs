@@ -1500,6 +1500,10 @@ pub struct ChatApp {
     /// Calls already announced, so a ring is said out loud once and not on
     /// every pass for as long as it rings.
     announced: std::collections::HashSet<([u8; 32], u64)>,
+    /// SIP-44: the other parties whose succession the registry has been
+    /// asked about, per session, so a direct message asks once on opening
+    /// and not on every pass. The answer lives in the state.
+    asked_succession: std::collections::HashSet<(At, PubKey)>,
     /// Files being chosen to attach, for which conversation. One at a time:
     /// the dialog is modal on a desktop and an activity on a phone, and
     /// neither runs two.
@@ -1572,6 +1576,7 @@ impl ChatApp {
             answering: None,
             ringing_out: std::collections::HashMap::new(),
             announced: std::collections::HashSet::new(),
+            asked_succession: std::collections::HashSet::new(),
             picking: None,
             saving: None,
             away: false,
@@ -4889,6 +4894,7 @@ impl ChatApp {
         if self.ringing_ui(ctx, at, state, ui, theme) {
             ui.add_space(tokens::SPACING_SM);
         }
+        self.succeeded_ui(at, state, ui, theme);
         let public = state
             .conversations
             .iter()
@@ -8058,6 +8064,66 @@ impl ChatApp {
             Some(RingPress::Decline) => self.decline_cross(at, cross.bridge),
             None => {}
         }
+    }
+
+    /// **SIP-44: the other party's account has moved.** Asked of the registry
+    /// once per direct message opened -- a transcript says so only where the
+    /// move was written into a channel both are in, and a contact who moved
+    /// while nothing was said reads as merely silent. The old key is still
+    /// this conversation's, so what is offered is a conversation with the
+    /// new one, not a rewrite of this.
+    fn succeeded_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some(peer) = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open)
+            .and_then(|c| c.peer)
+        else {
+            return;
+        };
+        if !state.succeeded.contains_key(&peer) && self.asked_succession.insert((at.clone(), peer))
+        {
+            self.send_as(Some(at), Cmd::SuccessionOf(peer));
+        }
+        let Some(Some(successor)) = state.succeeded.get(&peer) else {
+            return;
+        };
+        let named = state
+            .people
+            .get(&peer)
+            .map(|p| p.label(&peer))
+            .unwrap_or_else(|| sigil_ui::message::short(&peer.to_string()));
+        let successor = *successor;
+        egui::Frame::NONE
+            .fill(theme.surface_elevated)
+            .corner_radius(tokens::RADIUS_LG)
+            .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(format!(
+                        "{named}'s account is now {}",
+                        sigil_ui::message::short(&successor.to_string())
+                    ))
+                    .wrap(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "The exchange holds their own word for it. What was said here \
+                             stays with the old key; write to them at the new one.",
+                        )
+                        .small()
+                        .color(theme.text_secondary),
+                    )
+                    .wrap(),
+                );
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Compose, "Write to them there").clicked()
+                {
+                    self.send_as(Some(at), Cmd::AddContact(successor, String::new()));
+                    self.send_as(Some(at), Cmd::OpenDm(successor));
+                }
+            });
+        ui.add_space(tokens::SPACING_SM);
     }
 
     fn calling_ui(
