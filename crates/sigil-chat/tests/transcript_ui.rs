@@ -9960,8 +9960,12 @@ fn a_scrolled_transcript_offers_the_way_back_to_the_newest() {
         text_of(&h)
     );
 
-    // Up a few screens, as a finger does.
-    h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 300.0));
+    // Up a few screens, as a finger does, with the pointer in the margin:
+    // a message under it reveals its action strip, the strip is a
+    // foreground layer, and a wheel over that layer is the strip's -- so
+    // the middle of the pane scrolls nothing as soon as a layout change
+    // puts a bubble under the pointer.
+    h.hover_at(egui::pos2(26.0, 300.0));
     for _ in 0..12 {
         h.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
@@ -10457,5 +10461,121 @@ fn the_quick_reaction_already_sent_is_held_down_and_takes_itself_back() {
     assert!(
         sent.contains("React"),
         "pressing the one already sent did not take it back: {sent}"
+    );
+}
+
+/// A ring, for a test that only needs one to be happening.
+fn a_ringing(open: bool) -> ChatState {
+    let mut state = a_conversation();
+    if !open {
+        state.open = None;
+    }
+    state.ringing = vec![sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: them(),
+        mine: false,
+        secret: [3u8; 32],
+        answered: false,
+        label: "Ada".into(),
+        direct: false,
+        peer: None,
+    }];
+    state
+}
+
+/// **A phone rings from the bottom of the screen.**
+///
+/// The card was drawn at the top of whatever was on screen, which on a
+/// phone is the far end of the hand holding it: Answer and Decline were a
+/// stretch away, over the thing being read. At the bottom they are under
+/// the thumb, where a phone puts the two buttons of a call.
+#[test]
+fn a_phone_rings_from_the_bottom_of_the_screen() {
+    for (what, state) in [
+        ("with the list on screen", a_ringing(false)),
+        ("in a conversation", a_ringing(true)),
+    ] {
+        let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+        h.run();
+        h.run();
+        let answer = h.get_by_label("Answer").rect();
+        assert!(
+            answer.center().y > PHONE_HEIGHT / 2.0,
+            "{what}: Answer is at {:.0}, in the top half of a {PHONE_HEIGHT}-point screen",
+            answer.center().y
+        );
+    }
+}
+
+/// A wide pane keeps it at the top, where a window's banners belong: the
+/// negative control, and the reason the branch exists at all.
+#[test]
+fn a_window_still_rings_from_the_top() {
+    let mut h = harness_with(a_ringing(true), true);
+    h.run();
+    h.run();
+    let answer = h.get_by_label("Answer").rect();
+    assert!(
+        answer.center().y < 620.0 / 2.0,
+        "the ring moved to the bottom of the window too: {:.0}",
+        answer.center().y
+    );
+}
+
+/// And the ring at the foot does not stop the transcript scrolling: the
+/// card is as tall as a card, and everything below the pointer moved when
+/// it appeared.
+#[test]
+fn a_ring_at_the_bottom_leaves_the_transcript_scrolling() {
+    let mut state = a_page(50, 120);
+    state.ringing = a_ringing(true).ringing;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label_contains("Go to the latest").is_none(),
+        "a transcript opens at its foot"
+    );
+    // In the margin, not on a bubble: a message under the pointer reveals
+    // its strip, and the strip is a foreground layer that takes the wheel.
+    h.hover_at(egui::pos2(26.0, 300.0));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 240.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    assert!(
+        h.query_by_label_contains("Go to the latest").is_some(),
+        "the transcript did not scroll while a call was ringing"
+    );
+}
+
+/// What is wrong with a conversation is said at the same end as the ring:
+/// beside the box, not above the first message anybody has to scroll back
+/// up to see.
+#[test]
+fn a_phone_says_what_is_wrong_beside_the_box() {
+    let mut state = a_conversation();
+    state.trouble_with.no_key = Some(4);
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = h
+        .get_by_label_contains("You hold no key for this conversation")
+        .rect();
+    let box_row = h.get_by_label_contains("Attach a file").rect();
+    assert!(
+        said.center().y > PHONE_HEIGHT / 2.0,
+        "the trouble is in the top half at {:.0}",
+        said.center().y
+    );
+    assert!(
+        said.bottom() <= box_row.top() + 1.0,
+        "the trouble at {said:?} is over the box at {box_row:?}"
     );
 }

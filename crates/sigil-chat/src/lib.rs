@@ -2241,7 +2241,26 @@ impl App for ChatApp {
                 state.cross_ring.is_some() || state.ringing.iter().any(|r| !r.mine && !r.answered);
             if incoming && (route != Route::Conversations || state.open.is_none()) {
                 let theme = ColorTheme::current(ui.ctx());
-                if self.ringing_ui(ctx, &at, &state, ui, &theme) {
+                // **From the bottom on a phone.** A card at the top of a
+                // phone is at the far end of the hand holding it: Answer
+                // and Decline were a stretch away, over the thing the
+                // reader was looking at. At the bottom they are under the
+                // thumb, which is where a phone puts the two buttons of a
+                // call. A wide pane keeps it at the top, where a window's
+                // banners belong.
+                if sigil::Form::of(ui.ctx()).is_phone() {
+                    egui::Panel::bottom("phone_ring")
+                        .show_separator_line(false)
+                        .frame(egui::Frame::NONE.fill(theme.surface_primary).inner_margin(
+                            egui::Margin {
+                                top: tokens::SPACING_SM as i8,
+                                ..Default::default()
+                            },
+                        ))
+                        .show(ui, |ui| {
+                            self.ringing_ui(ctx, &at, &state, ui, &theme);
+                        });
+                } else if self.ringing_ui(ctx, &at, &state, ui, &theme) {
                     ui.add_space(tokens::SPACING_SM);
                 }
             }
@@ -5093,22 +5112,28 @@ impl ChatApp {
         }
 
         // The header is the bar above, drawn by whoever placed this pane;
-        // the transcript starts with what is happening in it.
-        if self.ringing_ui(ctx, at, state, ui, theme) {
-            ui.add_space(tokens::SPACING_SM);
-        }
-        self.succeeded_ui(at, state, ui, theme);
+        // what is happening in the conversation is said at the top of it --
+        // except on a phone, where it is said at the bottom, above the box.
+        // See the ring in `render_nav`: the end of a phone the hand is at.
         let public = state
             .conversations
             .iter()
             .find(|c| Some(c.channel) == state.open)
             .is_some_and(|c| c.public == Some(true));
-        for seq in self.trouble_ui(&state.trouble_with, public, ui, theme) {
-            self.send_as(Some(at), Cmd::Redact(seq));
+        let phone = sigil::Form::of(ui.ctx()).is_phone();
+        if !phone {
+            if self.ringing_ui(ctx, at, state, ui, theme) {
+                ui.add_space(tokens::SPACING_SM);
+            }
+            self.succeeded_ui(at, state, ui, theme);
+            for seq in self.trouble_ui(&state.trouble_with, public, ui, theme) {
+                self.send_as(Some(at), Cmd::Redact(seq));
+            }
         }
 
         // The composer is laid out first, from the bottom, so the transcript
         // gets the remaining height rather than pushing it off the screen.
+        let mut redact: Vec<u64> = Vec::new();
         egui::Panel::bottom("chat_composer")
             .frame(
                 egui::Frame::NONE
@@ -5126,7 +5151,22 @@ impl ChatApp {
                         ..Default::default()
                     }),
             )
-            .show(ui, |ui| self.composer_ui(ctx, at, state, ui, theme));
+            .show(ui, |ui| {
+                // **A phone says it above the box**, in the composer's
+                // own panel: one panel, and the same place on the screen
+                // as a second one below the transcript would be.
+                if phone {
+                    if self.ringing_ui(ctx, at, state, ui, theme) {
+                        ui.add_space(tokens::SPACING_SM);
+                    }
+                    self.succeeded_ui(at, state, ui, theme);
+                    redact = self.trouble_ui(&state.trouble_with, public, ui, theme);
+                }
+                self.composer_ui(ctx, at, state, ui, theme)
+            });
+        for seq in std::mem::take(&mut redact) {
+            self.send_as(Some(at), Cmd::Redact(seq));
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
