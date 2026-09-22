@@ -284,27 +284,21 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/resolve/publish", NotYet("SIP-28 resolution")),
     ("POST", "/resolve/get", NotYet("SIP-28 resolution")),
     ("POST", "/resolve/successor", NotYet("SIP-28 resolution")),
-    // SIP-44: signed with `sqex succession`; sigil shows the result in the
-    // transcript and tells a succeeded key where its account went.
-    (
-        "POST",
-        "/account/succeed",
-        NotYet("SIP-44 succession, from the CLI"),
-    ),
+    // SIP-44, from the Devices pane since sqex 0.104.3 gave `Chat` the
+    // methods: a will and guardians written by the account, a vouch as a
+    // guardian, and the successor's claim -- `WriteWill`, `NameGuardians`,
+    // `Vouch`, `Succeed`. The lodged policy is read for the pane and for a
+    // successor's claim.
+    ("POST", "/account/succeed", Chat),
+    ("POST", "/account/lodge", Chat),
+    ("POST", "/account/lodged", Chat),
+    // What the exchange recorded of a succession. sigil hears of one from
+    // the transcript and from the old key's refusal, both of which name the
+    // successor; `Chat::succession_of` exists and nothing here asks it yet.
     (
         "POST",
         "/account/succession",
-        NotYet("SIP-44 succession, from the CLI"),
-    ),
-    (
-        "POST",
-        "/account/lodge",
-        NotYet("SIP-44 succession, from the CLI"),
-    ),
-    (
-        "POST",
-        "/account/lodged",
-        NotYet("SIP-44 succession, from the CLI"),
+        NotYet("sigil learns a succession from the transcript, not the registry"),
     ),
     // SIP-45: a desktop holds its stream and needs no waking; the phone
     // client that will register an endpoint does not exist yet.
@@ -515,7 +509,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 81,
+        reached, 84,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

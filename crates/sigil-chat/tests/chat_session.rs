@@ -4701,3 +4701,260 @@ async fn a_revoked_device_comes_back_up_as_itself_again() {
     one.stop();
     again.stop();
 }
+
+/// **SIP-44 from the interface's commands, both ways.**
+///
+/// The CLI has had `succession will | policy | vouch | claim` since SIP-44
+/// landed, and sigil's own documentation said "done from a terminal today".
+/// A phone has no terminal, and it is the device most likely to be the one
+/// that is lost. So: Alice writes a will for Carol from the Devices pane;
+/// Carol pastes it and takes the account; Bob's transcript says so and
+/// Alice's session is told where the account went. Then, separately, Dave
+/// names two guardians, they vouch from their own panes, and Erin pastes
+/// Dave's key and the two vouches.
+///
+/// What is asserted is what the CLI test already asserts of the exchange's
+/// side -- the room line and the old key's notice -- reached through
+/// `Cmd`s alone, plus the words each pane shows for what it just wrote.
+#[tokio::test]
+async fn an_account_arranges_its_succession_from_the_pane_and_the_successor_takes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (alice_signer, alice_key) = signer(71);
+    let (bob_signer, bob_key) = signer(72);
+    let (carol_signer, carol_key) = signer(73);
+    let alice = start_at(endpoint, alice_signer, &dir.path().join("alice.db"));
+    let bob = start_at(endpoint, bob_signer, &dir.path().join("bob.db"));
+    let carol = start_at(endpoint, carol_signer, &dir.path().join("carol.db"));
+    for (h, k) in [(&alice, alice_key), (&bob, bob_key), (&carol, carol_key)] {
+        assert!(
+            until(|| h.state().me == Some(k), 15).await,
+            "should come up"
+        );
+    }
+    // A room Alice and Bob share, so there is somewhere for the succession
+    // to be said.
+    alice.send(Cmd::NewPublic {
+        name: "the room".into(),
+        topic: String::new(),
+    });
+    assert!(until(|| alice.state().open.is_some(), 15).await);
+    let channel = alice.state().open.unwrap();
+    alice.send(Cmd::Invite(bob_key));
+    assert!(
+        until(
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel),
+            20
+        )
+        .await
+    );
+    bob.send(Cmd::Show(channel));
+    assert!(until(|| bob.state().open == Some(channel), 15).await);
+
+    // **The pane asks what is arranged, and nothing is.**
+    alice.send(Cmd::SuccessionStatus);
+    assert!(
+        until(|| alice.state().succession.is_some(), 15).await,
+        "the pane was never told what is arranged"
+    );
+    let su = alice.state().succession.unwrap();
+    assert!(
+        su.is_account,
+        "Alice is her own account and the pane says otherwise"
+    );
+    assert!(su.lodged.is_none());
+
+    // **A will**, written from the pane and shown to be copied.
+    alice.send(Cmd::WriteWill(carol_key));
+    assert!(
+        until(
+            || alice
+                .state()
+                .succession
+                .as_ref()
+                .is_some_and(|s| s.will.is_some()),
+            15
+        )
+        .await,
+        "no will was shown: {:?}",
+        alice.state().trouble
+    );
+    let will = alice.state().succession.unwrap().will.unwrap();
+    assert!(
+        alice
+            .state()
+            .note
+            .is_some_and(|n| n.said.contains("Keep it apart")),
+        "the pane does not say what a will has to be kept apart from"
+    );
+    // Put away, as somebody would once it is copied.
+    alice.send(Cmd::HideSuccession);
+    assert!(
+        until(
+            || alice
+                .state()
+                .succession
+                .as_ref()
+                .is_some_and(|s| s.will.is_none()),
+            10
+        )
+        .await
+    );
+
+    // **Carol takes it**, by pasting the will and nothing else.
+    carol.send(Cmd::Succeed(will));
+    assert!(
+        until(
+            || carol
+                .state()
+                .note
+                .is_some_and(|n| n.said.contains("is yours")),
+            20
+        )
+        .await,
+        "Carol's claim did not go through: {:?}",
+        carol.state().trouble
+    );
+    // Bob's transcript says so, in words that name both keys.
+    assert!(
+        until(
+            || bob.state().events.iter().any(|e| {
+                e.said.contains("account is now") && e.actor == alice_key && e.subject == carol_key
+            }),
+            30
+        )
+        .await,
+        "the succession was not said in the room"
+    );
+    // And Alice's session is told where the account went.
+    assert!(
+        until(
+            || alice
+                .state()
+                .trouble
+                .as_deref()
+                .is_some_and(|t| t.contains("succeeded by")),
+            30
+        )
+        .await,
+        "{:?}",
+        alice.state().trouble
+    );
+
+    alice.stop();
+    bob.stop();
+    carol.stop();
+}
+
+#[tokio::test]
+async fn guardians_named_from_the_pane_vouch_and_the_successor_takes_the_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (dave_signer, dave_key) = signer(81);
+    let (g1_signer, g1_key) = signer(82);
+    let (g2_signer, g2_key) = signer(83);
+    let (erin_signer, erin_key) = signer(84);
+    let dave = start_at(endpoint, dave_signer, &dir.path().join("dave.db"));
+    let g1 = start_at(endpoint, g1_signer, &dir.path().join("g1.db"));
+    let g2 = start_at(endpoint, g2_signer, &dir.path().join("g2.db"));
+    let erin = start_at(endpoint, erin_signer, &dir.path().join("erin.db"));
+    for (h, k) in [
+        (&dave, dave_key),
+        (&g1, g1_key),
+        (&g2, g2_key),
+        (&erin, erin_key),
+    ] {
+        assert!(
+            until(|| h.state().me == Some(k), 15).await,
+            "should come up"
+        );
+    }
+
+    // Dave names two guardians, both of whom it takes.
+    dave.send(Cmd::NameGuardians {
+        threshold: 2,
+        guardians: vec![g1_key, g2_key],
+    });
+    assert!(
+        until(
+            || dave.state().succession.as_ref().is_some_and(|s| s
+                .lodged
+                .as_ref()
+                .is_some_and(|(t, g)| *t == 2 && g.len() == 2)),
+            20
+        )
+        .await,
+        "the policy was not lodged, or the pane was not told: {:?}",
+        dave.state().trouble
+    );
+
+    // The guardians vouch for Erin, each from their own pane.
+    let mut vouches = Vec::new();
+    for g in [&g1, &g2] {
+        g.send(Cmd::Vouch {
+            account: dave_key,
+            successor: erin_key,
+        });
+        assert!(
+            until(
+                || g.state()
+                    .succession
+                    .as_ref()
+                    .is_some_and(|s| s.vouch.is_some()),
+                15
+            )
+            .await,
+            "no vouch was shown"
+        );
+        vouches.push(g.state().succession.unwrap().vouch.unwrap());
+    }
+
+    // **One vouch is not enough**, and the pane says so before anything is
+    // sent -- the quorum is short.
+    erin.send(Cmd::Succeed(format!("{dave_key}\n{}", vouches[0])));
+    assert!(
+        until(|| erin.state().trouble.is_some(), 20).await,
+        "a short quorum was accepted: {:?}",
+        erin.state().note
+    );
+    assert!(
+        erin.state().trouble.unwrap_or_default().contains("quorum"),
+        "the refusal does not say the quorum is short: {:?}",
+        erin.state().trouble
+    );
+
+    // Two is: Erin pastes Dave's key and both vouches.
+    erin.send(Cmd::Succeed(format!(
+        "{dave_key}\n{}\n{}",
+        vouches[0], vouches[1]
+    )));
+    assert!(
+        until(
+            || erin
+                .state()
+                .note
+                .is_some_and(|n| n.said.contains("is yours")),
+            20
+        )
+        .await,
+        "Erin's claim did not go through: {:?}",
+        erin.state().trouble
+    );
+
+    dave.stop();
+    g1.stop();
+    g2.stop();
+    erin.stop();
+}

@@ -16,7 +16,24 @@ Two ways, both signed by you while you still can:
   you, and the successor presents those. No one guardian can move your
   account; you chose how many can.
 
-Both are done from a terminal today:
+Both are in **Chat › Devices**, at the foot, under *If you lose your key*:
+
+- **A will**: paste the successor's key, press the tick, and copy the will
+  it shows. Keep it where that key's secret is not.
+- **Guardians**: add each guardian's key, choose how many it takes, and
+  lodge it. The pane shows what is lodged; naming guardians again replaces
+  it.
+- **As somebody's guardian**: the account and the key that succeeds it;
+  copy the vouch it shows and give it to the successor.
+- **Take an account that named you**: paste the will; or the account's key
+  and, under it, the vouches you were given, one per line. A short quorum
+  or a will naming somebody else is refused before anything is sent.
+
+A device linked to the account (holding its credential, not its key) is
+offered the last two only, and told why.
+
+The terminal has the same five, and is where this lived until sigil could
+reach the routes (sqex 0.104.3):
 
 ```
 sqex succession will <successor-key>

@@ -12,7 +12,7 @@ use session::RING_WINDOW;
 pub use session::{
     Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Found, Happened,
     HeldBackup, Hit, Line, LinkState, Linked, Member, Person, Posted, Quoted, Receipt, Report,
-    Ring, Standing, Summary, Thumb, Trouble,
+    Ring, Standing, Succession, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -1063,6 +1063,16 @@ struct Pane {
     /// SIP-48: the words typed to restore from, and the drop's second step.
     restoring: String,
     confirming_drop: bool,
+    /// SIP-44: the fields of the succession section -- a successor's key, a
+    /// guardian being added and the ones added, how many it takes, who is
+    /// being vouched for, and what a successor pasted to claim.
+    successor: String,
+    guardian: String,
+    guardians: Vec<PubKey>,
+    threshold: u8,
+    vouch_account: String,
+    vouch_successor: String,
+    claiming: String,
     /// The message whose file is being forwarded.
     forwarding: Option<(u64, usize)>,
     /// The picture being looked at full size: a message and which of its
@@ -1226,6 +1236,13 @@ impl Default for Pane {
             report_note: String::new(),
             restoring: String::new(),
             confirming_drop: false,
+            successor: String::new(),
+            guardian: String::new(),
+            guardians: Vec::new(),
+            threshold: 2,
+            vouch_account: String::new(),
+            vouch_successor: String::new(),
+            claiming: String::new(),
             claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
@@ -8366,6 +8383,7 @@ impl ChatApp {
         );
 
         self.backup_ui(at, state, ui, theme);
+        self.succession_ui(at, state, ui, theme);
         AppResponse::default()
     }
 
@@ -8542,6 +8560,294 @@ impl ChatApp {
                 }
             }
         });
+    }
+}
+
+impl ChatApp {
+    /// SIP-44: what to arrange for the day this key is lost, and what to do
+    /// on it. Four things, in the order somebody meets them: a will and
+    /// guardians, written by the account while it still can; a vouch, as one
+    /// of somebody's guardians; and the claim, as the successor.
+    ///
+    /// **This was a terminal's.** The CLI has had all four since SIP-44
+    /// landed, and sigil's own documentation said so. A phone has no
+    /// terminal, and the phone is the device most likely to be the one that
+    /// is lost.
+    fn succession_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.add_space(tokens::SPACING_MD);
+        ui.separator();
+        ui.add_space(tokens::SPACING_SM);
+        ui.heading("If you lose your key");
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Your account is your key. Say now who takes over when it is gone, and the \
+                 exchange carries everything across when they do: names, conversations, \
+                 your place in each.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        let Some(su) = state.succession.as_ref() else {
+            ui.colored_label(theme.text_secondary, "Asking the exchange…");
+            return;
+        };
+
+        if su.is_account {
+            // -- a will ------------------------------------------------------
+            ui.label(egui::RichText::new("A will").strong());
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(
+                    "Names one key that may take this account by presenting it. Keep the will \
+                     where that key's secret is not: together they are the account.",
+                )
+                .small(),
+            );
+            let (_, write) = sigil_ui::labelled_field(
+                ui,
+                "",
+                &mut self.panes.entry(at.clone()).or_default().successor,
+                "the successor's key, in base58",
+                Some(sigil_ui::Action::Mark(
+                    sigil_ui::Icon::Check,
+                    "Write the will",
+                )),
+            );
+            if write {
+                let typed = self.pane(at).successor.trim().to_string();
+                match typed.parse::<PubKey>() {
+                    Ok(key) => self.send_as(Some(at), Cmd::WriteWill(key)),
+                    Err(_) => self.pane(at).add_trouble = Some("that is not a key".into()),
+                }
+            }
+            if let Some(will) = &su.will {
+                self.shown_secret_ui(at, ui, theme, will, "the will");
+            }
+
+            // -- guardians ---------------------------------------------------
+            ui.add_space(tokens::SPACING_MD);
+            ui.label(egui::RichText::new("Guardians").strong());
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(
+                    "People you name, and a number of them it takes. When the key is gone, \
+                     that many of them each vouch for the key that succeeds you, and no one of \
+                     them can move your account alone.",
+                )
+                .small(),
+            );
+            match &su.lodged {
+                Some((threshold, guardians)) => {
+                    ui.colored_label(
+                        theme.success,
+                        format!(
+                            "Lodged: any {threshold} of {} guardians may name your successor.",
+                            guardians.len()
+                        ),
+                    );
+                    for g in guardians {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(g.to_string()).monospace().small(),
+                            )
+                            .selectable(true),
+                        );
+                    }
+                    ui.colored_label(
+                        theme.text_muted,
+                        egui::RichText::new("Naming guardians again replaces these.").small(),
+                    );
+                }
+                None => {
+                    ui.colored_label(theme.text_muted, egui::RichText::new("None named.").small());
+                }
+            }
+            let (_, add) = sigil_ui::labelled_field(
+                ui,
+                "",
+                &mut self.panes.entry(at.clone()).or_default().guardian,
+                "a guardian's key, in base58",
+                Some(sigil_ui::Action::Mark(
+                    sigil_ui::Icon::Plus,
+                    "Add a guardian",
+                )),
+            );
+            if add {
+                let typed = self.pane(at).guardian.trim().to_string();
+                match typed.parse::<PubKey>() {
+                    Ok(key) => {
+                        let pane = self.pane(at);
+                        if !pane.guardians.contains(&key) {
+                            pane.guardians.push(key);
+                        }
+                        pane.guardian.clear();
+                    }
+                    Err(_) => self.pane(at).add_trouble = Some("that is not a key".into()),
+                }
+            }
+            let named = self.pane(at).guardians.clone();
+            if !named.is_empty() {
+                let mut drop: Option<PubKey> = None;
+                for g in &named {
+                    ui.horizontal(|ui| {
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Remove")
+                            .clicked()
+                        {
+                            drop = Some(*g);
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(g.to_string()).monospace().small(),
+                            )
+                            .selectable(true),
+                        );
+                    });
+                }
+                if let Some(g) = drop {
+                    self.pane(at).guardians.retain(|k| *k != g);
+                }
+                let n = named.len();
+                let mut threshold = self.pane(at).threshold.clamp(1, n as u8);
+                ui.horizontal(|ui| {
+                    ui.label("It takes");
+                    ui.add(egui::DragValue::new(&mut threshold).range(1..=n as u8));
+                    ui.label(format!("of {n}"));
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Lodge").clicked() {
+                        self.send_as(
+                            Some(at),
+                            Cmd::NameGuardians {
+                                threshold,
+                                guardians: named.clone(),
+                            },
+                        );
+                        self.pane(at).guardians.clear();
+                    }
+                });
+                self.pane(at).threshold = threshold;
+            }
+        } else {
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(
+                    "This is one of the account's devices, not the account: a will or guardians \
+                     are written from a device that holds the account's own key.",
+                )
+                .small(),
+            );
+        }
+
+        // -- as a guardian ---------------------------------------------------
+        ui.add_space(tokens::SPACING_MD);
+        ui.label(egui::RichText::new("As somebody's guardian").strong());
+        ui.colored_label(
+            theme.text_secondary,
+            egui::RichText::new(
+                "Sign that a key succeeds an account that named you. Your word, for the \
+                 successor to collect; it moves nothing on its own.",
+            )
+            .small(),
+        );
+        sigil_ui::labelled_field(
+            ui,
+            "",
+            &mut self.panes.entry(at.clone()).or_default().vouch_account,
+            "the account being succeeded, in base58",
+            None,
+        );
+        let (_, vouch) = sigil_ui::labelled_field(
+            ui,
+            "",
+            &mut self.panes.entry(at.clone()).or_default().vouch_successor,
+            "the key that succeeds it, in base58",
+            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Check, "Vouch")),
+        );
+        if vouch {
+            let (a, s) = {
+                let pane = self.pane(at);
+                (
+                    pane.vouch_account.trim().to_string(),
+                    pane.vouch_successor.trim().to_string(),
+                )
+            };
+            match (a.parse::<PubKey>(), s.parse::<PubKey>()) {
+                (Ok(account), Ok(successor)) => {
+                    self.send_as(Some(at), Cmd::Vouch { account, successor })
+                }
+                _ => self.pane(at).add_trouble = Some("both have to be keys".into()),
+            }
+        }
+        if let Some(v) = &su.vouch {
+            self.shown_secret_ui(at, ui, theme, v, "the vouch");
+        }
+
+        // -- the claim -------------------------------------------------------
+        ui.add_space(tokens::SPACING_MD);
+        ui.label(egui::RichText::new("Take an account that named you").strong());
+        ui.colored_label(
+            theme.text_secondary,
+            egui::RichText::new(
+                "Paste the will you were given; or the account's key, and under it the \
+                 vouches its guardians gave you, one per line. The account becomes this \
+                 key's: its names, its conversations, its place in each.",
+            )
+            .small(),
+        );
+        let width = ui.available_width();
+        ui.add(
+            egui::TextEdit::multiline(&mut self.panes.entry(at.clone()).or_default().claiming)
+                .hint_text("a will, or an account's key and the vouches for you")
+                .desired_rows(2)
+                .desired_width(width),
+        );
+        if ui.button("Take it").clicked() {
+            let pasted = self.pane(at).claiming.trim().to_string();
+            if !pasted.is_empty() {
+                self.pane(at).claiming.clear();
+                self.send_as(Some(at), Cmd::Succeed(pasted));
+            }
+        }
+        if let Some(t) = self.pane(at).add_trouble.clone() {
+            ui.colored_label(theme.destructive, t);
+        }
+    }
+
+    /// A signed thing just written -- a will, a vouch -- shown to be copied
+    /// and then put away. Base58, in full, selectable, with the one thing to
+    /// say about it beside a way to hide it.
+    fn shown_secret_ui(
+        &mut self,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        text: &str,
+        what: &str,
+    ) {
+        ui.add_space(tokens::SPACING_XS);
+        egui::Frame::NONE
+            .fill(theme.surface_elevated)
+            .corner_radius(tokens::RADIUS_MD)
+            .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).monospace().small())
+                        .wrap()
+                        .selectable(true),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(text.to_string());
+                    }
+                    if ui.button("Hide").clicked() {
+                        self.send_as(Some(at), Cmd::HideSuccession);
+                    }
+                    ui.colored_label(
+                        theme.text_muted,
+                        egui::RichText::new(format!("Give {what} to the person it is for."))
+                            .small(),
+                    );
+                });
+            });
     }
 }
 

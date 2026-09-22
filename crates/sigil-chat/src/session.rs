@@ -640,6 +640,9 @@ pub struct ChatState {
     /// SIP-48: what the exchange holds of this account's sealed backup, and
     /// whether this store has the key to write one. `None` until asked.
     pub backup: Option<Backup>,
+    /// SIP-44: what has been arranged for the day this key is lost, and what
+    /// was just written. `None` until asked.
+    pub succession: Option<Succession>,
     /// Whether this client still acts for its account.
     ///
     /// `None` when it was never linked: an account with no registered device
@@ -729,6 +732,30 @@ pub struct Backup {
     /// The 24 words, while shown. Cleared by `Cmd::HideBackupKey`; never
     /// kept in the state longer than the person asked to see them.
     pub words: Option<Vec<String>>,
+}
+
+/// SIP-44: what is arranged for the day this key is lost.
+///
+/// Two ways, both signed by the account while it still can: a **will** names
+/// a successor key, presented by that key when this one is gone; **guardians**
+/// are people named with a number of them it takes, who each sign for the
+/// successor later. The exchange holds the guardians' policy so they and the
+/// successor can find it when the account cannot be asked; a will is held by
+/// nobody but whoever the account gave it to.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Succession {
+    /// Whether this client *is* the account, and so may write a will or name
+    /// guardians. A linked device holds the account's credential and not its
+    /// seed, and a will it signed would be its own.
+    pub is_account: bool,
+    /// The policy lodged for this account at the exchange, if any: how many
+    /// guardians it takes, and who they are.
+    pub lodged: Option<(u8, Vec<PubKey>)>,
+    /// A will just written, base58, while shown. Kept apart from the
+    /// successor's secret; together they are the account.
+    pub will: Option<String>,
+    /// A vouch just signed as a guardian, base58, while shown.
+    pub vouch: Option<String>,
 }
 
 /// SIP-48: one backup, as the exchange describes it.
@@ -1325,6 +1352,28 @@ pub enum Cmd {
         channel: [u8; 32],
         seq: u64,
     },
+    /// SIP-44: what is arranged for this account's succession. Asked with
+    /// `BackupStatus`, which is the same screen.
+    SuccessionStatus,
+    /// SIP-44 §The will: sign that `successor` may take this account.
+    WriteWill(PubKey),
+    /// SIP-44 §Guardians: name them and how many it takes, and lodge it.
+    NameGuardians {
+        threshold: u8,
+        guardians: Vec<PubKey>,
+    },
+    /// SIP-44 §Guardians, as one of them: sign that `successor` succeeds
+    /// `account`.
+    Vouch {
+        account: PubKey,
+        successor: PubKey,
+    },
+    /// SIP-44 §The successor: take an account. `proof` is what was pasted --
+    /// a will, base58; or an account's key and then the guardians' vouches,
+    /// base58, one per line. Which it is is decided by shape.
+    Succeed(String),
+    /// Put away a will or a vouch that was shown.
+    HideSuccession,
     /// SIP-39: the cross-exchange ring was answered or refused. Both happen
     /// on the interface's own connection -- the answer is a call of its
     /// own, the refusal a post to the bridge -- so all the session has to
@@ -5845,7 +5894,10 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
 
         Cmd::Devices => refresh_devices(chat, state, desk).await,
-        Cmd::BackupStatus => backup_status(chat, state).await,
+        Cmd::BackupStatus => {
+            backup_status(chat, state).await;
+            succession_status(chat, state).await;
+        }
         Cmd::BackupKey => {
             let key = match chat.backup_key() {
                 Ok(Some(key)) => Ok(key),
@@ -5924,6 +5976,79 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Err(e) => trouble(state, e),
             }
         }
+        Cmd::SuccessionStatus => succession_status(chat, state).await,
+        Cmd::WriteWill(successor) => match chat.sign_will(&successor) {
+            Ok(will) => {
+                let encoded = bs58::encode(will.encode()).into_string();
+                state.send_modify(|s| {
+                    s.succession.get_or_insert_with(Default::default).will = Some(encoded);
+                });
+                note(
+                    state,
+                    format!(
+                        "A will: {successor} may take this account by presenting it. Keep it \
+                         apart from that key's secret -- together they are the account."
+                    ),
+                );
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::NameGuardians {
+            threshold,
+            guardians,
+        } => match chat.sign_policy(threshold, &guardians) {
+            Ok(policy) => match chat.lodge_policy(&policy).await {
+                Ok(()) => {
+                    note(
+                        state,
+                        format!(
+                            "Lodged: any {threshold} of {} guardians may name your successor. \
+                             Tell them.",
+                            guardians.len()
+                        ),
+                    );
+                    succession_status(chat, state).await;
+                }
+                Err(e) => trouble(state, e),
+            },
+            Err(e) => trouble(state, e),
+        },
+        Cmd::Vouch { account, successor } => {
+            let vouch = chat.vouch(&account, &successor);
+            let encoded = bs58::encode(vouch.encode()).into_string();
+            state.send_modify(|s| {
+                s.succession.get_or_insert_with(Default::default).vouch = Some(encoded);
+            });
+            note(
+                state,
+                format!("Your word that {successor} succeeds {account}. Give it to them."),
+            );
+        }
+        Cmd::Succeed(pasted) => match proof_from(chat, &pasted).await {
+            Ok(proof) => {
+                let account = proof.account();
+                match chat.succeed(proof).await {
+                    Ok(()) => {
+                        note(
+                            state,
+                            format!(
+                                "{account} is yours: its names, its conversations, its place in \
+                                 each. Its old devices are nobody's now; link yours."
+                            ),
+                        );
+                        desk.restructure = true;
+                    }
+                    Err(e) => trouble(state, e),
+                }
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::HideSuccession => state.send_modify(|s| {
+            if let Some(su) = s.succession.as_mut() {
+                su.will = None;
+                su.vouch = None;
+            }
+        }),
         Cmd::DropBackup => match chat.drop_backup().await {
             Ok(()) => {
                 note(state, "Dropped. What is on this machine stays.".into());
@@ -6476,6 +6601,69 @@ async fn backup_status(chat: &mut Chat, state: &watch::Sender<ChatState>) {
         }),
         Err(e) => trouble(state, e),
     }
+}
+
+/// SIP-44: what is arranged for this account's succession, as the exchange
+/// has it. What was just written stays shown.
+async fn succession_status(chat: &mut Chat, state: &watch::Sender<ChatState>) {
+    let me = chat.me;
+    let is_account = chat.credential().is_none();
+    match chat.lodged_policy(&me).await {
+        Ok(policy) => state.send_modify(|s| {
+            let su = s.succession.get_or_insert_with(Default::default);
+            su.is_account = is_account;
+            su.lodged = policy.map(|p| (p.threshold, p.guardians));
+        }),
+        Err(e) => trouble(state, e),
+    }
+}
+
+/// SIP-44 §The successor: what was pasted, read by its shape.
+///
+/// A will is one base58 token that decodes as one. Otherwise the first token
+/// is the account's key, the rest are the guardians' vouches, and the policy
+/// is fetched from where the account lodged it -- the successor was never
+/// given the policy, only told there is one. Either way the exchange checks
+/// everything again; this is so a wrong paste is said here, in words, before
+/// anything is sent.
+async fn proof_from(
+    chat: &mut Chat,
+    pasted: &str,
+) -> Result<sqex_proto::succession::Proof, String> {
+    use sqex_proto::succession::{Proof, Vouch, Will};
+    let tokens: Vec<&str> = pasted.split_whitespace().collect();
+    let [first, rest @ ..] = tokens.as_slice() else {
+        return Err("paste a will, or an account's key and the vouches for you".into());
+    };
+    if let Ok(bytes) = bs58::decode(first).into_vec()
+        && let Ok(will) = Will::decode(&bytes)
+    {
+        return Ok(Proof::Will(will));
+    }
+    let account: PubKey = first
+        .parse()
+        .map_err(|_| "that is neither a will nor an account's key".to_string())?;
+    let policy = chat
+        .lodged_policy(&account)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("{account} has no guardians' policy lodged here"))?;
+    let mut vouches = Vec::with_capacity(rest.len());
+    for v in rest {
+        let bytes = bs58::decode(v)
+            .into_vec()
+            .map_err(|_| format!("that is not a vouch: {v}"))?;
+        vouches.push(Vouch::decode(&bytes).map_err(|_| format!("that is not a vouch: {v}"))?);
+    }
+    if vouches.is_empty() {
+        return Err(format!(
+            "an account's key alone is not a claim: any {} of its {} guardians have to vouch \
+             for you, one per line after it",
+            policy.threshold,
+            policy.guardians.len()
+        ));
+    }
+    Ok(Proof::Guardians { policy, vouches })
 }
 
 /// SIP-56: read the room's reports for an admin, and clear the badge.

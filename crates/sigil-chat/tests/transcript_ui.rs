@@ -234,6 +234,7 @@ fn a_conversation() -> ChatState {
         home: None,
         ringing: Vec::new(),
         cross_ring: None,
+        succession: None,
         over: Vec::new(),
         arrivals: Vec::new(),
         unseen: Vec::new(),
@@ -9267,4 +9268,137 @@ fn a_call_from_another_exchange_rings_on_screen_with_a_way_to_answer_or_refuse()
         );
     }
     nothing_runs_off_the_edge(&h, "the cross-exchange ring");
+}
+
+/// **SIP-44 on the Devices pane, on a phone.** The section that was a
+/// terminal's: a will, guardians, a vouch, the claim. Drawn for an account
+/// with guardians lodged and a will just written, it fits the width, every
+/// control can be reached, and it says what it has to -- and for a linked
+/// device it says why the first two are not offered.
+#[test]
+fn the_succession_section_fits_a_phone_and_says_what_is_arranged() {
+    let mut state = a_conversation();
+    state.backup = Some(sigil_chat::Backup {
+        has_key: true,
+        held: None,
+        used: 0,
+        quota: 0,
+        words: None,
+    });
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        lodged: Some((
+            2,
+            vec![them(), PubKey::new([5u8; 32]), PubKey::new([6u8; 32])],
+        )),
+        will: Some(bs58::encode([7u8; 100]).into_string()),
+        vouch: None,
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    nothing_runs_off_the_edge(&h, "the Devices pane with succession");
+    // The whole pane, scrolled to the end: the section is at its foot.
+    for y in [100.0f32, 300.0, 500.0, 700.0] {
+        for _ in 0..40 {
+            h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, y));
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -400.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            h.run_steps(2);
+        }
+    }
+    let said = text_of(&h);
+    for want in [
+        "If you lose your key",
+        "any 2 of 3 guardians",
+        "Write the will",
+        "Add a guardian",
+        "Vouch",
+        "Take it",
+        "Keep the will",
+    ] {
+        assert!(said.contains(want), "{want:?} is not on the pane: {said}");
+    }
+    let deepest = deepest(&h);
+    assert!(
+        deepest.1 <= PHONE_HEIGHT as f64 + 1.0,
+        "{:?} still ends at y={:.0} after scrolling to the end",
+        deepest.0,
+        deepest.1
+    );
+
+    // A linked device is told why it cannot write a will, and still offered
+    // the two things it can do.
+    let mut state = a_conversation();
+    state.succession = Some(sigil_chat::Succession {
+        is_account: false,
+        ..Default::default()
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("one of the account's devices, not the account"),
+        "a linked device is not told why: {said}"
+    );
+    assert!(
+        !said.contains("Write the will"),
+        "a linked device is offered a will it cannot sign"
+    );
+    assert!(said.contains("Vouch") && said.contains("Take it"));
+}
+
+/// The succession section on a phone: a will just written, guardians
+/// lodged. A picture, because a new screen is looked at before it ships.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_succession() {
+    let mut state = a_conversation();
+    state.backup = Some(sigil_chat::Backup {
+        has_key: true,
+        held: None,
+        used: 0,
+        quota: 0,
+        words: None,
+    });
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        lodged: Some((
+            2,
+            vec![them(), PubKey::new([5u8; 32]), PubKey::new([6u8; 32])],
+        )),
+        will: Some(bs58::encode([7u8; 100]).into_string()),
+        vouch: None,
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    for _ in 0..40 {
+        h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        });
+        h.run_steps(2);
+    }
+    // Back up from the very end, so the section's heading is in frame.
+    for _ in 0..2 {
+        h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 300.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        });
+        h.run_steps(2);
+    }
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_succession");
 }
