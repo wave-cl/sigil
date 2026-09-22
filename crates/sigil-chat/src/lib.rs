@@ -885,35 +885,6 @@ fn member_actions_ui(
 /// your behalf and not mentioned.
 /// What the bubble is told about a video, from the pane's player for it if
 /// there is one and the message's own word otherwise.
-/// A decoded frame, no larger than a bubble can show it.
-///
-/// The long edge is the width a picture is drawn at on the widest pane sigil
-/// has, doubled for the pixels a phone's screen has per point. Above that the
-/// bytes are held for nothing: eight megabytes a clip, in textures that live
-/// as long as the conversation is open.
-fn bounded_still(image: egui::ColorImage) -> egui::ColorImage {
-    const EDGE: usize = 960;
-    let [w, h] = [image.width(), image.height()];
-    let long = w.max(h);
-    if long <= EDGE || w == 0 || h == 0 {
-        return image;
-    }
-    let (to_w, to_h) = (w * EDGE / long, h * EDGE / long);
-    let (to_w, to_h) = (to_w.max(1), to_h.max(1));
-    let mut out = egui::ColorImage::new([to_w, to_h], vec![egui::Color32::BLACK; to_w * to_h]);
-    for y in 0..out.height() {
-        for x in 0..out.width() {
-            // Nearest, and deliberately: this is a thumbnail of a moving
-            // picture, drawn smaller again by whoever shows it, and a
-            // filter here costs a frame's worth of work for a difference
-            // the bubble's own scaling hides.
-            let from = image[(x * w / out.width(), y * h / out.height())];
-            out[(x, y)] = from;
-        }
-    }
-    out
-}
-
 fn video_view<'a>(
     pane: &'a Pane,
     a: &'a session::Attached,
@@ -929,10 +900,6 @@ fn video_view<'a>(
     };
     sigil_ui::Video {
         frame: playing.and_then(|p| p.texture.as_ref()),
-        // The clip's own first frame, for the bubble, once the blob is
-        // here: the sender's thumbnail is 96 pixels and a bubble draws it
-        // over seven hundred.
-        still: pane.stills.get(&a.id),
         preview: &a.preview,
         id: &a.id,
         standing,
@@ -1194,13 +1161,6 @@ struct Pane {
     /// start the moment they do -- in the viewer, which is where a press
     /// on a video in the transcript goes.
     play_when_fetched: HashSet<String>,
-    /// A clip's own first frame, decoded once the blob is here and kept as
-    /// a texture: the sender's preview is 96 pixels across (SIP-18 caps one
-    /// at 8 KiB) and a bubble on this phone draws it over seven hundred.
-    stills: HashMap<String, egui::TextureHandle>,
-    /// Clips whose first frame would not decode, so it is not tried again
-    /// every pass. What is wrong is said by `unplayable` when one is opened.
-    no_still: HashSet<String>,
     /// Which message each of those is on, so the viewer can open on it.
     open_when_fetched: HashMap<String, (u64, usize)>,
     /// The viewer is showing a video on the whole screen; put back when it
@@ -1477,8 +1437,6 @@ impl Default for Pane {
             claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
-            stills: HashMap::new(),
-            no_still: HashSet::new(),
             open_when_fetched: HashMap::new(),
             whole_screen: false,
             unplayable: HashMap::new(),
@@ -2037,60 +1995,6 @@ impl ChatApp {
     }
 
     /// Start playing a video whose bytes are in hand.
-    /// A sharp first frame for one clip whose bytes are here, decoded once.
-    ///
-    /// **The sender's preview is not enough on a phone.** SIP-18 caps it at
-    /// eight kilobytes, so it is 96 pixels across, and a bubble draws it over
-    /// 240 points -- seven hundred device pixels on this phone. Once the blob
-    /// itself has arrived there is a better picture in it: the clip's own
-    /// first frame.
-    ///
-    /// One a pass, and never the same one twice. Decoding a keyframe is a few
-    /// milliseconds of the interface's thread; doing every clip in a long
-    /// conversation in one pass would be a stall, and retrying one that will
-    /// not decode would be a stall every pass for ever. The frame is scaled
-    /// to what a bubble can show before it becomes a texture -- a 1080p still
-    /// is eight megabytes of it otherwise, per clip.
-    fn still_for_a_clip(&mut self, at: &At, state: &ChatState, ctx: &egui::Context) {
-        /// How many of these a conversation keeps. Each is a texture of
-        /// about four megabytes; a conversation full of clips would hold
-        /// the lot of them for as long as it is open, for pictures nobody
-        /// is looking at. The ones already made are kept -- they are the
-        /// clips nearest what is being read.
-        const KEEP: usize = 6;
-        let pane = self.pane(at);
-        if pane.stills.len() >= KEEP {
-            return;
-        }
-        let want = state
-            .lines
-            .iter()
-            .flat_map(|l| l.attachments.iter())
-            .find(|a| {
-                a.kind == sigil_ui::attachment::VIDEO
-                    && a.bytes.is_some()
-                    && !pane.stills.contains_key(&a.id)
-                    && !pane.no_still.contains(&a.id)
-                    && !pane.players.contains_key(&a.id)
-            })
-            .map(|a| (a.id.clone(), a.bytes.clone().expect("checked just above")));
-        let Some((id, bytes)) = want else {
-            return;
-        };
-        match sigil_video::still(bytes) {
-            Ok((_, image)) => {
-                let image = bounded_still(image);
-                let texture =
-                    ctx.load_texture(format!("still-{id}"), image, egui::TextureOptions::LINEAR);
-                self.pane(at).stills.insert(id, texture);
-            }
-            Err(why) => {
-                tracing::warn!("no still for {id}: {why}");
-                self.pane(at).no_still.insert(id);
-            }
-        }
-    }
-
     fn start_video(&mut self, at: &At, ctx: &egui::Context, id: &str, bytes: std::sync::Arc<[u8]>) {
         let pane = self.pane(at);
         pane.play_when_fetched.remove(id);
@@ -5618,9 +5522,6 @@ impl ChatApp {
             .iter()
             .find(|c| Some(c.channel) == state.open)
             .is_some_and(|c| c.public == Some(true));
-        // One clip's first frame a pass, until every clip on screen has
-        // one: what the bubbles draw instead of a 96-pixel preview.
-        self.still_for_a_clip(at, state, ui.ctx());
         let phone = sigil::Form::of(ui.ctx()).is_phone();
         if !phone {
             if self.ringing_ui(ctx, at, state, ui, theme) {

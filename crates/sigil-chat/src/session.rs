@@ -2248,6 +2248,12 @@ async fn run(
             }
             continue;
         }
+        // Nothing left to fetch: one clip's first frame, from what is
+        // already on the disc. After the fetches, because a picture on its
+        // way matters more than a sharper thumbnail for one that is here.
+        if still_for_a_clip(&mut chat, &mut desk).await && publish(&chat, &state, &desk, me) {
+            (wake)();
+        }
         // **What is outstanding decides the wait.** A link being redialled
         // advances a slice per pass and would take minutes at the quiet
         // interval; a note has to disappear five seconds after it appeared,
@@ -2731,6 +2737,19 @@ struct Desk {
     /// a hundred-megabyte video is not something to pull because somebody
     /// scrolled past it.
     files: HashMap<[u8; 32], std::sync::Arc<[u8]>>,
+    /// A clip's own first frame, by blob: a JPEG of a few tens of
+    /// kilobytes, decoded once from the blob on this device's disc and
+    /// carried as the attachment's preview.
+    ///
+    /// **Because the sender's is 96 pixels.** SIP-18 caps a preview at
+    /// eight kilobytes so that it can ride inside the message, and a phone
+    /// draws a clip in a bubble over seven hundred device pixels. The
+    /// bytes it is made from are dropped again at once: a clip is not
+    /// fetched for being scrolled past ([`fetch_files`]) and this does not
+    /// change that -- it only reads what is already here.
+    stills: HashMap<[u8; 32], std::sync::Arc<[u8]>>,
+    /// Blobs whose first frame would not decode, so it is not tried again.
+    no_still: HashSet<[u8; 32]>,
     /// The order they were fetched in, for [`to_put_down`].
     fetched: Vec<[u8; 32]>,
     /// Blobs a fetch has failed on, and whether the failure was final.
@@ -2772,6 +2791,8 @@ impl Default for Desk {
             restale: HashSet::new(),
             answered: HashSet::new(),
             files: HashMap::new(),
+            stills: HashMap::new(),
+            no_still: HashSet::new(),
             fetched: Vec::new(),
             unfetchable: HashMap::new(),
             wanted: HashSet::new(),
@@ -4404,6 +4425,81 @@ async fn fetch_files(
     }
 }
 
+/// A first frame for one clip that is already on this device, as a picture
+/// the interface can draw instead of the sender's thumbnail.
+///
+/// **Read, decoded, and put down again.** A video is not fetched for being
+/// scrolled past -- forty megabytes for a clip somebody passed is not a
+/// picture on the way -- and this does not change that: it only opens what
+/// the store already holds, keeps a JPEG of a few tens of kilobytes, and
+/// drops the rest. One a pass, and never the same one twice; the decode is
+/// a blocking job, so it goes where blocking jobs go.
+///
+/// Returns whether anything was made, which is a reason to publish.
+async fn still_for_a_clip(chat: &mut Chat, desk: &mut Desk) -> bool {
+    let Some(open) = desk.open else { return false };
+    let Some(known) = desk.channels.get(&open) else {
+        return false;
+    };
+    let want = known
+        .timeline
+        .messages()
+        .flat_map(|m| m.post.attachments())
+        .find(|a| {
+            a.effective_kind() == sqex_proto::blob::KIND_VIDEO
+                && !desk.stills.contains_key(&a.blob)
+                && !desk.no_still.contains(&a.blob)
+                && chat.store().has_blob(&a.blob).unwrap_or(false)
+        })
+        .cloned();
+    let Some(a) = want else { return false };
+    let blob = a.blob;
+    let Ok(bytes) = chat.download(&a).await else {
+        // On the disc a moment ago and not readable now: the store has put
+        // it down. Nothing is wrong, and nothing is to be done about it.
+        desk.no_still.insert(blob);
+        return false;
+    };
+    let made = tokio::task::spawn_blocking(move || still_jpeg(&bytes))
+        .await
+        .ok()
+        .flatten();
+    match made {
+        Some(jpeg) => {
+            desk.stills.insert(blob, jpeg.into());
+            true
+        }
+        None => {
+            desk.no_still.insert(blob);
+            false
+        }
+    }
+}
+
+/// A clip's first frame as a JPEG, at the size a bubble draws one.
+///
+/// Nine hundred and sixty pixels on the long edge: the width a picture is
+/// drawn at on the widest pane sigil has, doubled for what a phone's screen
+/// has per point. `None` for anything that will not decode.
+fn still_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    const EDGE: u32 = 960;
+    let (_, frame) = sigil_video::still(bytes.into()).ok()?;
+    let [w, h] = [frame.width() as u32, frame.height() as u32];
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
+    for pixel in frame.pixels.iter() {
+        rgb.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+    }
+    let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, rgb)?);
+    let small = image.thumbnail(EDGE, EDGE);
+    let mut out = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+    small.to_rgb8().write_with_encoder(encoder).ok()?;
+    Some(out.into_inner())
+}
+
 /// Whether a blob is being left alone: gone for good, or waiting out a retry.
 fn held_back(desk: &Desk, blob: &[u8; 32]) -> bool {
     match desk.unfetchable.get(blob) {
@@ -4857,7 +4953,14 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                             size: a.size,
                             duration_ms: a.duration_ms().map(u64::from),
                             shape: a.dimensions().map(|(w, h)| (u32::from(w), u32::from(h))),
-                            preview: a.preview.as_slice().into(),
+                            // A clip's own first frame where this device has
+                            // decoded one; the sender's 96-pixel thumbnail
+                            // otherwise. See `still_for_a_clip`.
+                            preview: desk
+                                .stills
+                                .get(&a.blob)
+                                .cloned()
+                                .unwrap_or_else(|| a.preview.as_slice().into()),
                             bytes: desk.files.get(&a.blob).cloned(),
                             // Asked for and refused, as against not reached
                             // yet. The two look the same on screen otherwise,
@@ -7617,5 +7720,39 @@ mod preview_size_tests {
             "{} bytes against {MAX_PREVIEW}",
             preview.len()
         );
+    }
+}
+
+/// A clip's own first frame, as the thumbnail a bubble draws.
+#[cfg(test)]
+mod still_tests {
+    use super::still_jpeg;
+
+    /// **Bigger than the sender's, and a picture.** SIP-18 caps a preview
+    /// at eight kilobytes, which makes it 96 pixels across; a phone draws a
+    /// clip in a bubble over seven hundred device pixels, and the blur is
+    /// the first thing anybody sees of a video. This is decoded from the
+    /// blob itself, so it is bounded by what a bubble can show and not by
+    /// what fits inside a message.
+    #[test]
+    fn a_still_is_a_picture_larger_than_a_preview_may_be() {
+        let clip = include_bytes!("../../sigil-video/tests/fixtures/two_seconds.mp4");
+        let jpeg = still_jpeg(clip).expect("the first frame decodes");
+        let decoded = image::load_from_memory(&jpeg).expect("it is a picture");
+        assert!(
+            decoded.width() > 96,
+            "a still {} pixels across is no better than the preview",
+            decoded.width()
+        );
+        assert!(decoded.width() <= 960, "{}", decoded.width());
+    }
+
+    /// And nothing is made of what is not a clip. **The negative control**:
+    /// a decoder that answered something for any bytes would pass the test
+    /// above whatever it was handed.
+    #[test]
+    fn nothing_is_made_of_what_is_not_a_clip() {
+        assert!(still_jpeg(b"not a video").is_none());
+        assert!(still_jpeg(&[]).is_none());
     }
 }

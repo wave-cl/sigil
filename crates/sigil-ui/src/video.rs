@@ -25,13 +25,9 @@ pub struct Video<'a> {
     /// The picture due now, once there is a player. `None` shows the
     /// thumbnail.
     pub frame: Option<&'a egui::TextureHandle>,
-    /// The clip's own first frame, decoded from the blob once it is here.
-    /// Drawn in a bubble in place of the sender's thumbnail, which SIP-18
-    /// caps at eight kilobytes and which a phone therefore draws at four
-    /// times its own size. **Not a frame that moves**: a bubble still does
-    /// not play, it just has a sharper still to show.
-    pub still: Option<&'a egui::TextureHandle>,
-    /// The sender's thumbnail, empty if none.
+    /// The thumbnail: the sender's, or -- where this device has decoded one
+    /// from the blob it already holds -- the clip's own first frame. Empty
+    /// if there is neither. See `sigil_chat::session::still_for_a_clip`.
     pub preview: &'a std::sync::Arc<[u8]>,
     /// A stable name, for the thumbnail's texture.
     pub id: &'a str,
@@ -119,11 +115,12 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
         .rect_filled(rect, tokens::RADIUS_MD, egui::Color32::BLACK);
 
     // The picture: the frame, or the thumbnail until there is one. In a
-    // bubble the frames that move are the viewer's, but the clip's own
-    // first frame is a still and is what the thumbnail is a small copy of.
+    // bubble, always the thumbnail -- the frames are the viewer's. The
+    // thumbnail is the clip's own first frame where this device has
+    // decoded one; see `sigil_chat::session::still_for_a_clip`.
     let mut drew = false;
     let frame = match v.place {
-        Place::Bubble => v.still,
+        Place::Bubble => None,
         Place::Viewer => v.frame,
     };
     if let Some(texture) = frame {
