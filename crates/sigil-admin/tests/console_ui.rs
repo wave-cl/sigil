@@ -556,3 +556,93 @@ fn a_long_answer_does_not_push_the_console_off_the_screen() {
          {top:.0}: a preview is taking the window"
     );
 }
+
+/// **Nothing in the console is drawn where a finger cannot get to it.**
+///
+/// The console is the longest pane sigil has -- rows of operations with
+/// their buttons beside them -- and the fault this exists for was here: a
+/// fifty-line answer, pinned *outside* the scroll area that holds the
+/// operations, put the Whitelist heading at y=2392 of an 804-point screen
+/// with nothing to scroll. Every operation the console offers was three
+/// screens down.
+///
+/// "Is it on screen" is the wrong question: this pane is taller than any
+/// phone and always will be. So this scrolls to the end with a real wheel
+/// over the middle of the screen -- which is what a finger is, and which
+/// finds whichever scroll area is under it, including none -- and only then
+/// asks whether anything is still below the bottom.
+#[test]
+fn nothing_in_the_console_is_out_of_reach_on_a_phone() {
+    const TALL: f32 = 804.0;
+    for (what, state) in [("up", up()), ("answered", answered())] {
+        let mut h = harness_phone(state);
+        h.run();
+        h.run();
+        let before = deepest(&h);
+        // The control, inside the test: a pane that already fits has nothing
+        // to scroll, and then scrolling proves nothing about it.
+        assert!(
+            before.1 > TALL as f64,
+            "the console with {what} drew only {:.0} points on an \
+             {TALL}-point screen, so the scroll below is not being asked \
+             anything",
+            before.1
+        );
+        // **Down the screen, not only at its middle.** The console nests: an
+        // answer's preview is a bounded box inside the pane's own scroll
+        // area, and a wheel only ever turns whatever is under the pointer.
+        // A sweep at one height leaves every other box untouched, and a
+        // widget inside an unscrolled box reports a content position far
+        // below the screen -- which reads exactly like one nothing reaches.
+        for y in [100.0f32, 300.0, 500.0, 700.0] {
+            for _ in 0..40 {
+                h.hover_at(egui::pos2(180.0, y));
+                h.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -400.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                });
+                // Not `run`: a pane with a spinner repaints for ever, and
+                // `run` panics when it exceeds its step budget.
+                h.run_steps(2);
+            }
+        }
+        let after = deepest(&h);
+        assert!(
+            after.1 <= TALL as f64 + 1.0,
+            "with {what}, {:?} still ends at y={:.0} on an {TALL}-point \
+             screen after scrolling to the end, so nothing reaches it",
+            after.0,
+            after.1
+        );
+    }
+}
+
+/// The deepest thing drawn, and what it is, in points.
+///
+/// The accesskit node's own bounding box, not `Node::rect`: that one
+/// `expect`s a rectangle and the root has none, so it panics -- a test
+/// failing for a reason that has nothing to do with the layout.
+fn deepest(h: &Harness<'static>) -> (String, f64) {
+    fn walk(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<(String, f64)>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box()
+            && b.y1 > b.y0
+        {
+            out.push((name, b.y1 / ppp));
+        }
+        for c in node.children() {
+            walk(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    walk(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+    seen.sort_by(|a, b| b.1.total_cmp(&a.1));
+    seen.first().cloned().unwrap_or_default()
+}

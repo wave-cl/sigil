@@ -8839,20 +8839,29 @@ fn phone_long_members() {
 /// including none.
 #[test]
 fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
-    // Enough wheel to reach the end of anything this draws, with the wheel
-    // over the middle of the screen.
+    // Enough wheel to reach the end of anything this draws.
+    //
+    // **Down the screen, not only at its middle.** A wheel only ever turns
+    // whatever is under the pointer, and a pane can nest -- a bounded box
+    // inside the pane's own scroll area. A sweep at one height leaves every
+    // other box untouched, and a widget inside an unscrolled box reports a
+    // content position far below the screen, which reads exactly like one
+    // that nothing reaches. The console's answer preview is such a box and
+    // was reported as unreachable until this swept.
     fn to_the_end(h: &mut Harness<'static>) {
-        for _ in 0..40 {
-            h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, PHONE_HEIGHT / 2.0));
-            h.event(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: egui::vec2(0.0, -400.0),
-                phase: egui::TouchPhase::Move,
-                modifiers: egui::Modifiers::default(),
-            });
-            // Not `run`: a pane with a spinner in it repaints for ever, and
-            // `run` calls that exceeding its step budget.
-            h.run_steps(2);
+        for y in [100.0f32, 300.0, 500.0, 700.0] {
+            for _ in 0..40 {
+                h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, y));
+                h.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -400.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                });
+                // Not `run`: a pane with a spinner in it repaints for ever,
+                // and `run` calls that exceeding its step budget.
+                h.run_steps(2);
+            }
         }
     }
 
