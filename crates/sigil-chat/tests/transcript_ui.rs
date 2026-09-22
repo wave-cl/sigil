@@ -2083,18 +2083,19 @@ fn a_dialogs_controls_stay_on_a_phones_screen() {
 /// and it is exactly the dialog somebody opens while holding the phone next
 /// to the person whose words they are reading.
 ///
-/// # What this does not claim
+/// # It did not fit, and now it does
 ///
-/// That it *fits*. It does not, and the buttons at its foot are off the
-/// bottom. The obvious answer -- a scroll area inside the modal -- was tried
-/// and is worse: in egui 0.36 a `ScrollArea` inside a `Modal` makes every
-/// press inside the dialog dismiss it, which two existing tests caught
-/// immediately. Tried with each `auto_shrink` and inside a sensing scope of
-/// its own; all three dismiss.
+/// This used to assert the opposite -- that the buttons at its foot were off
+/// the bottom -- and stood as a record of a dialog that could only be
+/// finished by turning the phone upright. The obvious answer, a scroll area
+/// inside the modal, is worse and still is: in egui 0.36 a `ScrollArea`
+/// inside a `Modal` makes every press inside the dialog dismiss it, which
+/// two existing tests caught immediately. Tried with each `auto_shrink` and
+/// inside a sensing scope of its own; all three dismiss. The answer was a
+/// second column, which a short screen has the width for.
 ///
-/// So what is asserted is the floor: Escape leaves it, which is what the
-/// phone's Back sends, so a dialog that cannot be completed lying down is
-/// still not a trap. Turning the phone upright is the way to finish it.
+/// The floor stays whatever the layout does: Escape leaves it, which is what
+/// the phone's Back sends, so a dialog is never a trap.
 #[test]
 fn a_dialog_too_tall_for_the_screen_can_still_be_left() {
     const WIDE: f32 = 804.0;
@@ -2118,18 +2119,27 @@ fn a_dialog_too_tall_for_the_screen_can_still_be_left() {
         text_of(&h)
     );
 
-    // The premise: it really does not fit, or this is a test about nothing.
+    // **It fits now**, which is what `every_dialog_fits_a_phone_held_sideways`
+    // is for and what this test used to assert the opposite of: the code and
+    // the key went into a second column and the dialog came down from 482
+    // points to under 360. Asserted here too, because this is the one that
+    // presses the real button on the real pane rather than setting the
+    // dialog directly.
     let out = h
         .get_all_by_label("Not yet")
         .map(|n| n.rect().bottom())
         .fold(f32::MIN, f32::max);
     assert!(
-        out > SHORT,
-        "the way out is on screen at {out:.0} of {SHORT}: this dialog fits \
-         lying down after all"
+        out > f32::MIN,
+        "the way out is not drawn at all, so this says nothing about it"
+    );
+    assert!(
+        out <= SHORT,
+        "the way out is at {out:.0} of {SHORT}: the dialog does not fit lying \
+         down, and it cannot scroll"
     );
 
-    // And the floor: Back leaves it.
+    // And the floor stands whatever happens to the layout: Back leaves it.
     h.key_press(egui::Key::BrowserBack);
     h.run();
     h.run();
@@ -9146,4 +9156,69 @@ fn every_dialog_fits_a_phones_screen() {
         over.len(),
         over.join("\n  ")
     );
+}
+
+/// **And sideways.** A phone rotates, and a dialog cannot scroll.
+///
+/// Held sideways the screen is 360 points tall rather than 804, and five of
+/// the six dialogs still fit -- they are short. Verify did not: six words, a
+/// QR and a key stacked down the page came to 482 points, so its heading sat
+/// 61 points above the top of the screen with no way to reach it. On a short
+/// screen it is given a wider box and the code goes beside the words instead
+/// of under them, which is what the width is for.
+///
+/// The pane behind a dialog is not the subject here: it scrolls, and on this
+/// screen it is taller than the window either way. So this asks only about
+/// what the dialog itself drew, which is everything above the top of the
+/// screen -- a `Modal` is centred, so a dialog that does not fit shows there
+/// first.
+#[test]
+fn every_dialog_fits_a_phone_held_sideways() {
+    let mut over = Vec::new();
+    for which in ["compose", "profile", "exchange", "name", "verify", "report"] {
+        let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+        // The same phone, turned: 804 across and 360 down.
+        h.set_size(egui::vec2(PHONE_HEIGHT, PHONE_WIDTH));
+        h.run();
+        app.borrow_mut()
+            .open_dialog_for_test((me(), String::new()), which, them());
+        h.run();
+        h.run();
+        let top = every_box(&h)
+            .into_iter()
+            .filter(|(_, r)| r.height() > 0.0)
+            .min_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+        if let Some((name, r)) = top
+            && r.top() < -1.0
+        {
+            over.push(format!(
+                "the {which} dialog starts at y={:.0} ({name:?}) on a screen \
+                 {PHONE_WIDTH} tall",
+                r.top()
+            ));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} dialog(s) run off the top of a phone held sideways:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
+}
+
+/// The verify dialog on a phone held sideways, where it has a second column.
+/// A picture, because "it fits" is not the same as "it reads".
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_verify_sideways() {
+    let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    h.set_size(egui::vec2(PHONE_HEIGHT, PHONE_WIDTH));
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "verify", them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_dialog_verify_sideways");
 }

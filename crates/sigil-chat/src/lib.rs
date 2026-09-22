@@ -915,6 +915,18 @@ const MOST_FILES: usize = sqex_proto::message::MAX_ATTACHMENTS;
 const WASH_FOR: f64 = 1.5;
 const WASH: f32 = 0.35;
 
+/// A screen this short has no room for a dialog laid out down the page.
+///
+/// A phone held sideways is 360 points tall; a phone upright is 804. Nothing
+/// in between is a real device, so the exact number matters less than which
+/// side of it each one falls: a desktop window has to be deliberately
+/// squashed to get under this.
+const SHORT: f32 = 520.0;
+
+/// What a dialog may take on a short screen, when it has a second column to
+/// put something in. See [`SHORT`].
+const WIDE: f32 = 640.0;
+
 /// How much of the wash is left at `now`, from 1 at `since` to 0 at
 /// [`WASH_FOR`] later.
 fn wash_left(since: f64, now: f64) -> f32 {
@@ -3653,8 +3665,24 @@ impl ChatApp {
             .show(&egui_ctx, |ui| {
                 // As wide as a dialog likes, or as wide as the screen has
                 // once a margin is kept: a phone is narrower than a dialog.
-                let screen = ui.ctx().content_rect().width();
-                ui.set_width(360.0f32.min(screen - 2.0 * tokens::SPACING_XL).max(200.0));
+                //
+                // **Wider when the screen is short.** A dialog cannot scroll
+                // (see `every_dialog_fits_a_phones_screen`), and a phone held
+                // sideways is 360 points tall -- on which Verify, which is
+                // six words *and* a QR *and* a key, stood 482 points high
+                // and ran 61 points off the top. It is the one dialog with
+                // something to put in a second column, and a short screen is
+                // exactly the one with width to spare.
+                let screen = ui.ctx().content_rect();
+                let want = if matches!(which, Dialog::Verify(_)) && screen.height() < SHORT {
+                    WIDE
+                } else {
+                    360.0
+                };
+                ui.set_width(
+                    want.min(screen.width() - 2.0 * tokens::SPACING_XL)
+                        .max(200.0),
+                );
                 match which {
                     Dialog::Compose => self.compose_dialog(at, ui, theme),
                     Dialog::Profile => self.profile_dialog(at, ui, theme),
@@ -4007,6 +4035,42 @@ impl ChatApp {
             .get(&who)
             .map(|p| p.label(&who))
             .unwrap_or_else(|| sigil_ui::message::short(&who.to_string()));
+        let code = sqex_proto::safety::code(&me, &who);
+        let words = sqex_proto::safety::words_for(&me, &who);
+        // **Beside, not below, when the page is short.** Upright this reads
+        // straight down: what to do, the words, the code, the key. Sideways
+        // there are only 360 points of page and this stood 482 high, which a
+        // dialog cannot scroll its way out of -- so the code and the key go
+        // into a column of their own and the words keep the page. The wider
+        // box is asked for in `dialogs_ui`; this reads the width it was
+        // given rather than the screen, so the two agree by construction.
+        let beside = ui.available_width() >= WIDE - tokens::SPACING_XL;
+        let code_ui = |ui: &mut egui::Ui, theme: &ColorTheme| {
+            ui.horizontal(|ui| {
+                sigil_ui::qr(ui, &code, 132.0);
+                ui.add_space(tokens::SPACING_SM);
+                ui.vertical(|ui| {
+                    ui.colored_label(theme.text_muted, egui::RichText::new("their key").small());
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(who.to_string()).monospace().small())
+                            .wrap()
+                            .selectable(true),
+                    );
+                });
+            });
+        };
+        let words_ui = |ui: &mut egui::Ui| {
+            // Large, in two rows of three: read at speaking speed, not
+            // squinted at.
+            for row in words.chunks(3) {
+                ui.horizontal(|ui| {
+                    for word in row {
+                        ui.label(egui::RichText::new(*word).heading().strong());
+                        ui.add_space(tokens::SPACING_MD);
+                    }
+                });
+            }
+        };
         ui.heading(format!("Verify {label}"));
         ui.add_space(tokens::SPACING_SM);
         ui.colored_label(
@@ -4015,30 +4079,26 @@ impl ChatApp {
              on both screens or they are not, and only the two of you can tell.",
         );
         ui.add_space(tokens::SPACING_MD);
-        let words = sqex_proto::safety::words_for(&me, &who);
-        // Large, in two rows of three: read at speaking speed, not squinted at.
-        for row in words.chunks(3) {
-            ui.horizontal(|ui| {
-                for word in row {
-                    ui.label(egui::RichText::new(*word).heading().strong());
-                    ui.add_space(tokens::SPACING_MD);
-                }
-            });
-        }
-        ui.add_space(tokens::SPACING_MD);
-        let code = sqex_proto::safety::code(&me, &who);
-        ui.horizontal(|ui| {
-            sigil_ui::qr(ui, &code, 132.0);
-            ui.add_space(tokens::SPACING_SM);
-            ui.vertical(|ui| {
-                ui.colored_label(theme.text_muted, egui::RichText::new("their key").small());
-                ui.add(
-                    egui::Label::new(egui::RichText::new(who.to_string()).monospace().small())
-                        .wrap()
-                        .selectable(true),
+        if beside {
+            let room = ui.available_width();
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(room * 0.5, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| words_ui(ui),
+                );
+                ui.add_space(tokens::SPACING_LG);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| code_ui(ui, theme),
                 );
             });
-        });
+        } else {
+            words_ui(ui);
+            ui.add_space(tokens::SPACING_MD);
+            code_ui(ui, theme);
+        }
         ui.add_space(tokens::SPACING_MD);
         let verified_at = state.verified.get(&who).copied();
         if let Some(at_secs) = verified_at {
