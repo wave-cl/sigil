@@ -9531,3 +9531,54 @@ fn phone_ring() {
     h.run();
     h.snapshot("phone_ring");
 }
+
+/// On a phone the card's key is two even halves, not a line and an orphan.
+///
+/// Seen on the device: 43 characters on one line and "z" on the next. The
+/// halves are one label, so the key is still there whole for anybody who
+/// reads the tree; only the break moved.
+#[test]
+fn a_mentioned_names_card_halves_the_key_on_a_phone() {
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].text = "hi @Ada hi".into();
+    state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
+        key: them(),
+        label: "Ada".into(),
+    }];
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let words = h.get_by_label("hi @Ada hi").rect();
+    press_at(&mut h, words.center());
+    h.run();
+    h.run();
+    let key = them().to_string();
+    let (head, tail) = key.split_at(key.len().div_ceil(2));
+    let halved = format!("{head}\n{tail}");
+    assert!(
+        h.query_by_label(&halved).is_some(),
+        "the key is not in two halves: {}",
+        text_of(&h)
+    );
+    // And on a desktop, where it fits, it is one line.
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let one = state.lines.iter().position(|l| l.text == "one").unwrap();
+    state.lines[one].text = "hi @Ada hi".into();
+    state.lines[one].mentions = vec![sigil_chat::session::Mentioned {
+        key: them(),
+        label: "Ada".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    let words = h.get_by_label("hi @Ada hi").rect();
+    h.hover_at(words.center());
+    h.run();
+    press_at(&mut h, words.center());
+    h.run();
+    h.run();
+    assert!(h.query_by_label(&key).is_some(), "{}", text_of(&h));
+    assert!(h.query_by_label(&halved).is_none());
+}

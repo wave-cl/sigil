@@ -1151,7 +1151,7 @@ fn mention_popup(
         if crate::icon_item(ui, crate::Icon::Pencil, "Mention them here").clicked() {
             did(MentionDo::Mention);
         }
-        if crate::icon_item(ui, crate::Icon::Device, "Copy key").clicked() {
+        if crate::icon_item(ui, crate::Icon::Copy, "Copy key").clicked() {
             did(MentionDo::CopyKey);
         }
         if crate::icon_item(ui, crate::Icon::Verified, "Compare safety words").clicked() {
@@ -1167,7 +1167,28 @@ fn mention_card(ui: &mut egui::Ui, m: &Mentioned<'_>, quiet: egui::Color32) {
         crate::identicon(ui, m.key, tokens::AVATAR_MD);
         ui.vertical(|ui| {
             ui.strong(m.label);
-            ui.label(egui::RichText::new(m.key).monospace().small());
+            // The whole key, and in two even halves where it will not fit
+            // on one line: on a phone it wrapped with one character on the
+            // second line, which reads as a typo. Measured, not guessed --
+            // the card is as wide as the pane it is in.
+            let text = egui::RichText::new(m.key).monospace().small();
+            let mut font = egui::TextStyle::Small.resolve(ui.style());
+            font.family = egui::FontFamily::Monospace;
+            let whole = ui.ctx().fonts_mut(|f| {
+                f.layout_no_wrap(m.key.to_string(), font, egui::Color32::PLACEHOLDER)
+                    .rect
+                    .width()
+            });
+            if whole <= ui.available_width() || m.key.len() < 8 {
+                ui.label(text);
+            } else {
+                let (head, tail) = m.key.split_at(m.key.len().div_ceil(2));
+                ui.label(
+                    egui::RichText::new(format!("{head}\n{tail}"))
+                        .monospace()
+                        .small(),
+                );
+            }
             ui.colored_label(
                 quiet,
                 egui::RichText::new("The name is what this client calls the key.").small(),
