@@ -249,6 +249,24 @@ fn to_join<'a>(
 /// enough that somebody watching does not conclude it is broken.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// A session that keeps dying is tried again on a clock that doubles from
+/// `RETRY`, up to this: a store locked for good, a domain that never
+/// resolves, an exchange that is down. Every start is DNS, a handshake, a
+/// fold of the whole store and a round of prekeys, on the runtime every
+/// session shares -- at three seconds for ever, two such sessions kept a
+/// window from drawing (2026-09-22). Reset once a session has stayed up.
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Long enough to count as "it worked": a session up for this long that
+/// then dies starts its retries from `RETRY` again.
+const STAYED_UP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// SIP-59: a session parked because the exchange said the account lives
+/// elsewhere is tried again this often. An account can move back, and a
+/// former home can be told so by another device; neither happens in three
+/// seconds.
+const PARKED_RETRY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// SIP-39: a cross-exchange ring has no conversation, and everything about a
 /// ring here is keyed on one. The bridge is sixteen bytes and a channel is
 /// thirty-two; the bridge in the first half and nothing in the second is a
@@ -1431,6 +1449,11 @@ pub struct ChatApp {
     /// When each session was last started, so one that dies is tried again —
     /// and not faster than [`RETRY`].
     started: HashMap<At, std::time::Instant>,
+    /// How many times in a row a session has died without staying up, so
+    /// the retry can back off; and when each dead one was first seen dead,
+    /// which is what the wait is counted from.
+    failures: HashMap<At, u32>,
+    died: HashMap<At, std::time::Instant>,
     /// Each identity's file, by key -- what a session records beside it
     /// (the home, SIP-60); filled as sessions are reconciled.
     identity_paths: HashMap<PubKey, std::path::PathBuf>,
@@ -1570,6 +1593,8 @@ impl ChatApp {
             sessions: HashMap::new(),
             call_opts: sigil_net::CallOpts::default(),
             started: HashMap::new(),
+            failures: HashMap::new(),
+            died: HashMap::new(),
             identity_paths: HashMap::new(),
             starts: 0,
             told_calling: None,
@@ -1664,6 +1689,13 @@ impl ChatApp {
         keys.sort_by_key(|k| k.to_string());
         keys.dedup();
         keys
+    }
+
+    /// The state of `me`'s default session, dead or alive -- for a test to
+    /// read what a session said before it ended (parked, SIP-59).
+    #[doc(hidden)]
+    pub fn state_of_for_test(&self, me: &PubKey) -> Option<ChatState> {
+        self.sessions.get(&(*me, String::new())).map(|s| s.state())
     }
 
     /// Whether every session this app holds has ended.
@@ -1983,18 +2015,45 @@ impl ChatApp {
         // -- skipped it for ever. Dropped here, and started again by that same
         // loop, no sooner than `RETRY` after the last attempt so a store that
         // is locked for good does not become a restart every frame.
-        let dead: Vec<At> = self
+        let now = std::time::Instant::now();
+        let stopped: Vec<At> = self
             .sessions
             .iter()
-            .filter(|(at, session)| {
-                session.stopped()
-                    && self
-                        .started
-                        .get(*at)
-                        .is_none_or(|when| when.elapsed() >= RETRY)
-            })
+            .filter(|(_, s)| s.stopped())
             .map(|(at, _)| at.clone())
             .collect();
+        let mut dead = Vec::new();
+        for at in stopped {
+            let died = *self.died.entry(at.clone()).or_insert(now);
+            let parked = self
+                .sessions
+                .get(&at)
+                .is_some_and(|s| s.state().moved_to.is_some());
+            // Parked (SIP-59: the account lives elsewhere): a long clock.
+            // Died: a clock that doubles with each death in a row, from the
+            // moment it was seen dead.
+            let wait = if parked {
+                PARKED_RETRY
+            } else {
+                let n = self.failures.get(&at).copied().unwrap_or(0);
+                (RETRY * 2u32.saturating_pow(n.min(16))).min(RETRY_MAX)
+            };
+            if died.elapsed() >= wait {
+                // A session that stayed up before dying starts over at
+                // `RETRY`; one that died at once has failed again.
+                let stayed = self
+                    .started
+                    .get(&at)
+                    .is_some_and(|since| died.duration_since(*since) >= STAYED_UP);
+                if stayed || parked {
+                    self.failures.remove(&at);
+                } else {
+                    *self.failures.entry(at.clone()).or_insert(0) += 1;
+                }
+                self.died.remove(&at);
+                dead.push(at);
+            }
+        }
         for at in dead {
             self.sessions.remove(&at);
             // Nothing may go on borrowing what a dead session was holding.

@@ -544,6 +544,14 @@ pub struct ChatState {
     /// rather than as a sentence so the interface can look at its own other
     /// sessions and say which of the two it is.
     pub locked_out: Option<PubKey>,
+    /// SIP-59: this exchange told the session, on start, that the account
+    /// lives at another one -- the key and its domain -- and hands its
+    /// services off there. The session is **parked**: nothing more is asked
+    /// of this exchange, and the interface starts it again on a long clock
+    /// (an account can move back), not every three seconds. The first
+    /// version restarted such a session every three seconds and minted
+    /// sixty-five prekeys each time, for a week (2026-09-22).
+    pub moved_to: Option<(PubKey, String)>,
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
@@ -2031,7 +2039,34 @@ async fn run(
         let _ = publish(&chat, &state, &desk, me);
         (wake)();
     }
-    chat.top_up_prekeys().await.map_err(|e| e.to_string())?;
+    match chat.top_up_prekeys().await {
+        Ok(()) => {}
+        // SIP-59: not ours to use any more. Said, and parked -- the task
+        // ends without an error, and `reconcile` leaves a parked session
+        // alone for `PARKED_RETRY`. What the disc held was published above,
+        // so the conversations stay readable.
+        Err(sqex_chat::client::ChatError::Moved(key, domain_there)) => {
+            let there = match (&key, domain_there.is_empty()) {
+                (Some(k), true) => k.to_string(),
+                (_, false) => domain_there.clone(),
+                (None, true) => "another exchange".to_string(),
+            };
+            let here = chat
+                .domain()
+                .map(str::to_string)
+                .unwrap_or_else(|| endpoint.server.to_string());
+            state.send_modify(|s| {
+                s.moved_to = key.map(|k| (k, domain_there.clone()));
+                s.link = LinkState::Gone;
+                s.trouble = Some(format!(
+                    "this identity lives at {there}; {here} hands its services off there"
+                ));
+            });
+            (wake)();
+            return Ok(());
+        }
+        Err(e) => return Err(e.to_string()),
+    }
     // SIP-47 §Catching up in one round trip: everything that moved while this client was away, in one
     // round trip, before the sweep asks channel by channel. On a desktop it
     // is a faster start; on a phone woken for seconds it is the difference

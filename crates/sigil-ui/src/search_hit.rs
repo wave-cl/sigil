@@ -75,22 +75,32 @@ fn body(ui: &mut egui::Ui, hit: &SearchHit<'_>, theme: &ColorTheme) -> egui::Rec
                 // left -- the conversation row's arrangement, and for its
                 // reason: a label given the row first takes all of it.
                 //
-                // Inside a `horizontal`, which is one line tall. A
+                // Inside a row one line tall -- allocated, not a
+                // `horizontal`: that is at least `interact_size` high, a
+                // finger on a phone, with the name centred in it and the
+                // words a line's height under the name they belong to. A
                 // right-to-left layout put straight into a vertical ui is
-                // given all the height there is and centres in it, which
-                // put the first result two hundred pixels down an empty
-                // column.
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.colored_label(theme.text_muted, egui::RichText::new(hit.at).small());
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(hit.label).strong())
-                                    .truncate(),
+                // worse still: given all the height there is, it put the
+                // first result two hundred pixels down an empty column.
+                let line = ui.text_style_height(&egui::TextStyle::Body);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), line),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.colored_label(theme.text_muted, egui::RichText::new(hit.at).small());
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(hit.label).strong())
+                                            .truncate(),
+                                    );
+                                },
                             );
                         });
-                    });
-                });
+                    },
+                );
                 let (shown, marked) = excerpt(hit.text, hit.found.clone(), BEFORE);
                 let job = excerpt_job(
                     ui,
