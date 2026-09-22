@@ -833,124 +833,71 @@ impl Shell {
                 .resizable(false)
                 .exact_size(self.insets.top)
                 .frame(egui::Frame::NONE.fill(theme.surface_primary))
+                // No rule under it: the bar below draws its own, and over
+                // the opening screen there is no bar -- a line under the
+                // system's own strip read as a bar with nothing on it.
+                .show_separator_line(false)
                 .show(ui, |_| {});
         }
-        egui::Panel::top("sigil_window_chrome")
-            .resizable(false)
-            .exact_size(strip)
-            .frame(egui::Frame::NONE.fill(theme.surface_primary))
-            .show(ui, |ui| {
-                // Double-click to fill the screen, and again to go back:
-                // what a title bar has done on every desktop for thirty
-                // years, and this strip is the title bar.
-                //
-                // Only reached when the system did not handle it first --
-                // a click in that region goes to one place, so if egui was
-                // given it, macOS's own zoom was not.
-                let whole = ui.max_rect();
-                if !form.is_phone() {
-                    let bar = ui.allocate_rect(whole, egui::Sense::click());
-                    if bar.double_clicked() {
-                        let full = ui.ctx().input(|i| i.viewport().maximized);
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
-                            !full.unwrap_or(false),
-                        ));
-                    }
-                }
-                // On a phone the bar also says where you are: the app's own
-                // title for the view on screen, at the left, the way every
-                // phone's app bar does. A desktop has the tab strip for that.
-                //
-                // The title is also the way to the other apps. A phone has no
-                // rail -- a column of icons beside a 360-point screen was a
-                // sixth of it -- so the apps are a menu on the title, and a
-                // phone that only chats never sees it.
-                // The app's corner of it, drawn **over** the drag region --
-                // a later widget wins the press -- from the right edge in, and
-                // inset from it the way the buttons are inset from the left.
-                //
-                // **Before the head, and measured.** Both were given the whole
-                // bar and drawn one over the other, which is invisible while
-                // the name is short and wrong the moment it is not: a
-                // conversation with a long display name had its name painted
-                // *under* the call and More buttons. The drag region above is
-                // the only thing the corner has to come after, and that is
-                // drawn on a desktop only -- so on a phone the corner goes
-                // first and the head is given what it did not use.
-                let mut corner_used = 0.0f32;
-                if app_on_screen {
-                    let corner = whole.shrink2(egui::vec2(tokens::SPACING_SM, 0.0));
-                    let active = self.active();
-                    let drawn = ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(corner)
-                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                        |ui| {
-                            let mut ctx = AppContext {
-                                navigator: &mut self.navigator,
-                                accounts: &mut self.accounts,
-                                unfocused: false,
-                                away: self.away,
-                                notify: self.platform.as_ref(),
-                                connections: &self.connections,
-                            };
-                            let token = self.nav.top().token.clone();
-                            self.apps[active].chrome_ui(&mut ctx, ui, &token);
-                        },
-                    );
-                    corner_used = drawn.response.rect.width();
-                }
-                if form.is_phone() && app_on_screen {
-                    let entry = self.nav.top().clone();
-                    let active = self.active();
-                    // **A named view owns the bar.** `nav_title` answers for a
-                    // view that was pushed onto the history and has a name of
-                    // its own -- Devices, Members, Channel settings. On a
-                    // phone that name and the way back belong *here*, as a
-                    // conversation's already do, and the view draws no second
-                    // bar under this one. It did: the name was in the strip
-                    // and again in the pane below it, under a Back button of
-                    // its own, which cost a finger's height of a 804-point
-                    // screen on the four panes that have the least room.
+        // **No bar over the opening screen on a phone.** Everything the
+        // bar carries there is the app's -- its name, the exchange, the
+        // corner -- and with no app on screen it drew a blank strip a
+        // finger tall over a screen that has its own heading. A desktop
+        // keeps its strip: it is the title bar, and the window's buttons
+        // live in it.
+        let strip_wanted = !(form.is_phone() && !app_on_screen);
+        if strip_wanted {
+            egui::Panel::top("sigil_window_chrome")
+                .resizable(false)
+                .exact_size(strip)
+                .frame(egui::Frame::NONE.fill(theme.surface_primary))
+                .show(ui, |ui| {
+                    // Double-click to fill the screen, and again to go back:
+                    // what a title bar has done on every desktop for thirty
+                    // years, and this strip is the title bar.
                     //
-                    // The home app's bar says what the product is; another
-                    // app's says which it is, so nobody wonders where they
-                    // are.
-                    let named = self.apps[active].nav_title(&entry.token);
-                    let title = named.clone().unwrap_or_else(|| {
-                        if active == 0 {
-                            sigil::NAME.to_string()
-                        } else {
-                            self.apps[active].title().to_string()
+                    // Only reached when the system did not handle it first --
+                    // a click in that region goes to one place, so if egui was
+                    // given it, macOS's own zoom was not.
+                    let whole = ui.max_rect();
+                    if !form.is_phone() {
+                        let bar = ui.allocate_rect(whole, egui::Sense::click());
+                        if bar.double_clicked() {
+                            let full = ui.ctx().input(|i| i.viewport().maximized);
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                                !full.unwrap_or(false),
+                            ));
                         }
-                    });
-                    // What the corner left. A gap between them, so a
-                    // truncated name does not read as running into a button.
-                    let mut left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
-                    left.max.x = (left.max.x - corner_used - tokens::SPACING_SM).max(left.min.x);
-                    let mut switch = None;
-                    let mut back = false;
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(left)
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        |ui| {
-                            // A named view: the way back, then its name.
-                            // Back is the history's own step, which is what
-                            // the phone's hardware button does -- the view
-                            // asked for exactly that when it drew this
-                            // itself.
-                            if named.is_some() {
-                                if sigil_ui::icon_button(ui, sigil::Icon::Back).clicked() {
-                                    back = true;
-                                }
-                                ui.label(egui::RichText::new(&title).heading());
-                                return;
-                            }
-                            // The app's own head first: an identity's mark,
-                            // or Back and a name, in which case there is no
-                            // title to draw.
-                            let named = {
+                    }
+                    // On a phone the bar also says where you are: the app's own
+                    // title for the view on screen, at the left, the way every
+                    // phone's app bar does. A desktop has the tab strip for that.
+                    //
+                    // The title is also the way to the other apps. A phone has no
+                    // rail -- a column of icons beside a 360-point screen was a
+                    // sixth of it -- so the apps are a menu on the title, and a
+                    // phone that only chats never sees it.
+                    // The app's corner of it, drawn **over** the drag region --
+                    // a later widget wins the press -- from the right edge in, and
+                    // inset from it the way the buttons are inset from the left.
+                    //
+                    // **Before the head, and measured.** Both were given the whole
+                    // bar and drawn one over the other, which is invisible while
+                    // the name is short and wrong the moment it is not: a
+                    // conversation with a long display name had its name painted
+                    // *under* the call and More buttons. The drag region above is
+                    // the only thing the corner has to come after, and that is
+                    // drawn on a desktop only -- so on a phone the corner goes
+                    // first and the head is given what it did not use.
+                    let mut corner_used = 0.0f32;
+                    if app_on_screen {
+                        let corner = whole.shrink2(egui::vec2(tokens::SPACING_SM, 0.0));
+                        let active = self.active();
+                        let drawn = ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(corner)
+                                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                            |ui| {
                                 let mut ctx = AppContext {
                                     navigator: &mut self.navigator,
                                     accounts: &mut self.accounts,
@@ -959,44 +906,111 @@ impl Shell {
                                     notify: self.platform.as_ref(),
                                     connections: &self.connections,
                                 };
-                                self.apps[active].head_ui(&mut ctx, ui)
-                            };
-                            if named {
-                                return;
+                                let token = self.nav.top().token.clone();
+                                self.apps[active].chrome_ui(&mut ctx, ui, &token);
+                            },
+                        );
+                        corner_used = drawn.response.rect.width();
+                    }
+                    if form.is_phone() && app_on_screen {
+                        let entry = self.nav.top().clone();
+                        let active = self.active();
+                        // **A named view owns the bar.** `nav_title` answers for a
+                        // view that was pushed onto the history and has a name of
+                        // its own -- Devices, Members, Channel settings. On a
+                        // phone that name and the way back belong *here*, as a
+                        // conversation's already do, and the view draws no second
+                        // bar under this one. It did: the name was in the strip
+                        // and again in the pane below it, under a Back button of
+                        // its own, which cost a finger's height of a 804-point
+                        // screen on the four panes that have the least room.
+                        //
+                        // The home app's bar says what the product is; another
+                        // app's says which it is, so nobody wonders where they
+                        // are.
+                        let named = self.apps[active].nav_title(&entry.token);
+                        let title = named.clone().unwrap_or_else(|| {
+                            if active == 0 {
+                                sigil::NAME.to_string()
+                            } else {
+                                self.apps[active].title().to_string()
                             }
-                            let heading = egui::RichText::new(&title).heading();
-                            if self.apps.len() < 2 {
-                                ui.label(heading);
-                                return;
-                            }
-                            let button = ui
-                                .add(egui::Button::new(heading).frame(false))
-                                .on_hover_text("The other things sigil does");
-                            egui::Popup::menu(&button).show(|ui| {
-                                for i in 0..self.apps.len() {
-                                    let badge = self.apps[i].tab_notifications();
-                                    let said = if badge.is_empty() {
-                                        self.apps[i].title().to_string()
-                                    } else {
-                                        format!("{} ({})", self.apps[i].title(), badge.count)
-                                    };
-                                    if ui.selectable_label(i == active, said).clicked()
-                                        && i != active
-                                    {
-                                        switch = Some(i);
+                        });
+                        // What the corner left. A gap between them, so a
+                        // truncated name does not read as running into a button.
+                        let mut left = whole.shrink2(egui::vec2(tokens::SPACING_MD, 0.0));
+                        left.max.x =
+                            (left.max.x - corner_used - tokens::SPACING_SM).max(left.min.x);
+                        let mut switch = None;
+                        let mut back = false;
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(left)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            |ui| {
+                                // A named view: the way back, then its name.
+                                // Back is the history's own step, which is what
+                                // the phone's hardware button does -- the view
+                                // asked for exactly that when it drew this
+                                // itself.
+                                if named.is_some() {
+                                    if sigil_ui::icon_button(ui, sigil::Icon::Back).clicked() {
+                                        back = true;
                                     }
+                                    ui.label(egui::RichText::new(&title).heading());
+                                    return;
                                 }
-                            });
-                        },
-                    );
-                    if back {
-                        self.nav.go_back();
+                                // The app's own head first: an identity's mark,
+                                // or Back and a name, in which case there is no
+                                // title to draw.
+                                let named = {
+                                    let mut ctx = AppContext {
+                                        navigator: &mut self.navigator,
+                                        accounts: &mut self.accounts,
+                                        unfocused: false,
+                                        away: self.away,
+                                        notify: self.platform.as_ref(),
+                                        connections: &self.connections,
+                                    };
+                                    self.apps[active].head_ui(&mut ctx, ui)
+                                };
+                                if named {
+                                    return;
+                                }
+                                let heading = egui::RichText::new(&title).heading();
+                                if self.apps.len() < 2 {
+                                    ui.label(heading);
+                                    return;
+                                }
+                                let button = ui
+                                    .add(egui::Button::new(heading).frame(false))
+                                    .on_hover_text("The other things sigil does");
+                                egui::Popup::menu(&button).show(|ui| {
+                                    for i in 0..self.apps.len() {
+                                        let badge = self.apps[i].tab_notifications();
+                                        let said = if badge.is_empty() {
+                                            self.apps[i].title().to_string()
+                                        } else {
+                                            format!("{} ({})", self.apps[i].title(), badge.count)
+                                        };
+                                        if ui.selectable_label(i == active, said).clicked()
+                                            && i != active
+                                        {
+                                            switch = Some(i);
+                                        }
+                                    }
+                                });
+                            },
+                        );
+                        if back {
+                            self.nav.go_back();
+                        }
+                        if let Some(i) = switch {
+                            self.navigator.switch_to(AppId(i));
+                        }
                     }
-                    if let Some(i) = switch {
-                        self.navigator.switch_to(AppId(i));
-                    }
-                }
-            });
+                });
+        }
         // The notice band: what an app has to say to everybody, whichever
         // tab is open -- see `App::notice_ui`. Under the strip, above the
         // rail and the body, and only when some opened app has something,

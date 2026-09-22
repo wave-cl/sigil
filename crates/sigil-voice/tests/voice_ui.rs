@@ -573,7 +573,10 @@ fn shared(account: Account) -> (Harness<'static>, std::rc::Rc<std::cell::RefCell
 #[tokio::test(flavor = "multi_thread")]
 async fn nothing_in_a_call_is_out_of_reach_on_a_phone() {
     const TALL: f32 = 804.0;
-    let mut h = phone_with(a_room_of(12));
+    // Twenty, not twelve: the roster's rows are a line tall on a phone now,
+    // and twelve of them fit an 804-point screen -- which this control
+    // caught, as it should.
+    let mut h = phone_with(a_room_of(20));
     h.run();
     h.run();
     let before = deepest(&h);
@@ -581,7 +584,7 @@ async fn nothing_in_a_call_is_out_of_reach_on_a_phone() {
     // scroll, and then scrolling proves nothing about it.
     assert!(
         before.1 > TALL as f64,
-        "a room of twelve drew only {:.0} points on an {TALL}-point screen, \
+        "a room of twenty drew only {:.0} points on an {TALL}-point screen, \
          so the scroll below is not being asked anything",
         before.1
     );

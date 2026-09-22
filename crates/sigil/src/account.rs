@@ -246,7 +246,10 @@ impl Account {
             } => {
                 format!("That did not open it: {t}")
             }
-            Account::Unlocked(u) => format!("You are {}", u.me()),
+            // Not the key: the screen draws it under the mark already, and a
+            // 44-character key said twice, the second time wrapping on a
+            // phone, said it worse. What is worth saying is the state.
+            Account::Unlocked(_) => "Open, and yours to use.".into(),
             Account::Broken { path, trouble } => {
                 format!("Cannot use {}: {trouble}", path.display())
             }

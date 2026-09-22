@@ -2305,3 +2305,75 @@ fn on_a_phone_the_bar_carries_a_named_views_name_and_its_way_back() {
         "the name is on the screen more than once"
     );
 }
+
+/// On a phone the opening screen has no bar over it: the bar carries the
+/// app's name, exchange and corner, and with no app on screen it drew a
+/// blank strip a finger tall over a screen with its own heading. Seen on
+/// the device. What is drawn starts under the system's inset.
+#[test]
+fn the_phones_opening_screen_has_no_blank_bar_over_it() {
+    let mut h = sealed_phone(sigil::Account::Locked {
+        path: "/tmp/sigil-test/identity".into(),
+        trouble: None,
+    });
+    h.run();
+    h.run();
+    // The topmost drawn thing: nearer the inset's foot (24) than a strip's
+    // (24 + a finger, 56).
+    // The accesskit boxes, not `Node::rect`, which panics on a node with
+    // none; in physical pixels, hence the scale.
+    fn tops(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<f64>) {
+        if let Some(b) = node.accesskit_node().bounding_box()
+            && b.y1 > b.y0
+            && b.x1 > b.x0
+        {
+            out.push(b.y0 / ppp);
+        }
+        for c in node.children() {
+            tops(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    tops(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+    eprintln!(
+        "DEBUG root children {} label-open {:?}",
+        h.root().children().count(),
+        h.query_by_label("Open an identity").map(|n| n.rect())
+    );
+    let top = seen
+        .iter()
+        .copied()
+        .filter(|y| *y >= 24.0)
+        .fold(f64::MAX, f64::min);
+    // The first labelled thing is the key under the painted mark: the inset
+    // (24), five per cent of the height left (36), the mark (80) and a gap
+    // -- 182 measured. A strip a finger tall (56) over it puts it at 238.
+    let strip = sigil::tokens::BUTTON_LG as f64;
+    assert!(
+        top < 182.0 + strip / 2.0,
+        "the screen starts at {top} ({} boxes): a blank bar is over it",
+        seen.len()
+    );
+    // And a desktop keeps its strip: the title bar is where the window's
+    // buttons are.
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub::named("Chat", 0))];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::Locked {
+                path: "/tmp/sigil-test/identity".into(),
+                trouble: None,
+            },
+        ]));
+    let mut d = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Desktop);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    d.run();
+    d.run();
+    assert!(d.query_by_label("Open an identity").is_some());
+}
