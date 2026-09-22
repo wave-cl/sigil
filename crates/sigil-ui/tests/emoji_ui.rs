@@ -62,7 +62,7 @@ fn an_unknown_string_is_still_a_button_saying_itself() {
             let ctx = ui.ctx().clone();
             theme::install(&ctx, theme::light(), theme::dark());
             sigil_ui::install_loaders(&ctx);
-            sigil_ui::emoji::glyph(ui, "xyz", sigil_ui::emoji::CELL);
+            sigil_ui::emoji::glyph(ui, "xyz", sigil_ui::emoji::cell(&ctx), false);
             sigil_ui::emoji::chip(ui, "\u{1f389}", 3, true);
         });
     h.get_by_label("xyz");
@@ -107,10 +107,14 @@ fn strip_at(clip_top: f32, mine: bool) -> (egui::Rect, egui::Rect, bool) {
                     mine,
                     clip,
                     frequent: &[],
+                    chosen: &[],
+                    extras: 2,
                 },
                 &mut action,
-                move |ui, _| {
-                    if sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::Reply, "Reply").clicked() {
+                move |ui, _, cell| {
+                    if sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::Reply, "Reply", cell)
+                        .clicked()
+                    {
                         seen.store(true, Ordering::Relaxed);
                     }
                 },
@@ -217,11 +221,15 @@ fn picker(width: f32, form: sigil::Form) -> Harness<'static> {
                     mine: false,
                     clip: ui.max_rect(),
                     frequent: &frequent,
+                    // One already sent, so the snapshot shows a cell held
+                    // down beside five that are not.
+                    chosen: &["\u{1f44d}"],
+                    extras: 2,
                 },
                 &mut action,
-                |ui, _| {
-                    sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::Reply, "Reply");
-                    sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::More, "More");
+                |ui, _, cell| {
+                    sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::Reply, "Reply", cell);
+                    sigil_ui::emoji::cell_icon(ui, sigil_ui::Icon::More, "More", cell);
                 },
             );
             if first {

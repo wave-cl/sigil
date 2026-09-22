@@ -1191,6 +1191,13 @@ struct Pane {
     claim_pending: Option<String>,
     /// The message search box.
     searching: String,
+    /// The search box is on screen. A phone's list heading has room for a
+    /// magnifier and not for a box, so the box is what the magnifier opens;
+    /// on a wider pane it is always there and this is not read.
+    search_open: bool,
+    /// The box was just opened and has not been given the finger yet: a box
+    /// that opens without the keyboard is a box you have to press twice.
+    search_focus: bool,
     /// The exchange being added.
     exchange: String,
     /// SIP-85: the "through my home" box on Add an exchange.
@@ -1413,6 +1420,8 @@ impl Default for Pane {
             linking: String::new(),
             presenting: String::new(),
             searching: String::new(),
+            search_open: false,
+            search_focus: false,
             exchange: String::new(),
             forwarding: None,
             viewing: None,
@@ -2616,6 +2625,15 @@ impl App for ChatApp {
         }
         if self.single && state.open.is_some() {
             self.send_as(Some(&at), Cmd::Close);
+            return true;
+        }
+        // **Behind the list is the identity it belongs to.** Back at the
+        // list with nothing open had nowhere left to go and did nothing,
+        // which on a phone reads as a dead key -- and the screen this one
+        // came from is the opening screen, where the identity was chosen.
+        // The flag is taken by `answer`, so this asks the shell once.
+        if self.single {
+            self.switching = true;
             return true;
         }
         false
@@ -4762,64 +4780,13 @@ impl ChatApp {
         pane.chosen = Some((channel, seq));
     }
 
-    /// The conversation list.
-    /// `identity`: the identity sits in the heading row -- one pane, nothing
-    /// open, no bar for it to be in. In the wide layouts it is in the bar
-    /// over the transcript and this is false.
-    fn list_ui(
-        &mut self,
-        ctx: &mut AppContext<'_>,
-        at: &At,
-        state: &ChatState,
-        ui: &mut egui::Ui,
-        theme: &ColorTheme,
-        identity: bool,
-    ) {
-        let now = self.now();
-        // The heading carries the two things you do *to* the list, rather
-        // than each having a row of its own below it. Both are icons: a word
-        // in a heading row reads as part of the heading, not as a control.
-        ui.horizontal(|ui| {
-            // As tall as the bar over the transcript, so the two line up
-            // across the divider.
-            ui.set_min_height(tokens::AVATAR_MD);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if identity {
-                    self.me_ui(ctx, at, state, ui, theme, false);
-                    ui.add_space(tokens::SPACING_XS);
-                }
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
-                    .on_hover_text("Write to somebody, or start a group or a channel")
-                    .clicked()
-                {
-                    self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Compose);
-                }
-                if sigil_ui::icon_button(ui, sigil_ui::Icon::Public)
-                    .on_hover_text("Find a public channel")
-                    .clicked()
-                {
-                    ctx.navigator.push_here(Route::Directory);
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    // Beside the heading, and it puts the column away. The
-                    // control that brings it back is in the conversation's own
-                    // bar, because a control inside the thing it hides is a
-                    // control nobody can reach once they have used it. Not
-                    // when the list is the whole window: there is no column
-                    // to put away, and on a phone the heading row has no
-                    // room for a button that does nothing.
-                    if !self.single
-                        && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Hide the chats")
-                            .clicked()
-                    {
-                        self.columns_open = false;
-                    }
-                    ui.heading("Chats");
-                });
-            });
-        });
-        ui.add_space(tokens::SPACING_XS);
-
+    /// The search box over the conversation list, with its magnifier.
+    ///
+    /// Its own function because on a phone it is not always drawn: the
+    /// heading's magnifier opens it there, and a row that is sometimes
+    /// absent is easier to reason about as a thing than as a branch in the
+    /// middle of the list.
+    fn search_ui(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let form = sigil::Form::of(ui.ctx());
             let phone = form.is_phone();
@@ -4852,6 +4819,9 @@ impl ChatApp {
                     None,
                 )
             };
+            if std::mem::take(&mut self.pane(at).search_focus) {
+                field.request_focus();
+            }
             if field.changed() {
                 let query = self.pane(at).searching.clone();
                 self.pane(at).chosen = None;
@@ -4889,13 +4859,128 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::Search(String::new()));
                 }
             } else if pressed {
-                // Focuses the box rather than doing nothing: it is beside a
-                // field and the obvious thing to press first.
-                field.request_focus();
+                if phone {
+                    // Nothing typed and the magnifier pressed again: the row
+                    // goes away, which is what the same press in the heading
+                    // did to open it.
+                    self.pane(at).search_open = false;
+                } else {
+                    // Focuses the box rather than doing nothing: it is beside
+                    // a field and the obvious thing to press first.
+                    field.request_focus();
+                }
             }
         });
+    }
 
-        ui.add_space(tokens::SPACING_SM);
+    /// The conversation list.
+    /// `identity`: the identity sits in the heading row -- one pane, nothing
+    /// open, no bar for it to be in. In the wide layouts it is in the bar
+    /// over the transcript and this is false.
+    fn list_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        identity: bool,
+    ) {
+        let now = self.now();
+        // The heading carries what is done to the list, rather than each
+        // having a row of its own below it. All icons: a word in a heading
+        // row reads as part of the heading, not as a control.
+        let phone = sigil::Form::of(ui.ctx()).is_phone();
+        ui.horizontal(|ui| {
+            // As tall as the bar over the transcript, so the two line up
+            // across the divider.
+            ui.set_min_height(tokens::AVATAR_MD);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if identity {
+                    self.me_ui(ctx, at, state, ui, theme, false);
+                    ui.add_space(tokens::SPACING_XS);
+                }
+                // **A phone's heading holds two controls, not four.** The
+                // identity, a magnifier and a burger fit beside the word;
+                // a fifth pushes the heading off its own row. So the
+                // magnifier -- the one thing done to this list most often
+                // -- keeps its place, and what is done *from* it goes
+                // behind the burger.
+                if phone {
+                    // Three dots, not the hamburger: the hamburger is what
+                    // hides the column beside a wide window, and one shape
+                    // cannot mean both "a menu of this list's actions" and
+                    // "put this list away".
+                    let dots =
+                        sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "More choices");
+                    egui::Popup::menu(&dots).show(|ui| {
+                        if sigil_ui::icon_item(ui, sigil_ui::Icon::Compose, "Write to somebody")
+                            .clicked()
+                        {
+                            self.panes.entry(at.clone()).or_default().dialog =
+                                Some(Dialog::Compose);
+                            ui.close();
+                        }
+                        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Public channels")
+                            .clicked()
+                        {
+                            ctx.navigator.push_here(Route::Directory);
+                            ui.close();
+                        }
+                    });
+                    // The magnifier opens the box and puts the finger in
+                    // it; pressing it again puts both away, search and all.
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Search, "Find a chat")
+                        .clicked()
+                    {
+                        let pane = self.panes.entry(at.clone()).or_default();
+                        pane.search_open = !pane.search_open;
+                        pane.search_focus = pane.search_open;
+                        if !pane.search_open && !pane.searching.is_empty() {
+                            pane.searching.clear();
+                            pane.chosen = None;
+                            self.send_as(Some(at), Cmd::Search(String::new()));
+                        }
+                    }
+                } else {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Compose)
+                        .on_hover_text("Write to somebody, or start a group or a channel")
+                        .clicked()
+                    {
+                        self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Compose);
+                    }
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Public)
+                        .on_hover_text("Find a public channel")
+                        .clicked()
+                    {
+                        ctx.navigator.push_here(Route::Directory);
+                    }
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // Beside the heading, and it puts the column away. The
+                    // control that brings it back is in the conversation's own
+                    // bar, because a control inside the thing it hides is a
+                    // control nobody can reach once they have used it. Not
+                    // when the list is the whole window: there is no column
+                    // to put away, and on a phone the heading row has no
+                    // room for a button that does nothing.
+                    if !self.single
+                        && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Menu, "Hide the chats")
+                            .clicked()
+                    {
+                        self.columns_open = false;
+                    }
+                    ui.heading("Chats");
+                });
+            });
+        });
+        ui.add_space(tokens::SPACING_XS);
+
+        let show_search = !phone || self.pane(at).search_open;
+        if show_search {
+            self.search_ui(at, state, ui);
+            ui.add_space(tokens::SPACING_SM);
+        }
 
         // A search replaces the list while there is one. The list is still
         // there underneath, and clearing the box brings it back.
@@ -5895,7 +5980,7 @@ impl ChatApp {
                 // Counted when it is *sent*, not when it is taken back: the
                 // session toggles, so whether this press adds is read from
                 // the line — ours already there means this removes it.
-                let ours = line.reactions.iter().any(|(e, _, us)| *us && *e == emoji);
+                let ours = line.reactions.iter().any(|r| r.ours && r.emoji == emoji);
                 if !ours {
                     self.frequent.bump(&emoji);
                 }

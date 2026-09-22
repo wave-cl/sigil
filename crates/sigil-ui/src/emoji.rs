@@ -18,21 +18,39 @@
 //!
 //! # The strip
 //!
-//! Five quick reactions and a ➕, on a pill that hangs off the top-outer
-//! corner of the message under the pointer, with Reply and More beside them.
-//! The one place everything to do *to* a message lives, and one region for
-//! the reveal rule to reason about. Drawn as a foreground `Area` so it can
-//! overlap the message above without that message noticing: the reveal test
-//! is per layer, and the strip is its own.
+//! The quick reactions and a ➕, on a pill that hangs off the top-outer
+//! corner of the message under the pointer, with More beside them -- and
+//! Reply too where the pane is wide enough for it. The one place everything
+//! to do *to* a message lives, and one region for the reveal rule to reason
+//! about. Drawn as a foreground `Area` so it can overlap the message above
+//! without that message noticing: the reveal test is per layer, and the
+//! strip is its own.
+//!
+//! **The cells are the form's, not a number.** A phone's pane is the budget:
+//! the cell is as big as a finger wants, the row is measured against the
+//! pane rather than assumed to fit, and what does not fit goes in the menu.
 
 use sigil::{ColorTheme, tokens};
 
 use crate::message::BubbleAction;
 
-/// A cell on the strip and in the picker.
-pub const CELL: f32 = tokens::BUTTON_SM;
-/// The picture inside a cell.
-const PICTURE: f32 = 20.0;
+/// A cell on the strip and in the picker: a finger's worth on a phone, a
+/// pointer's worth on a desktop.
+///
+/// **A phone's cells are the finger's, not the pointer's**: at a desktop
+/// 28 points they were hit two presses in three on the device, which is
+/// how a reaction "does nothing".
+pub fn cell(ctx: &egui::Context) -> f32 {
+    if sigil::Form::of(ctx).is_phone() {
+        tokens::BUTTON_LG
+    } else {
+        tokens::BUTTON_MD
+    }
+}
+/// How much of a cell the picture inside it takes. A share rather than a
+/// size: the cell is the form's, and a 20-point emoji in a 40-point cell is
+/// a big button with a small picture rattling around in it.
+const PICTURE: f32 = 0.66;
 /// How far the strip reaches back over the bubble's corner.
 const OVERLAP: f32 = tokens::SPACING_LG;
 /// Cells across in the picker.
@@ -45,18 +63,35 @@ pub const FREQUENT: usize = 5;
 /// Says the emoji itself to the accessibility tree — the label is the string,
 /// so a test can find "🎉" whether or not a picture was painted — and shows
 /// its Unicode name on hover.
-pub fn glyph(ui: &mut egui::Ui, chars: &str, cell: f32) -> egui::Response {
+///
+/// `ours` is "you have already sent this one": it is drawn held down, and
+/// said as a pressed button to the accessibility tree. **Pressing it again
+/// takes the reaction back**, which is only obvious if the one you sent
+/// looks different from the five you did not.
+pub fn glyph(ui: &mut egui::Ui, chars: &str, cell: f32, ours: bool) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), chars)
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), ours, chars)
     });
     if ui.is_rect_visible(rect) {
-        if response.hovered() {
+        if ours {
+            // The same two marks a chip of one's own carries -- filled and
+            // outlined in the accent -- so the cell and the chip under the
+            // message are recognisably the same reaction.
+            ui.painter()
+                .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
+            ui.painter().rect_stroke(
+                rect,
+                tokens::RADIUS_SM,
+                egui::Stroke::new(tokens::STROKE_THIN, theme.accent),
+                egui::StrokeKind::Inside,
+            );
+        } else if response.hovered() {
             ui.painter()
                 .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
         }
-        let side = PICTURE.min(cell - 2.0 * tokens::SPACING_XXS);
+        let side = (cell * PICTURE).min(cell - 2.0 * tokens::SPACING_XXS);
         let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
         paint(ui, chars, inner, theme.text_primary);
     }
@@ -176,6 +211,13 @@ pub struct Strip<'a> {
     pub clip: egui::Rect,
     /// The person's most-used, for the picker's own row.
     pub frequent: &'a [String],
+    /// What this person has already sent on this message: those cells are
+    /// drawn held down, and pressing one takes that reaction back.
+    pub chosen: &'a [&'a str],
+    /// How many cells `more` draws after the emoji and the ➕, so the width
+    /// is known before the row is: a strip wider than it thought reaches
+    /// across the message it hangs off and swallows what was meant for it.
+    pub extras: usize,
 }
 
 /// The layer the strip for `id` draws on, for the reveal test.
@@ -183,7 +225,8 @@ pub fn strip_layer(id: egui::Id) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Foreground, id)
 }
 
-/// The strip: five quick reactions, ➕ for the rest, Reply, and More.
+/// The strip: the quick reactions, ➕ for the rest, and whatever `more`
+/// draws after them.
 ///
 /// Hangs off the top-outer corner of `bubble` — the right corner of somebody
 /// else's message, the left of one's own — reaching `OVERLAP` back over it
@@ -194,10 +237,12 @@ pub fn strip_layer(id: egui::Id) -> egui::LayerId {
 /// area is not clipped by the transcript, and a strip floating over the
 /// header for a message that is not on screen is a strip for nothing.
 ///
-/// `more` draws the rest of the menu (Reply, More) after the emoji, in the
-/// same row; it is the caller's because what it offers depends on the
-/// message. An emoji chosen from the strip or the picker lands in
-/// `action.react`.
+/// `more` draws the rest of the row after the emoji -- More, and Reply
+/// where there is room for it -- and is handed the cell size, so what it
+/// draws is the same size as what the strip drew. It is the caller's
+/// because what it offers depends on the message; `extras` is how many
+/// cells it will take. An emoji chosen from the strip or the picker lands
+/// in `action.react`.
 /// Returns the rectangle it drew in: a press there is the strip's, and the
 /// message underneath must not read it as a press elsewhere and put the
 /// strip away before the control under the finger has been drawn -- which
@@ -211,9 +256,11 @@ pub fn strip(
         mine,
         clip,
         frequent,
+        chosen,
+        extras,
     }: Strip<'_>,
     action: &mut BubbleAction,
-    more: impl FnOnce(&mut egui::Ui, &mut BubbleAction),
+    more: impl FnOnce(&mut egui::Ui, &mut BubbleAction, f32),
 ) -> egui::Rect {
     if bubble.bottom() < clip.top() || bubble.top() > clip.bottom() {
         return egui::Rect::NOTHING;
@@ -226,9 +273,15 @@ pub fn strip(
     // made the strip wider than the placement thought -- so it reached
     // further across the message, over the pointer that had revealed it,
     // and swallowed the wheel that should have scrolled the transcript.
-    let cells = (sigil_emoji::QUICK.len() + 3) as f32;
-    let width = cells * CELL + (cells - 1.0) * gap + 2.0 * pad;
-    let height = CELL + 2.0 * pad;
+    let cells = (sigil_emoji::QUICK.len() + 1 + extras) as f32;
+    // As big as the form wants, and never wider than the pane: a strip that
+    // does not fit is clamped back over the message, where it takes the
+    // presses meant for the message. Measured, so neither the count nor the
+    // size has to be guessed right twice.
+    let room = (clip.width() - 2.0 * pad - (cells - 1.0) * gap) / cells;
+    let cell = cell(ui.ctx()).min(room).max(tokens::BUTTON_SM);
+    let width = cells * cell + (cells - 1.0) * gap + 2.0 * pad;
+    let height = cell + 2.0 * pad;
     let x = if mine {
         bubble.left() + OVERLAP - width
     } else {
@@ -268,20 +321,21 @@ pub fn strip(
                     ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                     ui.horizontal(|ui| {
                         for quick in sigil_emoji::QUICK {
-                            if glyph(ui, quick, CELL).clicked() {
+                            let ours = chosen.contains(&quick);
+                            if glyph(ui, quick, cell, ours).clicked() {
                                 action.react = Some(quick.to_string());
                             }
                         }
-                        if cell_icon(ui, sigil::Icon::Plus, "More emoji").clicked() {
+                        if cell_icon(ui, sigil::Icon::Plus, "More emoji", cell).clicked() {
                             open_picker = true;
                         }
-                        more(ui, action);
+                        more(ui, action, cell);
                     });
                 });
         });
 
-    if let Some(chosen) = picker(ui, picker_id, bubble, frequent, open_picker) {
-        action.react = Some(chosen);
+    if let Some(picked) = picker(ui, picker_id, bubble, frequent, chosen, open_picker) {
+        action.react = Some(picked);
     }
     // The rectangle as it was just drawn, not the one remembered from a
     // pass when the strip was somewhere else.
@@ -290,9 +344,9 @@ pub fn strip(
 
 /// A painted icon in a strip cell, the size of an emoji cell rather than of
 /// `icon_button` — the strip is one row of like-sized things.
-pub fn cell_icon(ui: &mut egui::Ui, icon: sigil::Icon, word: &str) -> egui::Response {
+pub fn cell_icon(ui: &mut egui::Ui, icon: sigil::Icon, word: &str, cell: f32) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(CELL, CELL), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), word));
     if ui.is_rect_visible(rect) {
@@ -308,6 +362,49 @@ pub fn cell_icon(ui: &mut egui::Ui, icon: sigil::Icon, word: &str) -> egui::Resp
         );
     }
     response.on_hover_text(word)
+}
+
+/// A menu row that is an emoji and some words: the picture where an icon
+/// would be in [`sigil::icon_item`], and the words beside it, as one thing
+/// to press.
+///
+/// Says "❤️ Ana, You" to the accessibility tree -- the emoji as itself, then
+/// the words -- so a reader is told which reaction the names belong to.
+pub fn emoji_item(ui: &mut egui::Ui, chars: &str, text: &str) -> egui::Response {
+    let theme = ColorTheme::current(ui.ctx());
+    let gap = tokens::SPACING_SM;
+    let square = tokens::BUTTON_MD;
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    // Wrapped: a list of names is as long as the people are, and a menu
+    // that grows sideways off a phone shows the first name and no more.
+    let wrap = (ui.available_width() - square - gap).max(80.0);
+    let galley = ui
+        .painter()
+        .layout(text.to_owned(), font, theme.text_primary, wrap);
+    let height = square.max(galley.size().y + tokens::SPACING_XS);
+    let width = ui.available_width().max(square + gap + galley.size().x);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let said = format!("{chars} {text}");
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &said)
+    });
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
+        }
+        let picture = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + square / 2.0, rect.center().y),
+            egui::Vec2::splat(tokens::ICON_SM),
+        );
+        paint(ui, chars, picture, theme.text_primary);
+        let at = egui::pos2(
+            rect.left() + square + gap,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(at, galley, theme.text_primary);
+    }
+    response
 }
 
 /// A row of the picker: a heading, or up to `COLS` emoji.
@@ -328,6 +425,7 @@ pub fn picker(
     id: egui::Id,
     anchor: egui::Rect,
     frequent: &[String],
+    ours: &[&str],
     open_now: bool,
 ) -> Option<String> {
     let ctx = ui.ctx().clone();
@@ -347,7 +445,11 @@ pub fn picker(
     .show(|ui| {
         let theme = ColorTheme::current(ui.ctx());
         let gap = tokens::SPACING_XXS;
-        let width = COLS as f32 * CELL + (COLS - 1) as f32 * gap;
+        let room =
+            (ui.ctx().content_rect().width() - 2.0 * tokens::SPACING_MD - (COLS - 1) as f32 * gap)
+                / COLS as f32;
+        let side = cell(ui.ctx()).min(room).max(tokens::BUTTON_SM);
+        let width = COLS as f32 * side + (COLS - 1) as f32 * gap;
         ui.set_width(width);
 
         let mut query: String = ui.data(|d| d.get_temp(search_id)).unwrap_or_default();
@@ -367,13 +469,13 @@ pub fn picker(
         let rows = rows(&query, frequent);
         ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
         egui::ScrollArea::vertical()
-            .max_height(10.0 * (CELL + gap))
+            .max_height(10.0 * (side + gap))
             .auto_shrink([false, false])
-            .show_rows(ui, CELL, rows.len(), |ui, range| {
+            .show_rows(ui, side, rows.len(), |ui, range| {
                 for row in &rows[range] {
                     match row {
                         Row::Head(text) => {
-                            ui.allocate_ui(egui::vec2(width, CELL), |ui| {
+                            ui.allocate_ui(egui::vec2(width, side), |ui| {
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
@@ -389,7 +491,7 @@ pub fn picker(
                         Row::Cells(cells) => {
                             ui.horizontal(|ui| {
                                 for chars in cells {
-                                    if glyph(ui, chars, CELL).clicked() {
+                                    if glyph(ui, chars, side, ours.contains(chars)).clicked() {
                                         chosen = Some((*chars).to_string());
                                     }
                                 }

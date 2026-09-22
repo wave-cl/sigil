@@ -38,6 +38,16 @@ fn them() -> PubKey {
     PubKey::new([2u8; 32])
 }
 
+/// A reaction on a line: the emoji, who sent it as this conversation names
+/// them, and whether one of them is us.
+fn reacted(emoji: &str, who: &[&str], ours: bool) -> sigil_ui::Reaction {
+    sigil_ui::Reaction {
+        emoji: emoji.to_string(),
+        who: who.iter().map(|n| n.to_string()).collect(),
+        ours,
+    }
+}
+
 fn a_conversation() -> ChatState {
     let channel = [9u8; 32];
     ChatState {
@@ -106,7 +116,7 @@ fn a_conversation() -> ChatState {
                 redacted: false,
                 edited: true,
                 via: None,
-                reactions: vec![("\u{1f44d}".to_string(), 2, true)],
+                reactions: vec![reacted("\u{1f44d}", &["You", "Ada"], true)],
                 reply_to: None,
                 receipt: Some(Receipt::Read),
                 attachments: Vec::new(),
@@ -605,11 +615,36 @@ fn harness_phone_measured(
     harness_phone_themed(state, route, egui::Theme::Dark)
 }
 
+/// What the app asked the shell for, in the order it asked.
+type Asks = std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>;
+
+/// The phone, for a test about what a press asks the *shell* to do -- which
+/// on a phone includes Back, since the shell is what a Back key reaches.
+fn harness_phone_asks(state: ChatState, route: sigil_chat::Route) -> (Harness<'static>, Asks) {
+    let asks = Asks::default();
+    let (h, _, _) = harness_phone_recording(state, route, egui::Theme::Dark, asks.clone());
+    (h, asks)
+}
+
 #[allow(clippy::type_complexity)]
 fn harness_phone_themed(
     state: ChatState,
     route: sigil_chat::Route,
     theme_choice: egui::Theme,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::RefCell<ChatApp>>,
+    Drawn,
+) {
+    harness_phone_recording(state, route, theme_choice, Asks::default())
+}
+
+#[allow(clippy::type_complexity)]
+fn harness_phone_recording(
+    state: ChatState,
+    route: sigil_chat::Route,
+    theme_choice: egui::Theme,
+    asks: Asks,
 ) -> (
     Harness<'static>,
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
@@ -721,7 +756,9 @@ fn harness_phone_themed(
                         .inner_margin(egui::Margin::same(sigil::tokens::SPACING_MD as i8)),
                 )
                 .show(ui, |ui| {
-                    let _ = app.render_nav(&mut app_ctx, ui, &token);
+                    if let Some(action) = app.render_nav(&mut app_ctx, ui, &token).action {
+                        asks.borrow_mut().push(action);
+                    }
                     // What the pane came out as, margins included: the
                     // number `no_phone_pane_is_wider_than_the_phone` reads.
                     width.set(ui.min_rect().width() + 2.0 * sigil::tokens::SPACING_MD);
@@ -1108,6 +1145,10 @@ fn on_a_phone_the_search_box_is_the_whole_width_with_the_magnifier_inside() {
     let mut h = harness_phone(state, sigil_chat::Route::Conversations);
     h.run();
     h.run();
+    // The heading's magnifier is what puts the box on screen there.
+    h.get_by_label("Find a chat").click();
+    h.run();
+    h.run();
     let field = h
         .get_all_by_role(egui::accesskit::Role::TextInput)
         .map(|n| n.rect())
@@ -1295,7 +1336,7 @@ fn a_menu_does_not_conjure_a_strip_that_was_never_shown() {
         "the menu did not open, so this says nothing about the strip"
     );
     assert!(
-        h.query_by_label("Reply").is_none(),
+        h.query_by_label("More").is_none(),
         "opening the conversation's menu put a message's action strip on the \
          transcript, on a message nobody had touched"
     );
@@ -1309,10 +1350,12 @@ fn a_menu_does_not_conjure_a_strip_that_was_never_shown() {
 /// out in the margin, and it asserts as much, so a test cannot quietly
 /// start measuring nothing.
 fn away_from_the_strip(h: &Harness<'static>) -> egui::Pos2 {
+    // The last cell is More on either form: Reply is a cell of its own on a
+    // wide pane and a row of the More menu on a phone.
     let pill = h
         .get_by_label(sigil_emoji::QUICK[0])
         .rect()
-        .union(h.get_by_label("Reply").rect());
+        .union(h.get_by_label("More").rect());
     let away = egui::pos2(6.0, pill.bottom() + 60.0);
     assert!(
         !pill.contains(away),
@@ -1338,10 +1381,7 @@ fn a_hidden_strip_does_not_come_back_when_another_menu_opens() {
     finger_up(&mut h, on);
     h.run();
     h.run();
-    assert!(
-        h.query_by_label("Reply").is_some(),
-        "the tap did not reveal"
-    );
+    assert!(h.query_by_label("More").is_some(), "the tap did not reveal");
     let away = away_from_the_strip(&h);
     finger_down(&mut h, away);
     h.run();
@@ -1349,7 +1389,7 @@ fn a_hidden_strip_does_not_come_back_when_another_menu_opens() {
     h.run();
     h.run();
     assert!(
-        h.query_by_label("Reply").is_none(),
+        h.query_by_label("More").is_none(),
         "the tap away did not hide"
     );
     // Some other menu: the conversation's More.
@@ -1367,7 +1407,7 @@ fn a_hidden_strip_does_not_come_back_when_another_menu_opens() {
         "the menu did not open"
     );
     assert!(
-        h.query_by_label("Reply").is_none(),
+        h.query_by_label("More").is_none(),
         "the strip came back with the menu"
     );
 }
@@ -1576,7 +1616,10 @@ fn on_a_phone_a_dialog_fits_the_screen() {
     state.open = None;
     let mut h = harness_phone(state, sigil_chat::Route::Conversations);
     h.run();
-    h.get_by_label("New conversation").click();
+    // Behind the heading's dots on a phone.
+    h.get_by_label("More choices").click();
+    h.run();
+    h.get_by_label("Write to somebody").click();
     h.run();
     h.run();
     // The compose dialog's field takes the dialog's width; both must be
@@ -1604,7 +1647,7 @@ fn a_tap_reveals_a_messages_actions_and_a_second_tap_hides_them() {
     h.run();
     let bubble = topmost(&h, "mine, on the other side");
     assert!(
-        h.query_by_label("Reply").is_none(),
+        h.query_by_label("More").is_none(),
         "nothing is revealed before anybody touches"
     );
     // A tap: down, a frame, up.
@@ -1614,7 +1657,7 @@ fn a_tap_reveals_a_messages_actions_and_a_second_tap_hides_them() {
     h.run();
     h.run();
     assert!(
-        h.query_by_label("Reply").is_some(),
+        h.query_by_label("More").is_some(),
         "a tap on the message reveals its strip"
     );
     // A tap away -- below the strip and out in the margin, where there is
@@ -1626,7 +1669,7 @@ fn a_tap_reveals_a_messages_actions_and_a_second_tap_hides_them() {
     h.run();
     h.run();
     assert!(
-        h.query_by_label("Reply").is_none(),
+        h.query_by_label("More").is_none(),
         "a tap elsewhere puts the strip away"
     );
 }
@@ -1735,6 +1778,13 @@ fn the_search_results_fit_a_phone() {
 /// text field on screen. Typed rather than set, because what puts the
 /// results on screen is the box being changed.
 fn search_for(h: &mut Harness<'static>, what: &str) {
+    // On a phone the box is behind the heading's magnifier: the heading has
+    // room for the word and two controls, and a box is neither.
+    if let Some(magnifier) = h.query_by_label("Find a chat") {
+        magnifier.click();
+        h.run();
+        h.run();
+    }
     let field = h
         .get_all(
             egui_kittest::kittest::by()
@@ -2241,7 +2291,10 @@ fn phone_dialog_compose() {
     state.open = None;
     let mut h = harness_phone(state, sigil_chat::Route::Conversations);
     h.run();
-    h.get_by_label("New conversation").click();
+    // Behind the heading's dots on a phone.
+    h.get_by_label("More choices").click();
+    h.run();
+    h.get_by_label("Write to somebody").click();
     h.run();
     h.run();
     // The harness leaves the pointer where it clicked, and it lands on
@@ -7396,10 +7449,10 @@ fn reactions_dark() {
     let mut state = with_mine("and one of mine", 60);
     let n = state.lines.len();
     state.lines[n - 1].reactions = vec![
-        ("\u{1f389}".to_string(), 3, true),
-        ("\u{1f44d}".to_string(), 1, false),
+        reacted("\u{1f389}", &["You", "Ada", "Bo"], true),
+        reacted("\u{1f44d}", &["Ada"], false),
     ];
-    state.lines[n - 2].reactions = vec![("\u{2764}".to_string(), 1, true)];
+    state.lines[n - 2].reactions = vec![reacted("\u{2764}", &["You"], true)];
     state.lines[n - 2].redacted = false;
     state.lines[n - 2].text = "theirs, reacted to".into();
     let mut app = ChatApp::new();
@@ -8236,7 +8289,7 @@ fn reactions_hang_off_the_bubbles_bottom_edge() {
     let n = state.lines.len();
     state.lines[n - 2].redacted = false;
     state.lines[n - 2].text = "theirs, reacted to".into();
-    state.lines[n - 2].reactions = vec![("\u{2764}".to_string(), 1, true)];
+    state.lines[n - 2].reactions = vec![reacted("\u{2764}", &["You"], true)];
     // Theirs too, so it is grouped under the reacted one.
     state.lines[n - 1].who = them();
     state.lines[n - 1].mine = false;
@@ -10127,4 +10180,282 @@ fn a_sent_message_is_on_screen_before_the_exchange_answers() {
     );
     let sent = asked.borrow().join(" | ");
     assert!(sent.contains("Post"), "and it was sent: {sent}");
+}
+
+/// **The quick reactions are the size of a finger, and the strip fits.**
+///
+/// Nine cells across a 360-point pane are 28 points each with two points
+/// between them: pressed on the phone, two presses in three landed on the
+/// cell beside the one aimed at or between them, which is indistinguishable
+/// from a reaction that does nothing. The pane is the budget, so the strip
+/// spends it on fewer, larger cells -- Reply moved into the More menu -- and
+/// this reads both halves of that: how big a cell came out, and that the row
+/// still ends inside the pane.
+#[test]
+fn a_phones_quick_reactions_are_a_fingers_size_and_the_strip_fits_the_pane() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    finger_down(&mut h, bubble.center());
+    h.run();
+    finger_up(&mut h, bubble.center());
+    h.run();
+    h.run();
+
+    let first = h
+        .query_by_label(sigil_emoji::QUICK[0])
+        .expect("a tap reveals the strip")
+        .rect();
+    let last = h
+        .query_by_label(sigil_emoji::QUICK[sigil_emoji::QUICK.len() - 1])
+        .expect("the last quick reaction")
+        .rect();
+    // A finger is about 9mm; 40 points on this phone is 7.5mm, which is as
+    // much as a row of seven plus its own margins can be given. The number
+    // asserted is the floor: below it the cells are the pointer's again.
+    assert!(
+        first.width() >= 36.0,
+        "a quick reaction is {:.0} points across, which is a pointer's cell",
+        first.width()
+    );
+    let strip = first
+        .union(last)
+        .union(h.get_by_label("More emoji").rect())
+        .union(h.get_by_label("More").rect());
+    assert!(
+        strip.left() >= -1.0 && strip.right() <= PHONE_PANE + 1.0,
+        "the strip runs from {:.0} to {:.0} on a {PHONE_PANE}-point pane",
+        strip.left(),
+        strip.right()
+    );
+}
+
+/// And what the width bought is still reachable: Reply is the first row of
+/// the More menu on a phone. Without this the fix above is a feature
+/// removed rather than a control moved.
+#[test]
+fn a_phones_strip_offers_reply_inside_more() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    finger_down(&mut h, bubble.center());
+    h.run();
+    finger_up(&mut h, bubble.center());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_none(),
+        "Reply is still a cell of its own on the phone's strip"
+    );
+    h.get_by_label("More").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Reply").is_some(),
+        "Reply is nowhere: {}",
+        text_of(&h)
+    );
+}
+
+/// **Back at the list of chats offers the identities.**
+///
+/// A phone's Back walked back through the views and then stopped: at the
+/// list, with nothing open, it did nothing at all, which reads as a dead
+/// key. The screen before the list is the one the identity was chosen on,
+/// so that is where it goes -- and it is the only way back to it without
+/// opening a conversation first.
+#[test]
+fn back_at_the_list_of_chats_asks_for_the_identities() {
+    let mut state = a_conversation();
+    state.open = None;
+    let (mut h, asks) = harness_phone_asks(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(
+        asks.borrow().is_empty(),
+        "something was asked for before Back was pressed: {:?}",
+        asks.borrow()
+    );
+
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert_eq!(
+        asks.borrow().clone(),
+        vec![sigil::app::AppAction::ChooseIdentity],
+        "Back at the list asked for something else, or for nothing"
+    );
+}
+
+/// With a conversation open Back still closes that and stays: it is one
+/// step, and a key that skipped the conversation would drop somebody out of
+/// what they were reading. The negative control for the test above -- same
+/// key, same harness, one thing different about where it is pressed.
+#[test]
+fn back_in_a_conversation_does_not_leave_for_the_identities() {
+    // `a_conversation` has one open, which is the difference.
+    let (mut h, asks) = harness_phone_asks(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert!(
+        asks.borrow().is_empty(),
+        "Back left the conversation for the opening screen: {:?}",
+        asks.borrow()
+    );
+}
+
+/// **The chat list's heading is the word, a magnifier and three dots.**
+///
+/// Four controls and a heading on a 360-point row left the word squeezed
+/// and the search box a row of its own below it, on a screen whose whole
+/// job is the list under them. The magnifier opens the box; everything
+/// done *from* the list is behind the dots.
+#[test]
+fn the_chat_lists_heading_is_a_magnifier_and_a_menu() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("New conversation").is_none()
+            && h.query_by_label("Public channel").is_none(),
+        "the heading still carries its own compose and directory buttons"
+    );
+    // The box is not there until it is asked for.
+    assert!(
+        h.query_by_label("Search").is_none(),
+        "the search box is drawn before the magnifier was pressed"
+    );
+
+    h.get_by_label("More choices").click();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Write to somebody") && said.contains("Public channels"),
+        "the burger holds neither: {said}"
+    );
+}
+
+/// And the magnifier opens the box, which was the point of moving it.
+#[test]
+fn the_magnifier_opens_the_search_box_and_closes_it_again() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.get_by_label("Find a chat").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Search").is_some(),
+        "the magnifier opened nothing: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Find a chat").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Search").is_none(),
+        "the box stayed open: {}",
+        text_of(&h)
+    );
+}
+
+/// **A press on a reaction says who sent it; it does not take it back.**
+///
+/// A chip is an emoji and a number, and the question everybody has of it is
+/// who -- which nothing answered, while a finger that brushed one silently
+/// undid one's own reaction. So it opens the list of who reacted with what,
+/// and taking one's own back is a row in that list, said in words.
+#[test]
+fn a_press_on_a_reaction_names_who_sent_it_and_leaves_it_alone() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands_phone(a_conversation(), asked.clone());
+    h.run();
+    h.run();
+    let chip = h
+        .get_all(egui_kittest::kittest::by().label_contains("\u{1f44d}"))
+        .map(|n| n.rect())
+        .next()
+        .expect("the reaction on the fixture's own message");
+    finger_down(&mut h, chip.center());
+    h.run();
+    finger_up(&mut h, chip.center());
+    h.run();
+    h.run();
+
+    let said = text_of(&h);
+    assert!(
+        said.contains("You, Ada"),
+        "the press did not name who reacted: {said}"
+    );
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        !sent.contains("React"),
+        "the press took the reaction back: {sent}"
+    );
+
+    // The row is where it is taken back, now that the chip is a question.
+    h.get_by_label_contains("You, Ada").click();
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("React"),
+        "the row in the list sent nothing: {sent}"
+    );
+}
+
+/// **The one you already sent is held down, and pressing it takes it back.**
+///
+/// The strip toggles: the same emoji again is a retraction. That is only
+/// discoverable if the cell you already pressed looks unlike the five you
+/// did not -- otherwise the way to take a reaction back is a thing you have
+/// to be told. The fixture's own message carries a 👍 of ours.
+#[test]
+fn the_quick_reaction_already_sent_is_held_down_and_takes_itself_back() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_recording_commands_phone(a_conversation(), asked.clone());
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    finger_down(&mut h, bubble.center());
+    h.run();
+    finger_up(&mut h, bubble.center());
+    h.run();
+    h.run();
+
+    // 👍 is the fixture's own reaction; the heart beside it is nobody's.
+    let ours = h.get_by_label("\u{1f44d}");
+    assert_eq!(
+        ours.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True),
+        "the reaction we have already sent is drawn like the ones we have not"
+    );
+    let theirs = h.get_by_label(sigil_emoji::QUICK[0]);
+    assert_eq!(
+        theirs.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False),
+        "a reaction nobody sent is drawn as sent"
+    );
+
+    let at = ours.rect().center();
+    finger_down(&mut h, at);
+    h.run();
+    finger_up(&mut h, at);
+    h.run();
+    h.run();
+    let sent = asked.borrow().join(" | ");
+    assert!(
+        sent.contains("React"),
+        "pressing the one already sent did not take it back: {sent}"
+    );
 }

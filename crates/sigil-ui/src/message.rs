@@ -129,6 +129,34 @@ pub fn receipt(ui: &mut egui::Ui, receipt: Receipt, colour: egui::Color32) -> eg
     response
 }
 
+/// One emoji on a message, and who sent it.
+///
+/// **Who, not how many**: a count is what a chip draws, and who reacted is
+/// what the person pressing it wants. The names are already resolved --
+/// whatever this conversation calls each of them, and "You" for oneself --
+/// because the bubble has no way to look a key up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reaction {
+    /// The emoji itself, as it went over the wire.
+    pub emoji: String,
+    /// Who sent it, named.
+    pub who: Vec<String>,
+    /// Whether one of them is oneself.
+    pub ours: bool,
+}
+
+impl Reaction {
+    /// How many sent it.
+    pub fn count(&self) -> usize {
+        self.who.len()
+    }
+
+    /// The people, for a row that names them.
+    pub fn names(&self) -> String {
+        self.who.join(", ")
+    }
+}
+
 /// One message, as the interface needs it.
 #[derive(Default)]
 /// What a message replies to, as the reply shows it.
@@ -205,8 +233,8 @@ pub struct Bubble<'a> {
     pub redacted: bool,
     /// What is being replied to, if anything.
     pub reply_to: Option<Quote<'a>>,
-    /// Emoji, how many sent it, and whether we are one of them.
-    pub reactions: &'a [(String, usize, bool)],
+    /// The emoji on this message, and who sent each.
+    pub reactions: &'a [Reaction],
     /// The emoji this person sends most, for the picker's own row. Empty
     /// until they have sent any.
     pub frequent: &'a [String],
@@ -770,19 +798,40 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         return;
     }
 
+    // **A phone spends its width on the reactions**: nine cells across a
+    // 360-point pane are 28 points each and missed by a finger, which is
+    // what "the emoji do nothing" was. Reply moves inside the More menu
+    // there, and the cells are the finger's size.
+    let phone = sigil::Form::of(ui.ctx()).is_phone();
+    // What we have already sent on this message: those cells are drawn held
+    // down, because pressing one again is what takes it back.
+    let chosen: Vec<&str> = b
+        .reactions
+        .iter()
+        .filter(|r| r.ours)
+        .map(|r| r.emoji.as_str())
+        .collect();
     let strip = crate::emoji::Strip {
         id,
         bubble,
         mine: b.mine,
         clip: ui.clip_rect(),
         frequent: b.frequent,
+        chosen: &chosen,
+        extras: if phone { 1 } else { 2 },
     };
-    let strip_rect = crate::emoji::strip(ui, strip, action, |ui, action| {
-        if crate::emoji::cell_icon(ui, crate::Icon::Reply, "Reply").clicked() {
+    let strip_rect = crate::emoji::strip(ui, strip, action, |ui, action, cell| {
+        if !phone && crate::emoji::cell_icon(ui, crate::Icon::Reply, "Reply", cell).clicked() {
             action.reply = true;
         }
-        let more = crate::emoji::cell_icon(ui, crate::Icon::More, "More");
-        egui::Popup::menu(&more).show(|ui| more_menu(ui, b, action));
+        let more = crate::emoji::cell_icon(ui, crate::Icon::More, "More", cell);
+        egui::Popup::menu(&more).show(|ui| {
+            if phone && crate::icon_item(ui, crate::Icon::Reply, "Reply").clicked() {
+                action.reply = true;
+                ui.close();
+            }
+            more_menu(ui, b, action);
+        });
     });
     // The press the tap ended, against the strip as it was just drawn: the
     // position, not a layer test, because a release leaves no pointer over
@@ -1491,10 +1540,15 @@ fn body(
             egui::Layout::right_to_left(egui::Align::Min)
         };
         let hung = ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(layout), |ui| {
-            for (emoji, count, ours) in b.reactions {
-                if reaction_chip(ui, emoji, *count, *ours).clicked() {
-                    action.react = Some(emoji.clone());
-                }
+            for r in b.reactions {
+                // **A press names the people; it does not take the mark
+                // back.** A chip is two shades and a number, and the one
+                // question a reader has of it is who -- which used to be
+                // unanswerable, while a finger that brushed it silently
+                // undid one's own reaction. Taking it back is still here,
+                // said in words, one row further in.
+                let chip = reaction_chip(ui, &r.emoji, r.count(), r.ours);
+                egui::Popup::menu(&chip).show(|ui| who_reacted(ui, b.reactions, action));
             }
         });
         // The part that hangs below is room the next message must not take.
@@ -1804,6 +1858,27 @@ pub fn reply_preview(ui: &mut egui::Ui, q: Quote<'_>, rewriting: bool) -> ReplyP
 pub fn reaction_chip(ui: &mut egui::Ui, emoji: &str, count: usize, ours: bool) -> egui::Response {
     crate::emoji::chip(ui, emoji, count, ours)
 }
+
+/// Who reacted, and with which emoji: a row per reaction, the emoji and the
+/// names beside it.
+///
+/// Every row is pressable and sends that emoji, which for one's own -- the
+/// row with "You" in it -- takes it back. The one place a reaction is
+/// undone on purpose, now that a press on the chip is a question rather
+/// than an act.
+fn who_reacted(ui: &mut egui::Ui, reactions: &[Reaction], action: &mut BubbleAction) {
+    ui.set_max_width(WHO_WIDE);
+    for r in reactions {
+        if crate::emoji::emoji_item(ui, &r.emoji, &r.names()).clicked() {
+            action.react = Some(r.emoji.clone());
+            ui.close();
+        }
+    }
+}
+
+/// How wide the who-reacted list gets before the names wrap: a phone's pane
+/// less its margins, so the list is the same shape on either form.
+const WHO_WIDE: f32 = 260.0;
 
 /// A key, for where the whole one will not fit: its first four characters,
 /// three dots, and its last four.

@@ -128,8 +128,9 @@ pub struct Line {
     /// that is not where the conversation lives; named by this machine's
     /// pin store, or by the head of its key.
     pub via: Option<String>,
-    /// Emoji, how many sent it, and whether we are one of them.
-    pub reactions: Vec<(String, usize, bool)>,
+    /// The emoji on this message, and who sent each: named here, where the
+    /// people are known, rather than in the interface, which has only keys.
+    pub reactions: Vec<sigil_ui::Reaction>,
     /// What this replies to.
     pub reply_to: Option<Quoted>,
     /// How far one of ours is known to have got. `None` on anybody else's.
@@ -4788,7 +4789,25 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                     reactions: m
                         .reactions
                         .iter()
-                        .map(|(emoji, who)| (emoji.clone(), who.len(), who.contains(&me)))
+                        .map(|(emoji, who)| {
+                            // Oneself first and by the word, the way one is
+                            // named anywhere a list includes you.
+                            let ours = who.contains(&me);
+                            let mut named: Vec<String> = who
+                                .iter()
+                                .filter(|k| **k != me)
+                                .map(|k| name_for(&people, k, ""))
+                                .collect();
+                            named.sort();
+                            if ours {
+                                named.insert(0, "You".to_string());
+                            }
+                            sigil_ui::Reaction {
+                                emoji: emoji.clone(),
+                                who: named,
+                                ours,
+                            }
+                        })
                         .collect(),
                     reply_to: m.post.reply_to().map(|target| {
                         stubs
