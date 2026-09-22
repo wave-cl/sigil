@@ -693,7 +693,7 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         .kind(egui::PopupKind::Menu)
         .open_memory(None)
         .show(|ui| {
-            if ui.button("Reply").clicked() {
+            if crate::icon_item(ui, crate::Icon::Reply, "Reply").clicked() {
                 action.reply = true;
                 ui.close();
             }
@@ -755,32 +755,38 @@ const LONG_PRESS_SLOP: f32 = 6.0;
 fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
     {
         {
-            if b.editable && ui.button("Edit").clicked() {
+            // Rows with their icons, the shape every menu in sigil has:
+            // this one was six named buttons of six widths, staircased down
+            // a phone -- seen on the device, and the last menu still
+            // drawn that way.
+            if b.editable && crate::icon_item(ui, crate::Icon::Pencil, "Edit").clicked() {
                 action.edit = true;
                 ui.close();
             }
-            if ui.button("Delete").clicked() {
+            if crate::icon_item(ui, crate::Icon::Close, "Delete").clicked() {
                 action.redact = true;
                 ui.close();
             }
-            if ui.button("Copy key").clicked() {
+            if crate::icon_item(ui, crate::Icon::Copy, "Copy key").clicked() {
                 action.copy_key = true;
                 ui.close();
             }
             // The reply to a room that belongs to one person in it. Absent in
             // the direct message itself and on one's own messages, where it
             // would open the conversation already open, or none.
-            if b.direct && ui.button("Direct message").clicked() {
+            if b.direct && crate::icon_item(ui, crate::Icon::Compose, "Direct message").clicked() {
                 action.direct = true;
                 ui.close();
             }
             // Somebody else's key, to compare words with; ours needs none.
-            if !b.mine && ui.button("Compare safety words").clicked() {
+            if !b.mine
+                && crate::icon_item(ui, crate::Icon::Verified, "Compare safety words").clicked()
+            {
                 action.verify = true;
                 ui.close();
             }
             // SIP-56: somebody else's message, to the room's admins.
-            if !b.mine && ui.button("Report…").clicked() {
+            if !b.mine && crate::icon_item(ui, crate::Icon::Flag, "Report…").clicked() {
                 action.report = true;
                 ui.close();
             }
@@ -792,30 +798,26 @@ fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
             match b.attachments {
                 [] => {}
                 [_] => {
-                    if ui.button("Save file").clicked() {
+                    if crate::icon_item(ui, crate::Icon::Save, "Save file").clicked() {
                         action.save = Some(0);
                         ui.close();
                     }
-                    if ui.button("Forward file").clicked() {
+                    if crate::icon_item(ui, crate::Icon::Forward, "Forward file").clicked() {
                         action.forward = Some(0);
                         ui.close();
                     }
                 }
                 many => {
                     for (i, a) in many.iter().enumerate() {
-                        if ui
-                            .button(format!("Save {}", preview(a.described, 24)))
-                            .clicked()
-                        {
+                        let word = format!("Save {}", preview(a.described, 24));
+                        if crate::icon_item(ui, crate::Icon::Save, &word).clicked() {
                             action.save = Some(i);
                             ui.close();
                         }
                     }
                     for (i, a) in many.iter().enumerate() {
-                        if ui
-                            .button(format!("Forward {}", preview(a.described, 24)))
-                            .clicked()
-                        {
+                        let word = format!("Forward {}", preview(a.described, 24));
+                        if crate::icon_item(ui, crate::Icon::Forward, &word).clicked() {
                             action.forward = Some(i);
                             ui.close();
                         }

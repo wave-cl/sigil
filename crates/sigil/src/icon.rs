@@ -137,6 +137,10 @@ icons! {
     Forward => "Next",
     /// Put the text beside it on the clipboard.
     Copy => "Copy",
+    /// Tell this room's admins about a message (SIP-56).
+    Flag => "Report",
+    /// Keep a file somewhere of your own.
+    Save => "Save",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -307,6 +311,25 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
         Icon::Forward => {
             line(p(0.20, 0.50), p(0.76, 0.50));
             path(vec![p(0.56, 0.30), p(0.78, 0.50), p(0.56, 0.70)]);
+        }
+        Icon::Flag => {
+            // A pennant on a staff: the mark for "somebody should look at
+            // this", and nothing else here is triangular.
+            line(p(0.30, 0.18), p(0.30, 0.84));
+            path(vec![p(0.30, 0.22), p(0.74, 0.36), p(0.30, 0.52)]);
+        }
+        Icon::Save => {
+            // A stroke down into a tray: what a download is everywhere,
+            // and not a floppy disc, which is a picture of a thing most
+            // people have never held.
+            line(p(0.50, 0.20), p(0.50, 0.60));
+            path(vec![p(0.34, 0.46), p(0.50, 0.62), p(0.66, 0.46)]);
+            path(vec![
+                p(0.24, 0.72),
+                p(0.24, 0.82),
+                p(0.76, 0.82),
+                p(0.76, 0.72),
+            ]);
         }
         Icon::Copy => {
             // Two sheets, the front one whole and the back one showing at

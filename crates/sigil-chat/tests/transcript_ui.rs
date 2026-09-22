@@ -9935,3 +9935,23 @@ fn phone_way_back() {
     h.run();
     h.snapshot("phone_way_back");
 }
+
+/// The menu a long press opens, on a phone. A picture, because it was six
+/// named buttons of six widths until it was looked at on the device.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_message_menu() {
+    let mut state = a_conversation();
+    // Somebody else's message: the menu that carries the most -- a reply,
+    // their key, a direct message, the safety words, a report.
+    state.open = Some([8u8; 32]);
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "the second one, then");
+    finger_down(&mut h, bubble.center());
+    h.run_steps(20);
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_message_menu");
+}
