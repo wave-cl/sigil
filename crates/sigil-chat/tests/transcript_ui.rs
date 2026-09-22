@@ -244,6 +244,7 @@ fn a_conversation() -> ChatState {
         attested: std::collections::HashMap::new(),
         succeeded: std::collections::HashMap::new(),
         wake: None,
+        moved_to: None,
         devices: Vec::new(),
         linked: None,
         credential: None,
