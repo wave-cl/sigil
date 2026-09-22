@@ -45,6 +45,15 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
     // width; there the key is shortened -- the full one is still the row's
     // name for the tree, and the tooltip -- and the meter takes a share.
     let narrow = ui.available_width() < tokens::NARROW_WIDTH;
+    // A phone's theme makes every row a control's height for the buttons'
+    // sake; here there are none, and a finger's height between a key and
+    // its detail line reads as two rows. A line tall, as the conversation
+    // row does.
+    if narrow {
+        let line = ui.text_style_height(&egui::TextStyle::Body);
+        ui.spacing_mut().interact_size.y = line;
+        ui.spacing_mut().item_spacing.y = tokens::SPACING_XXS;
+    }
     for row in rows {
         ui.horizontal(|ui| {
             crate::dot(
