@@ -770,13 +770,27 @@ fn member_actions_ui(
         let more =
             sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "What may be done about them");
         egui::Popup::menu(&more).show(|ui| {
+            // Rows with their icons, the shape every menu has: this one was
+            // two words and a bare icon under them.
             for (label, hover, act) in acts {
-                if ui.button(label.as_str()).on_hover_text(*hover).clicked() {
+                let icon = match act {
+                    MemberAct::Verify => sigil_ui::Icon::Verified,
+                    MemberAct::Kick => sigil_ui::Icon::Close,
+                    MemberAct::Grant(_) => sigil_ui::Icon::People,
+                    MemberAct::Mute(true) => sigil_ui::Icon::BellOff,
+                    MemberAct::Mute(false) => sigil_ui::Icon::Bell,
+                    MemberAct::Block(true) => sigil_ui::Icon::Muted,
+                    MemberAct::Block(false) => sigil_ui::Icon::Sound,
+                };
+                if sigil_ui::icon_item(ui, icon, label)
+                    .on_hover_text(*hover)
+                    .clicked()
+                {
                     chose = Some(*act);
                 }
             }
             // The whole key, which the row itself has no width for.
-            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy key").clicked() {
+            if sigil_ui::icon_item(ui, sigil_ui::Icon::Copy, "Copy key").clicked() {
                 ui.ctx().copy_text(key.to_string());
             }
         });
