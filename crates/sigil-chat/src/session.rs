@@ -3987,7 +3987,14 @@ async fn refresh_devices(chat: &mut Chat, state: &watch::Sender<ChatState>, desk
 ///
 /// It rides inside the message, which is capped, so this has to stay small
 /// enough that a photograph does not push the post over the limit on its own.
-const THUMBNAIL_EDGE: u32 = 96;
+///
+/// **As large as the cap allows, not as small as it is sure to.** At 96 it
+/// always fitted and always looked it: a phone draws a clip's thumbnail over
+/// seven hundred device pixels, and 96 of them stretched that far is the blur
+/// somebody sees before they press play. `thumbnail_of` starts here and steps
+/// down until one fits, so a picture that compresses well keeps this size and
+/// a busy one still gets something.
+const THUMBNAIL_EDGE: u32 = 192;
 
 /// A small picture of an image file, to carry inside the message.
 ///
@@ -4109,12 +4116,24 @@ fn thumbnail_of(image: &image::DynamicImage) -> Option<Vec<u8>> {
     // Lossless and with alpha first; then lossy, then smaller and lossy. A
     // JPEG has no alpha, so it is encoded from the colour channels alone --
     // the encoder refuses RGBA outright rather than dropping the channel.
-    let attempts: [(u32, ImageFormat, Option<u8>); 4] = [
-        (THUMBNAIL_EDGE, ImageFormat::Png, None),
-        (THUMBNAIL_EDGE, ImageFormat::Jpeg, Some(80)),
-        (THUMBNAIL_EDGE * 2 / 3, ImageFormat::Jpeg, Some(70)),
-        (THUMBNAIL_EDGE / 2, ImageFormat::Jpeg, Some(60)),
+    // Lossless and with alpha first *for a picture that has any* -- a JPEG
+    // has none, and the encoder refuses RGBA outright rather than dropping
+    // the channel -- and then the ladder, biggest first. A picture with
+    // nothing transparent skips the PNG: at this size it is several times
+    // the cap, and its only purpose is the alpha.
+    let alpha = image.color().has_alpha();
+    let ladder = [
+        (THUMBNAIL_EDGE, ImageFormat::Jpeg, Some(72)),
+        (THUMBNAIL_EDGE * 2 / 3, ImageFormat::Jpeg, Some(72)),
+        (THUMBNAIL_EDGE / 2, ImageFormat::Jpeg, Some(75)),
+        (THUMBNAIL_EDGE / 3, ImageFormat::Jpeg, Some(70)),
+        (THUMBNAIL_EDGE / 4, ImageFormat::Jpeg, Some(60)),
     ];
+    let attempts: Vec<(u32, ImageFormat, Option<u8>)> = alpha
+        .then_some((THUMBNAIL_EDGE / 2, ImageFormat::Png, None))
+        .into_iter()
+        .chain(ladder)
+        .collect();
     for (edge, format, quality) in attempts {
         let small = image.thumbnail(edge, edge);
         let mut out = std::io::Cursor::new(Vec::new());
@@ -7547,6 +7566,56 @@ mod fetch_tests {
         assert!(
             held_back(&desk, &blob),
             "gone stays gone, however long anybody waits"
+        );
+    }
+}
+
+/// How large a preview actually comes out.
+#[cfg(test)]
+mod preview_size_tests {
+    use super::{MAX_PREVIEW, THUMBNAIL_EDGE, thumbnail_of};
+
+    /// A photograph — smooth, which is what a camera gives — keeps most of
+    /// the edge the cap allows. **The number that matters is the pixels**:
+    /// this was 96 across for as long as it existed, and a phone draws a
+    /// clip's thumbnail over seven hundred device pixels.
+    #[test]
+    fn a_photograph_gets_a_preview_worth_looking_at() {
+        let photo = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(1920, 1080, |x, y| {
+            // A gradient with a soft shape in it: what a JPEG is for.
+            let r = (x * 255 / 1920) as u8;
+            let g = (y * 255 / 1080) as u8;
+            image::Rgb([r, g, 128])
+        }));
+        let preview = thumbnail_of(&photo).expect("a preview");
+        assert!(preview.len() <= MAX_PREVIEW, "{} bytes", preview.len());
+        let decoded = image::load_from_memory(&preview).expect("it decodes");
+        assert!(
+            decoded.width() >= THUMBNAIL_EDGE * 2 / 3,
+            "a photograph's preview came out {} pixels across, against an edge of \
+             {THUMBNAIL_EDGE}",
+            decoded.width()
+        );
+    }
+
+    /// And a picture that will not compress still gets one, smaller,
+    /// inside the cap. The ladder's whole purpose, and the control for the
+    /// test above: a single size would either fail here or be tiny there.
+    #[test]
+    fn a_busy_picture_still_gets_one_that_fits() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let noise = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(800, 600, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let b = seed.to_le_bytes();
+            image::Rgba([b[0], b[1], b[2], 255])
+        }));
+        let preview = thumbnail_of(&noise).expect("a preview");
+        assert!(
+            preview.len() <= MAX_PREVIEW,
+            "{} bytes against {MAX_PREVIEW}",
+            preview.len()
         );
     }
 }

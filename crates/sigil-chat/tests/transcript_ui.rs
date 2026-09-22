@@ -10859,3 +10859,46 @@ fn a_clip_opens_on_the_whole_screen_with_its_own_controls() {
         text_of(&h)
     );
 }
+
+/// **A file on its way is on screen while it goes.**
+///
+/// A message with nothing but a file in it had no echo at all: between the
+/// press and the exchange's answer the transcript showed nothing whatever,
+/// and on a phone's uplink with a twenty-megabyte clip that is a minute of
+/// a press that did nothing.
+#[test]
+fn a_file_on_its_way_is_drawn_while_it_goes() {
+    let (mut h, app) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let dir = tempfile::tempdir().expect("a directory");
+    let file = dir.path().join("holiday.png");
+    std::fs::write(&file, a_png()).expect("write it");
+    app.borrow_mut()
+        .stage_for_test(me(), "", vec![file.clone()]);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("holiday.png"),
+        "the staged file is not in the composer: {}",
+        text_of(&h)
+    );
+
+    h.get_by_label("Send").click();
+    h.run();
+    h.run();
+    // In the transcript, above the box -- not the staged row inside the
+    // composer, which is what it looked like before the echo carried
+    // files and is the thing this has to tell apart.
+    let composer = h.get_by_label("Attach a file").rect();
+    let above: Vec<egui::Rect> = h
+        .get_all_by_label_contains("holiday.png")
+        .map(|n| n.rect())
+        .filter(|r| r.bottom() < composer.top())
+        .collect();
+    assert!(
+        !above.is_empty(),
+        "a file in flight is nowhere in the transcript: {}",
+        text_of(&h)
+    );
+}

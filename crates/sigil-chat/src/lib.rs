@@ -885,6 +885,35 @@ fn member_actions_ui(
 /// your behalf and not mentioned.
 /// What the bubble is told about a video, from the pane's player for it if
 /// there is one and the message's own word otherwise.
+/// A decoded frame, no larger than a bubble can show it.
+///
+/// The long edge is the width a picture is drawn at on the widest pane sigil
+/// has, doubled for the pixels a phone's screen has per point. Above that the
+/// bytes are held for nothing: eight megabytes a clip, in textures that live
+/// as long as the conversation is open.
+fn bounded_still(image: egui::ColorImage) -> egui::ColorImage {
+    const EDGE: usize = 960;
+    let [w, h] = [image.width(), image.height()];
+    let long = w.max(h);
+    if long <= EDGE || w == 0 || h == 0 {
+        return image;
+    }
+    let (to_w, to_h) = (w * EDGE / long, h * EDGE / long);
+    let (to_w, to_h) = (to_w.max(1), to_h.max(1));
+    let mut out = egui::ColorImage::new([to_w, to_h], vec![egui::Color32::BLACK; to_w * to_h]);
+    for y in 0..out.height() {
+        for x in 0..out.width() {
+            // Nearest, and deliberately: this is a thumbnail of a moving
+            // picture, drawn smaller again by whoever shows it, and a
+            // filter here costs a frame's worth of work for a difference
+            // the bubble's own scaling hides.
+            let from = image[(x * w / out.width(), y * h / out.height())];
+            out[(x, y)] = from;
+        }
+    }
+    out
+}
+
 fn video_view<'a>(
     pane: &'a Pane,
     a: &'a session::Attached,
@@ -899,7 +928,12 @@ fn video_view<'a>(
         sigil_ui::Standing::Held
     };
     sigil_ui::Video {
-        frame: playing.and_then(|p| p.texture.as_ref()),
+        // The player's picture while one is playing; otherwise the clip's
+        // own first frame if it has been decoded, and the sender's small
+        // preview only until it has.
+        frame: playing
+            .and_then(|p| p.texture.as_ref())
+            .or_else(|| pane.stills.get(&a.id)),
         preview: &a.preview,
         id: &a.id,
         standing,
@@ -1161,6 +1195,13 @@ struct Pane {
     /// start the moment they do -- in the viewer, which is where a press
     /// on a video in the transcript goes.
     play_when_fetched: HashSet<String>,
+    /// A clip's own first frame, decoded once the blob is here and kept as
+    /// a texture: the sender's preview is 96 pixels across (SIP-18 caps one
+    /// at 8 KiB) and a bubble on this phone draws it over seven hundred.
+    stills: HashMap<String, egui::TextureHandle>,
+    /// Clips whose first frame would not decode, so it is not tried again
+    /// every pass. What is wrong is said by `unplayable` when one is opened.
+    no_still: HashSet<String>,
     /// Which message each of those is on, so the viewer can open on it.
     open_when_fetched: HashMap<String, (u64, usize)>,
     /// The viewer is showing a video on the whole screen; put back when it
@@ -1437,6 +1478,8 @@ impl Default for Pane {
             claim_pending: None,
             players: HashMap::new(),
             play_when_fetched: HashSet::new(),
+            stills: HashMap::new(),
+            no_still: HashSet::new(),
             open_when_fetched: HashMap::new(),
             whole_screen: false,
             unplayable: HashMap::new(),
@@ -1995,6 +2038,60 @@ impl ChatApp {
     }
 
     /// Start playing a video whose bytes are in hand.
+    /// A sharp first frame for one clip whose bytes are here, decoded once.
+    ///
+    /// **The sender's preview is not enough on a phone.** SIP-18 caps it at
+    /// eight kilobytes, so it is 96 pixels across, and a bubble draws it over
+    /// 240 points -- seven hundred device pixels on this phone. Once the blob
+    /// itself has arrived there is a better picture in it: the clip's own
+    /// first frame.
+    ///
+    /// One a pass, and never the same one twice. Decoding a keyframe is a few
+    /// milliseconds of the interface's thread; doing every clip in a long
+    /// conversation in one pass would be a stall, and retrying one that will
+    /// not decode would be a stall every pass for ever. The frame is scaled
+    /// to what a bubble can show before it becomes a texture -- a 1080p still
+    /// is eight megabytes of it otherwise, per clip.
+    fn still_for_a_clip(&mut self, at: &At, state: &ChatState, ctx: &egui::Context) {
+        /// How many of these a conversation keeps. Each is a texture of
+        /// about four megabytes; a conversation full of clips would hold
+        /// the lot of them for as long as it is open, for pictures nobody
+        /// is looking at. The ones already made are kept -- they are the
+        /// clips nearest what is being read.
+        const KEEP: usize = 6;
+        let pane = self.pane(at);
+        if pane.stills.len() >= KEEP {
+            return;
+        }
+        let want = state
+            .lines
+            .iter()
+            .flat_map(|l| l.attachments.iter())
+            .find(|a| {
+                a.kind == sigil_ui::attachment::VIDEO
+                    && a.bytes.is_some()
+                    && !pane.stills.contains_key(&a.id)
+                    && !pane.no_still.contains(&a.id)
+                    && !pane.players.contains_key(&a.id)
+            })
+            .map(|a| (a.id.clone(), a.bytes.clone().expect("checked just above")));
+        let Some((id, bytes)) = want else {
+            return;
+        };
+        match sigil_video::still(bytes) {
+            Ok((_, image)) => {
+                let image = bounded_still(image);
+                let texture =
+                    ctx.load_texture(format!("still-{id}"), image, egui::TextureOptions::LINEAR);
+                self.pane(at).stills.insert(id, texture);
+            }
+            Err(why) => {
+                tracing::debug!("no still for {id}: {why}");
+                self.pane(at).no_still.insert(id);
+            }
+        }
+    }
+
     fn start_video(&mut self, at: &At, ctx: &egui::Context, id: &str, bytes: std::sync::Arc<[u8]>) {
         let pane = self.pane(at);
         pane.play_when_fetched.remove(id);
@@ -4255,6 +4352,13 @@ impl ChatApp {
             // it, which is not what "whole screen" means. Escape, the bar's
             // own control, or a press on the backdrop bring the window back.
             let whole = ui.ctx().viewport_rect();
+            // **One area, the video and its bar in it.** The bar was an
+            // area of its own over the video's, and on the phone it was
+            // nowhere to be seen: two areas of the same order are stacked
+            // in whatever way egui last moved them, and the one holding a
+            // widget that gets pressed comes to the top. Drawn inside,
+            // after the picture, it is over the picture by construction.
+            let safe = sigil::Insets::safe_rect(&egui_ctx);
             egui::Area::new(egui::Id::new(("video-whole", seq, index)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(whole.min)
@@ -4271,19 +4375,23 @@ impl ChatApp {
                             .layout(egui::Layout::top_down(egui::Align::Min)),
                     );
                     done = sigil_ui::video(&mut inner, &view, whole.width(), whole.height());
-                });
-            // What is done *to* the clip, over the picture at the top: the
-            // way out, and the two things anybody wants a clip for. The
-            // video's own bar is along the bottom of it and has the
-            // playing.
-            let safe = sigil::Insets::safe_rect(&egui_ctx);
-            egui::Area::new(egui::Id::new(("video-bar", seq, index)))
-                .order(egui::Order::Foreground)
-                .fixed_pos(safe.left_top() + egui::vec2(tokens::SPACING_SM, tokens::SPACING_SM))
-                .show(&egui_ctx, |ui| {
-                    ui.set_width(safe.width() - 2.0 * tokens::SPACING_SM);
-                    ui.horizontal(|ui| {
-                        ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+
+                    // What is done *to* the clip, along the top and inside
+                    // what the system leaves: the way out at the left, and
+                    // at the right the two things anybody wants a clip
+                    // for. The video's own bar is along the bottom of it
+                    // and has the playing.
+                    let row = egui::Rect::from_min_size(
+                        egui::pos2(
+                            safe.left() + tokens::SPACING_SM,
+                            safe.top() + tokens::SPACING_SM,
+                        ),
+                        egui::vec2(safe.width() - 2.0 * tokens::SPACING_SM, tokens::BUTTON_LG),
+                    );
+                    let mut top =
+                        ui.new_child(egui::UiBuilder::new().id_salt("clip-bar").max_rect(row));
+                    top.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                    top.horizontal(|ui| {
                         if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
                             close = true;
                         }
@@ -5511,6 +5619,9 @@ impl ChatApp {
             .iter()
             .find(|c| Some(c.channel) == state.open)
             .is_some_and(|c| c.public == Some(true));
+        // One clip's first frame a pass, until every clip on screen has
+        // one: what the bubbles draw instead of a 96-pixel preview.
+        self.still_for_a_clip(at, state, ui.ctx());
         let phone = sigil::Form::of(ui.ctx()).is_phone();
         if !phone {
             if self.ringing_ui(ctx, at, state, ui, theme) {
@@ -6100,31 +6211,58 @@ impl ChatApp {
         //
         // Not an edit: a rewrite has a message of its own on screen already,
         // and drawing the new words under it would read as two messages.
-        let echo: Vec<session::Line> = self
-            .pane(at)
-            .in_flight
-            .iter()
-            .filter(|u| u.editing.is_none() && !u.composing.trim().is_empty())
-            .enumerate()
-            .map(|(i, u)| session::Line {
-                seq: ECHO_SEQ + i as u64,
-                who: at.0,
-                name: None,
-                mine: true,
-                at: now,
-                text: u.composing.clone(),
-                redacted: false,
-                edited: false,
-                via: None,
-                reactions: Vec::new(),
-                reply_to: None,
-                receipt: None,
-                attachments: Vec::new(),
-                standing: session::Standing::Sound,
-                mentions: Vec::new(),
-                me_mentioned: false,
-            })
-            .collect();
+        let echo: Vec<session::Line> =
+            self.pane(at)
+                .in_flight
+                .iter()
+                // **And the files.** A message that is only a picture had no
+                // echo at all: the phone showed nothing whatever between the
+                // press and the exchange's answer, which on an uplink and a
+                // twenty-megabyte clip is a minute of a press that did nothing.
+                .filter(|u| {
+                    u.editing.is_none() && !(u.composing.trim().is_empty() && u.staged.is_empty())
+                })
+                .enumerate()
+                .map(|(i, u)| session::Line {
+                    seq: ECHO_SEQ + i as u64,
+                    who: at.0,
+                    name: None,
+                    mine: true,
+                    at: now,
+                    text: u.composing.clone(),
+                    redacted: false,
+                    edited: false,
+                    via: None,
+                    reactions: Vec::new(),
+                    reply_to: None,
+                    receipt: None,
+                    attachments: u
+                        .staged
+                        .iter()
+                        .enumerate()
+                        .map(|(k, f)| session::Attached {
+                            kind: f.kind,
+                            described: f.name.clone(),
+                            // What is not known until the exchange has it: the
+                            // size it will be stored as, the shape the decoder
+                            // will say, and the blob's own name.
+                            size: 0,
+                            duration_ms: None,
+                            shape: None,
+                            preview: f.preview.clone().unwrap_or_else(|| {
+                                std::sync::Arc::from(Vec::new().into_boxed_slice())
+                            }),
+                            missing: false,
+                            held: false,
+                            bytes: None,
+                            id: format!("sending-{}-{k}", u.token),
+                        })
+                        .collect(),
+                    standing: session::Standing::Sound,
+                    mentions: Vec::new(),
+                    me_mentioned: false,
+                })
+                .collect();
 
         for line in state.lines.iter().chain(echo.iter()) {
             // Nothing is done *to* a message that is not there yet: its
@@ -6228,6 +6366,9 @@ impl ChatApp {
                     id: &a.id,
                     video: (a.kind == sigil_ui::attachment::VIDEO)
                         .then(|| video_view(pane, a, sigil_ui::video::Place::Bubble)),
+                    // Still going up: this line is one of ours that the
+                    // exchange has not answered about yet.
+                    sending: line.seq >= ECHO_SEQ,
                 })
                 .collect();
             // The keys as text, owned here, so the chips can borrow them.

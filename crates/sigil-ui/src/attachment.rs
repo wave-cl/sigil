@@ -109,6 +109,30 @@ pub struct Attachment<'a> {
     /// For a video: the player's view of it, if the caller has one. Drawn
     /// in place of the file row. See [`crate::video`].
     pub video: Option<crate::Video<'a>>,
+    /// This one is still going up: the message is in flight and its bytes
+    /// are on their way to the exchange. A mark over the thumbnail, because
+    /// sending a clip over a phone's uplink takes long enough that nothing
+    /// on screen saying so reads as nothing happening.
+    pub sending: bool,
+}
+
+/// The mark on something still going up: the picture dimmed, and a spinner
+/// in the middle of it.
+///
+/// **Turning, not filling.** A bar would have to say *how far*, and nothing
+/// here knows: the chunks go in one call and the exchange answers when it
+/// has them all. A spinner says "this is happening" and promises no number
+/// it cannot keep.
+pub fn sending_mark(ui: &mut egui::Ui, rect: egui::Rect) {
+    ui.painter().rect_filled(
+        rect,
+        tokens::RADIUS_MD,
+        egui::Color32::from_black_alpha(120),
+    );
+    let side = tokens::BUTTON_LG.min(rect.width() * 0.4).max(16.0);
+    let at = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(at).id_salt("sending"));
+    inner.add(egui::Spinner::new().size(side).color(egui::Color32::WHITE));
 }
 
 /// How large a picture is drawn in a transcript.
@@ -205,7 +229,11 @@ fn draw_preview(
     match image.load_for_size(ui.ctx(), rect.size()) {
         Ok(egui::load::TexturePoll::Ready { texture }) => {
             let drawn = fit(texture.size, side, false);
-            image.paint_at(ui, egui::Rect::from_center_size(rect.center(), drawn));
+            let at = egui::Rect::from_center_size(rect.center(), drawn);
+            image.paint_at(ui, at);
+            if a.sending {
+                sending_mark(ui, at);
+            }
             true
         }
         _ => false,

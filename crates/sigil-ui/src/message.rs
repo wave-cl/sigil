@@ -2133,6 +2133,7 @@ mod tests {
                 size: 2100,
                 id: "abc123",
                 video: None,
+                sending: false,
             };
             // A limit wide enough that nothing here is clamped by it: what
             // is being measured is what the bubble *asks for*.
