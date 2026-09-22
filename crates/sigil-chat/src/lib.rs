@@ -60,6 +60,13 @@ pub enum Route {
     Search,
 }
 
+/// What a search here can and cannot reach. Said every time, in the count
+/// and again on hovering it, not once in a help page: an empty result means
+/// "not in what this client has opened", which is a different fact from
+/// "never said", and only this client can tell them apart.
+const ONLY_HERE: &str = "Searches what this client has opened. The exchange holds \
+                         ciphertext and cannot search it.";
+
 /// The exchange to suggest to an identity that names none.
 ///
 /// A fresh identity on a fresh machine has no handle sidecar and no
@@ -4742,8 +4749,6 @@ impl ChatApp {
         // in a help page: an empty result here means "not in what this
         // client has opened", which is a different fact from "never said",
         // and only this client can tell them apart.
-        const ONLY_HERE: &str = "Searches what this client has opened. The exchange holds \
-                                 ciphertext and cannot search it.";
         if state.hits.is_empty() {
             ui.colored_label(
                 theme.text_secondary,
@@ -8610,7 +8615,15 @@ impl ChatApp {
         let before = self.pane(at).chosen;
         self.search_ui(at, &state, ui);
         ui.add_space(tokens::SPACING_SM);
-        self.hits_ui(at, &state, ui, &theme, now);
+        // **An empty box has not failed to find anything.** The card opens
+        // with nothing typed, and "Nothing here matched." under an empty
+        // box is an answer to a question nobody has asked yet. What it can
+        // reach is worth saying there instead.
+        if self.pane(at).searching.trim().is_empty() {
+            ui.colored_label(theme.text_muted, egui::RichText::new(ONLY_HERE).small());
+        } else {
+            self.hits_ui(at, &state, ui, &theme, now);
+        }
         // A hit was pressed, or Enter took the newest: the conversation is
         // what was asked for, and it is on the card behind this one.
         if self.pane(at).chosen != before {

@@ -10638,3 +10638,34 @@ fn a_phone_says_what_is_wrong_beside_the_box() {
         "the trouble at {said:?} is over the box at {box_row:?}"
     );
 }
+
+/// The card opens on an empty box, and an empty box has not failed to find
+/// anything: it says what a search here reaches, and says "Nothing here
+/// matched." only once something has been looked for.
+#[test]
+fn an_empty_search_card_has_not_failed_to_find_anything() {
+    let mut state = a_search();
+    state.open = None;
+    state.hits = Vec::new();
+    let mut h = harness_phone(state, sigil_chat::Route::Search);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("Nothing here matched"),
+        "an empty box reports a failed search: {said}"
+    );
+    assert!(
+        said.contains("Searches what this client has opened"),
+        "it does not say what it can reach: {said}"
+    );
+
+    search_for(&mut h, "nothing like this");
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Nothing here matched"),
+        "a search that found nothing says nothing else: {}",
+        text_of(&h)
+    );
+}
