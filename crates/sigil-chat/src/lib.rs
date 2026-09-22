@@ -2085,7 +2085,7 @@ impl ChatApp {
                 self.pane(at).stills.insert(id, texture);
             }
             Err(why) => {
-                tracing::debug!("no still for {id}: {why}");
+                tracing::warn!("no still for {id}: {why}");
                 self.pane(at).no_still.insert(id);
             }
         }
