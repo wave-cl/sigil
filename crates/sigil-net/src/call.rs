@@ -467,6 +467,93 @@ pub fn spawn_call(
     }
 }
 
+/// **SIP-39: call somebody at another exchange, by name.**
+///
+/// [`spawn_call`] dials a key at *this* exchange and rendezvous with it
+/// there. A person whose account lives somewhere else has no session here to
+/// meet in, so the call is placed at this exchange for `target` --
+/// `name@domain` -- and this exchange carries it to theirs, which rings
+/// them. The media never touches either: the session key is derived over the
+/// two identities and the two ephemerals, and no exchange on the path, near
+/// or far, ever holds it.
+///
+/// `target` is a string rather than a key on purpose. A key is a thing you
+/// already have; the point of calling across exchanges is reaching somebody
+/// you know by name, and it is their home that turns the name into a key.
+/// Nothing here learns it -- the handshake does, inside the session -- so
+/// `CallState::peer` stays empty and the interface shows what was typed.
+pub fn spawn_cross_call(
+    dial: impl Into<Dial>,
+    signer: SoftwareSigner,
+    target: String,
+    wait: u64,
+    opts: CallOpts,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> CallHandle {
+    let dial = dial.into();
+    let (state_tx, state_rx) = watch::channel(CallState {
+        phase: Phase::Connecting,
+        ..CallState::default()
+    });
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let wake = Arc::new(wake);
+
+    let ending = state_tx.clone();
+    let ending_wake = wake.clone();
+    let hanging_up = state_tx.clone();
+    let hanging_up_wake = wake.clone();
+    let task = tokio::spawn(async move {
+        let mut bridge = Bridge {
+            state: state_tx,
+            events: events_tx,
+            wake,
+        };
+        let result = async {
+            // The endpoint, by the same three ways a direct call reaches
+            // one. A borrowed connection is this identity's own session, so
+            // the call is placed on the connection it already holds.
+            let endpoint = match &dial {
+                Dial::On(held) => {
+                    let (_, endpoint) = held.now().ok_or("not connected to the exchange")?;
+                    endpoint
+                }
+                Dial::At(e) => *e,
+                Dial::Discover(layers) => engine::resolve(&layers[..], &mut bridge).await?,
+                Dial::Via { .. } => return Err(NO_CALL_TUNNEL.to_string()),
+            };
+            // No ring from here: the ring is the *far* exchange's to send,
+            // once ours has carried the request to it. Ringing the target's
+            // key at our own exchange would reach nobody, since that is the
+            // whole reason this path exists.
+            let (client, session, id) =
+                engine::establish_cross(endpoint, &signer, &target, wait, &mut bridge).await?;
+            engine::call(client, session, id, opts, &mut bridge).await
+        }
+        .await;
+
+        match &result {
+            Ok(_) => tracing::info!("call over"),
+            Err(e) => tracing::warn!("call over with trouble: {e}"),
+        }
+        ending.send_modify(|s| {
+            s.phase = Phase::Ended;
+            if let Err(e) = &result {
+                s.trouble = Some(e.clone());
+            }
+        });
+        (ending_wake)();
+        result
+    });
+
+    CallHandle {
+        state: state_rx,
+        events: events_rx,
+        task,
+        ending: hanging_up,
+        wake: hanging_up_wake,
+    }
+}
+
 /// Join a room, on a task of its own.
 ///
 /// A room is not a call with more people in it. Nobody is dialled: holding the

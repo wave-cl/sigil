@@ -56,3 +56,26 @@ from two homes whose bar says **direct** is that evidence; one that says
 **via exchange** with a reason naming the NAT is the expected other
 outcome, and still a call. `sqex/docs/sip25-field-test.md` has the
 procedure.
+
+## Somebody at another exchange
+
+A call reaches a key at *your* exchange: both of you have a session there,
+and the exchange introduces you. Somebody whose account lives somewhere else
+has no session at yours to be introduced in — so the call is placed at your
+exchange **for their name**, `ada@b.test`, and your exchange carries the
+request to theirs, which rings them (SIP-39).
+
+Type the name where you would type a key. A key is base58 and base58 has no
+`@` in it, so the two cannot be confused; anything that is neither is still
+refused as a key. Until this, `ada@b.test` was refused with "that is not a
+key", which is true and useless: a name is exactly how you reach somebody
+whose exchange is not yours.
+
+Neither exchange hears the call. The session key is derived over the two
+identities and the two ephemerals, the same way a call at one exchange is,
+and no exchange on the path — near or far — ever holds it.
+
+**Placing one works; answering one does not yet.** A call carried *to* this
+exchange arrives as a `CrossCall` ring on the event stream, and nothing in
+sigil is subscribed for it, so a call from another exchange is placed and
+never answered. That is SIP-39's other half and it is not built.

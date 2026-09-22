@@ -69,6 +69,19 @@ impl Default for VoiceApp {
     }
 }
 
+/// Whether what was typed names somebody at another exchange rather than a
+/// key (SIP-38's `name@domain`).
+///
+/// By shape, and decided before the key parse: a key is base58 and base58
+/// has no `@`, so the two cannot be confused. Anything that is neither is
+/// still refused as a key, in the same words as before -- this only takes
+/// the one shape that *was* refused and had no business being.
+fn is_handle(typed: &str) -> bool {
+    matches!(typed.rsplit_once('@'), Some((label, domain))
+        if !label.is_empty() && !domain.is_empty())
+        && typed.parse::<PubKey>().is_err()
+}
+
 /// What to say when there is neither a connection to borrow nor an exchange to
 /// dial. One string, because both halves of this tab say it.
 const NOWHERE: &str = "no exchange configured — set SQEX_SERVER or ~/.sqnr/config";
@@ -162,7 +175,38 @@ impl VoiceApp {
             self.peer_trouble = Some("unlock your identity first".into());
             return;
         };
-        let peer: PubKey = match self.peer_input.trim().parse() {
+        let typed = self.peer_input.trim().to_string();
+        // **SIP-39: a name at another exchange is not a bad key.** Typing
+        // `ada@b.test` was refused with "that is not a key", which is true
+        // and useless: a person whose account lives elsewhere is exactly who
+        // you reach by name, and it is their home that turns the name into
+        // one. The call is placed here and carried there.
+        //
+        // Decided before the key parse, and by the shape of what was typed:
+        // a key is base58 and never has an `@` in it, so the two cannot be
+        // confused. Anything else is still refused as a key, in the same
+        // words as before.
+        if is_handle(&typed) {
+            let where_to = self.where_to(account);
+            let Some(reach) =
+                sigil_net::Dial::borrowed_or(held, where_to.clone().unwrap_or_default())
+            else {
+                self.peer_trouble = Some(where_to.err().unwrap_or_else(|| NOWHERE.into()));
+                return;
+            };
+            let wake = egui_ctx.clone();
+            self.call = Some(sigil_net::spawn_cross_call(
+                reach,
+                unlocked.signer(),
+                typed,
+                120,
+                CallOpts::default(),
+                move || wake.request_repaint(),
+            ));
+            self.log.clear();
+            return;
+        }
+        let peer: PubKey = match typed.parse() {
             Ok(k) => k,
             Err(e) => {
                 self.peer_trouble = Some(format!("that is not a key: {e}"));
@@ -408,7 +452,7 @@ impl VoiceApp {
             sigil_ui::field(
                 ui,
                 &mut self.peer_input,
-                "their key, base58",
+                "their key, or name@domain at another exchange",
                 box_width(ui, 420.0, 90.0),
             );
             if ui.button("Call").clicked() {
@@ -585,6 +629,36 @@ impl VoiceApp {
                     ui.colored_label(theme.text_muted, egui::RichText::new(line).monospace());
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+
+    /// **SIP-39: a name at another exchange is not a bad key.**
+    ///
+    /// Typing `ada@b.test` into the call field was refused with "that is not
+    /// a key" -- true, and useless: somebody whose account lives elsewhere is
+    /// exactly who you reach by name, and it is their home that turns the
+    /// name into one. This is the shape that decides, on its own, because
+    /// the branch it guards dials an exchange and a test must not.
+    #[test]
+    fn a_name_at_a_domain_is_reached_by_name_and_a_key_is_not() {
+        let key = sigil::Account::unlocked_for_test([3u8; 32])
+            .unlocked()
+            .expect("unlocked")
+            .me()
+            .to_string();
+        assert!(is_handle("ada@b.test"));
+        assert!(is_handle("ada@sub.b.test"));
+        // A key is base58 and base58 has no `@`, so the two cannot collide.
+        assert!(!is_handle(&key), "a real key was read as a handle: {key}");
+        // Neither is anything that is only half of one: those are still
+        // refused as keys, in the same words as before.
+        for not in ["", "ada", "ada@", "@b.test", "@"] {
+            assert!(!is_handle(not), "{not:?} was read as a handle");
+        }
     }
 }
 
