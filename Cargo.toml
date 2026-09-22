@@ -45,7 +45,18 @@ squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.27.0" }
 # Upstream egui, not notedeck's damus-io forks. 0.36 moved eframe::App to a
 # `logic`/`ui` split, where `logic` runs even while the window is hidden --
 # which is what lets a call keep running when sigil is closed to the tray.
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11"] }
+# `links` is in eframe's defaults and those are off here, so it has to be
+# named: without it `egui-winit` compiles `open_url_in_browser` to a log line
+# and **every link in sigil is a dead control**. The update check offers "See
+# the release" and "What changed"; both did nothing, on every platform, in
+# silence. `the_links_feature_is_on` asserts the crate that does the opening
+# is in the graph.
+eframe = { version = "0.36", default-features = false, features = [
+    "wgpu",
+    "wayland",
+    "x11",
+    "links",
+] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["all_loaders"] }
 egui-wgpu = "0.36"
