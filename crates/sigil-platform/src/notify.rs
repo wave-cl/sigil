@@ -12,7 +12,9 @@
 //! go out as plain notices that lead nowhere, rather than as threads that
 //! may never end.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+#[cfg(not(target_os = "android"))]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_os = "android"))]
