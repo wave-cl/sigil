@@ -885,7 +885,10 @@ async fn the_notifications_answer_takes_a_call_from_another_exchange() {
         sigil_net::CallOpts {
             source: sqex_voice::audio::Source::Tone,
             sink: sqex_voice::audio::Sink::Null,
-            seconds: Some(2),
+            // Long enough to be seen: on a slow runner a two-second call
+            // came and went between two polls, and Bob's handle was reaped
+            // before the loop saw it. The test hangs up.
+            seconds: Some(60),
             ..sigil_net::CallOpts::default()
         },
         || {},
