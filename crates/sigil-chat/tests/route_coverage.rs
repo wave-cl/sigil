@@ -324,26 +324,13 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // and said in the conversation with the old key. A transcript says so
     // only where the move was written into a room both were in.
     ("POST", "/account/succession", Chat),
-    // SIP-45: a desktop holds its stream and needs no waking; the phone
-    // client that will register an endpoint does not exist yet.
-    (
-        "POST",
-        "/wake/register",
-        NotYet(
-            "SIP-45 wake-up: sigil-android's `sigil_phone::wake` does this, and \
-             nothing in *this* workspace does -- a desktop holds its stream open \
-             and is never asleep",
-        ),
-    ),
-    (
-        "POST",
-        "/wake/forget",
-        NotYet(
-            "SIP-45 wake-up: sigil-android's `sigil_phone::wake` does this, and \
-             nothing in *this* workspace does -- a desktop holds its stream open \
-             and is never asleep",
-        ),
-    ),
+    // SIP-45: the endpoint the platform offers is left with the exchange
+    // (`Cmd::WakeEndpoint`), on every connect, and taken back when the
+    // distributor goes -- `tests/wake_session.rs`, against an exchange that
+    // then wakes a loopback distributor. A desktop offers no endpoint and
+    // holds its stream open.
+    ("POST", "/wake/register", Chat),
+    ("POST", "/wake/forget", Chat),
     // ---- exchange to exchange --------------------------------------------
     ("POST", "/peer/hello", NotAClientRoute),
     ("POST", "/peer/pull", NotAClientRoute),
@@ -533,7 +520,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 87,
+        reached, 89,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

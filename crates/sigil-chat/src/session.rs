@@ -627,6 +627,11 @@ pub struct ChatState {
     /// the registry is what knows for a contact who moved while nothing was
     /// said. `None` is the registry's answer that they were not.
     pub succeeded: HashMap<PubKey, Option<PubKey>>,
+    /// SIP-45: what came of leaving the wake endpoint with this exchange --
+    /// "registered", "forgotten", "not offered here", or the refusal. A
+    /// readout, since a phone that quietly failed to register would go
+    /// unwoken with nothing to say why.
+    pub wake: Option<String>,
     /// Whether we may rename, invite, remove and rotate here.
     pub i_am_admin: bool,
     /// SIP-56: the open conversation's reports, as last loaded (admins).
@@ -1518,6 +1523,10 @@ pub enum Cmd {
     Attested(PubKey),
     /// SIP-44: ask the registry whether `who` was succeeded, and by whom.
     SuccessionOf(PubKey),
+    /// SIP-45: the platform's wake endpoint and how long the exchange may
+    /// keep it, or `None` to forget the one registered. Told to the exchange
+    /// now if the link is up, and again on every connect.
+    WakeEndpoint(Option<(String, u32)>),
     /// Open a conversation with one of its messages in the window: what a
     /// search result does. [`Show`](Cmd::Show) opens on the last page and a
     /// hit can be anywhere before it; this widens the window so the message
@@ -2220,6 +2229,15 @@ async fn run(
                     desk.restructure = true;
                     desk.dirty.extend(desk.channels.keys().copied());
                 }
+                // SIP-45, on every connect: a registration is idempotent
+                // and cheap, and a phone that forgot would go quiet at the
+                // end of the last ttl, silently. `wake_told` is per link:
+                // a redial is a new connection the exchange keys nothing to.
+                if chat.link() != Link::Up {
+                    desk.wake_told = false;
+                } else if !desk.wake_told && desk.wake.is_some() {
+                    tell_wake(&mut chat, &state, &mut desk).await;
+                }
                 // **SIP-30's events say which channels moved**, and that is
                 // what decides where to look. This used to drain and discard
                 // them and poll only whatever was on screen, so a message
@@ -2524,6 +2542,11 @@ struct Desk {
     /// SIP-39 §The peer directory: what this exchange federates with, read once per connection.
     peers: Vec<(PubKey, String)>,
     peers_read: bool,
+    /// SIP-45: the endpoint the platform offered, to be registered on every
+    /// connect (SIP-47 §Connecting, step 2), or `Some(None)` to forget the
+    /// one registered. `wake_told` is whether this connection was told.
+    wake: Option<Option<(String, u32)>>,
+    wake_told: bool,
     /// SIP-42: this account's other devices, the open kept toward each,
     /// and the sync running with one when it has turned up.
     siblings: crate::siblings::Siblings,
@@ -2602,6 +2625,8 @@ impl Default for Desk {
             presence: HashMap::new(),
             peers: Vec::new(),
             peers_read: false,
+            wake: None,
+            wake_told: false,
             siblings: crate::siblings::Siblings::default(),
             seed: [0; 32],
         }
@@ -3324,6 +3349,44 @@ fn took(
 }
 
 /// Fetch what has changed and publish the result.
+/// SIP-45: leave the wake endpoint with the exchange, or take it back, on
+/// the connection this session holds. The outcome is published, in words.
+async fn tell_wake(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk) {
+    let Some(wanted) = desk.wake.clone() else {
+        return;
+    };
+    let Some(mut client) = chat.connection() else {
+        return;
+    };
+    let (route, body, done) = match &wanted {
+        Some((url, ttl)) => (
+            "/wake/register",
+            sqex_proto::wake::Register {
+                ttl: (*ttl).clamp(1, sqex_proto::wake::MAX_TTL),
+                endpoint: url.clone(),
+            }
+            .encode(),
+            "registered",
+        ),
+        None => ("/wake/forget", sqex_proto::wake::forget(), "forgotten"),
+    };
+    let said = match client.post(route, body).await {
+        Ok((200, _)) => done.to_string(),
+        // SIP-45 is additive: an exchange from before it answers not_found,
+        // and the phone keeps its stream open as long as the platform lets
+        // it, which is what it did.
+        Ok((404, _)) => "not offered here".to_string(),
+        Ok((code, body)) => match sqex_proto::refusal::Refusal::decode(&body) {
+            Ok(r) => format!("refused: {r} ({code})"),
+            Err(_) => format!("refused: status {code}"),
+        },
+        Err(e) => format!("failed: {e}"),
+    };
+    tracing::info!(route, %said, "wake endpoint");
+    desk.wake_told = true;
+    state.send_modify(|s| s.wake = Some(said));
+}
+
 async fn refresh(
     chat: &mut Chat,
     state: &watch::Sender<ChatState>,
@@ -5839,6 +5902,13 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     format!("the exchange refused the statement ({code})"),
                 ),
                 Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::WakeEndpoint(endpoint) => {
+            desk.wake = Some(endpoint);
+            desk.wake_told = false;
+            if chat.link() == Link::Up {
+                tell_wake(chat, state, desk).await;
             }
         }
         Cmd::SuccessionOf(who) => match chat.succession_of(&who).await {

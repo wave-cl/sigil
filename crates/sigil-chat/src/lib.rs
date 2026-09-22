@@ -1516,6 +1516,9 @@ pub struct ChatApp {
     /// asked about, per session, so a direct message asks once on opening
     /// and not on every pass. The answer lives in the state.
     asked_succession: std::collections::HashSet<(At, PubKey)>,
+    /// SIP-45: the platform's latest word on where this device may be
+    /// woken, kept so a session started later is told too.
+    wake: Option<Option<(String, u32)>>,
     /// Files being chosen to attach, for which conversation. One at a time:
     /// the dialog is modal on a desktop and an activity on a phone, and
     /// neither runs two.
@@ -1588,6 +1591,7 @@ impl ChatApp {
             answering: None,
             announcer: announce::Announcer::new(None),
             asked_succession: std::collections::HashSet::new(),
+            wake: None,
             picking: None,
             saving: None,
             away: false,
@@ -2074,6 +2078,9 @@ impl ChatApp {
                 announcer.woken();
             });
             self.announcer.watch(at.clone(), session.watch());
+            if let Some(wake) = &self.wake {
+                session.send(Cmd::WakeEndpoint(wake.clone()));
+            }
             // **The connection this session is about to hold, offered to the
             // rest of the window.** A call and the administrative console
             // borrow it rather than dialling their own -- see
@@ -2292,6 +2299,15 @@ impl App for ChatApp {
             let ats: Vec<At> = self.sessions.keys().cloned().collect();
             for at in ats {
                 self.send_as(Some(&at), Cmd::Away(ctx.away));
+            }
+        }
+        // SIP-45: the platform's word on where to wake this device, to
+        // every session, and remembered for the ones not started yet.
+        if let Some(offered) = sigil::wake::take() {
+            let wake = offered.url.map(|url| (url, offered.ttl_secs));
+            self.wake = Some(wake.clone());
+            for session in self.sessions.values() {
+                session.send(Cmd::WakeEndpoint(wake.clone()));
             }
         }
         // What the frame knows, then what has not been said. The same

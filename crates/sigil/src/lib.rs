@@ -27,6 +27,7 @@ pub mod prefs;
 pub mod quiet;
 pub mod theme;
 pub mod tokens;
+pub mod wake;
 
 pub use account::{Account, Unlocked};
 pub use accounts::Accounts;
