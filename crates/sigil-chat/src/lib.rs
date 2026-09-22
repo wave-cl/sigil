@@ -8386,47 +8386,65 @@ impl ChatApp {
 
         for device in &state.devices {
             let key = device.device.to_string();
+            // The ring card's shape, for the ring card's reason: the key in
+            // a column beside a named button is wider than a phone, and the
+            // button was drawn over it. The row carries what is short --
+            // the mark, the short key, whether it is this one -- and the
+            // revocation at its end; the whole key and the dates have rows
+            // of their own, wrapped.
+            let mut revoke = false;
             ui.horizontal(|ui| {
                 sigil_ui::identicon(ui, &key, tokens::AVATAR_SM);
                 ui.add_space(tokens::SPACING_SM);
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(sigil_ui::message::short(&key));
-                        if device.is_this_one {
-                            ui.colored_label(theme.accent, "this device");
-                        }
-                    });
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&key).monospace().small())
-                            .selectable(true),
-                    );
-                    ui.colored_label(
-                        theme.text_muted,
-                        egui::RichText::new(format!(
-                            "linked {} · credential expires {}",
-                            sigil_ui::brief(device.added, self.now()),
-                            sigil_ui::brief(device.not_after, self.now())
-                        ))
-                        .small(),
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !device.is_this_one {
+                        revoke = sigil_ui::icon_button_as_named(
+                            ui,
+                            sigil_ui::Icon::Close,
+                            "Revoke",
+                            Some(theme.destructive),
+                            false,
+                        )
+                        .on_hover_text(
+                            "It stops acting for you. It keeps every key it was already \
+                             given, so rotate anything it could read.",
+                        )
+                        .clicked();
+                        ui.add_space(tokens::SPACING_SM);
+                    }
+                    let line = ui.text_style_height(&egui::TextStyle::Body);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), line),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label(sigil_ui::message::short(&key));
+                            if device.is_this_one {
+                                ui.colored_label(theme.accent, "this device");
+                            }
+                        },
                     );
                 });
-                if !device.is_this_one {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("Revoke").color(theme.destructive),
-                            ))
-                            .on_hover_text(
-                                "It stops acting for you. It keeps every key it was already \
-                                 given, so rotate anything it could read.",
-                            )
-                            .clicked()
-                        {
-                            self.send_as(Some(at), Cmd::RevokeDevice(device.device));
-                        }
-                    });
-                }
             });
+            ui.add(
+                egui::Label::new(egui::RichText::new(&key).monospace().small())
+                    .wrap()
+                    .selectable(true),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "linked {} · credential expires {}",
+                        sigil_ui::brief(device.added, self.now()),
+                        sigil_ui::brief(device.not_after, self.now())
+                    ))
+                    .small()
+                    .color(theme.text_muted),
+                )
+                .wrap(),
+            );
+            if revoke {
+                self.send_as(Some(at), Cmd::RevokeDevice(device.device));
+            }
             ui.separator();
         }
 

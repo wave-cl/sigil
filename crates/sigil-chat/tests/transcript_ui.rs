@@ -9582,3 +9582,78 @@ fn a_mentioned_names_card_halves_the_key_on_a_phone() {
     assert!(h.query_by_label(&key).is_some(), "{}", text_of(&h));
     assert!(h.query_by_label(&halved).is_none());
 }
+
+/// A linked device's row fits a phone, with Revoke beside the short key
+/// and the whole key under it.
+///
+/// No phone render had ever drawn a linked device: the fixture linked
+/// nothing, so the pane said "Nothing else is linked" and the row that
+/// carries a 44-character key beside a named button was never measured.
+/// It had the ring card's fault.
+#[test]
+fn a_linked_devices_row_fits_a_phone_with_revoke_off_the_key() {
+    let mut state = a_conversation();
+    state.devices = vec![
+        sigil_chat::Linked {
+            device: me(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: true,
+        },
+        sigil_chat::Linked {
+            device: them(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: false,
+        },
+    ];
+    let mut h = harness_phone(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let revoke = h.get_by_label("Revoke").rect();
+    let key = h
+        .get_all_by_label_contains(&them().to_string())
+        .map(|n| n.rect())
+        .max_by(|a, b| a.width().total_cmp(&b.width()))
+        .expect("the key is drawn");
+    assert!(revoke.width() > 0.0 && key.width() > 0.0, "a box is empty");
+    assert!(
+        !revoke.intersects(key),
+        "Revoke at {revoke:?} lies over the key at {key:?}"
+    );
+    assert!(
+        revoke.right() <= PHONE_WIDTH + 0.5,
+        "Revoke at {revoke:?} runs off the pane"
+    );
+    assert!(
+        key.top() >= revoke.bottom() - 1.0,
+        "the key is not under the row"
+    );
+    nothing_runs_off_the_edge(&h, "the Devices pane with a linked device");
+}
+
+/// The Devices pane with a second device linked, on a phone. A picture,
+/// because no render had ever drawn the row.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_devices_linked() {
+    let mut state = a_conversation();
+    state.devices = vec![
+        sigil_chat::Linked {
+            device: me(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: true,
+        },
+        sigil_chat::Linked {
+            device: them(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: false,
+        },
+    ];
+    let mut h = harness_phone(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    h.snapshot("phone_devices_linked");
+}
