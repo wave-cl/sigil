@@ -7023,43 +7023,55 @@ impl ChatApp {
                                     }
                                     w
                                 };
-                                ui.horizontal(|ui| {
-                                    // Only when there is one to show. `label`
-                                    // falls back to the first characters of
-                                    // the key, and the whole key is on the
-                                    // very next line -- so an unnamed member
-                                    // would read as a prefix of themselves,
-                                    // above themselves.
-                                    if let Some(named) = person.named() {
-                                        let room = (ui.available_width() - badges).max(60.0);
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(room, ui.spacing().interact_size.y),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.add(egui::Label::new(named).truncate());
-                                            },
-                                        );
-                                    }
-                                    if member.admin {
-                                        // The exchange attests this one, so it
-                                        // may be drawn as a role. A SIP-21
-                                        // title may not, which is why it is
-                                        // not here.
-                                        ui.colored_label(theme.accent, "admin");
-                                    }
-                                    if member.muted {
-                                        // SIP-56: the exchange's own signed
-                                        // entry says so; the roster's word.
-                                        ui.colored_label(theme.text_muted, "muted")
-                                            .on_hover_text("They read, and may not write.");
-                                    }
-                                    if member.account == me {
-                                        ui.colored_label(theme.text_muted, "you");
-                                    }
-                                    if state.verified.contains_key(&member.account) {
-                                        sigil_ui::verified_mark(ui);
-                                    }
-                                });
+                                // A line of text tall, not a button tall: a
+                                // `horizontal` is at least `interact_size`
+                                // high, which is a finger on a phone, and the
+                                // name centred in it left the key some 36
+                                // points under the name it identifies --
+                                // seen on the device, where every row of the
+                                // roster was loose.
+                                let line = ui.text_style_height(&egui::TextStyle::Body);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), line),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        // Only when there is one to show. `label`
+                                        // falls back to the first characters of
+                                        // the key, and the whole key is on the
+                                        // very next line -- so an unnamed member
+                                        // would read as a prefix of themselves,
+                                        // above themselves.
+                                        if let Some(named) = person.named() {
+                                            let room = (ui.available_width() - badges).max(60.0);
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(room, line),
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    ui.add(egui::Label::new(named).truncate());
+                                                },
+                                            );
+                                        }
+                                        if member.admin {
+                                            // The exchange attests this one, so it
+                                            // may be drawn as a role. A SIP-21
+                                            // title may not, which is why it is
+                                            // not here.
+                                            ui.colored_label(theme.accent, "admin");
+                                        }
+                                        if member.muted {
+                                            // SIP-56: the exchange's own signed
+                                            // entry says so; the roster's word.
+                                            ui.colored_label(theme.text_muted, "muted")
+                                                .on_hover_text("They read, and may not write.");
+                                        }
+                                        if member.account == me {
+                                            ui.colored_label(theme.text_muted, "you");
+                                        }
+                                        if state.verified.contains_key(&member.account) {
+                                            sigil_ui::verified_mark(ui);
+                                        }
+                                    },
+                                );
                                 // This is the only thing that identifies
                                 // them; everything above it is a claim. In
                                 // full on a desktop -- but 44 base58
