@@ -646,3 +646,29 @@ fn deepest(h: &Harness<'static>) -> (String, f64) {
     seen.sort_by(|a, b| b.1.total_cmp(&a.1));
     seen.first().cloned().unwrap_or_default()
 }
+
+/// On a phone the bar says "Exchange"; the console does not say it again.
+///
+/// The pane opened with the word a line under the bar that carried it. The
+/// status beside it -- which exchange, and whether it answers -- stays,
+/// since the bar says neither.
+#[test]
+fn on_a_phone_the_console_does_not_repeat_the_bars_title() {
+    let mut h = harness_phone(up());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Exchange").is_none(),
+        "the console says Exchange under a bar that says Exchange: {}",
+        text_of(&h)
+    );
+    assert!(
+        text_of(&h).contains("answering"),
+        "the status is gone with it"
+    );
+    // And on a desktop, where there is no bar, it is the pane's own head.
+    let mut h = harness(up());
+    h.run();
+    h.run();
+    assert!(h.query_by_label("Exchange").is_some(), "{}", text_of(&h));
+}

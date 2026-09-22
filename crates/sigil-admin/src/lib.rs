@@ -374,7 +374,11 @@ impl AdminApp {
         theme: &ColorTheme,
     ) {
         ui.horizontal(|ui| {
-            ui.heading("Exchange");
+            // Not on a phone: its bar already says "Exchange", and the
+            // same word a line under it said nothing twice.
+            if !sigil::Form::of(ui.ctx()).is_phone() {
+                ui.heading("Exchange");
+            }
             // Which one, by the name somebody chose it under: the key below
             // is the exchange's answer, this is the person's.
             match acting {
