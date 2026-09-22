@@ -429,10 +429,15 @@ impl VoiceApp {
             // phone; a `horizontal` never wraps, so the key simply left the
             // pane and took the ui's width with it, which is what clipped
             // every explanation under it.
+            //
+            // And small, the size the Phone tab and the Devices pane show a
+            // key at: at body size forty-four monospace characters do not fit
+            // a phone's width even on a line of their own, and a key broken
+            // across two lines is a key somebody reads out wrong.
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(theme.text_secondary, "You are");
                 ui.add(
-                    egui::Label::new(egui::RichText::new(me.to_string()).monospace())
+                    egui::Label::new(egui::RichText::new(me.to_string()).monospace().small())
                         .selectable(true),
                 );
             });
@@ -448,18 +453,21 @@ impl VoiceApp {
         }
         ui.add_space(tokens::SPACING_SM);
 
-        ui.horizontal_wrapped(|ui| {
-            sigil_ui::field(
-                ui,
-                &mut self.peer_input,
-                "their key, or name@domain at another exchange",
-                box_width(ui, 420.0, 90.0),
-            );
-            if ui.button("Call").clicked() {
-                let held = borrowable(ctx);
-                self.place_call(ctx.account(), held, ui.ctx());
-            }
-        });
+        // The same row every other field in sigil is: the box given the
+        // width there is and its one action beside it, as a mark. This was
+        // a `horizontal_wrapped` of a box at a fixed width and a "Call"
+        // button, which on a phone put the button on a row of its own.
+        let (_, call) = sigil_ui::labelled_field(
+            ui,
+            "",
+            &mut self.peer_input,
+            "their key, or name@domain at another exchange",
+            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Call, "Call")),
+        );
+        if call {
+            let held = borrowable(ctx);
+            self.place_call(ctx.account(), held, ui.ctx());
+        }
         if let Some(trouble) = &self.peer_trouble {
             ui.colored_label(theme.destructive, trouble);
         }
@@ -477,22 +485,23 @@ impl VoiceApp {
             "A room is named by a secret, and holding it is what being in the room \
              consists of.",
         );
-        ui.horizontal_wrapped(|ui| {
-            sigil_ui::field(
-                ui,
-                &mut self.room_input,
-                "room secret, base58",
-                box_width(ui, 420.0, 190.0),
-            );
-            if ui.button("Join").clicked() {
-                let held = borrowable(ctx);
-                self.join_room(ctx.account(), held, ui.ctx());
-            }
-            if ui.button("New room").clicked() {
-                self.room_input = RoomId::generate().to_base58();
-                self.room_trouble = None;
-            }
-        });
+        let (_, join) = sigil_ui::labelled_field(
+            ui,
+            "",
+            &mut self.room_input,
+            "room secret, base58",
+            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Check, "Join")),
+        );
+        if join {
+            let held = borrowable(ctx);
+            self.join_room(ctx.account(), held, ui.ctx());
+        }
+        // Minting is not acting on the box, so it is not the box's mark: a
+        // word, under it, for what no picture says.
+        if ui.button("New room").clicked() {
+            self.room_input = RoomId::generate().to_base58();
+            self.room_trouble = None;
+        }
         if let Some(trouble) = &self.room_trouble {
             ui.colored_label(theme.destructive, trouble);
         }
