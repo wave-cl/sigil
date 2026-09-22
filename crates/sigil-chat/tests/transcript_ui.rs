@@ -9784,3 +9784,44 @@ fn phone_moved() {
     h.run();
     h.snapshot("phone_moved");
 }
+
+/// The ring over the list and the Devices pane, on a phone in the light
+/// theme -- reachable now that the phone's own light or dark reaches sigil.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_ring_light() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.cross_ring = Some(sigil_chat::CrossRing {
+        bridge: [7u8; 16],
+        caller: them(),
+    });
+    let mut h = harness_phone_light(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_ring_light");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_devices_light() {
+    let mut state = a_conversation();
+    state.devices = vec![
+        sigil_chat::Linked {
+            device: me(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: true,
+        },
+        sigil_chat::Linked {
+            device: them(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: false,
+        },
+    ];
+    let mut h = harness_phone_light(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    h.snapshot("phone_devices_light");
+}
