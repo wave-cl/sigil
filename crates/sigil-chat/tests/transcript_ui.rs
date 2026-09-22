@@ -9955,3 +9955,42 @@ fn phone_message_menu() {
     h.run();
     h.snapshot("phone_message_menu");
 }
+
+/// A message's menu opens inside what the system leaves.
+///
+/// A popup is its own layer and no panel's inset reaches it, so a menu
+/// opened near the foot of a phone grew straight down into the navigation
+/// bar -- seen on the device, with "Report…" under the system's own row,
+/// where the touch is the system's and the item cannot be pressed.
+#[test]
+fn a_messages_menu_stays_out_of_the_systems_own_row() {
+    const BOTTOM: f32 = 48.0;
+    let mut state = a_conversation();
+    state.open = Some([8u8; 32]);
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    // As the phone reports it: a gesture bar at the foot.
+    sigil::Insets::install(
+        &h.ctx,
+        sigil::Insets {
+            bottom: BOTTOM,
+            ..sigil::Insets::NONE
+        },
+    );
+    h.run();
+    h.run();
+    // The lowest message there is, so the menu opens at the foot.
+    let bubble = h
+        .get_all_by_label_contains("the second one, then")
+        .map(|n| n.rect())
+        .max_by(|a, b| a.bottom().total_cmp(&b.bottom()))
+        .expect("a message at the foot");
+    finger_down(&mut h, bubble.center());
+    h.run_steps(20);
+    h.run();
+    let last = h.get_by_label_contains("Report").rect();
+    assert!(
+        last.bottom() <= PHONE_HEIGHT - BOTTOM + 1.0,
+        "the menu's last row ends at {:.0}, inside the system's own {BOTTOM} points",
+        last.bottom()
+    );
+}

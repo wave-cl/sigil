@@ -79,6 +79,35 @@ pub struct Insets {
 }
 
 impl Insets {
+    /// Where these are kept, so anything drawn outside the shell's panels
+    /// can ask. **A popup is not in a panel**: the shell keeps its panels
+    /// clear of the system's bars, and a menu opened near the foot of a
+    /// phone grew straight down into the navigation bar, where the last row
+    /// cannot be pressed because the system takes the touch. Seen on the
+    /// device, on a message's long-press menu.
+    const KEY: &'static str = "sigil_insets";
+
+    pub fn install(ctx: &egui::Context, insets: Insets) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(Self::KEY), insets.clamped()));
+    }
+
+    /// What the system draws over, as the shell last said. Nothing, when
+    /// nobody said -- a desktop, or a test.
+    pub fn of(ctx: &egui::Context) -> Insets {
+        ctx.data(|d| d.get_temp(egui::Id::new(Self::KEY)))
+            .unwrap_or(Insets::NONE)
+    }
+
+    /// The screen less what the system draws over: where a menu may go.
+    pub fn safe_rect(ctx: &egui::Context) -> egui::Rect {
+        let insets = Insets::of(ctx);
+        let screen = ctx.content_rect();
+        egui::Rect::from_min_max(
+            screen.min + egui::vec2(insets.left, insets.top),
+            screen.max - egui::vec2(insets.right, insets.bottom),
+        )
+    }
+
     pub const NONE: Insets = Insets {
         top: 0.0,
         bottom: 0.0,

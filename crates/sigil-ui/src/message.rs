@@ -684,6 +684,25 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         && egui::Popup::is_id_open(ui.ctx(), menu)
         && let Some(at) = ui.ctx().data(|d| d.get_temp::<egui::Pos2>(menu.with("at")))
     {
+        // **Inside what the system leaves.** A popup is its own layer and
+        // no panel's inset applies to it, so a menu opened near the foot of
+        // a phone grew into the navigation bar and its last row could not
+        // be pressed. egui measures a popup in a sizing pass before it is
+        // shown, so the height is known from the first drawn frame; the
+        // anchor is lifted by whatever does not fit.
+        let at = {
+            let safe = sigil::Insets::safe_rect(ui.ctx());
+            let tall = ui
+                .ctx()
+                .memory(|m| m.area_rect(menu))
+                .map(|r| r.height())
+                .unwrap_or(0.0);
+            let mut at = at;
+            if tall > 0.0 && at.y + tall > safe.bottom() {
+                at.y = (safe.bottom() - tall).max(safe.top());
+            }
+            at
+        };
         egui::Popup::new(
             menu,
             ui.ctx().clone(),

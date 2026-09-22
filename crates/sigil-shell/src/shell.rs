@@ -307,6 +307,13 @@ impl Shell {
         self.insets = insets.clamped();
     }
 
+    /// The insets, where anything drawn outside the shell's panels can ask
+    /// -- a popup, which is a layer of its own. Installed every pass, since
+    /// the keyboard rising changes them.
+    fn publish_insets(&self, ctx: &egui::Context) {
+        Insets::install(ctx, self.insets);
+    }
+
     /// Start with a particular identity, rather than whatever `~/.sqnr` holds.
     /// Used by tests, which must never reach for the real one.
     pub fn with_account(self, account: Account) -> Self {
@@ -754,6 +761,7 @@ impl Shell {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        self.publish_insets(ui.ctx());
         self.restore_focus(ui.ctx());
         self.handle_shell_keys(ui.ctx());
 
