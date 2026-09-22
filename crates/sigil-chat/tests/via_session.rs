@@ -235,7 +235,10 @@ async fn a_home_that_does_not_carry_is_a_session_that_says_so() {
         "expected the home's refusal, got {:?}",
         chat.state().trouble
     );
-    assert_eq!(chat.state().exchange, None, "nothing was reached");
+    // `exchange` names the store's exchange from the moment the disc is
+    // drawn, before anything is dialled; that nothing was *reached* is the
+    // link, and B's own account of who arrived.
+    assert_ne!(chat.state().link, LinkState::Up, "the link came up");
     assert_eq!(
         b.server.last_peer_identity(),
         None,

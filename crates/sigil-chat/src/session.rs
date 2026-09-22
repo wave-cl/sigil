@@ -2105,7 +2105,7 @@ async fn run(
     // local copy is also the only copy that can ever be read: opening an
     // epoch key spends the prekey it was sealed against, so the disc is not a
     // cache of the exchange's data, it is the data.
-    sync_local(&mut chat, &mut desk, me);
+    sync_local(&chat, &mut desk, me);
     let _ = publish(&chat, &state, &desk, me);
     (wake)();
 
@@ -2154,7 +2154,7 @@ async fn run(
     }
     if acting_as(&chat, &state, &mut me) {
         desk.restructure = true;
-        sync_local(&mut chat, &mut desk, me);
+        sync_local(&chat, &mut desk, me);
         let _ = publish(&chat, &state, &desk, me);
         (wake)();
     }
@@ -2219,7 +2219,7 @@ async fn run(
         if acting_as(&chat, &state, &mut me) {
             desk.restructure = true;
             desk.dirty.extend(desk.channels.keys().copied());
-            sync_local(&mut chat, &mut desk, me);
+            sync_local(&chat, &mut desk, me);
             let _ = publish(&chat, &state, &desk, me);
             (wake)();
         }
