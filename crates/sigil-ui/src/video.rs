@@ -68,6 +68,10 @@ pub struct VideoAction {
     pub open: bool,
     /// The whole screen, or back from it (from the viewer).
     pub fullscreen: bool,
+    /// The frame itself was pressed in the viewer -- not the bar's play
+    /// button, which is [`VideoAction::toggle`]. A phone leaves the viewer
+    /// on it; a window plays or pauses.
+    pub tapped: bool,
     /// Go to this time.
     pub seek: Option<u64>,
     /// Silence it, or let it be heard again.
@@ -191,7 +195,7 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
     if response.clicked() {
         match v.place {
             Place::Bubble => action.open = true,
-            Place::Viewer => action.toggle = true,
+            Place::Viewer => action.tapped = true,
         }
     }
     // That is the whole of a bubble: no bar, because nothing plays here.

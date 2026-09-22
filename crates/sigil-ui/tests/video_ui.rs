@@ -130,9 +130,13 @@ fn a_held_video_says_how_long_it_is_and_opens_or_plays_on_a_press() {
     let (mut h, did) = drawn(sigil_ui::Standing::Held, false, false);
     h.get_by_label("[video 449s, 46.1 MiB]").click();
     h.run();
+    // **The frame's press is its own answer**, not the bar's play button:
+    // a window plays or pauses on it and a phone leaves the viewer, and one
+    // flag for both left no way to say which was pressed.
     assert!(
-        did.get().toggle,
-        "pressing the video in the viewer should ask to play it"
+        did.get().tapped && !did.get().toggle,
+        "pressing the video in the viewer should say the frame was pressed: {:?}",
+        did.get()
     );
 }
 
@@ -189,14 +193,15 @@ fn a_playing_video_can_be_paused_muted_enlarged_and_scrubbed() {
     assert_eq!(did.get().mute, Some(true));
     did.set(Default::default());
     // In the viewer, the enlarge control asks for the whole screen; a press
-    // on the picture plays or pauses.
+    // on the picture is the frame's own, which the caller reads as play or
+    // pause in a window and as the way out on a phone.
     h.get_by_label("Whole screen").click();
     h.run();
     assert!(did.get().fullscreen && !did.get().open);
     did.set(Default::default());
     h.get_by_label("[video 449s, 46.1 MiB]").click();
     h.run();
-    assert!(did.get().toggle && !did.get().open);
+    assert!(did.get().tapped && !did.get().open && !did.get().toggle);
     did.set(Default::default());
     // The scrubber: a press at three quarters along goes three quarters in.
     let slider = h.get_by_role(egui::accesskit::Role::Slider);

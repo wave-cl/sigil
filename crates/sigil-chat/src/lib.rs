@@ -67,6 +67,44 @@ pub enum Route {
 const ONLY_HERE: &str = "Searches what this client has opened. The exchange holds \
                          ciphertext and cannot search it.";
 
+/// What the whole-screen picture viewer is drawing: which file, when it
+/// was sent, its bytes, and where it sits among the message's others.
+struct Whole {
+    seq: u64,
+    index: usize,
+    moment: u64,
+    /// The blob's name, so the texture is the one the transcript already
+    /// decoded rather than a second copy of the same picture.
+    id: String,
+    bytes: std::sync::Arc<[u8]>,
+    /// Which of how many, when the message carries more than one.
+    among: Option<(usize, usize)>,
+    previous: Option<usize>,
+    next: Option<usize>,
+}
+
+/// What a saved file is called: `sigil-2026-09-22-18-32-05.png`.
+///
+/// The moment is the message's, not the save's, so saving the same picture
+/// twice writes the same name rather than two copies an hour apart; the
+/// extension is read out of the bytes ([`sigil_ui::attachment::extension`])
+/// and never off the sender's word. Files used to be offered to the save
+/// dialog under `[image 1920x1080, 2.1 MB]` -- what the bubble *says* about
+/// one -- or under nothing at all, and landed on disk with no extension,
+/// which on every desktop means no program will open them.
+fn save_name(moment: u64, index: usize, bytes: Option<&[u8]>) -> String {
+    let stamp = sigil_ui::clock::file_stamp(moment);
+    let ext = sigil_ui::attachment::extension(bytes.unwrap_or(&[]));
+    // **The second file of a message is not the first.** A gallery's
+    // pictures are all the same moment, so a name built from the moment
+    // alone has the second landing on top of the first. The first keeps the
+    // plain name; the rest say which they are.
+    match index {
+        0 => format!("sigil-{stamp}.{ext}"),
+        n => format!("sigil-{stamp}-{}.{ext}", n + 1),
+    }
+}
+
 /// The exchange to suggest to an identity that names none.
 ///
 /// A fresh identity on a fresh machine has no handle sidecar and no
@@ -3693,12 +3731,12 @@ impl ChatApp {
         }
         // Gone from under it — the message was deleted, or the conversation
         // changed — is not an error, it is nothing to show.
-        let Some(file) = state
-            .lines
-            .iter()
-            .find(|l| l.seq == seq)
-            .and_then(|l| l.attachments.get(index))
-        else {
+        let Some(line) = state.lines.iter().find(|l| l.seq == seq) else {
+            self.pane(at).viewing = None;
+            return;
+        };
+        let moment = line.at;
+        let Some(file) = line.attachments.get(index) else {
             self.pane(at).viewing = None;
             return;
         };
@@ -3710,7 +3748,26 @@ impl ChatApp {
         if file.kind == sigil_ui::attachment::VIDEO
             && let Some(bytes) = bytes.clone()
         {
-            return self.video_viewer_ui(at, ui, theme, seq, index, file, bytes);
+            return self.video_viewer_ui(at, ui, theme, seq, index, moment, file, bytes);
+        }
+        if sigil::Form::of(ui.ctx()).is_phone()
+            && let Some(bytes) = bytes.clone()
+        {
+            let step = |by: isize| place.and_then(|p| step(p, by));
+            return self.picture_whole_screen(
+                at,
+                ui,
+                Whole {
+                    seq,
+                    index,
+                    moment,
+                    id: file.id.clone(),
+                    bytes,
+                    among: place.map(|p| (p + 1, siblings.len())),
+                    previous: step(-1),
+                    next: step(1),
+                },
+            );
         }
 
         let egui_ctx = ui.ctx().clone();
@@ -3718,19 +3775,40 @@ impl ChatApp {
         // grow. `available_rect` is the whole surface here: this draws over
         // everything by construction.
         let screen = ui.ctx().viewport_rect().size();
+        // **A phone shows it on the whole screen.** A dialog with margins
+        // and rounded corners inside a 360-point pane is a small picture in
+        // a frame, on a screen with nothing else worth looking at. The room
+        // is what the system leaves, less the row of controls under it.
+        let phone = sigil::Form::of(&egui_ctx).is_phone();
+        let safe = sigil::Insets::safe_rect(&egui_ctx);
+        let mut forward = false;
+        // Set from inside the dialog, acted on after it: the viewer cannot
+        // be taken down while it is being drawn.
+        let mut close = false;
         let response = egui::Modal::new(egui::Id::new(("picture", seq, index)))
-            .frame(
+            .frame(if phone {
+                egui::Frame::NONE
+                    .fill(egui::Color32::BLACK)
+                    .inner_margin(egui::Margin::same(tokens::SPACING_XS as i8))
+            } else {
                 egui::Frame::NONE
                     .fill(theme.surface_primary)
                     .corner_radius(tokens::RADIUS_LG)
-                    .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8)),
-            )
+                    .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+            })
             .show(&egui_ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     // The same URI the transcript uses, so the decoded texture
                     // is the one already in hand rather than a second copy of
                     // the same picture under another name.
-                    let room = screen * 0.86;
+                    let room = if phone {
+                        egui::vec2(
+                            safe.width() - 2.0 * tokens::SPACING_XS,
+                            safe.height() - tokens::BUTTON_LG - 4.0 * tokens::SPACING_SM,
+                        )
+                    } else {
+                        screen * 0.86
+                    };
                     if let Some(bytes) = bytes.clone() {
                         let image = egui::Image::from_bytes(format!("bytes://{}", file.id), bytes)
                             .corner_radius(tokens::RADIUS_MD);
@@ -3750,13 +3828,23 @@ impl ChatApp {
                                 let touched = ui.ctx().input(|i| i.has_touch_screen());
 
                                 if held.clicked() {
-                                    // In to the picture's own pixels, or twice its
-                                    // size when that is smaller than the window --
-                                    // clicking must always do something -- and out
-                                    // again from anywhere closer than fitting.
-                                    let closest = (1.0 / scale).max(2.0);
-                                    let to = if look.zoom > 1.01 { 1.0 } else { closest };
-                                    self.pane(at).look = look.zoomed(to, fitted, fitted);
+                                    if touched {
+                                        // **A tap is the way out.** On a phone
+                                        // the viewer *is* the whole screen, and
+                                        // the tap that opened it closes it; a
+                                        // finger zooms by pinching, which is
+                                        // below, so nothing is lost.
+                                        close = true;
+                                    } else {
+                                        // In to the picture's own pixels, or twice
+                                        // its size when that is smaller than the
+                                        // window -- clicking must always do
+                                        // something -- and out again from anywhere
+                                        // closer than fitting.
+                                        let closest = (1.0 / scale).max(2.0);
+                                        let to = if look.zoom > 1.01 { 1.0 } else { closest };
+                                        self.pane(at).look = look.zoomed(to, fitted, fitted);
+                                    }
                                 }
 
                                 // **Moving the pointer looks around it**, with no
@@ -3851,21 +3939,222 @@ impl ChatApp {
                             egui::RichText::new(&file.described).small(),
                         );
                         // Nothing to save until it is here.
-                        if bytes.is_some() && ui.button("Save…").clicked() {
-                            self.saving =
-                                Some((at.clone(), seq, index, files::save_file(&file.described)));
-                            ui.ctx().request_repaint();
+                        // Nothing to save or to hand on until it is here.
+                        if bytes.is_some() {
+                            if sigil_ui::icon_button_named(
+                                ui,
+                                sigil_ui::Icon::Forward,
+                                "Forward it",
+                            )
+                            .clicked()
+                            {
+                                forward = true;
+                            }
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Save, "Save…")
+                                .clicked()
+                            {
+                                let name = save_name(moment, index, bytes.as_deref());
+                                self.saving =
+                                    Some((at.clone(), seq, index, files::save_file(&name)));
+                                ui.ctx().request_repaint();
+                            }
                         }
                         if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
-                            self.pane(at).viewing = None;
+                            close = true;
                         }
                     });
                 });
             });
         // The backdrop and Escape, which `should_close` covers, and the
         // control above. Three ways out of something that covers the window.
-        if response.should_close() {
+        if response.should_close() || close {
             self.pane(at).viewing = None;
+        }
+        // Where to send it is chosen under the composer, which is behind
+        // this: the viewer closes, and the list is there.
+        if forward {
+            self.pane(at).forwarding = Some((seq, index));
+            self.pane(at).viewing = None;
+        }
+    }
+
+    /// **A phone's picture viewer is the screen.** Black from edge to edge,
+    /// the picture as large as it fits, and the controls floating over it:
+    /// a dialog with margins and rounded corners inside a 360-point pane is
+    /// a small picture in a frame, on a screen with nothing else on it.
+    ///
+    /// A tap on the picture leaves -- the gesture that opened it, which is
+    /// what a phone's viewer answers to everywhere -- and a pinch zooms,
+    /// which is what a finger has instead of a click.
+    fn picture_whole_screen(&mut self, at: &At, ui: &mut egui::Ui, w: Whole) {
+        let Whole {
+            seq,
+            index,
+            moment,
+            id,
+            bytes,
+            among,
+            previous,
+            next,
+        } = w;
+        let egui_ctx = ui.ctx().clone();
+        let theme = ColorTheme::current(&egui_ctx);
+        let whole = egui_ctx.viewport_rect();
+        let safe = sigil::Insets::safe_rect(&egui_ctx);
+        let mut close = false;
+        let mut forward = false;
+        let mut save = false;
+        let mut go: Option<usize> = None;
+        egui::Area::new(egui::Id::new(("picture-whole", seq, index)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(whole.min)
+            .show(&egui_ctx, |ui| {
+                ui.set_min_size(whole.size());
+                ui.painter().rect_filled(whole, 0.0, egui::Color32::BLACK);
+                // The picture, in what the system leaves less the bar over
+                // it: a picture under the status bar is a picture with a
+                // clock on it.
+                let bar = tokens::BUTTON_LG + 2.0 * tokens::SPACING_SM;
+                let room = egui::Rect::from_min_max(
+                    egui::pos2(safe.left(), safe.top() + bar),
+                    egui::pos2(safe.right(), safe.bottom() - bar),
+                );
+                let uri = format!("bytes://{id}");
+                let image = egui::Image::from_bytes(uri, egui::load::Bytes::Shared(bytes.clone()));
+                if let Ok(egui::load::TexturePoll::Ready { texture }) =
+                    image.load_for_size(&egui_ctx, room.size())
+                {
+                    let scale = (room.width() / texture.size.x)
+                        .min(room.height() / texture.size.y)
+                        .min(1.0);
+                    let fitted = texture.size * scale;
+                    let view = egui::Rect::from_center_size(room.center(), fitted);
+                    let held = ui.interact(
+                        view,
+                        egui::Id::new(("picture-whole-held", seq, index)),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let look = self.pane(at).look;
+                    // Pinched, and dragged about once there is more of it
+                    // than fits.
+                    if held.dragged() && look.zoom > 1.01 {
+                        self.pane(at).look = look.panned(held.drag_delta(), fitted, fitted);
+                    }
+                    if let Some(pinch) = ui.input(|i| i.multi_touch().map(|m| m.zoom_delta))
+                        && (pinch - 1.0).abs() > 0.001
+                    {
+                        let look = self.pane(at).look;
+                        let to = (look.zoom * pinch).clamp(1.0, 8.0);
+                        self.pane(at).look = look.zoomed(to, fitted, fitted);
+                    }
+                    if held.clicked() {
+                        close = true;
+                    }
+                    let look = self.pane(at).look;
+                    let mut painting =
+                        ui.new_child(egui::UiBuilder::new().id_salt("whole").max_rect(view));
+                    painting.set_clip_rect(view);
+                    image.paint_at(
+                        &painting,
+                        egui::Rect::from_center_size(view.center() + look.pan, look.size(fitted)),
+                    );
+                } else {
+                    let mut waiting =
+                        ui.new_child(egui::UiBuilder::new().id_salt("whole-wait").max_rect(room));
+                    waiting.add(image.max_size(room.size()));
+                }
+
+                // The bar: the way out at the left, and what is done to the
+                // picture at the right. Over the picture, not under it --
+                // the picture is the screen.
+                let row = egui::Rect::from_min_size(
+                    egui::pos2(
+                        safe.left() + tokens::SPACING_SM,
+                        safe.top() + tokens::SPACING_SM,
+                    ),
+                    egui::vec2(safe.width() - 2.0 * tokens::SPACING_SM, tokens::BUTTON_LG),
+                );
+                let mut top =
+                    ui.new_child(egui::UiBuilder::new().id_salt("whole-bar").max_rect(row));
+                top.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                top.horizontal(|ui| {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
+                        close = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Save, "Save…").clicked()
+                        {
+                            save = true;
+                        }
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Forward, "Forward it")
+                            .clicked()
+                        {
+                            forward = true;
+                        }
+                    });
+                });
+
+                // Where this one is among the message's pictures, and the
+                // way to the others: along the foot, where a thumb is.
+                if let Some((which, of)) = among
+                    && of > 1
+                {
+                    let foot = egui::Rect::from_min_size(
+                        egui::pos2(
+                            safe.left() + tokens::SPACING_SM,
+                            safe.bottom() - tokens::BUTTON_LG - tokens::SPACING_SM,
+                        ),
+                        egui::vec2(safe.width() - 2.0 * tokens::SPACING_SM, tokens::BUTTON_LG),
+                    );
+                    let mut bottom =
+                        ui.new_child(egui::UiBuilder::new().id_salt("whole-foot").max_rect(foot));
+                    bottom.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                    bottom.horizontal(|ui| {
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Back, "Previous")
+                            .clicked()
+                        {
+                            go = previous;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Forward, "Next")
+                                .clicked()
+                            {
+                                go = next;
+                            }
+                            ui.with_layout(
+                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                |ui| {
+                                    ui.colored_label(
+                                        theme.text_muted,
+                                        egui::RichText::new(format!("{which} of {of}")).small(),
+                                    );
+                                },
+                            );
+                        });
+                    });
+                }
+            });
+        if egui_ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
+        }
+        if let Some(to) = go {
+            self.pane(at).viewing = Some((seq, to));
+            self.pane(at).look = Look::default();
+            egui_ctx.request_repaint();
+            return;
+        }
+        if save {
+            let name = save_name(moment, index, Some(&bytes));
+            self.saving = Some((at.clone(), seq, index, files::save_file(&name)));
+            egui_ctx.request_repaint();
+        }
+        if forward {
+            self.pane(at).forwarding = Some((seq, index));
+            close = true;
+        }
+        if close {
+            self.pane(at).viewing = None;
+            self.pane(at).look = Look::default();
         }
     }
 
@@ -3936,12 +4225,13 @@ impl ChatApp {
         theme: &ColorTheme,
         seq: u64,
         index: usize,
+        moment: u64,
         file: &session::Attached,
         bytes: std::sync::Arc<[u8]>,
     ) {
         let egui_ctx = ui.ctx().clone();
         if !self.pane(at).players.contains_key(&file.id) {
-            self.start_video(at, &egui_ctx, &file.id, bytes);
+            self.start_video(at, &egui_ctx, &file.id, bytes.clone());
         }
         if let Some(playing) = self.pane(at).players.get_mut(&file.id) {
             playing.refresh(&egui_ctx, &file.id);
@@ -3951,7 +4241,14 @@ impl ChatApp {
         let mut done = sigil_ui::VideoAction::default();
         let mut close = false;
         let mut save = false;
-        if self.pane(at).whole_screen {
+        let mut forward = false;
+        // **A phone plays it on the whole screen.** There is nothing else
+        // worth looking at while a clip is open on a 360-point pane, and a
+        // dialog with margins inside a screen that size is a small video in
+        // a frame. A window keeps its dialog until somebody asks for the
+        // whole screen.
+        let phone = sigil::Form::of(&egui_ctx).is_phone();
+        if self.pane(at).whole_screen || phone {
             // **The video is the screen.** Edge to edge on black, its own bar
             // over it, nothing else drawn: the viewer's dialog inside a
             // fullscreen window was still a small video with a frame round
@@ -3975,8 +4272,51 @@ impl ChatApp {
                     );
                     done = sigil_ui::video(&mut inner, &view, whole.width(), whole.height());
                 });
+            // What is done *to* the clip, over the picture at the top: the
+            // way out, and the two things anybody wants a clip for. The
+            // video's own bar is along the bottom of it and has the
+            // playing.
+            let safe = sigil::Insets::safe_rect(&egui_ctx);
+            egui::Area::new(egui::Id::new(("video-bar", seq, index)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(safe.left_top() + egui::vec2(tokens::SPACING_SM, tokens::SPACING_SM))
+                .show(&egui_ctx, |ui| {
+                    ui.set_width(safe.width() - 2.0 * tokens::SPACING_SM);
+                    ui.horizontal(|ui| {
+                        ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                        if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
+                            close = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Save, "Save…")
+                                .clicked()
+                            {
+                                save = true;
+                            }
+                            if sigil_ui::icon_button_named(
+                                ui,
+                                sigil_ui::Icon::Forward,
+                                "Forward it",
+                            )
+                            .clicked()
+                            {
+                                forward = true;
+                            }
+                        });
+                    });
+                });
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close = true;
+            }
+            // A press on the picture itself: on a phone the way out of the
+            // whole screen, which is what a phone's viewer is; in a window,
+            // play or pause, as it has always been.
+            if done.tapped {
+                if phone {
+                    close = true;
+                } else if let Some(playing) = self.pane(at).players.get(&file.id) {
+                    playing.player.toggle();
+                }
             }
             if let Some(playing) = self.pane(at).players.get(&file.id) {
                 if done.toggle {
@@ -3989,9 +4329,26 @@ impl ChatApp {
                     playing.player.set_volume(if mute { 0.0 } else { 1.0 });
                 }
             }
+            if save {
+                let name = save_name(moment, index, Some(&bytes));
+                self.saving = Some((at.clone(), seq, index, files::save_file(&name)));
+                egui_ctx.request_repaint();
+            }
+            if forward {
+                self.pane(at).forwarding = Some((seq, index));
+                close = true;
+            }
+            // On a phone the whole screen *is* the viewer: the control that
+            // would shrink it back into a dialog leaves instead.
+            if (done.fullscreen && phone) || close {
+                self.pane(at).viewing = None;
+                self.pane(at).players.remove(&file.id);
+            }
             if done.fullscreen || close {
                 self.pane(at).whole_screen = false;
-                egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                if !phone {
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                }
             }
             return;
         }
@@ -4013,7 +4370,8 @@ impl ChatApp {
                             theme.text_muted,
                             egui::RichText::new(&file.described).small(),
                         );
-                        if ui.button("Save…").clicked() {
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Save, "Save…").clicked()
+                        {
                             save = true;
                         }
                         if sigil_ui::icon_button(ui, sigil_ui::Icon::Close).clicked() {
@@ -4023,7 +4381,7 @@ impl ChatApp {
                 });
             });
         if let Some(playing) = self.pane(at).players.get(&file.id) {
-            if done.toggle {
+            if done.toggle || done.tapped {
                 playing.player.toggle();
             }
             if let Some(ms) = done.seek {
@@ -4034,7 +4392,8 @@ impl ChatApp {
             }
         }
         if save {
-            self.saving = Some((at.clone(), seq, index, files::save_file("")));
+            let name = save_name(moment, index, Some(&bytes));
+            self.saving = Some((at.clone(), seq, index, files::save_file(&name)));
             egui_ctx.request_repaint();
         }
         // A phone's viewer already fills the screen, and a window command
@@ -6163,7 +6522,12 @@ impl ChatApp {
                 // Asked here, acted on in `take_choices`: on a desktop the
                 // dialog blocks and the answer is in by the next pass; on a
                 // phone it arrives when the platform's activity ends.
-                self.saving = Some((at.clone(), seq, index, files::save_file("")));
+                let name = save_name(
+                    line.at,
+                    index,
+                    line.attachments.get(index).and_then(|a| a.bytes.as_deref()),
+                );
+                self.saving = Some((at.clone(), seq, index, files::save_file(&name)));
                 ui.ctx().request_repaint();
             }
         }
@@ -10558,6 +10922,64 @@ mod carried_tests {
         assert!(
             !direct_allowed(true, false, false),
             "this side does not allow it"
+        );
+    }
+}
+
+/// What a saved file is called.
+#[cfg(test)]
+mod save_name_tests {
+    use super::*;
+
+    /// The shape the user asked for, and the extension read out of the
+    /// bytes: `sigil-2026-09-22-18-32-05.png`.
+    #[test]
+    fn a_saved_file_is_named_for_its_moment_and_its_kind() {
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
+        let said = save_name(1_758_559_925, 0, Some(&png));
+        assert!(said.starts_with("sigil-"), "{said}");
+        assert!(said.ends_with(".png"), "{said}");
+        // Date, clock and extension: nothing else, and nothing a
+        // filesystem argues with.
+        assert_eq!(said.len(), "sigil-".len() + 19 + ".png".len(), "{said}");
+        assert!(
+            said.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
+            "{said}"
+        );
+    }
+
+    /// A clip is a clip, and what nothing recognises is not given an
+    /// extension that would hand it to the wrong program. **The negative
+    /// control**: a name built from the kind rather than the bytes would
+    /// say `.png` for all three of these.
+    #[test]
+    fn the_extension_follows_the_bytes_and_not_a_guess() {
+        let mp4 = b"\x00\x00\x00\x18ftypmp42".to_vec();
+        assert!(save_name(1_758_559_925, 0, Some(&mp4)).ends_with(".mp4"));
+        assert!(save_name(1_758_559_925, 0, Some(b"nothing known")).ends_with(".bin"));
+        assert!(save_name(1_758_559_925, 0, None).ends_with(".bin"));
+    }
+
+    /// Two files of the *same* message are two names -- a gallery's
+    /// pictures share a moment, and the second landing on the first is a
+    /// picture somebody saved and no longer has.
+    #[test]
+    fn two_files_of_one_message_are_two_names() {
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        assert_ne!(
+            save_name(1_758_559_925, 0, Some(&png)),
+            save_name(1_758_559_925, 1, Some(&png))
+        );
+    }
+
+    /// And two moments are two names.
+    #[test]
+    fn a_later_message_gets_a_later_name() {
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        assert_ne!(
+            save_name(1_758_559_925, 0, Some(&png)),
+            save_name(1_758_559_999, 0, Some(&png))
         );
     }
 }

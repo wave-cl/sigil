@@ -79,6 +79,26 @@ pub fn brief(at: u64, now: u64) -> String {
     }
 }
 
+/// A moment as a file name's stamp: `2026-09-22-18-32-05`, local.
+///
+/// **Sortable, and the same shape wherever it is read**: dashes only, so it
+/// survives every filesystem, and seconds, so two files saved a minute apart
+/// are two names. A moment this machine cannot place in a zone is written as
+/// UTC with a `Z` on it rather than as a plausible wrong local time -- the
+/// rule this module keeps everywhere, and a file name has to say something.
+pub fn file_stamp(at: u64) -> String {
+    match local(at) {
+        Some(z) => z.strftime("%Y-%m-%d-%H-%M-%S").to_string(),
+        None => match i64::try_from(at)
+            .ok()
+            .and_then(|s| jiff::Timestamp::from_second(s).ok())
+        {
+            Some(t) => format!("{}Z", t.strftime("%Y-%m-%d-%H-%M-%S")),
+            None => "unknown".to_string(),
+        },
+    }
+}
+
 fn local(at: u64) -> Option<jiff::Zoned> {
     let secs = i64::try_from(at).ok()?;
     Some(
@@ -145,5 +165,32 @@ mod tests {
         // yesterday, or two days would run together with no line between them.
         assert_ne!(day_of(NOW), day_of(NOW - DAY));
         assert_ne!(day_label(NOW, NOW), day_label(NOW - DAY, NOW));
+    }
+}
+
+#[cfg(test)]
+mod file_stamp_tests {
+    use super::*;
+
+    /// The shape, whatever zone this machine is in: ten characters of date,
+    /// a dash, eight of clock, and nothing else.
+    #[test]
+    fn a_stamp_is_a_date_and_a_clock_in_dashes() {
+        let said = file_stamp(1_758_559_925);
+        assert_eq!(said.len(), 19, "{said}");
+        assert!(
+            said.chars().all(|c| c.is_ascii_digit() || c == '-'),
+            "a file name must survive every filesystem: {said}"
+        );
+        let parts: Vec<&str> = said.split('-').collect();
+        assert_eq!(parts.len(), 6, "{said}");
+        assert_eq!(parts[0].len(), 4, "the year: {said}");
+    }
+
+    /// Two moments a second apart are two names -- the whole reason the
+    /// seconds are in it.
+    #[test]
+    fn a_second_apart_is_a_different_name() {
+        assert_ne!(file_stamp(1_758_559_925), file_stamp(1_758_559_926));
     }
 }

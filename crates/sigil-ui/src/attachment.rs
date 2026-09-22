@@ -18,6 +18,64 @@ use sigil::{ColorTheme, tokens};
 
 /// Image, video, voice note, file — the four SIP-18 kinds, as the interface
 /// needs them. Anything unrecognised is a file.
+/// What to call a saved file, by what the bytes actually are.
+///
+/// # Sniffed, never taken on the sender's word
+///
+/// SIP-18: a receiver must not dispatch on the mime type a sender claims.
+/// An extension *is* a dispatch on most desktops -- it is what decides which
+/// program opens the file -- so it is read out of the bytes themselves, from
+/// the few magic numbers every one of these formats begins with. Anything
+/// this does not recognise is `bin`: a wrong extension hands a file to the
+/// wrong program, and no extension hands it to none.
+pub fn extension(bytes: &[u8]) -> &'static str {
+    let begins = |m: &[u8]| bytes.len() >= m.len() && &bytes[..m.len()] == m;
+    if begins(b"\x89PNG\r\n\x1a\n") {
+        return "png";
+    }
+    if begins(b"\xff\xd8\xff") {
+        return "jpg";
+    }
+    if begins(b"GIF87a") || begins(b"GIF89a") {
+        return "gif";
+    }
+    if begins(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP" {
+        return "webp";
+    }
+    if begins(b"BM") {
+        return "bmp";
+    }
+    if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        // The brand says which of the family it is; `heic` and `avif` are
+        // pictures and the rest of the ones sigil sees are video.
+        let brand = &bytes[8..bytes.len().min(12)];
+        return match brand {
+            b"heic" | b"heix" | b"hevc" | b"mif1" => "heic",
+            b"avif" | b"avis" => "avif",
+            _ => "mp4",
+        };
+    }
+    if begins(b"\x1a\x45\xdf\xa3") {
+        return "webm";
+    }
+    if begins(b"OggS") {
+        return "ogg";
+    }
+    if begins(b"fLaC") {
+        return "flac";
+    }
+    if begins(b"ID3") || begins(b"\xff\xfb") {
+        return "mp3";
+    }
+    if begins(b"%PDF") {
+        return "pdf";
+    }
+    if begins(b"PK\x03\x04") {
+        return "zip";
+    }
+    "bin"
+}
+
 pub const IMAGE: u8 = 0x01;
 pub const VIDEO: u8 = 0x02;
 pub const VOICE: u8 = 0x03;
@@ -752,5 +810,40 @@ fn tile_picture(
             )
         };
         image.uv(uv).paint_at(ui, rect);
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    /// The formats a conversation actually carries, each by its own first
+    /// bytes -- and nothing recognised by guesswork.
+    #[test]
+    fn each_format_is_read_out_of_its_own_first_bytes() {
+        for (name, head) in [
+            ("png", &b"\x89PNG\r\n\x1a\n"[..]),
+            ("jpg", &b"\xff\xd8\xff\xe0"[..]),
+            ("gif", &b"GIF89a....."[..]),
+            ("webp", &b"RIFF\x00\x00\x00\x00WEBPVP8 "[..]),
+            ("mp4", &b"\x00\x00\x00\x18ftypmp42"[..]),
+            ("heic", &b"\x00\x00\x00\x18ftypheic"[..]),
+            ("webm", &b"\x1a\x45\xdf\xa3\x01\x00"[..]),
+            ("ogg", &b"OggS\x00\x02"[..]),
+            ("pdf", &b"%PDF-1.7"[..]),
+        ] {
+            assert_eq!(extension(head), name, "{name}");
+        }
+    }
+
+    /// Anything else is `bin`. **The negative control**: a sniffer that
+    /// answered something plausible for every input would pass the test
+    /// above and hand every unknown file to the wrong program.
+    #[test]
+    fn what_is_not_recognised_gets_no_extension_worth_the_name() {
+        assert_eq!(extension(b"not a picture at all"), "bin");
+        assert_eq!(extension(&[]), "bin");
+        // Nearly a PNG: one byte of the magic number wrong.
+        assert_eq!(extension(b"\x89PNH\r\n\x1a\n"), "bin");
     }
 }

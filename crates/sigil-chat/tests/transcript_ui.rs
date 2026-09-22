@@ -10752,3 +10752,73 @@ fn picking_a_quick_reaction_puts_the_strip_away() {
         text_of(&h)
     );
 }
+
+/// **The viewer hands a picture on and saves it.**
+///
+/// Everything you can do with a picture was in the message's More menu,
+/// behind a long press on a bubble whose picture is the whole of it -- so
+/// the surface that shows the picture as large as the screen could only
+/// close. Forwarding leaves the viewer for the list of where to send it,
+/// which is drawn under the composer behind it.
+#[test]
+fn the_viewer_hands_a_picture_on() {
+    let mut h = harness_with(with_pictures(3), true);
+    h.run();
+    h.run();
+    let tile = h.get_by_label("[image 1, 4 KiB]").rect();
+    press_at(&mut h, tile.center());
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("2 of 3"),
+        "the tile did not open the viewer: {}",
+        text_of(&h)
+    );
+    assert!(
+        h.query_by_label("Save…").is_some(),
+        "the viewer cannot save: {}",
+        text_of(&h)
+    );
+    h.get_by_label("Forward it").click();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Forward to"),
+        "forwarding did not offer anywhere to send it: {said}"
+    );
+}
+
+/// **A tap on the picture leaves the viewer**, on a phone, where the
+/// viewer is the whole screen and the tap that opened it is the gesture to
+/// hand. A pointer still zooms with a click, which is what a pointer has
+/// instead of pinching.
+#[test]
+fn a_tap_on_a_picture_leaves_the_phones_viewer() {
+    let mut h = phone_pictures(1);
+    h.run();
+    h.run();
+    let tile = h.get_by_label_contains("[image 0").rect();
+    finger_down(&mut h, tile.center());
+    h.run();
+    finger_up(&mut h, tile.center());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Save…").is_some(),
+        "the tile did not open the viewer: {}",
+        text_of(&h)
+    );
+
+    let middle = egui::pos2(PHONE_WIDTH / 2.0, PHONE_HEIGHT / 2.0);
+    finger_down(&mut h, middle);
+    h.run();
+    finger_up(&mut h, middle);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Save…").is_none(),
+        "a tap on the picture did not leave the viewer: {}",
+        text_of(&h)
+    );
+}
