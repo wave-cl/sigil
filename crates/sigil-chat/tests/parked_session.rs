@@ -110,6 +110,7 @@ async fn a_session_told_the_account_moved_is_parked() {
 
     let egui_ctx = egui::Context::default();
     let store_root: PathBuf = f_dir.path().join("stores");
+    std::fs::create_dir_all(&store_root).unwrap();
     let mut app = ChatApp::new();
     app.set_store_root_for_test(store_root);
     app.set_exchange_for_test(&f_addr.to_string(), &PubKey::new(f_pub).to_string());
@@ -117,7 +118,9 @@ async fn a_session_told_the_account_moved_is_parked() {
     pass(&mut app, &mut accounts, &egui_ctx);
     assert_eq!(app.starts_for_test(), 1);
     assert!(until_stopped(&app).await, "the session should end, parked");
-    let state = app.state_of_for_test(&me).expect("the parked session's state");
+    let state = app
+        .state_of_for_test(&me)
+        .expect("the parked session's state");
     assert_eq!(
         state.moved_to.as_ref().map(|(k, d)| (*k, d.as_str())),
         Some((PubKey::new(e_pub), "e.test")),
