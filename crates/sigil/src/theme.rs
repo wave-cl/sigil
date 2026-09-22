@@ -22,9 +22,22 @@ use crate::tokens;
 
 const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x8B, 0xFF);
 const ACCENT_DIM: Color32 = Color32::from_rgb(0x4A, 0x63, 0xC8);
-const DESTRUCTIVE: Color32 = Color32::from_rgb(0xE0, 0x5A, 0x6B);
+// **Three states, two themes, and a contrast floor.** Each of these carries
+// words at body size -- a refusal is the one nobody can afford not to read --
+// so each has to clear 4.5 against all three surfaces of the theme it is in.
+// A red that reads on near-black does not read on near-white, and the light
+// theme's were between 3.24 and 4.00: legible-looking to whoever picked them,
+// and thin for everybody else. `muted_text_stays_legible_on_every_surface`
+// fails if any of these six drifts back under.
+const DESTRUCTIVE: Color32 = Color32::from_rgb(0xED, 0x5F, 0x71);
 const WARNING: Color32 = Color32::from_rgb(0xE8, 0xA8, 0x4B);
 const SUCCESS: Color32 = Color32::from_rgb(0x4C, 0xC0, 0x8A);
+
+// The same three, darkened for a light ground. Same hue and saturation,
+// stepped down in value until each clears the floor.
+const L_DESTRUCTIVE: Color32 = Color32::from_rgb(0xB5, 0x49, 0x57);
+const L_WARNING: Color32 = Color32::from_rgb(0x99, 0x60, 0x00);
+const L_SUCCESS: Color32 = Color32::from_rgb(0x1A, 0x7D, 0x4F);
 
 // Dark surfaces, lightest last.
 const D_BASE: Color32 = Color32::from_rgb(0x14, 0x15, 0x19);
@@ -149,8 +162,8 @@ pub fn light() -> ColorTheme {
         window_stroke: L_EDGE,
         text_color: L_TEXT,
         hyperlink_color: ACCENT_DIM,
-        error_fg_color: DESTRUCTIVE,
-        warn_fg_color: Color32::from_rgb(0xA8, 0x6A, 0x00),
+        error_fg_color: L_DESTRUCTIVE,
+        warn_fg_color: L_WARNING,
         selection_bg: Color32::from_rgb(0xD4, 0xDC, 0xFF),
         selection_stroke: ACCENT_DIM,
 
@@ -164,9 +177,9 @@ pub fn light() -> ColorTheme {
 
         accent: ACCENT_DIM,
         accent_muted: ACCENT,
-        destructive: DESTRUCTIVE,
-        warning: Color32::from_rgb(0xA8, 0x6A, 0x00),
-        success: Color32::from_rgb(0x1E, 0x8E, 0x5A),
+        destructive: L_DESTRUCTIVE,
+        warning: L_WARNING,
+        success: L_SUCCESS,
 
         border_default: L_EDGE,
         border_strong: L_EDGE_STRONG,
@@ -174,10 +187,10 @@ pub fn light() -> ColorTheme {
         interactive_hover: L_RAISED,
         interactive_pressed: L_EDGE,
 
-        speaking: Color32::from_rgb(0x1E, 0x8E, 0x5A),
-        link_up: Color32::from_rgb(0x1E, 0x8E, 0x5A),
-        link_retrying: Color32::from_rgb(0xA8, 0x6A, 0x00),
-        link_gone: DESTRUCTIVE,
+        speaking: L_SUCCESS,
+        link_up: L_SUCCESS,
+        link_retrying: L_WARNING,
+        link_gone: L_DESTRUCTIVE,
     }
 }
 
@@ -435,6 +448,9 @@ mod tests {
             let (hi, lo) = if x > y { (x, y) } else { (y, x) };
             (hi + 0.05) / (lo + 0.05)
         }
+        // Every pair that falls short, not the first: a palette is fixed as a
+        // palette, and one number at a time hides the shape of the problem.
+        let mut thin: Vec<String> = Vec::new();
         for (name, t) in [("dark", dark()), ("light", light())] {
             for (surface_name, surface) in [
                 ("primary", t.surface_primary),
@@ -457,6 +473,39 @@ mod tests {
                 r >= 4.5,
                 "{name}: body text on a sent bubble is {r:.2}, below 4.5"
             );
+
+            // **Every other colour sigil writes words in.** The three above
+            // were the ones somebody had thought about; these are the rest,
+            // and each of them carries something at body size on each of the
+            // three surfaces: the prose under every heading is
+            // `text_secondary`, a sender's name and a link are `accent`, and
+            // a refusal -- the one nobody can afford not to read -- is
+            // `destructive`.
+            for (fg_name, fg) in [
+                ("primary", t.text_primary),
+                ("secondary", t.text_secondary),
+                ("accent", t.accent),
+                ("destructive", t.destructive),
+                ("warning", t.warning),
+                ("success", t.success),
+            ] {
+                for (surface_name, surface) in [
+                    ("primary", t.surface_primary),
+                    ("secondary", t.surface_secondary),
+                    ("elevated", t.surface_elevated),
+                ] {
+                    let r = ratio(fg, surface);
+                    if r < 4.5 {
+                        thin.push(format!("{name}: {fg_name} on {surface_name} is {r:.2}"));
+                    }
+                }
+            }
         }
+        assert!(
+            thin.is_empty(),
+            "{} pair(s) of colours are below the body-text floor of 4.5:\n  {}",
+            thin.len(),
+            thin.join("\n  ")
+        );
     }
 }
