@@ -1811,6 +1811,48 @@ struct Wires {
 /// (`ChatHandle::connection`) -- so running on somebody else's (`On`) would
 /// invert that, and a tunnel inside a tunnel (`Via` within `Via`) is not
 /// specified (SIP-85 §Rationale).
+/// The exchange's domain, for showing SIP-38 handles as `name@domain`.
+///
+/// **Nothing set this.** `Chat::handle` needs a domain to compose one, so
+/// it returned `None` for every account including our own — and a name
+/// claimed at this exchange still read as unregistered afterwards, with
+/// the claim having actually worked. Read off the same layers the
+/// connection was made from, and only when they name a domain: an address
+/// is not one, and `name@203.0.113.1` is not a handle.
+fn domain_of_dial(dial: &Dial) -> Option<String> {
+    match dial {
+        Dial::Discover(layers) => sigil_net::domain_of(layers),
+        // SIP-85: the name the home was asked to find the target by is the
+        // target's domain, whichever way the target itself was given.
+        Dial::Via { target_domain, .. } => Some(target_domain.clone()),
+        // No domain to show: reached by a literal host and key, or — refused
+        // above — on somebody else's connection.
+        Dial::At(_) | Dial::On(_) => None,
+    }
+}
+
+/// The exchange's key, where it is known without the network: given
+/// literally, or pinned in `known_servers` for the domain to be discovered
+/// (SIP-33 -- the pin is what every later contact is held to anyway).
+/// `None` for a first contact, which has nothing on the disc to draw.
+fn pinned_key(dial: &Dial) -> Option<PubKey> {
+    match dial {
+        Dial::At(e) => Some(e.server),
+        Dial::Discover(layers) => {
+            let first = layers
+                .iter()
+                .find(|l| l.server.is_some() || l.host.is_some())?;
+            if let Some(k) = &first.key {
+                return k.parse().ok();
+            }
+            let domain = first.server.as_deref()?;
+            sigil_net::pinned_key_of(domain)
+        }
+        Dial::Via { target, .. } => pinned_key(target),
+        Dial::On(_) => None,
+    }
+}
+
 async fn resolve_plain(dial: &Dial) -> Result<Endpoint, String> {
     match dial {
         Dial::At(e) => Ok(*e),
@@ -1870,6 +1912,49 @@ async fn run(
     // socket with the target's key pinned. The lock below is by the
     // **target's** key -- it is the target's SIP-17 counter -- as it would be
     // directly.
+    // **The disc first.** Where the exchange's key is already known without
+    // asking anybody -- pinned in `known_servers`, or given literally -- the
+    // store is locked, opened and drawn from before a single packet is sent:
+    // the conversation list and the open conversation come from this
+    // machine, and the exchange adds to them when it answers. Until this,
+    // a window showed nothing until DNS, a tunnel and a handshake had all
+    // completed, which on a slow morning was the whole of what the person
+    // saw (2026-09-22). A first contact has no pin and nothing on the disc,
+    // and takes the old order.
+    let domain = domain_of_dial(&dial);
+    let mut desk = Desk {
+        seed,
+        ..Desk::default()
+    };
+    let early = match pinned_key(&dial) {
+        Some(key) => match store::lock(&path, &key) {
+            Ok(lock) => match Store::open(&seed, Some(&path)) {
+                Ok(mut store) => {
+                    let _ = store.scope_to(&key);
+                    let acting = store.account().ok().flatten().unwrap_or(me);
+                    let offline = Offline {
+                        store: &store,
+                        me: acting,
+                        domain: domain.clone(),
+                    };
+                    sync_local(&offline, &mut desk, acting);
+                    state.send_modify(|s| {
+                        s.me = Some(acting);
+                        s.exchange = Some(key);
+                        s.domain = domain.clone();
+                    });
+                    let _ = publish(&offline, &state, &desk, acting);
+                    (wake)();
+                    Some((key, lock, store))
+                }
+                Err(_) => None,
+            },
+            // Locked by another client: reported below, by the same path
+            // that always reported it.
+            Err(_) => None,
+        },
+        None => None,
+    };
     let (endpoint, carried) = match &dial {
         Dial::Via {
             home,
@@ -1897,19 +1982,74 @@ async fn run(
     // Held for the life of the session. Two interactive clients on one account
     // at one exchange would disagree about the next message counter, and
     // reusing one costs the confidentiality of two messages.
-    let _lock = store::lock(&path, &endpoint.server).map_err(|e| {
-        // Which exchange, so the interface can check whether the client
-        // already holding it is one of its own. The message stands on its own
-        // for the case where it is not.
-        state.send_modify(|s| {
-            s.exchange = Some(endpoint.server);
-            s.locked_out = Some(endpoint.server);
-        });
-        format!("another client is already using this account at this exchange: {e}")
-    })?;
-    let store = Store::open(&seed, Some(&path)).map_err(|e| e.to_string())?;
-    let client =
-        sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed).await?;
+    // What the disc gave us stands if the exchange resolved to the key it
+    // was pinned under; a pin that moved (SIP-40) is a different exchange,
+    // and the lock and the store are taken again under the real key.
+    let (_lock, store) = match early {
+        Some((key, lock, store)) if key == endpoint.server => (lock, store),
+        _ => {
+            desk = Desk {
+                seed,
+                ..Desk::default()
+            };
+            let lock = store::lock(&path, &endpoint.server).map_err(|e| {
+                // Which exchange, so the interface can check whether the
+                // client already holding it is one of its own. The message
+                // stands on its own for the case where it is not.
+                state.send_modify(|s| {
+                    s.exchange = Some(endpoint.server);
+                    s.locked_out = Some(endpoint.server);
+                });
+                format!("another client is already using this account at this exchange: {e}")
+            })?;
+            let store = Store::open(&seed, Some(&path)).map_err(|e| e.to_string())?;
+            (lock, store)
+        }
+    };
+    // **Opening a conversation does not wait for the handshake.** While the
+    // exchange is dialled, a Show is answered from the disc -- the fold is
+    // already in `desk` -- and anything that needs the exchange is kept
+    // until there is one. A click that waited behind a slow handshake was
+    // a click that seemed to do nothing.
+    let mut deferred: Vec<Cmd> = Vec::new();
+    let client = {
+        let connect = sqnr::Client::connect_as(endpoint.address, endpoint.server.as_bytes(), &seed);
+        tokio::pin!(connect);
+        let acting = store.account().ok().flatten().unwrap_or(me);
+        loop {
+            tokio::select! {
+                connected = &mut connect => break connected?,
+                cmd = cmds.recv() => match cmd {
+                    Some(Cmd::Show(channel)) => {
+                        open(&mut desk, &state, channel);
+                        // Borrowed for the publish only: a `&Store` held
+                        // across the await above would make this task
+                        // un-spawnable.
+                        let offline = Offline {
+                            store: &store,
+                            me: acting,
+                            domain: domain.clone(),
+                        };
+                        let _ = publish(&offline, &state, &desk, acting);
+                        (wake)();
+                    }
+                    Some(Cmd::Close) => {
+                        desk.open = None;
+                        state.send_modify(|s| {
+                            s.open = None;
+                            s.lines.clear();
+                            s.divider = None;
+                            s.unread_on_open = 0;
+                        });
+                        (wake)();
+                    }
+                    Some(other) => deferred.push(other),
+                    // The handle is gone: nobody is listening.
+                    None => return Ok(()),
+                },
+            }
+        }
+    };
     let mut chat = Chat::new(client, seed, me, endpoint.server, store);
     // **The account, which is not always the device.** `me` above is this
     // client's own key: what it seals under, publishes prekeys for and counts
@@ -1941,23 +2081,6 @@ async fn run(
         }
         _ => None,
     };
-    // The exchange's domain, for showing SIP-38 handles as `name@domain`.
-    //
-    // **Nothing set this.** `Chat::handle` needs a domain to compose one, so
-    // it returned `None` for every account including our own — and a name
-    // claimed at this exchange still read as unregistered afterwards, with
-    // the claim having actually worked. Read off the same layers the
-    // connection was made from, and only when they name a domain: an address
-    // is not one, and `name@203.0.113.1` is not a handle.
-    let domain = match &dial {
-        Dial::Discover(layers) => sigil_net::domain_of(layers),
-        // SIP-85: the name the home was asked to find the target by is the
-        // target's domain, whichever way the target itself was given.
-        Dial::Via { target_domain, .. } => Some(target_domain.clone()),
-        // No domain to show: reached by a literal host and key, or — refused
-        // above — on somebody else's connection.
-        Dial::At(_) | Dial::On(_) => None,
-    };
     chat.set_domain(domain.clone());
     // So a lost connection can be rebuilt without restarting the session.
     chat.dials(endpoint.address, endpoint.server.as_bytes().to_owned());
@@ -1976,10 +2099,6 @@ async fn run(
     let knock: sqex_chat::events::Wake = Arc::new(tokio::sync::Notify::new());
     chat.wake_on_events(knock.clone());
 
-    let mut desk = Desk {
-        seed,
-        ..Desk::default()
-    };
     // **Before the exchange is asked anything.** Everything below this point
     // is a round trip -- prekeys, then the list, then a fetch per channel --
     // and none of it is needed to draw what this machine already holds. The
@@ -2072,6 +2191,12 @@ async fn run(
     // is a faster start; on a phone woken for seconds it is the difference
     // between a window that finishes and one that does not.
     catch_up(&mut chat, &state, &mut desk, me).await;
+    // What was asked for while the exchange was being dialled, now that
+    // there is one to ask.
+    for cmd in std::mem::take(&mut deferred) {
+        apply(&mut chat, cmd, &state, &mut desk).await;
+    }
+    (wake)();
     // The backstop's own clock. `sleep` rather than `interval`, because how
     // long to wait is decided each time round from what is outstanding.
     let busy = std::cmp::min(every, std::time::Duration::from_millis(TICK_MS));
@@ -3062,7 +3187,90 @@ fn acting_as(chat: &Chat, state: &watch::Sender<ChatState>, me: &mut PubKey) -> 
     true
 }
 
-fn sync_local(chat: &mut Chat, desk: &mut Desk, me: PubKey) {
+/// What drawing needs from a client, whether or not it is connected.
+///
+/// Everything here reads the store -- names, handles, the fold of a channel
+/// -- and `Chat` answers from its store; [`Offline`] answers from a store
+/// alone, before there is a connection, so a window draws what the disc
+/// holds while the exchange is still being found (2026-09-22: the freeze
+/// on launch was a window with nothing to draw until the handshake).
+pub(crate) trait Local {
+    fn store(&self) -> &Store;
+    fn display_name(&self, account: &PubKey) -> Option<String>;
+    fn title_of(&self, account: &PubKey) -> Option<String>;
+    fn handle(&self, account: &PubKey) -> Option<String>;
+    fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline>;
+    fn dm_with(&self, them: &PubKey) -> [u8; 32];
+    fn homed_elsewhere(&self, channel: &[u8; 32]) -> Option<(PubKey, String)>;
+    fn link(&self) -> LinkState;
+}
+
+impl Local for Chat {
+    fn store(&self) -> &Store {
+        Chat::store(self)
+    }
+    fn display_name(&self, account: &PubKey) -> Option<String> {
+        Chat::display_name(self, account)
+    }
+    fn title_of(&self, account: &PubKey) -> Option<String> {
+        Chat::title_of(self, account)
+    }
+    fn handle(&self, account: &PubKey) -> Option<String> {
+        Chat::handle(self, account)
+    }
+    fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline> {
+        Chat::history(self, channel, admins).ok()
+    }
+    fn dm_with(&self, them: &PubKey) -> [u8; 32] {
+        Chat::dm_with(self, them)
+    }
+    fn homed_elsewhere(&self, channel: &[u8; 32]) -> Option<(PubKey, String)> {
+        Chat::homed_elsewhere(self, channel).map(|h| (h.origin, h.domain.clone()))
+    }
+    fn link(&self) -> LinkState {
+        LinkState::from(Chat::link(self))
+    }
+}
+
+/// A store and nothing else: the disc, drawn before the exchange answers.
+struct Offline<'a> {
+    store: &'a Store,
+    me: PubKey,
+    domain: Option<String>,
+}
+
+impl Local for Offline<'_> {
+    fn store(&self) -> &Store {
+        self.store
+    }
+    fn display_name(&self, account: &PubKey) -> Option<String> {
+        let (name, _, _) = self.store.profile(account).ok().flatten()?;
+        (!name.is_empty()).then_some(name)
+    }
+    fn title_of(&self, account: &PubKey) -> Option<String> {
+        let (_, title, _) = self.store.profile(account).ok().flatten()?;
+        (!title.is_empty()).then_some(title)
+    }
+    fn handle(&self, account: &PubKey) -> Option<String> {
+        let (name, _) = self.store.handle(account).ok().flatten()?;
+        let domain = self.domain.as_deref()?;
+        (!name.is_empty()).then(|| format!("{name}@{domain}"))
+    }
+    fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline> {
+        self.store.history(channel, admins).ok()
+    }
+    fn dm_with(&self, them: &PubKey) -> [u8; 32] {
+        self.store.dm_with(&self.me, them)
+    }
+    fn homed_elsewhere(&self, _channel: &[u8; 32]) -> Option<(PubKey, String)> {
+        None
+    }
+    fn link(&self) -> LinkState {
+        LinkState::Connecting
+    }
+}
+
+fn sync_local(chat: &impl Local, desk: &mut Desk, me: PubKey) {
     let Ok(channels) = chat.store().channels() else {
         return;
     };
@@ -4274,7 +4482,7 @@ fn wanted_names(desk: &Desk, me: PubKey) -> Vec<PubKey> {
 }
 
 /// Everything we can say about who somebody is, read back out of the store.
-fn people_of(chat: &Chat, desk: &Desk) -> HashMap<PubKey, Person> {
+fn people_of(chat: &impl Local, desk: &Desk) -> HashMap<PubKey, Person> {
     let mut out = HashMap::new();
     let look = |account: PubKey, out: &mut HashMap<PubKey, Person>| {
         out.entry(account).or_insert_with(|| Person {
@@ -4428,7 +4636,7 @@ pub fn verified_holder(
         .find(|k| handle_of(k).is_some_and(|h| h.to_lowercase() == wanted))
 }
 
-fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
+fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
     let verified: HashMap<PubKey, u64> = chat
         .store()
         .verified()
@@ -5012,10 +5220,8 @@ fn publish(chat: &Chat, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKe
     let topic = open
         .map(|(_, k)| k.timeline.topic.clone())
         .unwrap_or_default();
-    let home = open
-        .and_then(|(channel, _)| chat.homed_elsewhere(&channel))
-        .map(|h| (h.origin, h.domain.clone()));
-    let link = LinkState::from(chat.link());
+    let home = open.and_then(|(channel, _)| chat.homed_elsewhere(&channel));
+    let link = chat.link();
 
     // **Published only where it differs, and it says whether it did.**
     //

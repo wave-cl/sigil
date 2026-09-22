@@ -22,6 +22,15 @@ pub use sqex_proto::room::RoomId;
 /// `sqex-discovery` directly.
 pub use sqex_discovery::Layer;
 
+/// The key pinned for a domain (SIP-33), without the network: what a client
+/// may draw its disc under before the exchange has answered. `None` for a
+/// first contact.
+pub fn pinned_key_of(domain: &str) -> Option<sqnr_core::PubKey> {
+    sqex_discovery::Known::load(&sqex_discovery::known::path())
+        .ok()?
+        .lookup(domain)
+}
+
 /// Which exchange a set of layers names, without dialling anything.
 ///
 /// The domain, when the layers name one; `None` when they name an address,
