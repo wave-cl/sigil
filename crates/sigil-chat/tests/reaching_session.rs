@@ -809,7 +809,10 @@ async fn a_call_inside_a_conversation_across_exchanges_connects() {
         || {},
     );
     let live = until(
-        || hers.state().phase == sigil_net::Phase::Live && his.state().phase == sigil_net::Phase::Live,
+        || {
+            hers.state().phase == sigil_net::Phase::Live
+                && his.state().phase == sigil_net::Phase::Live
+        },
         20,
     )
     .await;
