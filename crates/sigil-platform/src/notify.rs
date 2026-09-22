@@ -32,6 +32,7 @@ use crate::support::Support;
 const BUNDLE_ID: &str = "org.squic.sigil";
 
 /// How many notifications may be waiting to be pressed at once.
+#[cfg(not(target_os = "android"))]
 const MOST_WATCHED: usize = 32;
 
 pub struct Notifier {
@@ -39,6 +40,7 @@ pub struct Notifier {
     /// Targets of notifications that were pressed, waiting to be collected.
     pressed: Arc<Mutex<Vec<Target>>>,
     /// How many threads are waiting on a notification right now.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     watching: Arc<AtomicUsize>,
 }
 

@@ -27,6 +27,7 @@ pub struct Hotkeys {
     #[cfg(not(target_os = "android"))]
     _manager: Option<GlobalHotKeyManager>,
     support: Support,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     mute: Option<u32>,
 }
 

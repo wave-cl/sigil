@@ -48,8 +48,11 @@ pub enum TrayAction {
     Quit,
 }
 
+#[cfg(not(target_os = "android"))]
 const OPEN: &str = "sigil-open";
+#[cfg(not(target_os = "android"))]
 const QUIET: &str = "sigil-quiet";
+#[cfg(not(target_os = "android"))]
 const QUIT: &str = "sigil-quit";
 
 /// What the desktop reported and nobody has collected yet. The tray's
@@ -57,6 +60,7 @@ const QUIT: &str = "sigil-quit";
 /// and ask the interface to look, and the interface drains it each pass.
 static PENDING: Mutex<Vec<TrayAction>> = Mutex::new(Vec::new());
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn report(action: TrayAction) {
     if let Ok(mut pending) = PENDING.lock() {
         pending.push(action);
@@ -352,6 +356,7 @@ pub fn tray_title(unread: u32) -> Option<String> {
     (unread > 0).then(|| unread.to_string())
 }
 
+#[cfg(not(target_os = "android"))]
 fn tray_tooltip(unread: u32) -> String {
     match unread {
         0 => "Sigil".to_string(),
