@@ -10669,3 +10669,86 @@ fn an_empty_search_card_has_not_failed_to_find_anything() {
         text_of(&h)
     );
 }
+
+/// **The identity menu's keys can be taken from it with a finger.**
+///
+/// Your own key is drawn in full and selectable, which is a pointer's
+/// answer: on a phone nothing selects text, so the one thing anybody wants
+/// to do with their key -- send it to somebody -- could not be done from
+/// the only place that shows it. And the exchange's key, forty-four
+/// characters of it, wrapped across the menu saying no more than its two
+/// ends do.
+#[test]
+fn the_identity_menu_offers_its_keys_to_a_finger() {
+    // The menu is the same one on either form, and the chevron that opens
+    // it is the wide pane's; what is asserted here is what the menu holds.
+    let mut h = harness_with(a_conversation(), true);
+    h.run();
+    h.run();
+    open_identity(&mut h);
+    assert!(
+        h.query_by_label("Copy your key").is_some(),
+        "no way to take your own key: {}",
+        text_of(&h)
+    );
+    let said = text_of(&h);
+    assert!(
+        said.contains(&me().to_string()),
+        "your own key is not in the menu in full: {said}"
+    );
+}
+
+/// And the exchange's key, which stays on screen in full -- see
+/// `the_exchange_this_list_belongs_to_is_shown_in_full`, whose reason a
+/// phone does not change -- can be taken from there without selecting it.
+#[test]
+fn the_identity_menu_offers_the_exchange_key_to_a_finger() {
+    let mut state = a_conversation();
+    state.exchange = Some(them());
+    let mut h = harness_with(state, true);
+    h.run();
+    h.run();
+    open_identity(&mut h);
+    let said = text_of(&h);
+    assert!(
+        said.contains(&them().to_string()),
+        "the exchange's key belongs on screen whole: {said}"
+    );
+    assert!(
+        h.query_by_label("Copy the exchange's key").is_some(),
+        "and there is no way to take it"
+    );
+}
+
+/// **Picking a reaction puts the strip away.**
+///
+/// It was left up over the message it belongs to -- covering the mark it
+/// had just made -- and the next tap on the transcript went to the strip
+/// instead of where it was aimed.
+#[test]
+fn picking_a_quick_reaction_puts_the_strip_away() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    finger_down(&mut h, bubble.center());
+    h.run();
+    finger_up(&mut h, bubble.center());
+    h.run();
+    h.run();
+    let quick = h
+        .query_by_label(sigil_emoji::QUICK[0])
+        .expect("a tap reveals the strip")
+        .rect();
+
+    finger_down(&mut h, quick.center());
+    h.run();
+    finger_up(&mut h, quick.center());
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("More").is_none(),
+        "the strip is still up after a reaction was picked: {}",
+        text_of(&h)
+    );
+}

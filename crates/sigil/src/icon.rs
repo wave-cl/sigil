@@ -569,6 +569,16 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
 ///
 /// Full width, so the whole row is the hit target rather than the text in it.
 pub fn icon_item(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
+    icon_item_as(ui, icon, text, false)
+}
+
+/// The same row, and whether it is the one you are on.
+///
+/// A menu that switches between things -- the apps, on a phone -- has to say
+/// which is current, and a row that cannot is a menu you have to remember
+/// your way around. Filled like a chosen thing, and said as a selected
+/// button to the accessibility tree.
+pub fn icon_item_as(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
     let gap = tokens::SPACING_SM;
     let font = egui::TextStyle::Body.resolve(ui.style());
@@ -582,11 +592,21 @@ pub fn icon_item(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     // The word, not the shape: an icon's `word()` is what it means in general
     // and this says what it does here.
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, text)
+    });
 
     if ui.is_rect_visible(rect) {
-        if response.hovered() {
+        if selected {
+            ui.painter()
+                .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
+            ui.painter().rect_stroke(
+                rect,
+                tokens::RADIUS_SM,
+                egui::Stroke::new(tokens::STROKE_THIN, theme.accent),
+                egui::StrokeKind::Inside,
+            );
+        } else if response.hovered() {
             ui.painter()
                 .rect_filled(rect, tokens::RADIUS_SM, theme.interactive_hover);
         }

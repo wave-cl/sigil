@@ -994,6 +994,13 @@ impl Shell {
                                     .add(egui::Button::new(heading).frame(false))
                                     .on_hover_text("The other things sigil does");
                                 egui::Popup::menu(&button).show(|ui| {
+                                    // **Each app by its own mark**, the shape
+                                    // this menu has everywhere else: the
+                                    // rail's icons are what these apps are
+                                    // recognised by on a wide window, and a
+                                    // phone showing three bare words was the
+                                    // one menu in sigil with nothing to look
+                                    // at. The one you are on is filled.
                                     for i in 0..self.apps.len() {
                                         let badge = self.apps[i].tab_notifications();
                                         let said = if badge.is_empty() {
@@ -1001,7 +1008,9 @@ impl Shell {
                                         } else {
                                             format!("{} ({})", self.apps[i].title(), badge.count)
                                         };
-                                        if ui.selectable_label(i == active, said).clicked()
+                                        let icon = self.apps[i].icon();
+                                        if sigil_ui::icon_item_as(ui, icon, &said, i == active)
+                                            .clicked()
                                             && i != active
                                         {
                                             switch = Some(i);

@@ -131,6 +131,15 @@ impl App for Stub {
     fn tab_notifications(&self) -> sigil::TabNotifications {
         sigil::TabNotifications::count(self.unread)
     }
+    /// A mark of its own, so a menu of these is a menu of apps rather than
+    /// of one icon repeated.
+    fn icon(&self) -> sigil::Icon {
+        match self.title {
+            "Calls" => sigil::Icon::Call,
+            "Chat" => sigil::Icon::Compose,
+            _ => sigil::Icon::Public,
+        }
+    }
 }
 
 /// Everything the screen says.
@@ -2376,4 +2385,49 @@ fn the_phones_opening_screen_has_no_blank_bar_over_it() {
     d.run();
     d.run();
     assert!(d.query_by_label("Open an identity").is_some());
+}
+
+/// **The phone's app menu says which app you are on**, and draws each by
+/// its own mark.
+///
+/// It was three bare words -- the one menu in sigil with nothing to look
+/// at, and no way to tell the current app from the others but by
+/// remembering. The rail on a wide window has always been these icons.
+#[test]
+fn the_phones_app_menu_marks_the_app_you_are_on() {
+    let mut h = with_phone(sigil::Insets::NONE);
+    h.run();
+    h.get_by_label("Sigil").click();
+    h.run();
+    h.run();
+    // "Calls" is also what the app's own body says; the menu's row is the
+    // one that carries a mark at all.
+    let marked: Vec<_> = h
+        .get_all_by_label("Calls")
+        .filter_map(|n| n.accesskit_node().toggled())
+        .collect();
+    assert_eq!(
+        marked,
+        vec![egui::accesskit::Toggled::True],
+        "the app on screen is not marked in the menu"
+    );
+    let other = h.get_by_label("Chat (3)");
+    assert_eq!(
+        other.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False),
+        "another app is marked as the one on screen"
+    );
+}
+
+/// And what it looks like: the marks, and the one you are on.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_app_menu() {
+    let mut h = with_phone(sigil::Insets::NONE);
+    h.run();
+    h.get_by_label("Sigil").click();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_app_menu");
 }

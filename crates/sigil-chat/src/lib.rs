@@ -3471,7 +3471,20 @@ impl ChatApp {
         // In full, selectable, and wrapped rather than clipped. A name is an
         // assertion (SIP-21) and this is not -- it is the only thing that
         // identifies you to somebody who wants to write to you.
-        ui.colored_label(theme.text_muted, egui::RichText::new("You").small());
+        //
+        // **And copyable, because a finger cannot select text.** Selectable
+        // is a pointer's answer: on the phone the one thing anybody wants
+        // to do with their own key -- send it to somebody -- could not be
+        // done from the one place that shows it.
+        ui.horizontal(|ui| {
+            ui.colored_label(theme.text_muted, egui::RichText::new("You").small());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy your key").clicked()
+                {
+                    ui.ctx().copy_text(me.to_string());
+                }
+            });
+        });
         ui.add(
             egui::Label::new(egui::RichText::new(me.to_string()).monospace().small())
                 .wrap()
@@ -3483,7 +3496,10 @@ impl ChatApp {
         // for good.
         if let Some(handle) = &state.mine.handle {
             ui.separator();
-            ui.colored_label(theme.text_muted, egui::RichText::new("Name here").small());
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new("Your name at this exchange").small(),
+            );
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(egui::RichText::new(handle).monospace().small()).wrap());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3577,12 +3593,27 @@ impl ChatApp {
             ui.colored_label(theme.text_muted, egui::RichText::new("at").small());
             match state.exchange {
                 Some(key) => {
+                    // **In full**, by `the_exchange_this_list_belongs_to_is_shown_in_full`:
+                    // it is the key a receipt verifies under and the one a
+                    // client pins independently of whatever it is connected
+                    // to, and a phone has no hover to hide the rest of it
+                    // behind. Copy is what a finger has instead of
+                    // selecting the forty-four characters.
                     ui.add(
                         egui::Label::new(egui::RichText::new(key.to_string()).monospace().small())
                             .wrap()
                             .selectable(true),
                     )
                     .on_hover_text("the exchange this conversation list belongs to");
+                    if sigil_ui::icon_button_named(
+                        ui,
+                        sigil_ui::Icon::Copy,
+                        "Copy the exchange's key",
+                    )
+                    .clicked()
+                    {
+                        ui.ctx().copy_text(key.to_string());
+                    }
                     // SIP-85: it sees the home's address, not this machine's.
                     if let Some(home) = &state.carried {
                         ui.colored_label(

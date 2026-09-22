@@ -386,4 +386,5 @@ pub use search_hit::{SearchHit, search_hit};
 pub use sigil::icon;
 pub use sigil::icon::{
     Icon, icon_button, icon_button_as_named, icon_button_named, icon_button_tinted, icon_item,
+    icon_item_as,
 };

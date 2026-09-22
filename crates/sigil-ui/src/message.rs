@@ -839,6 +839,13 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     if hide_after.is_some_and(|p| !strip_rect.contains(p)) {
         hide_strip(ui.ctx());
     }
+    // **Picking one puts the strip away.** The mark lands under the message
+    // and the strip has done what it was opened for; left up, it covers the
+    // message it belongs to -- and the mark it just made -- and takes the
+    // next tap meant for the transcript.
+    if action.react.is_some() {
+        hide_strip(ui.ctx());
+    }
 }
 
 /// Put away whatever message's strip is showing.
