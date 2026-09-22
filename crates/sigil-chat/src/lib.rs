@@ -1406,6 +1406,11 @@ pub struct ChatApp {
     /// for whichever is being looked at. A message arriving somewhere you are
     /// not currently showing is still a message you want to be told about.
     sessions: HashMap<At, ChatHandle>,
+    /// What every call this window joins is opened with: the microphone and
+    /// the speaker, unless a test says a tone and nothing -- a runner with
+    /// no sound card ends a call on opening it, which reads as "the answer
+    /// did not connect" from outside.
+    call_opts: sigil_net::CallOpts,
     /// When each session was last started, so one that dies is tried again —
     /// and not faster than [`RETRY`].
     started: HashMap<At, std::time::Instant>,
@@ -1544,6 +1549,7 @@ impl ChatApp {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            call_opts: sigil_net::CallOpts::default(),
             started: HashMap::new(),
             identity_paths: HashMap::new(),
             starts: 0,
@@ -1840,6 +1846,12 @@ impl ChatApp {
     /// The notification a ring from another exchange would be pressed
     /// under, if one is ringing on any session: what the platform hands
     /// back to [`App::open`] when its Answer is pressed.
+    /// How calls are opened -- a tone and a null sink where the machine has
+    /// no microphone or speaker to open.
+    pub fn set_call_opts_for_test(&mut self, opts: sigil_net::CallOpts) {
+        self.call_opts = opts;
+    }
+
     pub fn cross_ring_target_for_test(&self) -> Option<Target> {
         self.sessions.iter().find_map(|(at, s)| {
             let cross = s.cross_ring()?;
@@ -7435,10 +7447,10 @@ impl ChatApp {
                 peer,
                 room,
                 direct_allowed(ring.direct, ctx.accounts.prefs.direct_calls, carried),
-                Default::default(),
+                self.call_opts.clone(),
                 move || wake.request_repaint(),
             ),
-            None => sigil_net::spawn_room(reach, signer, room, Default::default(), move || {
+            None => sigil_net::spawn_room(reach, signer, room, self.call_opts.clone(), move || {
                 wake.request_repaint()
             }),
         };
@@ -7678,7 +7690,7 @@ impl ChatApp {
             signer,
             caller,
             120,
-            Default::default(),
+            self.call_opts.clone(),
             move || wake.request_repaint(),
         );
         self.calls.insert(

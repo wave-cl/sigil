@@ -857,6 +857,14 @@ async fn the_notifications_answer_takes_a_call_from_another_exchange() {
     let mut app = sigil_chat::ChatApp::new();
     app.set_store_root_for_test(dir.path().to_path_buf());
     app.set_exchange_for_test(&b.endpoint.address.to_string(), &b.key.to_string());
+    // A tone and nothing: the Linux runner has no sound card, and a call
+    // opened on a microphone it has not got ends at once -- which from
+    // here looked like the answer never connecting.
+    app.set_call_opts_for_test(sigil_net::CallOpts {
+        source: sqex_voice::audio::Source::Tone,
+        sink: sqex_voice::audio::Sink::Null,
+        ..sigil_net::CallOpts::default()
+    });
     let mut accounts =
         sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([0x91u8; 32])]);
     let pass = |app: &mut sigil_chat::ChatApp, accounts: &mut sigil::accounts::Accounts| {
