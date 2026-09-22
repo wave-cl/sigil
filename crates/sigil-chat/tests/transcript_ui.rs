@@ -9768,3 +9768,18 @@ fn a_direct_message_asks_once_whether_the_other_party_moved_and_says_where() {
         "the offer did not open a conversation with the successor: {all}"
     );
 }
+
+/// A direct message whose other party has moved, on a phone. A picture,
+/// because the banner is new.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_moved() {
+    let mut state = a_conversation();
+    state
+        .succeeded
+        .insert(them(), Some(PubKey::new([0x44u8; 32])));
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_moved");
+}

@@ -52,6 +52,14 @@ check. A session still running as the old key is told where the account
 went and does nothing else; link that device to the new key and it is
 yours again, history and all (SIP-42 carries it once it is a sibling).
 
+That line reaches only the rooms the move was written into. For a
+contact who moved while nothing was said between you, a direct message
+asks the exchange's registry once, when it opens, whether the other party
+was succeeded -- and checks the proof it is handed, the will or the
+guardians' vouches, rather than taking the exchange's word. If they were,
+the conversation says so at its head and offers a conversation with the
+new key. What was said stays with the old one.
+
 ## What moves, and what does not
 
 Names, memberships and roles, block lists, and where you are reachable
