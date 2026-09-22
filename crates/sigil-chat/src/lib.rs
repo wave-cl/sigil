@@ -1658,6 +1658,29 @@ impl ChatApp {
         self.fixed = Some(state);
     }
 
+    /// Open a dialog, as the control that opens it does.
+    ///
+    /// Sets exactly what the button sets -- `dialogs_ui` draws from
+    /// `pane.dialog` and nothing else -- so everything below this line is the
+    /// production path. It exists because two of the six are behind menus a
+    /// test would have to walk to reach, and what is being checked is the
+    /// dialog, not the walk.
+    ///
+    /// `who` is only read by `verify`.
+    #[doc(hidden)]
+    pub fn open_dialog_for_test(&mut self, at: (PubKey, String), which: &str, who: PubKey) {
+        let dialog = match which {
+            "compose" => Dialog::Compose,
+            "profile" => Dialog::Profile,
+            "exchange" => Dialog::Exchange,
+            "name" => Dialog::Name,
+            "verify" => Dialog::Verify(who),
+            "report" => Dialog::Report { target: 3 },
+            other => panic!("no dialog called {other:?}"),
+        };
+        self.panes.entry(at).or_default().dialog = Some(dialog);
+    }
+
     /// The emoji this person sends most. Tests read it; the picker draws it.
     pub fn frequent_for_test(&self) -> Vec<String> {
         self.frequent.top(sigil_ui::emoji::FREQUENT)

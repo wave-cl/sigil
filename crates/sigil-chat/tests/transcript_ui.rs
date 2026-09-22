@@ -9060,3 +9060,90 @@ fn every_box(h: &Harness<'static>) -> Vec<(String, egui::Rect)> {
     walk(h.root(), h.ctx.pixels_per_point(), &mut seen);
     seen
 }
+
+/// **Every dialog fits a phone's screen, because a dialog cannot scroll.**
+///
+/// A pane taller than the screen is ordinary: it scrolls, and
+/// `nothing_on_a_phone_is_drawn_where_it_cannot_be_reached` checks that it
+/// can be reached. A dialog has no such way out. egui 0.36 makes a
+/// `ScrollArea` inside a `Modal` dismiss the dialog on any press inside it --
+/// tried, with each `auto_shrink` and with a sensing scope, and every one of
+/// them closes it -- so what does not fit is simply gone, with the buttons
+/// the first thing over the edge.
+///
+/// Six dialogs, each opened the way its own control opens it, and each asked
+/// where its deepest widget ended up. One of them was already checked by
+/// hand (`a_dialogs_controls_stay_on_a_phones_screen`, for the Exchange
+/// dialog, which is the tall one); the other five were not, and the one that
+/// grows next is whichever somebody adds a paragraph to.
+#[test]
+fn every_dialog_fits_a_phones_screen() {
+    let mut over = Vec::new();
+    for which in ["compose", "profile", "exchange", "name", "verify", "report"] {
+        let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+        h.run();
+        app.borrow_mut()
+            .open_dialog_for_test((me(), String::new()), which, them());
+        h.run();
+        h.run();
+        // **Both edges.** A `Modal` is centred, so a dialog that outgrows the
+        // screen goes off the *top* as much as the bottom: sixty extra lines
+        // in the profile dialog put its buttons at y=1290 and its heading at
+        // y=-487. A check on the bottom alone would name half of that.
+        //
+        // These have room, and it is worth saying how much: twenty extra
+        // lines still fit -- the first control shown here was that, and it
+        // passed because the dialog genuinely fitted, not because the
+        // measurement was blind.
+        // The instrument has to be looking at the dialog and not at the pane
+        // behind it: every one of these says something of its own.
+        let said = text_of(&h);
+        let named = match which {
+            "compose" => "New conversation",
+            "profile" => "Your profile",
+            "exchange" => "Add an exchange",
+            "name" => "Claim a name",
+            "verify" => "Verify",
+            "report" => "Report this message",
+            _ => unreachable!(),
+        };
+        assert!(
+            said.contains(named),
+            "the {which} dialog did not open ({named:?} is not on screen), so \
+             this says nothing about it: {said}"
+        );
+        let boxes = every_box(&h);
+        let low = boxes
+            .iter()
+            .filter(|(_, r)| r.height() > 0.0)
+            .max_by(|a, b| a.1.bottom().total_cmp(&b.1.bottom()));
+        let high = boxes
+            .iter()
+            .filter(|(_, r)| r.height() > 0.0)
+            .min_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+        if let Some((name, r)) = low
+            && r.bottom() > PHONE_HEIGHT + 1.0
+        {
+            over.push(format!(
+                "the {which} dialog ends at y={:.0} of {PHONE_HEIGHT} ({name:?}), \
+                 and a dialog cannot scroll",
+                r.bottom()
+            ));
+        }
+        if let Some((name, r)) = high
+            && r.top() < -1.0
+        {
+            over.push(format!(
+                "the {which} dialog starts at y={:.0} ({name:?}): a Modal is \
+                 centred, so what does not fit goes off the top as well",
+                r.top()
+            ));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} dialog(s) run off the bottom of a phone:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
+}
