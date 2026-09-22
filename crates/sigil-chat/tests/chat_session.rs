@@ -2119,29 +2119,32 @@ async fn a_credential_written_by_one_device_enrols_the_other() {
     two.stop();
 }
 
-/// **SIP-47's claim has no producer, and this says so.**
+/// **SIP-47's pairing, both halves, and the day the claim went green.**
 ///
 /// The Devices pane offers two ways in for a new device. One is "Use a
-/// credential": the other device writes one, somebody carries it across, and
-/// this device presents it -- `RegisterSelf`, which the test above covers.
+/// credential": the other device writes one, somebody carries it across,
+/// and this device presents it -- `RegisterSelf`, which the test above
+/// covers. The other is "Where the other device sent you": an `sqx-pair:`
+/// string, and `claim_listed`, which finds *this* device already in the
+/// account's list and takes the credential the registration carries.
 ///
-/// The other is "Where the other device sent you": an `sqx-pair:` string,
-/// and `claim_listed`, which finds *this* device already in the account's
-/// list and takes the credential the registration carries. The exchange
-/// supports it -- `/device/register` accepts a posting from "the delegate
-/// itself, **or an already-registered device of the same account**" -- but
-/// nothing registers a sibling. `register_self` is the only caller anywhere,
-/// in sigil and in `sqex-chat`'s CLI both, and it registers the *caller*.
+/// The exchange always supported it -- `/device/register` takes a posting
+/// from "the delegate itself, **or an already-registered device of the same
+/// account**" -- but for as long as this test existed nothing posted the
+/// second kind. `register_self` was the only caller anywhere, and it
+/// registers the *caller*, so a sibling was never registered and the claim
+/// could only succeed for a device that had already registered, which by
+/// then did not need to claim. This test recorded that, asserted the
+/// refusal, and said it would go green the day something registered the
+/// sibling.
 ///
-/// So the claim can only succeed for a device that has already registered,
-/// which by then does not need to claim. That is what this records: the
-/// credential is written and the claim is still refused, because writing one
-/// is not registering anything.
-///
-/// It goes green the day something registers the sibling, which is the one
-/// piece missing from a phone that is meant to be paired by scanning.
+/// That is `Chat::register_device` (sqex 0.104.2), and `LinkDevice` calls
+/// it after writing the credential. So now: the first device names the
+/// second, the second is in the list before anybody carries anything, and
+/// the second's claim -- told only where to go -- finds itself and takes the
+/// account. The pairing somebody expects of a QR.
 #[tokio::test]
-async fn a_device_that_was_never_registered_cannot_claim_the_account() {
+async fn a_device_named_by_its_sibling_claims_the_account_by_name_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (addr, server_pub, _h) = server_in(dir.path()).await;
     let endpoint = Endpoint {
@@ -2161,8 +2164,23 @@ async fn a_device_that_was_never_registered_cannot_claim_the_account() {
         "both should come up"
     );
 
-    // The whole of what the pane does for the other device: a credential is
-    // written, and nothing is registered.
+    // **The control: before anything is written, the claim is refused**, and
+    // says why -- the account has not registered this device. Without this
+    // the assertion below would pass for a device that could always claim.
+    two.send(Cmd::ClaimAccount(first.to_string()));
+    assert!(
+        until(|| two.state().trouble.is_some(), 20).await,
+        "the claim neither succeeded nor failed: {:?}",
+        two.state().note
+    );
+    let said = two.state().trouble.unwrap_or_default();
+    assert!(
+        said.contains("has not registered this device"),
+        "the refusal does not say what is missing: {said}"
+    );
+
+    // The first device names the second: a credential is written *and* the
+    // second is registered, from the first's own connection.
     one.send(Cmd::LinkDevice {
         device: second,
         days: 90,
@@ -2172,48 +2190,30 @@ async fn a_device_that_was_never_registered_cannot_claim_the_account() {
         "no credential was written: {:?}",
         one.state().trouble
     );
-
-    // And the account's list does not have it, which is the whole reason the
-    // claim cannot work.
-    one.send(Cmd::Devices);
     assert!(
-        until(|| !one.state().devices.is_empty(), 20).await,
-        "the exchange listed nothing at all, so this proves nothing"
-    );
-    assert!(
-        !one.state().devices.iter().any(|d| d.device == second),
-        "the other device is listed after all, so the claim below should \
-         succeed and this test is about nothing: {:?}",
-        one.state().devices
+        until(
+            || one.state().devices.iter().any(|d| d.device == second),
+            20
+        )
+        .await,
+        "the other device is not in the account's list, so nothing registered \
+         it: {:?} / {:?}",
+        one.state().devices,
+        one.state().trouble
     );
 
-    // The phone's half of SIP-47: it was told where to go and nothing else.
+    // **And the phone's half is the whole of it now**: told where to go and
+    // nothing else, it finds itself listed and takes the account.
     two.send(Cmd::ClaimAccount(first.to_string()));
-    let refused = until(|| two.state().trouble.is_some(), 20).await;
     assert!(
-        refused,
-        "the claim neither succeeded nor failed: {:?}",
+        until(|| two.state().linked == Some(true), 20).await,
+        "the claim did not succeed: {:?} / {:?}",
+        two.state().trouble,
         two.state().note
     );
-    assert_eq!(
-        two.state().linked,
-        None,
-        "the claim was refused and the device still thinks it is linked"
-    );
-
-    // **And it says why, in a sentence somebody can act on.** A path with no
-    // producer is only a broken button if the refusal is a shrug: this one
-    // names the account, says it has not registered *this* device, and
-    // offers the two reasons that are actually possible -- the wrong key, or
-    // a registration that has not reached this exchange.
-    let said = two.state().trouble.unwrap_or_default();
     assert!(
-        said.contains(&first.to_string()),
-        "the refusal does not say which account: {said}"
-    );
-    assert!(
-        said.contains("has not registered this device"),
-        "the refusal does not say what is missing: {said}"
+        until(|| two.state().me == Some(first), 20).await,
+        "the device claimed the account and still draws itself as its own key"
     );
 
     one.stop();

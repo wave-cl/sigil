@@ -5997,12 +5997,35 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
             match chat.issue_credential(&device, days * 24 * 60 * 60) {
                 Ok(credential) => {
+                    // **SIP-47 §Pairing, step 2: register it, from here.** The
+                    // exchange takes a registration from an already-registered
+                    // device of the same account -- which this one is, as of
+                    // the block above -- and nothing ever posted one. So the
+                    // other device's claim (`ClaimAccount`) looked for itself
+                    // in the account's list and was never there: writing a
+                    // credential is not registering anything. Registered, the
+                    // other device only has to say where it was sent, which
+                    // is the pairing somebody expects of a QR.
+                    //
+                    // The credential is still shown and still works by hand,
+                    // for a device that cannot scan. A registration that
+                    // fails is said and does not take the credential with it.
+                    match chat.register_device(&credential).await {
+                        Ok(()) => refresh_devices(chat, state, desk).await,
+                        Err(e) => trouble(
+                            state,
+                            format!(
+                                "the credential is written, but registering the device here failed: {e}"
+                            ),
+                        ),
+                    }
                     let encoded = bs58::encode(credential.encode()).into_string();
                     state.send_modify(|s| s.credential = Some(encoded));
                     note(
                         state,
-                        "Give this to the other device. It names both keys in the clear, \
-                         so hand it over the way you would a key."
+                        "The other device is registered: it can claim this account by \
+                         your name here, or take this credential by hand. It names both \
+                         keys in the clear, so hand it over the way you would a key."
                             .into(),
                     );
                 }
