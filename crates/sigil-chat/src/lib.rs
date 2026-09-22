@@ -7934,8 +7934,11 @@ impl ChatApp {
                 // SIP-56. Anybody may report the room itself; the admins see
                 // what was reported, with who reported it, and dismiss.
                 ui.add_space(tokens::SPACING_SM);
-                if ui
-                    .button("Report this room…")
+                // A row with its mark, the shape every other thing to press
+                // on this card has: a bare word in a box, alone under a list
+                // of rows, read as something left over rather than as the
+                // one thing anybody does *to* a room they are in.
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Flag, "Report this room…")
                     .on_hover_text("Tell the room's admins something is wrong with it.")
                     .clicked()
                 {
@@ -9164,10 +9167,18 @@ impl ChatApp {
 
         ui.add_space(tokens::SPACING_MD);
         ui.heading("Link another device");
+        // **Small, under its heading**: the prose on this card explains a
+        // security-relevant act and is worth every word, and at body size
+        // three paragraphs of it were the whole of a phone's screen before
+        // a single field. The shape the Backup section below has had all
+        // along.
         ui.colored_label(
             theme.text_secondary,
-            "Write a credential here, then give it to the other device. It names both \
-             keys in the clear, so hand it over the way you would hand over a key.",
+            egui::RichText::new(
+                "Write a credential here, then give it to the other device. It names both \
+                 keys in the clear, so hand it over the way you would hand over a key.",
+            )
+            .small(),
         );
         {
             let (_, write) = sigil_ui::labelled_field(
@@ -9240,8 +9251,11 @@ impl ChatApp {
         ui.heading("Where the other device sent you");
         ui.colored_label(
             theme.text_secondary,
-            "If another of your devices read this one's key and showed you an \
-             sqx-pair: string — or you know your name at an exchange — put it here.",
+            egui::RichText::new(
+                "If another of your devices read this one's key and showed you an \
+                 sqx-pair: string — or you know your name at an exchange — put it here.",
+            )
+            .small(),
         );
         ui.add_space(tokens::SPACING_SM);
         let (_, go) = sigil_ui::labelled_field(
@@ -9295,9 +9309,12 @@ impl ChatApp {
         ui.heading("Use a credential");
         ui.colored_label(
             theme.text_secondary,
-            "If another of your devices wrote one for this one, paste it here. The \
-             exchange checks it names this very device, so one somebody found is one \
-             they cannot use.",
+            egui::RichText::new(
+                "If another of your devices wrote one for this one, paste it here. The \
+                 exchange checks it names this very device, so one somebody found is one \
+                 they cannot use.",
+            )
+            .small(),
         );
         ui.add_space(tokens::SPACING_SM);
         let (_, register) = sigil_ui::labelled_field(

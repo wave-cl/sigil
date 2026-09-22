@@ -133,7 +133,11 @@ fn exchange_row(
     selected: bool,
     removable: bool,
 ) -> (bool, bool) {
-    let height = tokens::BUTTON_MD;
+    // A finger's row on a phone, a pointer's in a window: this is a menu
+    // reached from the app bar, where the other rows are already the
+    // form's size, and a 34-point row between them was the one thing here
+    // aimed at a mouse.
+    let height = sigil::Form::of(ui.ctx()).button_size();
     let (rect, row) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
