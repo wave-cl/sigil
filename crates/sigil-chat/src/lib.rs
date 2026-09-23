@@ -6587,6 +6587,10 @@ impl ChatApp {
                 mentions_me: line.me_mentioned,
                 verified: !line.mine && state.verified.contains_key(&line.who),
                 editable: live && line.mine && session::rewritable(line.at, now),
+                // SIP-19: the author, or an admin of the channel. In a
+                // direct message nobody is an admin, so it is one's own or
+                // nothing.
+                deletable: live && (line.mine || state.i_am_admin),
                 readonly: !live,
                 again: line.said.is_some(),
             };

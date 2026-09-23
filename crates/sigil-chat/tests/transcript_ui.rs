@@ -12007,3 +12007,55 @@ fn a_menu_is_no_wider_than_a_menu() {
         row.width()
     );
 }
+
+/// **Delete is offered only to somebody who may delete.**
+///
+/// SIP-19: a `Redact` "MUST be accepted only from the account of `target`,
+/// or from an account the channel lists as an admin", and the exchange
+/// enforces the same. It was offered on every message, so Delete on a
+/// stranger's message in a direct message — where nobody is an admin —
+/// sent a redaction for the exchange to refuse.
+#[test]
+fn delete_is_offered_on_ones_own_message_and_not_on_anybody_elses() {
+    let strip_of = |text: &str, admin: bool| -> String {
+        let mut state = a_conversation();
+        state.i_am_admin = admin;
+        state.lines.truncate(1);
+        state.lines[0].text = "theirs, in a direct message".into();
+        state.lines[0].mine = false;
+        state.lines[0].who = them();
+        let mut mine = state.lines[0].clone();
+        mine.seq = 2;
+        mine.mine = true;
+        mine.who = me();
+        mine.text = "mine, in a direct message".into();
+        state.lines.push(mine);
+        state.events.clear();
+        state.divider = None;
+        let mut h = harness_with(state, true);
+        h.run();
+        hide_column(&mut h);
+        h.run();
+        h.get_by_label_contains(text).hover();
+        h.run();
+        h.run();
+        // Reply is on the strip itself; Delete is inside the More menu.
+        h.get_by_label("More").click();
+        h.run_steps(3);
+        text_of(&h)
+    };
+
+    let own = strip_of("mine, in a direct message", false);
+    assert!(
+        own.contains("Delete"),
+        "one's own message offered no Delete, so this proves nothing: {own}"
+    );
+    let theirs = strip_of("theirs, in a direct message", false);
+    assert!(
+        !theirs.contains("Delete"),
+        "Delete was offered on somebody else's message with no admin to back it: {theirs}"
+    );
+    // An admin may take anybody's down, and is offered it.
+    let as_admin = strip_of("theirs, in a direct message", true);
+    assert!(as_admin.contains("Delete"), "{as_admin}");
+}

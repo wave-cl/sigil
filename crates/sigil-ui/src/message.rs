@@ -263,6 +263,16 @@ pub struct Bubble<'a> {
     /// every reader drops the rewrite (SIP-19), so offering one would be
     /// offering a button that does nothing.
     pub editable: bool,
+    /// This reader may take it down: SIP-19 says a `Redact` "MUST be
+    /// accepted only from the account of `target`, or from an account the
+    /// channel lists as an admin", and the exchange enforces the same at
+    /// `/channel/redact`.
+    ///
+    /// **Offered on everything until now**, including a stranger's message
+    /// in a direct message, where nobody is an admin — a press that sent a
+    /// redaction for the exchange to refuse. The same reason `editable`
+    /// exists: offering one would be offering a button that does nothing.
+    pub deletable: bool,
     /// Nothing may be done *to* this message: it belongs to an earlier copy
     /// of the conversation (SIP-60 §The client keeps what it read), whose
     /// channel no longer exists.
@@ -921,7 +931,7 @@ fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
                 action.edit = true;
                 ui.close();
             }
-            if crate::icon_item(ui, crate::Icon::Close, "Delete").clicked() {
+            if b.deletable && crate::icon_item(ui, crate::Icon::Close, "Delete").clicked() {
                 action.redact = true;
                 ui.close();
             }
@@ -2174,6 +2184,7 @@ mod tests {
             mentions_me: false,
             verified: false,
             editable: false,
+            deletable: true,
             readonly: false,
             again: false,
         }
