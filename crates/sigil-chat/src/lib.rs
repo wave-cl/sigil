@@ -893,6 +893,30 @@ fn member_actions_ui(
 /// still be in the box after switching to another: the next Return would send
 /// it as somebody else, which is a mistake the interface would have made on
 /// your behalf and not mentioned.
+/// What the bubble is told about a voice note.
+///
+/// `None` until somebody presses play: a note is not fetched for being
+/// scrolled past, and a row with no player is a waveform and a length --
+/// both of which came in the message itself (SIP-18).
+fn voice_view(pane: &Pane, a: &session::Attached) -> Option<sigil_ui::attachment::Voice> {
+    let note = pane.notes.get(&a.id);
+    let fetching = pane.play_when_fetched.contains(&a.id);
+    let trouble = pane.unplayable.contains_key(&a.id);
+    if note.is_none() && !fetching && !trouble {
+        return None;
+    }
+    Some(sigil_ui::attachment::Voice {
+        playing: note.is_some_and(|n| n.playing()),
+        done: note.map(|n| n.done()).unwrap_or(0.0),
+        position_ms: note.map(|n| n.position_ms()).unwrap_or(0),
+        fetching,
+        // The word is fixed rather than the decoder's own: what a reader
+        // can do about it is the same whatever it says, and the detail is
+        // in the log where it is of use.
+        trouble: trouble.then_some("this voice note will not play"),
+    })
+}
+
 /// What the bubble is told about a video, from the pane's player for it if
 /// there is one and the message's own word otherwise.
 fn video_view<'a>(
@@ -1167,6 +1191,10 @@ struct Pane {
     /// leaves the conversation on screen; a conversation switched away
     /// from stops its video.
     players: HashMap<String, Playing>,
+    /// SIP-18 voice notes this pane has open, by attachment id. Made when
+    /// somebody presses play and the bytes are in hand; dropped with the
+    /// attachment, which stops the sound.
+    notes: HashMap<String, sigil_video::note::Note>,
     /// Videos play was pressed on before their bytes had arrived: they
     /// start the moment they do -- in the viewer, which is where a press
     /// on a video in the transcript goes.
@@ -1449,6 +1477,7 @@ impl Default for Pane {
             claiming: String::new(),
             claim_pending: None,
             players: HashMap::new(),
+            notes: HashMap::new(),
             play_when_fetched: HashSet::new(),
             open_when_fetched: HashMap::new(),
             whole_screen: false,
@@ -2006,6 +2035,31 @@ impl ChatApp {
 
     fn pane(&mut self, at: &At) -> &mut Pane {
         self.panes.entry(at.clone()).or_default()
+    }
+
+    /// Start playing a voice note whose bytes are in hand.
+    ///
+    /// **Decoded whole, here.** A note is seconds of Opus; there is
+    /// nothing to keep in step with a picture and nothing to stream. A
+    /// file that will not decode is remembered as such, so the row says so
+    /// once rather than trying again on every pass.
+    fn start_note(&mut self, at: &At, ctx: &egui::Context, id: &str, bytes: &[u8]) {
+        let pane = self.pane(at);
+        pane.play_when_fetched.remove(id);
+        if let Some(note) = pane.notes.get(id) {
+            note.play();
+            return;
+        }
+        match sigil_video::note::Note::open(bytes, ctx.clone()) {
+            Ok(note) => {
+                note.play();
+                pane.notes.insert(id.to_owned(), note);
+            }
+            Err(why) => {
+                tracing::info!(id, %why, "a voice note will not decode");
+                pane.unplayable.insert(id.to_owned(), why.to_string());
+            }
+        }
     }
 
     /// Start playing a video whose bytes are in hand.
@@ -6162,14 +6216,21 @@ impl ChatApp {
             self.pane(at)
                 .players
                 .retain(|id, _| here.contains(id.as_str()));
-            let arrived: Vec<(String, std::sync::Arc<[u8]>)> = state
+            self.pane(at)
+                .notes
+                .retain(|id, _| here.contains(id.as_str()));
+            let arrived: Vec<(String, u8, std::sync::Arc<[u8]>)> = state
                 .lines
                 .iter()
                 .flat_map(|l| l.attachments.iter())
                 .filter(|a| self.pane(at).play_when_fetched.contains(&a.id))
-                .filter_map(|a| a.bytes.clone().map(|b| (a.id.clone(), b)))
+                .filter_map(|a| a.bytes.clone().map(|b| (a.id.clone(), a.kind, b)))
                 .collect();
-            for (id, bytes) in arrived {
+            for (id, kind, bytes) in arrived {
+                if kind == sigil_ui::attachment::VOICE {
+                    self.start_note(at, &ctx, &id, &bytes);
+                    continue;
+                }
                 self.start_video(at, &ctx, &id, bytes);
                 if let Some((seq, index)) = self.pane(at).open_when_fetched.remove(&id) {
                     self.pane(at).viewing = Some((seq, index));
@@ -6368,6 +6429,9 @@ impl ChatApp {
                     id: &a.id,
                     video: (a.kind == sigil_ui::attachment::VIDEO)
                         .then(|| video_view(pane, a, sigil_ui::video::Place::Bubble)),
+                    voice: (a.kind == sigil_ui::attachment::VOICE)
+                        .then(|| voice_view(pane, a))
+                        .flatten(),
                     // Still going up: this line is one of ours that the
                     // exchange has not answered about yet.
                     sending: line.seq >= ECHO_SEQ,
@@ -6655,6 +6719,39 @@ impl ChatApp {
                         self.send_as(Some(at), Cmd::Fetch { seq, index });
                     }
                 }
+            }
+            // **A voice note plays in the bubble.** There is nothing to
+            // look at, so there is nowhere to go: the control, the shape
+            // and the clock are the whole of it, where the message is.
+            if let Some(index) = did.play
+                && let Some(a) = state
+                    .lines
+                    .iter()
+                    .find(|l| l.seq == seq)
+                    .and_then(|l| l.attachments.get(index))
+            {
+                let ctx = ui.ctx().clone();
+                if let Some(note) = self.pane(at).notes.get(&a.id) {
+                    note.toggle();
+                } else if let Some(bytes) = a.bytes.clone() {
+                    self.start_note(at, &ctx, &a.id, &bytes);
+                } else if !self.pane(at).unplayable.contains_key(&a.id) {
+                    // Not here: a note is not fetched for being scrolled
+                    // past. Asked for now, and played when it lands.
+                    self.pane(at).play_when_fetched.insert(a.id.clone());
+                    self.send_as(Some(at), Cmd::Fetch { seq, index });
+                }
+            }
+            if let Some((index, done)) = did.seek
+                && let Some(id) = state
+                    .lines
+                    .iter()
+                    .find(|l| l.seq == seq)
+                    .and_then(|l| l.attachments.get(index))
+                    .map(|a| a.id.clone())
+                && let Some(note) = self.pane(at).notes.get(&id)
+            {
+                note.seek(done);
             }
             if let Some(index) = did.open {
                 self.pane(at).viewing = Some((seq, index));

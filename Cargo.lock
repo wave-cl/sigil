@@ -6167,6 +6167,7 @@ dependencies = [
  "image",
  "mp4",
  "openh264",
+ "opus",
  "symphonia",
 ]
 

@@ -55,6 +55,7 @@ fn tall(bytes: Option<std::sync::Arc<[u8]>>, height: Option<f32>) -> f32 {
                             sending: false,
                             waveform: &[],
                             duration_ms: None,
+                            voice: None,
                             id: "sized",
                         },
                         sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -92,6 +93,7 @@ fn drawn(bytes: std::sync::Arc<[u8]>) -> Harness<'static> {
                     sending: false,
                     waveform: &[],
                     duration_ms: None,
+                    voice: None,
                     id: "notapicture",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -387,6 +389,7 @@ fn a_picture_reserves_what_it_took_last_time() {
                             sending: false,
                             waveform: &[],
                             duration_ms: None,
+                            voice: None,
                             id: "remembered",
                         },
                         sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -461,6 +464,7 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
                     sending: false,
                     waveform: &[],
                     duration_ms: None,
+                    voice: None,
                     id: "swapping",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -515,6 +519,7 @@ fn captioned(
                     sending: false,
                     waveform: &[],
                     duration_ms: None,
+                    voice: None,
                     id: "captioned",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -706,6 +711,7 @@ fn voice(levels: &'static [u8], duration_ms: Option<u64>, wide: f32) -> (usize, 
                                 sending: false,
                                 waveform: levels,
                                 duration_ms,
+                                voice: None,
                                 id: "voice",
                             },
                             sigil::ColorTheme::current(ui.ctx()).surface_elevated,
@@ -769,4 +775,114 @@ fn a_long_waveform_thins_rather_than_smears() {
         levels.len()
     );
     assert!(bars as f32 <= 140.0 / 5.0, "{bars} bars across 140 points");
+}
+
+/// A voice note nobody has pressed has no play control and no fetch: SIP-18
+/// puts the shape and the length in the message, and the audio stays at the
+/// exchange until somebody asks for it.
+#[test]
+fn a_voice_note_nobody_pressed_is_a_shape_and_a_length() {
+    let (_, said) = voice(&[0, 40, 120, 200, 255], Some(12_000), 240.0);
+    assert!(said.contains("0:12"), "{said}");
+    assert!(!said.contains("Pause"), "{said}");
+}
+
+/// Pressing it asks to play, and the row says which way it is about to go.
+#[test]
+fn the_control_says_play_and_then_pause() {
+    for (playing, word, other) in [(false, "Play", "Pause"), (true, "Pause", "Play")] {
+        let mut h = a_note_row(sigil_ui::attachment::Voice {
+            playing,
+            ..Default::default()
+        });
+        h.run();
+        h.get_by_label(word);
+        assert!(
+            h.query_by_label(other).is_none(),
+            "both controls were drawn at once"
+        );
+    }
+}
+
+/// While it plays the clock counts up beside the whole length, which is the
+/// pair of numbers somebody actually wants.
+#[test]
+fn a_playing_note_says_where_it_is_and_how_long_it_is() {
+    let mut h = a_note_row(sigil_ui::attachment::Voice {
+        playing: true,
+        done: 0.25,
+        position_ms: 3_000,
+        ..Default::default()
+    });
+    h.run();
+    let said = said(&h);
+    assert!(said.contains("0:03 / 0:12"), "{said}");
+}
+
+/// Asked for and not here: a spinner where the control is, because there is
+/// nothing to play until the blob arrives.
+#[test]
+fn a_note_being_fetched_shows_no_control() {
+    let mut h = a_note_row(sigil_ui::attachment::Voice {
+        fetching: true,
+        ..Default::default()
+    });
+    // `run_steps`, not `run`: a spinner asks for the next frame forever,
+    // and `run` waits for the ui to settle.
+    h.run_steps(2);
+    assert!(h.query_by_label("Play").is_none());
+    assert!(h.query_by_label("Pause").is_none());
+}
+
+/// One that will not decode says so where the control was, rather than
+/// offering a press that does nothing.
+#[test]
+fn a_note_that_will_not_decode_says_so() {
+    let mut h = a_note_row(sigil_ui::attachment::Voice {
+        trouble: Some("this voice note will not play"),
+        ..Default::default()
+    });
+    h.run();
+    assert!(
+        h.query_by_label("Play").is_none(),
+        "a press that does nothing"
+    );
+    let said = said(&h);
+    assert!(said.contains("0:12"), "the length stays: {said}");
+}
+
+/// A voice row with a player attached to it.
+fn a_note_row(voice: sigil_ui::attachment::Voice) -> Harness<'static> {
+    Harness::builder()
+        .with_size(egui::vec2(360.0, 200.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            ui.allocate_ui_with_layout(
+                egui::vec2(300.0, 60.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    sigil_ui::attachment(
+                        ui,
+                        &sigil_ui::Attachment {
+                            kind: sigil_ui::attachment::VOICE,
+                            described: "[voice note 12s]",
+                            preview: sigil_ui::attachment::no_preview(),
+                            bytes: None,
+                            missing: false,
+                            held: false,
+                            size: 40_000,
+                            video: None,
+                            sending: false,
+                            waveform: &[0, 40, 120, 200, 255, 200, 120, 40],
+                            duration_ms: Some(12_000),
+                            voice: Some(voice),
+                            id: "voice",
+                        },
+                        sigil::ColorTheme::current(&ctx).surface_elevated,
+                    );
+                },
+            );
+        })
 }

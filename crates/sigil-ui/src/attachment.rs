@@ -116,11 +116,30 @@ pub struct Attachment<'a> {
     /// How long it runs, for a voice note or a clip: what the sender said
     /// in the meta, in milliseconds.
     pub duration_ms: Option<u64>,
+    /// For a voice note: the player's view of it, when this client has one
+    /// open. `None` before anybody has pressed play, which is the ordinary
+    /// case -- a note is not fetched for being scrolled past.
+    pub voice: Option<Voice>,
     /// This one is still going up: the message is in flight and its bytes
     /// are on their way to the exchange. A mark over the thumbnail, because
     /// sending a clip over a phone's uplink takes long enough that nothing
     /// on screen saying so reads as nothing happening.
     pub sending: bool,
+}
+
+/// A voice note being played, as the row needs it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Voice {
+    pub playing: bool,
+    /// Nought to one.
+    pub done: f32,
+    /// Where it is now, for the clock.
+    pub position_ms: u64,
+    /// Asked for and not here yet: the bytes are being fetched.
+    pub fetching: bool,
+    /// It will not decode. The waveform and the length stay -- they came
+    /// from the message -- and the press says why instead of doing nothing.
+    pub trouble: Option<&'static str>,
 }
 
 /// How tall a bar stands, for a level on SIP-15's scale.
@@ -141,16 +160,34 @@ pub fn bar_height(level: u8, tall: f32) -> f32 {
 /// and the same scale as a live call's meter, so one function could draw
 /// both.
 ///
-/// Returns how many bars were drawn, which is how a test knows one was.
-pub fn waveform(ui: &mut egui::Ui, levels: &[u8], colour: egui::Color32, wide: f32) -> usize {
-    if levels.is_empty() || wide <= 0.0 {
-        return 0;
-    }
+/// What was drawn: how many bars, which is how a test knows one was, and
+/// the row itself, which is what a press on it seeks by.
+pub struct Waveform {
+    pub bars: usize,
+    pub response: egui::Response,
+}
+
+/// How much of it has been played, and the colour those bars take.
+///
+/// `None` for a note nothing is playing: every bar is the quiet colour,
+/// which is also what a note nobody has pressed looks like.
+pub type Played = Option<(f32, egui::Color32)>;
+
+pub fn waveform(
+    ui: &mut egui::Ui,
+    levels: &[u8],
+    colour: egui::Color32,
+    wide: f32,
+    played: Played,
+) -> Waveform {
     let tall = tokens::ICON_MD;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(wide, tall), egui::Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return 0;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(wide.max(0.0), tall), egui::Sense::click());
+    let nothing = Waveform { bars: 0, response };
+    if levels.is_empty() || wide <= 0.0 || !ui.is_rect_visible(rect) {
+        return nothing;
     }
+    let response = nothing.response;
     // **A pitch, not a bar count.** Five points a bar -- three of mark and
     // two of air -- because a comb of hairlines is a texture, not a shape:
     // the first draw put two hundred one-point bars in a phone's bubble and
@@ -166,15 +203,26 @@ pub fn waveform(ui: &mut egui::Ui, levels: &[u8], colour: egui::Color32, wide: f
         let level = levels[i * levels.len() / count];
         let h = bar_height(level, tall);
         let x = rect.left() + i as f32 * pitch + (pitch - bar) / 2.0;
+        // **The played part is the bars, not a line over them.** A cursor
+        // drawn across a waveform hides the shape exactly where somebody
+        // is looking; colouring what has gone past leaves every bar
+        // readable and says the same thing.
+        let fill = match played {
+            Some((done, warm)) if (i as f32 + 0.5) / count as f32 <= done => warm,
+            _ => colour,
+        };
         ui.painter().rect_filled(
             egui::Rect::from_min_size(egui::pos2(x, rect.center().y - h / 2.0), egui::vec2(bar, h)),
             // Rounded to its own half-width: the caps are what stop a short
             // bar looking like a speck of dust on the line.
             bar / 2.0,
-            colour,
+            fill,
         );
     }
-    count
+    Waveform {
+        bars: count,
+        response,
+    }
 }
 
 /// The mark on something still going up: the picture dimmed, and a spinner
@@ -245,7 +293,7 @@ pub fn no_preview() -> &'static std::sync::Arc<[u8]> {
 }
 
 /// What the reader did to a file.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AttachmentAction {
     pub save: bool,
     /// Look at it full size.
@@ -256,6 +304,10 @@ pub struct AttachmentAction {
     pub fetch: bool,
     /// What was done to a video.
     pub video: Option<crate::VideoAction>,
+    /// The play control on a voice note: start it, or stop it.
+    pub play: bool,
+    /// A press on the waveform: go this far through, nought to one.
+    pub seek: Option<f32>,
 }
 
 /// `4.1 MiB`, for a caption.
@@ -612,18 +664,43 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             ))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let said = a
-                        .duration_ms
-                        .map(crate::video::clock)
-                        .unwrap_or_else(|| human(a.size));
+                    // The clock counts up while it plays and says the
+                    // whole length otherwise -- which is the number
+                    // somebody wants before pressing and after it stops.
+                    let voice = a.voice.unwrap_or_default();
+                    let whole = a.duration_ms.map(crate::video::clock);
+                    let said = match (&whole, voice.playing) {
+                        (Some(whole), true) => {
+                            format!("{} / {whole}", crate::video::clock(voice.position_ms))
+                        }
+                        (Some(whole), false) => whole.clone(),
+                        (None, _) => human(a.size),
+                    };
                     let clock = egui::WidgetText::from(&said).into_galley(
                         ui,
                         Some(egui::TextWrapMode::Extend),
                         f32::INFINITY,
                         egui::TextStyle::Body,
                     );
-                    if a.sending {
+                    // **The control, then the shape, then the clock.**
+                    // Going up: a spinner where the play button will be,
+                    // because there is nothing to play until the exchange
+                    // has it. Coming down: the same, while it is fetched.
+                    if a.sending || voice.fetching {
                         ui.add(egui::Spinner::new().size(tokens::ICON_SM));
+                    } else if let Some(why) = voice.trouble {
+                        ui.colored_label(theme.warning, egui::RichText::new("!").strong())
+                            .on_hover_text(why);
+                    } else {
+                        let icon = if voice.playing {
+                            crate::Icon::Pause
+                        } else {
+                            crate::Icon::Play
+                        };
+                        let word = if voice.playing { "Pause" } else { "Play" };
+                        if crate::icon_button_named(ui, icon, word).clicked() {
+                            action.play = true;
+                        }
                     }
                     // The waveform takes what the clock leaves, so the row
                     // is the bubble's width whatever the note's length --
@@ -631,7 +708,27 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     // message after it out for a pane that wide.
                     let room = ui.available_width() - clock.size().x - ui.spacing().item_spacing.x;
                     if room > tokens::ICON_SM && !a.waveform.is_empty() {
-                        waveform(ui, a.waveform, quiet, room);
+                        let drawn = waveform(
+                            ui,
+                            a.waveform,
+                            quiet,
+                            room,
+                            Some((voice.done, theme.accent)),
+                        );
+                        // A press on the shape goes to that point in it,
+                        // which is the one thing everybody tries on a
+                        // waveform. Only where there is something to seek.
+                        if a.voice.is_some()
+                            && let Some(at) = drawn.response.interact_pointer_pos()
+                        {
+                            let rect = drawn.response.rect;
+                            action.seek = Some(
+                                ((at.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0),
+                            );
+                        }
+                        if drawn.response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
                     }
                     // Shown as a clock, read as the sentence: anything
                     // that reads rather than looks gets "[voice note 12s]",

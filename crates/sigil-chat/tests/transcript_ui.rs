@@ -11422,3 +11422,44 @@ fn the_dialog_can_still_give_the_name_up() {
     // exchange it is released at is the one being talked to.
     assert!(said.iter().any(|c| c == "ReleaseName(\"ada\")"), "{said:?}");
 }
+
+/// A voice note is not fetched for being scrolled past — SIP-18 puts the
+/// shape and the length in the message so it draws without the audio. The
+/// press is what asks for it.
+#[test]
+fn pressing_play_on_a_voice_note_asks_the_exchange_for_it() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: sigil_ui::attachment::VOICE,
+        described: "[voice note 12s]".into(),
+        size: 40_000,
+        preview: sigil_ui::attachment::no_preview().clone(),
+        bytes: None,
+        missing: false,
+        held: false,
+        duration_ms: Some(12_000),
+        shape: None,
+        waveform: std::sync::Arc::from(vec![0u8, 40, 120, 200, 255].into_boxed_slice()),
+        id: "voice123".into(),
+    }];
+    let mut h = harness_recording_commands_phone(state, asked.clone());
+    h.run();
+    // Nothing asked for while it sits there: the waveform came free.
+    assert!(
+        !format!("{:?}", asked.borrow()).contains("Fetch"),
+        "a note was fetched for being on screen: {:?}",
+        asked.borrow()
+    );
+    h.get_by_label("Play").click();
+    // `run_steps` after the press: the row turns into a spinner while the
+    // fetch is out, and a spinner asks for the next frame forever.
+    h.run_steps(3);
+    let said = format!("{:?}", asked.borrow());
+    assert!(
+        said.contains("Fetch"),
+        "the press asked for nothing: {said}"
+    );
+}

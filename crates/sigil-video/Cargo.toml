@@ -15,6 +15,10 @@ mp4 = "0.14"
 openh264 = { version = "0.9", features = ["source"] }
 symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
 cpal = "0.18"
+# A voice note is Opus in Ogg (SIP-18) and symphonia has no Opus decoder,
+# so the packets go to libopus -- the same decoder a call already uses, via
+# opusic-sys, which builds it from source and so needs no system package.
+opus = "0.4"
 
 [dev-dependencies]
 image = { workspace = true }

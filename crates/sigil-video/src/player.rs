@@ -628,7 +628,7 @@ fn sound_thread(shared: Arc<Shared>, mut sound: Sound) {
 /// Linear resampling, which is enough for speech and music under a
 /// picture; `carry` keeps the fraction of a frame between chunks so the
 /// seam does not click.
-fn fit(
+pub(crate) fn fit(
     samples: &[f32],
     from_channels: usize,
     from_rate: u32,

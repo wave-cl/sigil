@@ -284,7 +284,7 @@ pub struct Mentioned<'a> {
 }
 
 /// What the reader did to a message.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct BubbleAction {
     /// An emoji to add or remove.
     pub react: Option<String>,
@@ -303,6 +303,10 @@ pub struct BubbleAction {
     pub fetch: Option<usize>,
     /// What was done to the video at this index.
     pub video: Option<(usize, crate::VideoAction)>,
+    /// The play control on the voice note at this index was pressed.
+    pub play: Option<usize>,
+    /// A press on the waveform of the note at this index: how far through.
+    pub seek: Option<(usize, f32)>,
     /// Forward the file at this index somewhere else.
     pub forward: Option<usize>,
     /// Go to the message this one replies to, by its place in the channel.
@@ -1475,6 +1479,12 @@ fn body(
                     if let Some(v) = did.video {
                         action.video = Some((i, v));
                     }
+                    if did.play {
+                        action.play = Some(i);
+                    }
+                    if let Some(done) = did.seek {
+                        action.seek = Some((i, done));
+                    }
                 }
             }
             if b.redacted {
@@ -2136,6 +2146,7 @@ mod tests {
                 sending: false,
                 waveform: &[],
                 duration_ms: None,
+                voice: None,
             };
             // A limit wide enough that nothing here is clamped by it: what
             // is being measured is what the bubble *asks for*.
