@@ -4749,9 +4749,32 @@ impl ChatApp {
     /// `name@domain`. They are two different things that both get called a
     /// name, so they get two dialogs and each says which it is.
     fn name_dialog(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Claim a name");
+        // What is held now, if anything: the dialog is reached both from an
+        // unclaimed domain line and from the name itself, and it had only
+        // ever been able to say the first of those.
+        let held = self
+            .state_of(Some(at))
+            .mine
+            .handle
+            .clone()
+            .filter(|h| !h.is_empty());
+        ui.heading(if held.is_some() {
+            "Your name here"
+        } else {
+            "Claim a name"
+        });
         ui.add_space(tokens::SPACING_SM);
-        ui.label("Name");
+        if let Some(handle) = &held {
+            ui.add(
+                egui::Label::new(egui::RichText::new(handle).monospace())
+                    .wrap()
+                    .selectable(true),
+            );
+            ui.add_space(tokens::SPACING_SM);
+            ui.label("Take another instead");
+        } else {
+            ui.label("Name");
+        }
         let width = ui.available_width();
         let field = sigil_ui::field(
             ui,
@@ -4769,6 +4792,7 @@ impl ChatApp {
             .small(),
         );
         ui.add_space(tokens::SPACING_SM);
+        let mut release = None;
         ui.horizontal(|ui| {
             if ui.button("Claim").clicked() || entered {
                 let name = self.pane(at).naming.trim().to_string();
@@ -4778,12 +4802,36 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::ClaimName(name));
                 }
             }
+            // **The only way to give a name up**, and it is here rather than
+            // on the card because it cannot be undone: the name goes back to
+            // the pool and somebody else may take it. Beside the sentence
+            // that says so.
+            if let Some(handle) = &held
+                && ui
+                    .button("Give it up")
+                    .on_hover_text(
+                        "Stop being reachable at this name. Nothing is deleted — your \
+                         conversations, keys and counters are untouched — and somebody \
+                         else may take it afterwards.",
+                    )
+                    .clicked()
+            {
+                // The bare local part: a release names it, and the exchange
+                // it is released at is the one being talked to.
+                release = Some(handle.split('@').next().unwrap_or(handle).to_string());
+            }
             if ui.button("Cancel").clicked() {
                 let pane = self.pane(at);
                 pane.naming.clear();
                 pane.dialog = None;
             }
         });
+        if let Some(local) = release {
+            let pane = self.pane(at);
+            pane.naming.clear();
+            pane.dialog = None;
+            self.send_as(Some(at), Cmd::ReleaseName(local));
+        }
     }
 
     /// SIP-56: what is wrong, in one of the four words the wire has, and a
@@ -9170,7 +9218,6 @@ impl ChatApp {
         let me = at.0;
         let mut edit_profile = false;
         let mut claim_name = false;
-        let mut give_up = None;
         ui.vertical_centered(|ui| {
             ui.add_space(tokens::SPACING_MD);
             // **The mark is a button.** An avatar is where everybody has
@@ -9224,19 +9271,17 @@ impl ChatApp {
                             .truncate()
                             .sense(egui::Sense::click()),
                         )
-                        .on_hover_text(
-                            "Your name at this exchange. Press to stop being reachable at it \
-                             — nothing is deleted, and somebody else may take it afterwards.",
-                        );
+                        .on_hover_text("The name you are reachable at here");
                     if row.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if row.clicked() {
-                        // The bare local part: a release names it, and the
-                        // exchange it is released at is the one being
-                        // talked to.
-                        give_up = Some(handle.split('@').next().unwrap_or(handle).to_string());
-                    }
+                    // **To the dialog, not to the release.** This line sits
+                    // directly under your own name, a thumb's width from it,
+                    // and giving a name up cannot be undone -- somebody else
+                    // may take it. One stray tap must not be able to do that,
+                    // so the card opens the place where both claiming another
+                    // and giving this one up are deliberate.
+                    claim_name |= row.clicked();
                 }
                 None => {
                     // **The domain the handle would have had.** `state.domain`
@@ -9296,9 +9341,6 @@ impl ChatApp {
         }
         if claim_name {
             self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Name);
-        }
-        if let Some(local) = give_up {
-            self.send_as(Some(at), Cmd::ReleaseName(local));
         }
     }
 

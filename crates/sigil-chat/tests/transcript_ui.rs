@@ -3114,6 +3114,38 @@ fn harness_recording_commands_phone(
         })
 }
 
+/// The Settings card, recording what it asked the session for.
+fn me_card_commands(
+    state: ChatState,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    Harness::builder()
+        .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(sigil_chat::Route::Me);
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
+            *asked.borrow_mut() = app.asked_for_test().to_vec();
+        })
+}
+
 fn harness_recording_commands(
     state: ChatState,
     asked: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
@@ -9311,7 +9343,10 @@ fn every_dialog_fits_a_phones_screen() {
             "compose" => "New conversation",
             "profile" => "Your profile",
             "exchange" => "Add an exchange",
-            "name" => "Claim a name",
+            // The fixture holds a name, so the dialog is the one that offers
+            // to take another and to give this one up -- "Claim a name" is
+            // its other heading, for an identity with none.
+            "name" => "Your name here",
             "verify" => "Verify",
             "report" => "Report this message",
             _ => unreachable!(),
@@ -11340,4 +11375,50 @@ fn me_card_phone() {
     h.run();
     h.remove_cursor();
     h.snapshot("me_card_phone");
+}
+
+/// Giving a name up cannot be undone — it goes back to the pool and somebody
+/// else may take it — and the line that shows it sits a thumb's width under
+/// your own name. A press on it must reach the dialog, never the release.
+#[test]
+fn pressing_your_handle_does_not_give_the_name_up() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = a_conversation();
+    state.mine.handle = Some("ada@squic.org".into());
+    let mut h = me_card_commands(state, asked.clone());
+    h.run();
+    h.get_by_label("ada@squic.org").click();
+    h.run();
+    h.run();
+    let said = format!("{:?}", asked.borrow());
+    assert!(
+        !said.contains("ReleaseName"),
+        "one press gave the name up: {said}"
+    );
+    // It reached the dialog instead, which is where both claiming another
+    // and giving this one up are deliberate.
+    let on_screen = text_of(&h);
+    assert!(on_screen.contains("Your name here"), "{on_screen}");
+    assert!(on_screen.contains("Give it up"), "{on_screen}");
+}
+
+/// The negative control: the release still exists, and the dialog's own
+/// button does it. Without this the test above would pass on a client that
+/// had simply lost the ability to give a name up at all.
+#[test]
+fn the_dialog_can_still_give_the_name_up() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = a_conversation();
+    state.mine.handle = Some("ada@squic.org".into());
+    let mut h = me_card_commands(state, asked.clone());
+    h.run();
+    h.get_by_label("ada@squic.org").click();
+    h.run();
+    h.get_by_label("Give it up").click();
+    h.run();
+    h.run();
+    let said = asked.borrow().clone();
+    // The local part, without the domain: a release names it, and the
+    // exchange it is released at is the one being talked to.
+    assert!(said.iter().any(|c| c == "ReleaseName(\"ada\")"), "{said:?}");
 }
