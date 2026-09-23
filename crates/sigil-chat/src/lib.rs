@@ -3442,7 +3442,15 @@ impl ChatApp {
         let anchor = chevron.or(mark).expect("the chevron or the mark");
         egui::Popup::menu(&anchor).show(|ui| {
             let screen = ui.ctx().content_rect().width();
-            ui.set_min_width(320.0f32.min(screen - 2.0 * tokens::SPACING_LG).max(200.0));
+            let wide = 320.0f32.min(screen - 2.0 * tokens::SPACING_LG).max(200.0);
+            ui.set_min_width(wide);
+            // **And no wider.** A row laid out from the right -- the copy
+            // beside a key, the ✕ beside a name -- is laid out from wherever
+            // the ui ends, and a menu with a minimum and no maximum ends
+            // wherever its widest row does: on the phone that was past the
+            // screen, with both controls half off it. Seen on the device,
+            // after the copy buttons were added.
+            ui.set_max_width(wide);
             self.identity_menu(ctx, at, state, ui, theme);
         });
     }
@@ -3631,48 +3639,48 @@ impl ChatApp {
     /// adding an account than to changing a preference, and switching between
     /// them changes the whole conversation list.
     fn exchanges_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some(key) = state.exchange else {
+            ui.horizontal(|ui| {
+                ui.colored_label(theme.text_muted, egui::RichText::new("at").small());
+                ui.colored_label(theme.text_muted, egui::RichText::new("connecting…").small());
+            });
+            return;
+        };
+        // **The caption and the control share a row; the key has its own.**
+        // A `horizontal` does not wrap: a 44-character key beside a button
+        // is wider than a phone's menu, and what came after it was drawn
+        // off the edge. The same shape as the key above it.
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_muted, egui::RichText::new("at").small());
-            match state.exchange {
-                Some(key) => {
-                    // **In full**, by `the_exchange_this_list_belongs_to_is_shown_in_full`:
-                    // it is the key a receipt verifies under and the one a
-                    // client pins independently of whatever it is connected
-                    // to, and a phone has no hover to hide the rest of it
-                    // behind. Copy is what a finger has instead of
-                    // selecting the forty-four characters.
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(key.to_string()).monospace().small())
-                            .wrap()
-                            .selectable(true),
-                    )
-                    .on_hover_text("the exchange this conversation list belongs to");
-                    if sigil_ui::icon_button_named(
-                        ui,
-                        sigil_ui::Icon::Copy,
-                        "Copy the exchange's key",
-                    )
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy the exchange's key")
                     .clicked()
-                    {
-                        ui.ctx().copy_text(key.to_string());
-                    }
-                    // SIP-85: it sees the home's address, not this machine's.
-                    if let Some(home) = &state.carried {
-                        ui.colored_label(
-                            theme.text_muted,
-                            egui::RichText::new(format!("through {home}")).small(),
-                        )
-                        .on_hover_text(
-                            "your home carries this connection: the exchange sees your home's \
-                             address and your own key, never where you are",
-                        );
-                    }
+                {
+                    ui.ctx().copy_text(key.to_string());
                 }
-                None => {
-                    ui.colored_label(theme.text_muted, egui::RichText::new("connecting…").small());
-                }
-            }
+            });
         });
+        // **In full**, by `the_exchange_this_list_belongs_to_is_shown_in_full`:
+        // it is the key a receipt verifies under and the one a client pins
+        // independently of whatever it is connected to, and a phone has no
+        // hover to hide the rest of it behind.
+        ui.add(
+            egui::Label::new(egui::RichText::new(key.to_string()).monospace().small())
+                .wrap()
+                .selectable(true),
+        )
+        .on_hover_text("the exchange this conversation list belongs to");
+        // SIP-85: it sees the home's address, not this machine's.
+        if let Some(home) = &state.carried {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!("through {home}")).small(),
+            )
+            .on_hover_text(
+                "your home carries this connection: the exchange sees your home's \
+                 address and your own key, never where you are",
+            );
+        }
     }
 
     /// One picture, as large as the window will take.
