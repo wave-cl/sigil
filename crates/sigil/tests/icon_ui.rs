@@ -5,6 +5,7 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::Queryable;
 use sigil::Icon;
 use sigil::theme;
 
@@ -180,4 +181,87 @@ fn no_two_icons_draw_the_same_shape() {
         painted(Icon::Back),
         "the same icon drew differently twice, so this comparison means nothing"
     );
+}
+
+/// A count on a menu row is a **pill**, not brackets in the words.
+///
+/// The row is the navigation rail on a phone, and it drew `Chat (3)` --
+/// the only count in sigil written out, next to a chats list, a rail and a
+/// window badge that all draw a filled pill. What is drawn here is the
+/// word and the number apart; what is *said* is still the brackets,
+/// because the tree takes words and not shapes.
+#[test]
+fn a_count_on_a_menu_row_is_a_pill_and_not_brackets() {
+    fn drawn(count: u32) -> (Vec<String>, usize) {
+        let ctx = egui::Context::default();
+        theme::install(&ctx, theme::light(), theme::dark());
+        ctx.set_theme(egui::Theme::Dark);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_max_width(240.0);
+            sigil::icon::icon_item_counted(ui, Icon::Compose, "Chat", false, count);
+        });
+        let mut words = Vec::new();
+        let mut rects = 0;
+        fn walk(s: &egui::epaint::Shape, words: &mut Vec<String>, rects: &mut usize) {
+            match s {
+                egui::epaint::Shape::Text(t) => words.push(t.galley.text().to_owned()),
+                egui::epaint::Shape::Rect(_) => *rects += 1,
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, words, rects);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut words, &mut rects);
+        }
+        // epaint panics on a dropped texture delta it was never given back.
+        out.textures_delta.clear();
+        (words, rects)
+    }
+
+    let (plain, plain_rects) = drawn(0);
+    let (counted, counted_rects) = drawn(3);
+    assert!(
+        counted.iter().any(|w| w == "Chat"),
+        "the word lost its own galley: {counted:?}"
+    );
+    assert!(
+        counted.iter().any(|w| w == "3"),
+        "the count was not drawn: {counted:?}"
+    );
+    assert!(
+        !counted.iter().any(|w| w.contains("(3)")),
+        "the count is still in the words: {counted:?}"
+    );
+    assert_eq!(plain.iter().filter(|w| *w == "Chat").count(), 1);
+    assert_eq!(
+        counted_rects,
+        plain_rects + 1,
+        "the pill behind the number was not filled: {plain_rects} without, {counted_rects} with"
+    );
+}
+
+/// And the count is still spoken, because a pill says nothing to a reader
+/// that cannot see it.
+#[test]
+fn the_count_is_still_said_in_words() {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(240.0, 80.0))
+        .build_ui(|ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            sigil::icon::icon_item_counted(ui, Icon::Compose, "Chat", false, 3);
+            sigil::icon::icon_item_counted(ui, Icon::Call, "Phone", false, 0);
+            sigil::icon::icon_item_counted(ui, Icon::Settings, "Exchange", false, 140);
+        });
+    h.run();
+    h.get_by_label("Chat (3)");
+    h.get_by_label("Phone");
+    // Past a hundred the pill says "99+" and the words say the number:
+    // the shape has a width to keep, and the tree does not.
+    h.get_by_label("Exchange (140)");
 }

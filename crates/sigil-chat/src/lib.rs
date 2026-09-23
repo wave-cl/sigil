@@ -1103,6 +1103,25 @@ struct Staged {
     /// A small PNG of it, once the decoding thread has made one; `None`
     /// until then, and for a kind that has no picture.
     preview: Option<std::sync::Arc<[u8]>>,
+    /// A voice note's length and its bars, once they have been read off
+    /// SIP-18's meta. **A staged note is drawn as a note and not as a
+    /// file**: a tile reading `voice-2026-0...` is a filename where the
+    /// sender wanted the thing they just recorded, and the waveform is
+    /// already there to be drawn -- it is measured at staging so that it
+    /// can travel, and was being thrown away.
+    voice: Option<(u64, Vec<u8>)>,
+}
+
+/// What decoding a staged file turned up: a thumbnail for a kind that has one,
+/// and a voice note's length and bars.
+///
+/// Both come out of the one decode. A note's waveform is measured at
+/// staging because it has to travel with the message, and the composer may
+/// as well draw the same numbers it is about to send.
+#[derive(Default)]
+struct Scanned {
+    preview: Option<Vec<u8>>,
+    voice: Option<(u64, Vec<u8>)>,
 }
 
 /// Where a staged file comes from.
@@ -1125,6 +1144,18 @@ impl Staged {
             name: a.described.clone(),
             kind: a.kind,
             preview: (!a.preview.is_empty()).then(|| a.preview.clone()),
+            voice: (a.kind == sqex_proto::blob::KIND_VOICE && !a.waveform.is_empty())
+                .then(|| (a.duration_ms.unwrap_or(0), a.waveform.to_vec())),
+        }
+    }
+
+    /// What to call it out loud: a voice note by how long it runs,
+    /// anything else by its name. `voice-2026-09-23-14-02.ogg` is what the
+    /// recorder had to call the file, not what anybody recorded.
+    fn described(&self) -> String {
+        match &self.voice {
+            Some((ms, _)) => format!("Voice note {}", sigil_ui::video::clock(*ms)),
+            None => self.name.clone(),
         }
     }
 
@@ -1241,9 +1272,9 @@ struct Pane {
     /// with its thumbnail once one is decoded, and a way to take it back
     /// out before sending.
     staged: Vec<Staged>,
-    /// Thumbnails arriving from the threads that decode them, by path.
-    previews: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Option<Vec<u8>>)>>,
-    previews_tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, Option<Vec<u8>>)>>,
+    /// What the threads that decode staged files found, by path.
+    previews: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Scanned)>>,
+    previews_tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, Scanned)>>,
     /// Why not every file picked was staged.
     staging_trouble: Option<String>,
     /// Why the last line typed as a command did nothing.
@@ -6887,12 +6918,21 @@ impl ChatApp {
                 name,
                 kind,
                 preview: None,
+                voice: None,
             });
             let tx = tx.clone();
             let wake = ctx.clone();
             std::thread::spawn(move || {
-                let preview = session::preview_of(&path, kind).map(|(_, p)| p);
-                let _ = tx.send((path, preview));
+                let found = session::preview_of(&path, kind).map_or_else(
+                    Scanned::default,
+                    |(meta, preview)| Scanned {
+                        preview: Some(preview),
+                        voice: (kind == sqex_proto::blob::KIND_VOICE)
+                            .then(|| session::voice_facts(meta))
+                            .flatten(),
+                    },
+                );
+                let _ = tx.send((path, found));
                 wake.request_repaint();
             });
         }
@@ -6924,20 +6964,21 @@ impl ChatApp {
     /// it while there is no picture, and a way to take it back out.
     fn staged_ui(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
         // Thumbnails that have arrived since last pass.
-        let landed: Vec<(std::path::PathBuf, Option<Vec<u8>>)> = self
+        let landed: Vec<(std::path::PathBuf, Scanned)> = self
             .pane(at)
             .previews
             .as_ref()
             .map(|rx| rx.try_iter().collect())
             .unwrap_or_default();
-        for (path, preview) in landed {
+        for (path, found) in landed {
             if let Some(s) = self
                 .pane(at)
                 .staged
                 .iter_mut()
                 .find(|s| matches!(&s.source, Source::File(p) if *p == path))
             {
-                s.preview = preview.filter(|p| !p.is_empty()).map(|p| p.into());
+                s.preview = found.preview.filter(|p| !p.is_empty()).map(|p| p.into());
+                s.voice = found.voice;
             }
         }
         if self.pane(at).staged.is_empty() {
@@ -6953,12 +6994,60 @@ impl ChatApp {
         let mut remove: Option<usize> = None;
         ui.horizontal_wrapped(|ui| {
             for (i, s) in self.pane(at).staged.iter().enumerate() {
+                // **A voice note is a shape, not a name.** It gets a tile
+                // wide enough for its waveform to read as one; every other
+                // kind keeps the square it has always had.
+                let wide = if s.voice.is_some() { TILE * 2.0 } else { TILE };
                 let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(TILE, TILE), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(wide, TILE), egui::Sense::hover());
                 ui.painter()
                     .rect_filled(rect, tokens::RADIUS_MD, theme.surface_secondary);
-                match &s.preview {
-                    Some(bytes) => {
+                match (&s.voice, &s.preview) {
+                    (Some((ms, bars)), _) => {
+                        let inner = rect.shrink(tokens::SPACING_SM);
+                        // **Placed, not laid out.** A vertical layout given
+                        // this box overflowed it by a line and wrote the
+                        // clock on the background *under* the tile. The two
+                        // rows are put where they go instead -- and the
+                        // bars stop short of the corner the way out sits
+                        // in, so those two never share a pixel either.
+                        let galley = ui.painter().layout_no_wrap(
+                            sigil_ui::video::clock(*ms),
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            theme.text_secondary,
+                        );
+                        let under = galley.size().y;
+                        let band = egui::Rect::from_min_max(
+                            inner.left_top(),
+                            egui::pos2(
+                                (inner.right() - tokens::BUTTON_SM).max(inner.left()),
+                                (inner.bottom() - under).max(inner.top()),
+                            ),
+                        );
+                        // Top-down and from the top left: the row this
+                        // sits in lays out horizontally, and a child that
+                        // inherits that puts `add_space` somewhere else
+                        // entirely.
+                        let build = egui::UiBuilder::new()
+                            .max_rect(band)
+                            .layout(egui::Layout::top_down(egui::Align::Min));
+                        ui.scope_builder(build, |ui| {
+                            ui.add_space(((band.height() - tokens::ICON_MD) / 2.0).max(0.0));
+                            sigil_ui::attachment::waveform(
+                                ui,
+                                bars,
+                                theme.accent,
+                                band.width(),
+                                None,
+                            );
+                        });
+                        ui.painter().galley(
+                            egui::pos2(inner.left(), inner.bottom() - under),
+                            galley,
+                            theme.text_secondary,
+                        );
+                    }
+                    (None, Some(bytes)) => {
                         let uri = s.uri();
                         ui.ctx()
                             .include_bytes(uri.clone(), egui::load::Bytes::Shared(bytes.clone()));
@@ -6967,7 +7056,7 @@ impl ChatApp {
                             .show_loading_spinner(false)
                             .paint_at(ui, rect);
                     }
-                    None => {
+                    (None, None) => {
                         // The name, for a file with no picture -- or one
                         // whose picture is still being made.
                         ui.painter().text(
@@ -7002,7 +7091,7 @@ impl ChatApp {
                     sigil_ui::icon_button_named(
                         ui,
                         sigil_ui::Icon::Close,
-                        &format!("Remove {}", s.name),
+                        &format!("Remove {}", s.described()),
                     )
                     .clicked()
                 });
@@ -7011,7 +7100,7 @@ impl ChatApp {
                 }
                 // Said to the tree, since the picture says nothing to it.
                 out.response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Image, true, &s.name)
+                    egui::WidgetInfo::labeled(egui::WidgetType::Image, true, s.described())
                 });
             }
         });
@@ -9681,12 +9770,9 @@ impl ChatApp {
         ui.separator();
         ui.colored_label(theme.text_muted, egui::RichText::new("sigil").small());
         for s in siblings {
-            let said = if s.badge == 0 {
-                s.title.clone()
-            } else {
-                format!("{} ({})", s.title, s.badge)
-            };
-            if sigil_ui::icon_item_as(ui, s.icon, &said, s.active).clicked() && !s.active {
+            if sigil_ui::icon_item_counted(ui, s.icon, &s.title, s.active, s.badge).clicked()
+                && !s.active
+            {
                 ctx.navigator.switch_to(s.id);
             }
         }

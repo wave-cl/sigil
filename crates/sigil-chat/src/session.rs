@@ -4191,6 +4191,27 @@ fn voice_meta(decoded: &sigil_video::note::Decoded) -> Vec<u8> {
     meta
 }
 
+/// Read SIP-18's voice meta back: how long the note runs, and its bars.
+///
+/// Through sqex-proto's own accessors rather than a second parser here, so
+/// a note drawn in the composer before it is sent is drawn from the same
+/// bytes, read the same way, as the note the far end will draw. `None`
+/// when the meta is too short to hold either -- a length with no bars is a
+/// note that was measured and has nothing to show.
+pub fn voice_facts(meta: Vec<u8>) -> Option<(u64, Vec<u8>)> {
+    let a = sqex_proto::blob::Attachment {
+        kind: sqex_proto::blob::KIND_VOICE,
+        blob: [0; 32],
+        key: [0; 32],
+        size: 0,
+        chunks: 0,
+        mime: String::new(),
+        meta,
+        preview: Vec::new(),
+    };
+    Some((a.duration_ms()? as u64, a.waveform()?.to_vec()))
+}
+
 fn shape_meta(width: u32, height: u32, duration_ms: Option<u64>) -> Vec<u8> {
     let mut m = Vec::with_capacity(8);
     m.extend_from_slice(&(width.min(u16::MAX as u32) as u16).to_be_bytes());

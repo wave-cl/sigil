@@ -596,21 +596,62 @@ pub fn icon_item(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
 /// your way around. Filled like a chosen thing, and said as a selected
 /// button to the accessibility tree.
 pub fn icon_item_as(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool) -> egui::Response {
+    icon_item_counted(ui, icon, text, selected, 0)
+}
+
+/// The same row carrying a count: what is waiting behind it.
+///
+/// **A pill, not parentheses.** This row is the navigation rail on a phone,
+/// and it read `Chat (3)` -- the only count in sigil written as words. The
+/// chats list, the rail and the window's own badge all draw a filled pill,
+/// so brackets here were the same fact said in a second language, in the
+/// one place somebody is choosing between three things by their shape.
+///
+/// The count is still *spoken* in brackets, because a pill is a shape and
+/// the accessibility tree takes words.
+pub fn icon_item_counted(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &str,
+    selected: bool,
+    count: u32,
+) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
     let gap = tokens::SPACING_SM;
     let font = egui::TextStyle::Body.resolve(ui.style());
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), font, theme.text_primary);
+    // "99+" rather than a number that widens the row without adding a fact.
+    let badge = (count > 0).then(|| {
+        let said = if count > 99 {
+            "99+".to_string()
+        } else {
+            count.to_string()
+        };
+        ui.painter().layout_no_wrap(
+            said,
+            egui::TextStyle::Small.resolve(ui.style()),
+            egui::Color32::WHITE,
+        )
+    });
+    let pill = badge
+        .as_ref()
+        .map(|g| egui::vec2(g.size().x + gap * 2.0, g.size().y + tokens::SPACING_XS))
+        .unwrap_or(egui::Vec2::ZERO);
     let height = tokens::BUTTON_MD.max(galley.size().y);
     let width = ui
         .available_width()
-        .max(tokens::BUTTON_MD + gap + galley.size().x);
+        .max(tokens::BUTTON_MD + gap + galley.size().x + pill.x + gap);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     // The word, not the shape: an icon's `word()` is what it means in general
     // and this says what it does here.
+    let spoken = match count {
+        0 => text.to_owned(),
+        n => format!("{text} ({n})"),
+    };
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, text)
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, &spoken)
     });
 
     if ui.is_rect_visible(rect) {
@@ -642,6 +683,22 @@ pub fn icon_item_as(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool) -
             rect.center().y - galley.size().y / 2.0,
         );
         ui.painter().galley(at, galley, theme.text_primary);
+        if let Some(badge) = badge {
+            let box_ = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - gap - pill.x, rect.center().y - pill.y / 2.0),
+                pill,
+            );
+            ui.painter()
+                .rect_filled(box_, tokens::RADIUS_PILL, theme.accent);
+            ui.painter().galley(
+                egui::pos2(
+                    box_.center().x - badge.size().x / 2.0,
+                    box_.center().y - badge.size().y / 2.0,
+                ),
+                badge,
+                egui::Color32::WHITE,
+            );
+        }
     }
     response
 }

@@ -11181,6 +11181,33 @@ fn voice_note_phone() {
     h.snapshot("voice_note_phone");
 }
 
+/// What a note *about to be sent* looks like, which is the picture the
+/// assertions cannot take: the first draw laid the tile out vertically and
+/// the clock overflowed the box by a line, landing on the background under
+/// it. Nothing was off screen and nothing was unreachable, so only a
+/// rendering says whether the two rows are inside the tile they belong to.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn composer_note_phone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voice-2026-09-23-14-02-11.ogg");
+    std::fs::write(&path, three_seconds_of_note()).unwrap();
+    let (mut h, app) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    app.borrow_mut().stage_for_test(me(), "", vec![path]);
+    // Decoded on a thread; the picture waits for it rather than catching
+    // the tile halfway.
+    for _ in 0..100 {
+        h.run();
+        if h.query_by_label("Voice note 0:03").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    h.run();
+    h.remove_cursor();
+    h.snapshot("composer_note_phone");
+}
+
 // ---------------------------------------------------------------------
 // The Settings card: what is behind your own mark on a phone.
 // ---------------------------------------------------------------------
@@ -11537,4 +11564,79 @@ fn a_recording_thrown_away_leaves_nothing_behind() {
     composer(&h);
     // Nothing staged: no tile, and the microphone is on offer again.
     h.get_by_label("Record a voice note");
+}
+
+// ---------------------------------------------------------------------------
+// A staged voice note draws as a note.
+// ---------------------------------------------------------------------------
+
+/// Three seconds of tone, encoded the way the recorder encodes what it
+/// captures, so the tile is fed a real note and not a stub.
+fn three_seconds_of_note() -> Vec<u8> {
+    let samples: Vec<f32> = (0..sigil_video::note::RATE as usize * 3)
+        .map(|i| {
+            let t = i as f32 / sigil_video::note::RATE as f32;
+            (t * 440.0 * std::f32::consts::TAU).sin() * 0.5
+        })
+        .collect();
+    sigil_video::note::encode(&samples).expect("a note encodes")
+}
+
+/// **A note in the composer is a waveform and a length, not a filename.**
+/// The recorder has to call the file something, and what it calls it is a
+/// stamp -- `voice-2026-09-23-14-02.ogg` -- which is what the tile showed:
+/// ten characters of that, truncated, where the thing just recorded should
+/// be. The bars are measured at staging anyway, because they have to
+/// travel with the message; they were being measured and thrown away.
+#[test]
+fn a_staged_voice_note_shows_its_waveform_and_its_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voice-2026-09-23-14-02-11.ogg");
+    std::fs::write(&path, three_seconds_of_note()).unwrap();
+
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(the_room());
+    app.stage_for_test(me(), "", vec![path]);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render(&mut app_ctx, ui);
+        });
+    // Decoded on a thread of its own; give it a moment to land.
+    for _ in 0..100 {
+        h.run();
+        if h.query_by_label("Voice note 0:03").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let said = text_of(&h);
+    assert!(
+        h.query_by_label("Voice note 0:03").is_some(),
+        "the tile did not say what it holds: {said}"
+    );
+    assert!(
+        h.query_by_label("Remove Voice note 0:03").is_some(),
+        "and the way out named a file: {said}"
+    );
+    assert!(
+        !said.contains("voice-2026"),
+        "the stamp the recorder had to write is on screen: {said}"
+    );
+    // The length is drawn beside the bars, not only spoken to the tree.
+    assert!(said.contains("0:03"), "{said}");
 }

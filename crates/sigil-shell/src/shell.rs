@@ -1024,14 +1024,17 @@ impl Shell {
                                     // at. The one you are on is filled.
                                     for i in 0..self.apps.len() {
                                         let badge = self.apps[i].tab_notifications();
-                                        let said = if badge.is_empty() {
-                                            self.apps[i].title().to_string()
-                                        } else {
-                                            format!("{} ({})", self.apps[i].title(), badge.count)
-                                        };
+                                        let count = if badge.is_empty() { 0 } else { badge.count };
                                         let icon = self.apps[i].icon();
-                                        if sigil_ui::icon_item_as(ui, icon, &said, i == active)
-                                            .clicked()
+                                        let title = self.apps[i].title().to_string();
+                                        if sigil_ui::icon_item_counted(
+                                            ui,
+                                            icon,
+                                            &title,
+                                            i == active,
+                                            count,
+                                        )
+                                        .clicked()
                                             && i != active
                                         {
                                             switch = Some(i);
