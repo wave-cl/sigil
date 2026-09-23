@@ -40,7 +40,7 @@ pub use deeplink::Link;
 pub use form::{Form, Insets};
 pub use icon::{Icon, icon_button, icon_button_named, icon_button_tinted};
 pub use nav::{Discarded, NavStack};
-pub use navigator::{ActiveEntry, AppId, NavEntry, NavRequest, Navigator};
+pub use navigator::{ActiveEntry, AppId, NavEntry, NavRequest, Navigator, Sibling};
 pub use prefs::Prefs;
 pub use quiet::Quiet;
 pub use theme::ColorTheme;

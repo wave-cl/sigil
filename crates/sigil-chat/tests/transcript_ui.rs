@@ -150,6 +150,7 @@ fn a_conversation() -> ChatState {
                     held: false,
                     duration_ms: None,
                     shape: None,
+                    waveform: Default::default(),
                     id: "abc123".into(),
                 }],
                 standing: Default::default(),
@@ -679,6 +680,28 @@ fn harness_phone_recording(
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
     Drawn,
 ) {
+    harness_phone_beside(state, route, theme_choice, asks, routes, Vec::new())
+}
+
+/// The phone with the other apps beside this one, as the shell publishes
+/// them.
+///
+/// Empty in every other harness, which is the honest answer for one app on
+/// its own: there is nowhere else to go, and the Settings card draws no way
+/// to nowhere.
+#[allow(clippy::type_complexity)]
+fn harness_phone_beside(
+    state: ChatState,
+    route: sigil_chat::Route,
+    theme_choice: egui::Theme,
+    asks: Asks,
+    routes: Routes,
+    siblings: Vec<sigil::Sibling>,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::RefCell<ChatApp>>,
+    Drawn,
+) {
     let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
     let width = drawn.clone();
     let mut app = ChatApp::new();
@@ -702,6 +725,7 @@ fn harness_phone_recording(
             ctx.set_theme(theme_choice);
             let t = sigil::ColorTheme::current(&ctx);
             let mut nav = Navigator::default();
+            nav.set_siblings(siblings.clone());
             let mut app_ctx = AppContext {
                 navigator: &mut nav,
                 accounts: &mut accounts,
@@ -2826,6 +2850,7 @@ fn a_picture_the_session_has_put_down_is_forgotten_by_the_interface() {
             held: false,
             duration_ms: None,
             shape: None,
+            waveform: Default::default(),
             id: "putdown".into(),
         }];
         state
@@ -3669,6 +3694,7 @@ fn mine_dark() {
         held: false,
         duration_ms: None,
         shape: None,
+        waveform: Default::default(),
         id: "mine123".into(),
     }];
     let mut h = harness_with(state, true);
@@ -6368,6 +6394,7 @@ fn a_picture_is_not_captioned_with_its_own_size() {
         held: false,
         duration_ms: None,
         shape: None,
+        waveform: Default::default(),
         id: "captioned".into(),
     }];
     let mut h = harness_with(state, true);
@@ -6674,6 +6701,7 @@ fn a_video_is_fetched_when_its_play_mark_is_pressed() {
         held: true,
         duration_ms: Some(449_344),
         shape: Some((1280, 720)),
+        waveform: Default::default(),
         id: "clip".into(),
     }];
     let seq = state.lines[n - 1].seq;
@@ -6724,6 +6752,7 @@ fn a_portrait_video_gets_a_bubble_its_own_width() {
         held: true,
         duration_ms: Some(20_000),
         shape: Some((720, 1280)),
+        waveform: Default::default(),
         id: "tall".into(),
     }];
     // The bubble's time label, in whatever zone the test runs in.
@@ -7165,6 +7194,7 @@ fn with_pictures(n: usize) -> ChatState {
             held: false,
             duration_ms: None,
             shape: Some((4, 4)),
+            waveform: Default::default(),
             id: format!("pic{i}"),
         })
         .collect();
@@ -11020,4 +11050,294 @@ fn the_conversation_list_asks_the_directory_for_nothing() {
     h.run();
     let said = asked.borrow().join(" | ");
     assert!(!said.contains("Find("), "it searched the directory: {said}");
+}
+
+/// SIP-18: a voice note carries its waveform and its length in the message
+/// itself, "so it draws before any audio is fetched" — and here nothing is
+/// fetched: `bytes` is `None` and the row still says how long it runs.
+///
+/// The bars themselves are counted in sigil-ui's own tests, off the shapes
+/// the row paints. What this one is about is the *carriage*: that a length
+/// the sender put in the meta survives the trip from the store, through the
+/// session's state, to the bubble.
+fn a_voice_note_saying(duration_ms: Option<u64>) -> String {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: sigil_ui::attachment::VOICE,
+        described: "[voice note 12s]".into(),
+        size: 40_000,
+        preview: sigil_ui::attachment::no_preview().clone(),
+        bytes: None,
+        missing: false,
+        held: false,
+        duration_ms,
+        shape: None,
+        waveform: std::sync::Arc::from(vec![0u8, 40, 120, 200, 255].into_boxed_slice()),
+        id: "voice123".into(),
+    }];
+    let mut h = harness_with(state, true);
+    h.run();
+    text_of(&h)
+}
+
+#[test]
+fn a_voice_note_says_its_length_before_any_audio_is_fetched() {
+    let said = a_voice_note_saying(Some(12_000));
+    assert!(said.contains("0:12"), "the length is on the row: {said}");
+    // Drawn as a clock, read as a sentence: the description stays in the
+    // tree for anything that reads rather than looks.
+    assert!(said.contains("[voice note 12s]"), "{said}");
+}
+
+/// The negative control. A sender may send no length, and then the row has
+/// nothing to count down — so it says the one thing it does know. A row that
+/// printed "0:12" from anywhere but the meta would pass the test above and
+/// fail this one.
+#[test]
+fn a_voice_note_with_no_length_says_how_big_it_is_instead() {
+    let said = a_voice_note_saying(None);
+    assert!(!said.contains("0:12"), "a length came from nowhere: {said}");
+    assert!(said.contains("39 KiB"), "it says what it does know: {said}");
+}
+
+/// What a voice note looks like on a phone.
+///
+/// A picture, because the only question left about it is one no assertion
+/// answers: whether a row of bars beside a clock reads as a voice note at
+/// the width a phone's bubble actually has.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn voice_note_phone() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    // A shape with something in it: syllables. A smooth envelope draws a
+    // hill and a hill is not what speech looks like -- what makes a voice
+    // note recognisable at a glance is that it is lumpy.
+    let levels: Vec<u8> = (0..48)
+        .map(|i| {
+            let t = i as f32 / 47.0;
+            let envelope = (t * std::f32::consts::PI).sin().max(0.0);
+            // A cheap deterministic wobble, so the picture is the same
+            // every time it is taken.
+            let wobble = ((i * 37 % 11) as f32 / 10.0) * 0.55 + 0.45;
+            let loud = (envelope * wobble).clamp(0.05, 1.0);
+            (255.0 - loud * 245.0) as u8
+        })
+        .collect();
+    state.lines[n - 1].attachments = vec![Attached {
+        kind: sigil_ui::attachment::VOICE,
+        described: "[voice note 12s]".into(),
+        size: 40_000,
+        preview: sigil_ui::attachment::no_preview().clone(),
+        bytes: None,
+        missing: false,
+        held: false,
+        duration_ms: Some(12_000),
+        shape: None,
+        waveform: std::sync::Arc::from(levels.into_boxed_slice()),
+        id: "voice123".into(),
+    }];
+    let (mut h, _app) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.remove_cursor();
+    h.snapshot("voice_note_phone");
+}
+
+// ---------------------------------------------------------------------
+// The Settings card: what is behind your own mark on a phone.
+// ---------------------------------------------------------------------
+
+/// The other things sigil does, as the shell publishes them.
+fn three_apps() -> Vec<sigil::Sibling> {
+    vec![
+        sigil::Sibling {
+            id: sigil::AppId(0),
+            title: "Chat".into(),
+            icon: sigil_ui::Icon::Compose,
+            badge: 3,
+            active: true,
+        },
+        sigil::Sibling {
+            id: sigil::AppId(1),
+            title: "Exchange".into(),
+            icon: sigil_ui::Icon::Settings,
+            badge: 0,
+            active: false,
+        },
+        sigil::Sibling {
+            id: sigil::AppId(2),
+            title: "Phone".into(),
+            icon: sigil_ui::Icon::Device,
+            badge: 0,
+            active: false,
+        },
+    ]
+}
+
+fn me_card(state: ChatState, siblings: Vec<sigil::Sibling>) -> (Harness<'static>, Routes) {
+    let routes = Routes::default();
+    let (h, _, _) = harness_phone_beside(
+        state,
+        sigil_chat::Route::Me,
+        egui::Theme::Dark,
+        Asks::default(),
+        routes.clone(),
+        siblings,
+    );
+    (h, routes)
+}
+
+/// A press on your own mark goes to the card, and not to a popup hanging
+/// off it.
+#[test]
+fn your_mark_opens_the_settings_card_on_a_phone() {
+    // The list, with nothing open: a phone's bar is the conversation's when
+    // one is, and your mark is not on it.
+    let mut state = a_conversation();
+    state.open = None;
+    let (mut h, routes) = harness_phone_routes(state, sigil_chat::Route::Conversations);
+    h.run();
+    assert!(
+        routes.borrow().is_empty(),
+        "something asked to go somewhere before anything was pressed"
+    );
+    h.get_by_label("Your identity").click();
+    h.run();
+    assert_eq!(
+        routes.borrow().as_slice(),
+        [sigil_chat::Route::Me],
+        "the mark did not open the card"
+    );
+}
+
+/// The head: the mark, the name and where you are reachable, and each of
+/// the three is a control.
+#[test]
+fn the_card_puts_your_name_and_your_domain_at_its_head() {
+    let mut state = a_conversation();
+    state.mine.name = Some("Ada".into());
+    state.mine.handle = Some("ada@squic.org".into());
+    let (mut h, _) = me_card(state, three_apps());
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Ada"), "your name: {said}");
+    assert!(said.contains("ada@squic.org"), "where you are: {said}");
+    // The mark is a button, and what it does is what it says -- which is
+    // also what the row further down says, so this counts rather than
+    // fetching the one node.
+    assert!(
+        said.contains("Edit your profile"),
+        "the mark is a control: {said}"
+    );
+}
+
+/// With no name claimed the second line is the domain alone — the domain
+/// the handle *would* have had, from the same field the handle is composed
+/// from, so the two cannot disagree.
+#[test]
+fn with_no_name_claimed_the_card_says_the_domain_by_itself() {
+    let mut state = a_conversation();
+    state.mine.handle = None;
+    state.domain = Some("squic.org".into());
+    let (mut h, _) = me_card(state, three_apps());
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("@squic.org"), "the domain: {said}");
+}
+
+/// Keys are shown short. A whole base58 key is 41 to 44 characters and
+/// nobody reads one: what anybody does with their own is send it, which is
+/// the button beside it.
+#[test]
+fn the_card_shows_keys_short_with_a_way_to_copy_them() {
+    let (mut h, _) = me_card(a_conversation(), three_apps());
+    h.run();
+    let said = text_of(&h);
+    let whole = me().to_string();
+    assert!(
+        said.contains(&sigil_ui::short(&whole)),
+        "the short form is on the card: {said}"
+    );
+    assert!(
+        !said.contains(&whole),
+        "the whole key was drawn where the short form belongs: {said}"
+    );
+    h.get_by_label("Copy your key");
+    h.get_by_label("Copy the exchange's key");
+}
+
+/// The rail, for a screen with no room for one: the other things sigil
+/// does, with the one you are on marked and its badge said.
+#[test]
+fn the_card_carries_the_way_to_the_other_apps() {
+    let (mut h, _) = me_card(a_conversation(), three_apps());
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Chat (3)"), "the badge is said: {said}");
+    assert!(said.contains("Exchange"), "{said}");
+    assert!(said.contains("Phone"), "{said}");
+}
+
+/// The negative control for the row above: one app on its own has nowhere
+/// else to go, and the card draws no way to nowhere. Without this, a test
+/// that found "Exchange" anywhere on the card would pass on the word in
+/// "Copy the exchange…".
+#[test]
+fn a_card_with_no_other_apps_draws_no_way_to_them() {
+    let (mut h, _) = me_card(a_conversation(), Vec::new());
+    h.run();
+    let said = text_of(&h);
+    assert!(!said.contains("Chat (3)"), "{said}");
+    assert!(
+        !said.contains("Phone"),
+        "a way to an app that is not there: {said}"
+    );
+}
+
+/// Everything that used to be behind the mark is still reachable, on a card
+/// that has a name in the bar and a Back that means something.
+#[test]
+fn the_card_keeps_everything_the_menu_had() {
+    let (mut h, _) = me_card(a_conversation(), three_apps());
+    h.run();
+    let said = text_of(&h);
+    for row in [
+        "Edit your profile",
+        "Your devices",
+        "Add an exchange",
+        "Switch identity",
+    ] {
+        assert!(said.contains(row), "{row} is not on the card: {said}");
+    }
+}
+
+/// Pressing Your devices from the card goes to Devices, the same as the
+/// menu did.
+#[test]
+fn the_card_reaches_your_devices() {
+    let (mut h, routes) = me_card(a_conversation(), three_apps());
+    h.run();
+    h.get_by_label("Your devices").click();
+    h.run();
+    assert_eq!(routes.borrow().as_slice(), [sigil_chat::Route::Devices]);
+}
+
+/// What the card looks like.
+///
+/// A picture because the head is the only part of sigil that is *centred*,
+/// and nothing but looking at it says whether a mark, a name and a domain
+/// stacked in the middle of a phone read as one thing or as three.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn me_card_phone() {
+    let mut state = a_conversation();
+    state.mine.name = Some("Ada Lovelace".into());
+    state.mine.handle = Some("ada@squic.org".into());
+    let (mut h, _) = me_card(state, three_apps());
+    h.run();
+    h.remove_cursor();
+    h.snapshot("me_card_phone");
 }

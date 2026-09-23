@@ -760,10 +760,31 @@ impl Shell {
         }
     }
 
+    /// Tell the navigator what the other apps are, so a view can offer the
+    /// way to them.
+    ///
+    /// A phone has no rail: the way between Chat, Exchange and Phone is on a
+    /// card one of the apps draws, and it reads this rather than being handed
+    /// the app list. Refilled every pass because a badge changes under it.
+    fn publish_siblings(&mut self) {
+        let active = self.active();
+        let siblings: Vec<sigil::Sibling> = (0..self.apps.len())
+            .map(|i| sigil::Sibling {
+                id: AppId(i),
+                title: self.apps[i].title().to_string(),
+                icon: self.apps[i].icon(),
+                badge: self.apps[i].tab_notifications().count,
+                active: i == active,
+            })
+            .collect();
+        self.navigator.set_siblings(siblings);
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.publish_insets(ui.ctx());
         self.restore_focus(ui.ctx());
         self.handle_shell_keys(ui.ctx());
+        self.publish_siblings();
 
         let theme = ColorTheme::current(ui.ctx());
 

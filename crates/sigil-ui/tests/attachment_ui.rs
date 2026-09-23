@@ -53,6 +53,8 @@ fn tall(bytes: Option<std::sync::Arc<[u8]>>, height: Option<f32>) -> f32 {
                             size: 0,
                             video: None,
                             sending: false,
+                            waveform: &[],
+                            duration_ms: None,
                             id: "sized",
                         },
                         sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -88,6 +90,8 @@ fn drawn(bytes: std::sync::Arc<[u8]>) -> Harness<'static> {
                     size: 0,
                     video: None,
                     sending: false,
+                    waveform: &[],
+                    duration_ms: None,
                     id: "notapicture",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -381,6 +385,8 @@ fn a_picture_reserves_what_it_took_last_time() {
                             size: 0,
                             video: None,
                             sending: false,
+                            waveform: &[],
+                            duration_ms: None,
                             id: "remembered",
                         },
                         sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -453,6 +459,8 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
                     size: 0,
                     video: None,
                     sending: false,
+                    waveform: &[],
+                    duration_ms: None,
                     id: "swapping",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -505,6 +513,8 @@ fn captioned(
                     size: 4_300_000,
                     video: None,
                     sending: false,
+                    waveform: &[],
+                    duration_ms: None,
                     id: "captioned",
                 },
                 sigil::ColorTheme::current(&ctx).surface_elevated,
@@ -645,4 +655,118 @@ fn a_gif_is_decoded_off_the_interface_thread_and_then_plays() {
         .copied()
         .collect();
     assert_eq!(all, vec![std::time::Duration::from_millis(100); 2]);
+}
+
+/// A voice note, drawn: the bars the **row itself** painted, and what it said.
+///
+/// Counted off the shapes the frame produced rather than by calling the
+/// drawing function again beside it -- what is in question is whether the
+/// row draws a waveform, and a second call proves only that the function
+/// works when something calls it.
+fn voice(levels: &'static [u8], duration_ms: Option<u64>, wide: f32) -> (usize, String) {
+    fn bars(shape: &egui::Shape, found: &mut usize) {
+        match shape {
+            egui::Shape::Rect(r) => {
+                // A bar: a few points wide and no taller than the row.
+                if r.rect.width() > 0.0
+                    && r.rect.width() <= 3.5
+                    && r.rect.height() <= sigil::tokens::ICON_MD
+                {
+                    *found += 1;
+                }
+            }
+            egui::Shape::Vec(v) => v.iter().for_each(|s| bars(s, found)),
+            _ => {}
+        }
+    }
+    let ctx = egui::Context::default();
+    theme::install(&ctx, theme::light(), theme::dark());
+    let mut found = 0;
+    let mut said = String::new();
+    // Twice: the first pass is where a ui learns what it is given.
+    for _ in 0..2 {
+        found = 0;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(wide, 60.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        sigil_ui::attachment(
+                            ui,
+                            &sigil_ui::Attachment {
+                                kind: sigil_ui::attachment::VOICE,
+                                described: "[voice note 12s]",
+                                preview: sigil_ui::attachment::no_preview(),
+                                bytes: None,
+                                missing: false,
+                                held: false,
+                                size: 40_000,
+                                video: None,
+                                sending: false,
+                                waveform: levels,
+                                duration_ms,
+                                id: "voice",
+                            },
+                            sigil::ColorTheme::current(ui.ctx()).surface_elevated,
+                        );
+                    },
+                );
+            });
+        });
+        // Nobody is uploading these anywhere; epaint panics on a dropped
+        // delta that was never handled.
+        out.textures_delta.clear();
+        for clipped in &out.shapes {
+            bars(&clipped.shape, &mut found);
+        }
+        said = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+    }
+    (found, said)
+}
+/// SIP-18 puts the levels in the message so a voice note has a shape before
+/// any audio is fetched — and nothing here fetches any.
+#[test]
+fn a_voice_note_draws_its_waveform_with_no_audio() {
+    let levels: &[u8] = &[0, 40, 120, 200, 255, 200, 120, 40];
+    let (bars, said) = voice(levels, Some(12_000), 240.0);
+    assert_eq!(bars, levels.len(), "every level got a bar");
+    assert!(
+        said.contains("0:12"),
+        "the row says how long it runs: {said}"
+    );
+}
+
+/// The negative control: no levels, no bars. A sender may send none, and a
+/// row that drew something anyway would pass the test above for free.
+#[test]
+fn a_voice_note_without_levels_draws_no_bars() {
+    let (bars, said) = voice(&[], Some(12_000), 240.0);
+    assert_eq!(bars, 0, "bars were drawn for a note with no waveform");
+    assert!(
+        said.contains("0:12"),
+        "it still says how long it runs: {said}"
+    );
+}
+
+/// A note longer than the row has pitches for is read at a coarser pitch
+/// rather than squeezed: a comb of hairlines is a texture, not a shape.
+#[test]
+fn a_long_waveform_thins_rather_than_smears() {
+    let levels: &[u8] = &[80; 200];
+    let (bars, _) = voice(levels, Some(200_000), 140.0);
+    assert!(
+        bars > 0 && bars < levels.len(),
+        "{bars} of {}",
+        levels.len()
+    );
+    assert!(bars as f32 <= 140.0 / 5.0, "{bars} bars across 140 points");
 }

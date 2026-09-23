@@ -104,6 +104,26 @@ pub enum NavRequest {
 #[derive(Default)]
 pub struct Navigator {
     requests: Vec<NavRequest>,
+    siblings: Vec<Sibling>,
+}
+
+/// One of the other things sigil does, as somewhere to go.
+///
+/// **An app is not given the app list.** A phone has no rail, so the way
+/// between Chat, Exchange and Phone lives on a card one of them draws -- and
+/// the one drawing it has no business holding its neighbours. It reads this,
+/// which the shell refills every pass, and asks the navigator to switch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sibling {
+    pub id: AppId,
+    /// What it calls itself.
+    pub title: String,
+    /// Its mark -- what it is recognised by on the rail.
+    pub icon: crate::Icon,
+    /// How many things in it are waiting to be looked at. Nought for none.
+    pub badge: u32,
+    /// The one being drawn right now.
+    pub active: bool,
 }
 
 impl Navigator {
@@ -143,6 +163,19 @@ impl Navigator {
 
     pub fn is_empty(&self) -> bool {
         self.requests.is_empty()
+    }
+
+    /// The other things sigil does, in the order the rail has them.
+    ///
+    /// Empty where nothing filled it in -- a test harness running one app
+    /// by itself -- which is the honest answer: there is nowhere else to go.
+    pub fn siblings(&self) -> &[Sibling] {
+        &self.siblings
+    }
+
+    /// Refilled by the shell once a pass. Apps read it and do not write it.
+    pub fn set_siblings(&mut self, siblings: Vec<Sibling>) {
+        self.siblings = siblings;
     }
 
     /// Take everything queued this frame. The shell calls this; apps do not.

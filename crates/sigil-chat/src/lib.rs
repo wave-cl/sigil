@@ -58,6 +58,16 @@ pub enum Route {
     /// for a box, and a box that pushes the list down is a search that
     /// costs something to have open.
     Search,
+    /// **You**: your mark, your name, your exchange's domain, your keys, the
+    /// way to the other things sigil does, and everything that is done to
+    /// this identity rather than to a conversation.
+    ///
+    /// A card, not a menu. On a phone the identity menu had grown into a
+    /// popup as tall as the screen with a scroll in it, hanging off a mark
+    /// in the corner -- and the way between Chat, Exchange and Phone was in
+    /// a *second* popup behind the title. Two menus, neither of them a
+    /// place. This is the place.
+    Me,
 }
 
 /// What a search here can and cannot reach. Said every time, in the count
@@ -2321,6 +2331,7 @@ impl App for ChatApp {
             Route::Settings => self.settings_view(ctx, ui),
             Route::Devices => self.devices_view(ctx, ui),
             Route::Search => self.search_view(ctx, ui),
+            Route::Me => self.me_view(ctx, ui),
         };
         // A dialog opened from a view -- verifying somebody from Members --
         // is drawn over that view. `render` draws its own.
@@ -2343,6 +2354,7 @@ impl App for ChatApp {
                 Route::Settings => "Channel settings",
                 Route::Devices => "Devices",
                 Route::Search => "Search",
+                Route::Me => "Settings",
             }
             .to_string(),
         )
@@ -2734,7 +2746,9 @@ impl App for ChatApp {
                     }
                     return;
                 }
-                Route::Directory | Route::Members | Route::Settings | Route::Search => return,
+                Route::Directory | Route::Members | Route::Settings | Route::Search | Route::Me => {
+                    return;
+                }
                 Route::Conversations => {}
             }
         }
@@ -3440,6 +3454,16 @@ impl ChatApp {
         }
 
         let anchor = chevron.or(mark).expect("the chevron or the mark");
+        // **On a phone the mark is a door, not a menu.** What was behind it
+        // had grown a scroll bar, and a popup that scrolls is a card that
+        // has not admitted it: no name in the bar, no Back, and nowhere to
+        // put the way to the other things sigil does. See [`Route::Me`].
+        if sigil::Form::of(ui.ctx()).is_phone() {
+            if anchor.clicked() {
+                ctx.navigator.push_here(Route::Me);
+            }
+            return;
+        }
         egui::Popup::menu(&anchor).show(|ui| {
             let screen = ui.ctx().content_rect().width();
             let wide = 320.0f32.min(screen - 2.0 * tokens::SPACING_LG).max(200.0);
@@ -6176,6 +6200,9 @@ impl ChatApp {
                             size: 0,
                             duration_ms: None,
                             shape: None,
+                            // Read off the file when it is opened, which
+                            // has not happened while it is on its way.
+                            waveform: std::sync::Arc::from(Vec::new().into_boxed_slice()),
                             preview: f.preview.clone().unwrap_or_else(|| {
                                 std::sync::Arc::from(Vec::new().into_boxed_slice())
                             }),
@@ -6296,6 +6323,8 @@ impl ChatApp {
                     // Still going up: this line is one of ours that the
                     // exchange has not answered about yet.
                     sending: line.seq >= ECHO_SEQ,
+                    waveform: &a.waveform,
+                    duration_ms: a.duration_ms,
                 })
                 .collect();
             // The keys as text, owned here, so the chips can borrow them.
@@ -9076,6 +9105,369 @@ impl ChatApp {
     /// box is the same one a wide pane keeps above its list -- one search,
     /// drawn in two places -- and choosing a hit leaves the card for the
     /// conversation it is in, which is what pressing a result means.
+    /// The card behind your own mark: who you are, where you are, and
+    /// everything that is done to this identity rather than to a
+    /// conversation -- with the way to the other things sigil does on it.
+    ///
+    /// # Why a card and not the menu it replaced
+    ///
+    /// On a phone the identity menu was a popup hanging off a mark in the
+    /// corner, and it had grown a scroll bar. The way between Chat, Exchange
+    /// and Phone was in a *second* popup, behind the title. Two menus and
+    /// neither of them a place you could go back to. A card has a name in
+    /// the bar, a Back that means something, and room to put a face at the
+    /// top of it.
+    ///
+    /// # What is tapped to change what
+    ///
+    /// The three things at the head are the three things somebody comes here
+    /// to change, and each is its own control: the mark and the name open
+    /// the profile, the handle claims or gives up a name at the exchange.
+    /// **Nothing here is a caption.** A line of text that cannot be pressed,
+    /// beside two that can, is the one somebody presses.
+    fn me_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+        let me = at.0;
+        let key = me.to_string();
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Settings");
+            });
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.me_head_ui(ctx, at, &state, ui, &theme, &key);
+                ui.add_space(tokens::SPACING_LG);
+                self.me_keys_ui(&state, ui, &theme, &key);
+                ui.add_space(tokens::SPACING_MD);
+                self.me_apps_ui(ctx, ui, &theme);
+                ui.add_space(tokens::SPACING_MD);
+                self.me_settings_ui(ctx, at, &state, ui, &theme);
+            });
+        AppResponse::default()
+    }
+
+    /// The head: the mark, the name, the handle, the link -- centred, and
+    /// every one of them a control.
+    fn me_head_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        key: &str,
+    ) {
+        let me = at.0;
+        let mut edit_profile = false;
+        let mut claim_name = false;
+        let mut give_up = None;
+        ui.vertical_centered(|ui| {
+            ui.add_space(tokens::SPACING_MD);
+            // **The mark is a button.** An avatar is where everybody has
+            // learned to press to change what others see of them, and the
+            // mark itself is not editable -- it is the key drawn -- so a
+            // press on it opens the one thing about you that is.
+            let mark = ui
+                .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                    sigil_ui::identicon(ui, key, tokens::AVATAR_XL);
+                })
+                .response
+                .on_hover_text("Your name and title, as others see them");
+            mark.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit your profile")
+            });
+            if mark.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            edit_profile |= mark.clicked();
+            ui.add_space(tokens::SPACING_SM);
+
+            // Your name. With none published this is the head of your key,
+            // which is what everybody else sees too -- so pressing it is
+            // how a name gets published.
+            let name = ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(state.mine.label(&me))
+                            .heading()
+                            .color(theme.text_primary),
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_text("Your name and title, as others see them");
+            if name.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            edit_profile |= name.clicked();
+
+            // Where you are reachable. Registered: `ada@trunk.exchange`,
+            // and pressing it gives the name up. Unregistered: the domain
+            // alone, and pressing it claims one.
+            match &state.mine.handle {
+                Some(handle) => {
+                    let row = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(handle).color(theme.text_secondary),
+                            )
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(
+                            "Your name at this exchange. Press to stop being reachable at it \
+                             — nothing is deleted, and somebody else may take it afterwards.",
+                        );
+                    if row.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if row.clicked() {
+                        // The bare local part: a release names it, and the
+                        // exchange it is released at is the one being
+                        // talked to.
+                        give_up = Some(handle.split('@').next().unwrap_or(handle).to_string());
+                    }
+                }
+                None => {
+                    // **The domain the handle would have had.** `state.domain`
+                    // is what `Chat::handle` composes `name@domain` from, so
+                    // the line before a name is claimed and the line after it
+                    // cannot disagree about where you are. With none -- a
+                    // connection made to a bare address -- the switcher's own
+                    // label is the best there is.
+                    let domain = state
+                        .domain
+                        .clone()
+                        .unwrap_or_else(|| self.exchange_label(me, &at.1));
+                    let row = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("@{domain}")).color(theme.text_muted),
+                            )
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Claim a name at this exchange");
+                    if row.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    claim_name |= row.clicked();
+                }
+            }
+
+            // What others see of you, and -- when the link is down -- the
+            // one thing worth doing about it. A colour says nothing to
+            // somebody who cannot see it, so the word is here too.
+            ui.add_space(tokens::SPACING_XS);
+            match state.link {
+                LinkState::Up => {
+                    let (word, colour) = if ctx.away {
+                        ("away", theme.text_muted)
+                    } else {
+                        ("active", theme.success)
+                    };
+                    ui.colored_label(colour, egui::RichText::new(word).small())
+                        .on_hover_text("what others see of you");
+                }
+                _ => {
+                    let colour = match state.link {
+                        LinkState::Gone => theme.link_gone,
+                        _ => theme.link_retrying,
+                    };
+                    ui.colored_label(colour, egui::RichText::new(state.link.word()).small());
+                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Refresh, "Reconnect").clicked() {
+                        self.send_as(Some(at), Cmd::Reconnect);
+                    }
+                }
+            }
+        });
+        if edit_profile {
+            self.open_profile(at, state);
+        }
+        if claim_name {
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Name);
+        }
+        if let Some(local) = give_up {
+            self.send_as(Some(at), Cmd::ReleaseName(local));
+        }
+    }
+
+    /// The keys, short, with the way to the whole of each.
+    ///
+    /// **Short and copyable, not long and selectable.** These are 44
+    /// characters of base58 and nobody reads one: what anybody does with
+    /// their own key is send it to somebody, and what they do with the
+    /// exchange's is compare it -- which the head and tail settle. The whole
+    /// of it goes to the clipboard, and is on the hover for a pointer.
+    fn me_keys_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme, key: &str) {
+        let mut rows: Vec<(&str, String, &str, &str)> = vec![(
+            "You",
+            key.to_string(),
+            "Copy your key",
+            "the only thing that identifies you to somebody who wants to write to you",
+        )];
+        if let Some(exchange) = state.exchange {
+            rows.push((
+                "Exchange",
+                exchange.to_string(),
+                "Copy the exchange's key",
+                "the exchange this conversation list belongs to",
+            ));
+        }
+        for (said, whole, button, hover) in rows {
+            ui.horizontal(|ui| {
+                ui.colored_label(theme.text_muted, egui::RichText::new(said).small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, button).clicked() {
+                        ui.ctx().copy_text(whole.clone());
+                    }
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(sigil_ui::short(&whole))
+                                .monospace()
+                                .small(),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(format!("{whole}\n{hover}"));
+                });
+            });
+        }
+        // SIP-85: the exchange sees the home's address, not this machine's.
+        if let Some(home) = &state.carried {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!("through {home}")).small(),
+            )
+            .on_hover_text(
+                "your home carries this connection: the exchange sees your home's address \
+                 and your own key, never where you are",
+            );
+        }
+    }
+
+    /// The other things sigil does, and the way to them.
+    ///
+    /// **The rail, for a screen with no room for one.** On a desktop these
+    /// are icons down the side; on a phone they were behind the title, in a
+    /// popup nobody found. The one you are on is filled, so the card says
+    /// where you are as well as where you can go.
+    fn me_apps_ui(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let siblings = ctx.navigator.siblings().to_vec();
+        if siblings.len() < 2 {
+            return;
+        }
+        ui.separator();
+        ui.colored_label(theme.text_muted, egui::RichText::new("sigil").small());
+        for s in siblings {
+            let said = if s.badge == 0 {
+                s.title.clone()
+            } else {
+                format!("{} ({})", s.title, s.badge)
+            };
+            if sigil_ui::icon_item_as(ui, s.icon, &said, s.active).clicked() && !s.active {
+                ctx.navigator.switch_to(s.id);
+            }
+        }
+    }
+
+    /// Everything done *to* this identity, and the one setting that is not
+    /// about an identity at all.
+    fn me_settings_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        ui.separator();
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new("This identity").small(),
+        );
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
+            .on_hover_text("Your name and title, as others see them")
+            .clicked()
+        {
+            self.open_profile(at, state);
+        }
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Device, "Your devices")
+            .on_hover_text("Every key that acts as you, and what happens if you lose this one")
+            .clicked()
+        {
+            self.send_as(Some(at), Cmd::Devices);
+            self.send_as(Some(at), Cmd::BackupStatus);
+            ctx.navigator.push_here(Route::Devices);
+        }
+        // **An exchange is not a preference.** The identity is the same key
+        // everywhere and nothing else is -- conversations, channel keys and
+        // SIP-17 counters belong to one exchange and do not move. So the row
+        // says what it opens: adding one, which is much closer to adding an
+        // account than to changing a setting. *Switching* between the ones
+        // already added is in the corner of the chats list, where changing
+        // it changes the list under it.
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Add an exchange")
+            .on_hover_text(
+                "Your key is the same everywhere. Conversations are not: they belong to the \
+                 exchange they were had at.",
+            )
+            .clicked()
+        {
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
+        }
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Switch, "Switch identity")
+            .on_hover_text(
+                "Choose another identity. This one stays open — its messages keep arriving \
+                 and a call on it keeps running.",
+            )
+            .clicked()
+        {
+            self.switching = true;
+        }
+
+        ui.separator();
+        ui.colored_label(theme.text_muted, egui::RichText::new("Everywhere").small());
+        // Not this identity's: quiet is the person's, and it covers every
+        // identity this window holds and every ring on any of them.
+        let dnd = ctx.accounts.quiet.dnd;
+        let said = if dnd {
+            "Do not disturb"
+        } else {
+            "Notifications"
+        };
+        let icon = if dnd {
+            sigil_ui::Icon::BellOff
+        } else {
+            sigil_ui::Icon::Bell
+        };
+        if sigil_ui::icon_item_as(ui, icon, said, dnd)
+            .on_hover_text(if dnd {
+                "Nothing is said out loud on any identity, rings included."
+            } else {
+                "Press to silence everything on every identity, rings included."
+            })
+            .clicked()
+        {
+            ctx.accounts.quiet.set_dnd(!dnd);
+        }
+        ui.add_space(tokens::SPACING_MD);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(format!("sigil {}", env!("CARGO_PKG_VERSION"))).small(),
+        );
+    }
+
     fn search_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
         let Some(at) = self.showing_at(ctx) else {

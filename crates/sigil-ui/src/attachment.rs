@@ -109,11 +109,72 @@ pub struct Attachment<'a> {
     /// For a video: the player's view of it, if the caller has one. Drawn
     /// in place of the file row. See [`crate::video`].
     pub video: Option<crate::Video<'a>>,
+    /// SIP-18: a voice note's waveform, one level a bar, in SIP-15's scale
+    /// -- half a decibel below full scale per unit, 255 for digital
+    /// silence. Empty for anything else, and for a sender that sent none.
+    pub waveform: &'a [u8],
+    /// How long it runs, for a voice note or a clip: what the sender said
+    /// in the meta, in milliseconds.
+    pub duration_ms: Option<u64>,
     /// This one is still going up: the message is in flight and its bytes
     /// are on their way to the exchange. A mark over the thumbnail, because
     /// sending a clip over a phone's uplink takes long enough that nothing
     /// on screen saying so reads as nothing happening.
     pub sending: bool,
+}
+
+/// How tall a bar stands, for a level on SIP-15's scale.
+///
+/// Nought is full scale and 255 is digital silence, so the bar is the
+/// *inverse*: the loudest moment is the tallest mark. A floor of one point
+/// under the line, because a silent stretch of a voice note is a fact about
+/// it -- a gap where the bars stop reads as a waveform that ran out.
+pub fn bar_height(level: u8, tall: f32) -> f32 {
+    let loud = (255.0 - level as f32) / 255.0;
+    (loud * tall).max(1.0)
+}
+
+/// A voice note's waveform, as wide as it is given.
+///
+/// **Drawn from the meta, not from the audio**: SIP-18 puts the levels in
+/// the message so the note has a shape before a byte of it is fetched --
+/// and the same scale as a live call's meter, so one function could draw
+/// both.
+///
+/// Returns how many bars were drawn, which is how a test knows one was.
+pub fn waveform(ui: &mut egui::Ui, levels: &[u8], colour: egui::Color32, wide: f32) -> usize {
+    if levels.is_empty() || wide <= 0.0 {
+        return 0;
+    }
+    let tall = tokens::ICON_MD;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(wide, tall), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return 0;
+    }
+    // **A pitch, not a bar count.** Five points a bar -- three of mark and
+    // two of air -- because a comb of hairlines is a texture, not a shape:
+    // the first draw put two hundred one-point bars in a phone's bubble and
+    // what it read as was a smear. A note with more levels than the row has
+    // pitches is *sampled*, one taken per bar: a waveform survives being
+    // read coarsely, which is the whole reason it is a waveform and not a
+    // recording.
+    const PITCH: f32 = 5.0;
+    let count = levels.len().min((wide / PITCH).floor().max(1.0) as usize);
+    let pitch = wide / count as f32;
+    let bar = (pitch - 2.0).clamp(1.5, 3.0);
+    for i in 0..count {
+        let level = levels[i * levels.len() / count];
+        let h = bar_height(level, tall);
+        let x = rect.left() + i as f32 * pitch + (pitch - bar) / 2.0;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(egui::pos2(x, rect.center().y - h / 2.0), egui::vec2(bar, h)),
+            // Rounded to its own half-width: the caps are what stop a short
+            // bar looking like a speck of dust on the line.
+            bar / 2.0,
+            colour,
+        );
+    }
+    count
 }
 
 /// The mark on something still going up: the picture dimmed, and a spinner
@@ -534,6 +595,58 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
         return action;
     }
 
+    // A voice note. Its waveform and how long it runs -- and **not** the
+    // bracketed description, which says the same seconds in worse words.
+    // The label is kept on the row itself so anything that reads rather
+    // than looks still gets the sentence.
+    //
+    // No play affordance: this client cannot play one yet, and a button
+    // that does nothing is worse than no button.
+    if a.kind == VOICE {
+        egui::Frame::NONE
+            .fill(theme.surface_secondary)
+            .corner_radius(tokens::RADIUS_MD)
+            .inner_margin(egui::Margin::symmetric(
+                tokens::SPACING_SM as i8,
+                tokens::SPACING_XS as i8,
+            ))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let said = a
+                        .duration_ms
+                        .map(crate::video::clock)
+                        .unwrap_or_else(|| human(a.size));
+                    let clock = egui::WidgetText::from(&said).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    );
+                    if a.sending {
+                        ui.add(egui::Spinner::new().size(tokens::ICON_SM));
+                    }
+                    // The waveform takes what the clock leaves, so the row
+                    // is the bubble's width whatever the note's length --
+                    // a row that grew with the number of bars laid every
+                    // message after it out for a pane that wide.
+                    let room = ui.available_width() - clock.size().x - ui.spacing().item_spacing.x;
+                    if room > tokens::ICON_SM && !a.waveform.is_empty() {
+                        waveform(ui, a.waveform, quiet, room);
+                    }
+                    // Shown as a clock, read as the sentence: anything
+                    // that reads rather than looks gets "[voice note 12s]",
+                    // which is what the waveform and the clock say to an
+                    // eye.
+                    ui.colored_label(theme.text_muted, said).widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, a.described)
+                    });
+                });
+            })
+            .response
+            .on_hover_text(a.described);
+        return action;
+    }
+
     // Not a picture. A row that says what it is and offers the only thing that
     // can be done with it.
     egui::Frame::NONE
@@ -725,6 +838,35 @@ mod tests {
             Some([1, 1]),
             "the image never decoded, so every attachment draws as a broken picture"
         );
+    }
+
+    /// SIP-15's scale runs the other way round from a bar's height: nought
+    /// is full scale, 255 is digital silence.
+    #[test]
+    fn a_bar_is_tallest_at_full_scale_and_shortest_at_silence() {
+        assert_eq!(bar_height(0, 40.0), 40.0, "full scale is the whole height");
+        assert_eq!(
+            bar_height(255, 40.0),
+            1.0,
+            "silence keeps a mark on the line"
+        );
+        // Halfway down the scale, halfway up the row, near enough.
+        let half = bar_height(128, 40.0);
+        assert!((half - 20.0).abs() < 0.5, "{half}");
+        // Monotone, which is the whole of what the mapping promises.
+        for level in 0..255u8 {
+            assert!(
+                bar_height(level, 40.0) >= bar_height(level + 1, 40.0),
+                "louder drew shorter at {level}"
+            );
+        }
+    }
+
+    /// The floor is not decoration: without it a silent stretch draws
+    /// nothing, and a waveform that stops reads as a waveform that ran out.
+    #[test]
+    fn silence_is_not_nothing() {
+        assert!(bar_height(255, 40.0) > 0.0);
     }
 
     #[test]

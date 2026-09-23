@@ -2134,6 +2134,8 @@ mod tests {
                 id: "abc123",
                 video: None,
                 sending: false,
+                waveform: &[],
+                duration_ms: None,
             };
             // A limit wide enough that nothing here is clamped by it: what
             // is being measured is what the bubble *asks for*.

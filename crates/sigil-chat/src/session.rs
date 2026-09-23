@@ -819,6 +819,11 @@ pub struct Attached {
     pub duration_ms: Option<u64>,
     /// Width and height, for a picture or a video; what the sender said.
     pub shape: Option<(u32, u32)>,
+    /// SIP-18: a voice note's waveform, one level per bar, **so it draws
+    /// before any audio is fetched**. SIP-15's scale: half a decibel below
+    /// full scale per unit, 255 for digital silence -- the same numbers a
+    /// live call's meter uses, which is why the spec reuses them.
+    pub waveform: std::sync::Arc<[u8]>,
     /// The thumbnail the sender put in, if any. Drawn while the blob is
     /// fetched, and the only thing shown at all until it is.
     ///
@@ -5132,6 +5137,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                             size: a.size,
                             duration_ms: a.duration_ms().map(u64::from),
                             shape: a.dimensions().map(|(w, h)| (u32::from(w), u32::from(h))),
+                            waveform: a.waveform().unwrap_or_default().into(),
                             // A clip's own first frame where this device has
                             // decoded one; the sender's 96-pixel thumbnail
                             // otherwise. See `still_for_a_clip`.
