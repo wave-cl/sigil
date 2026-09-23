@@ -547,15 +547,24 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
             ui.horizontal(|ui| {
                 // A word, not an icon: an icon for a file kind is a convention
                 // to learn, and there are only four of them.
-                ui.colored_label(
-                    theme.text_muted,
-                    match a.kind {
-                        IMAGE => "image",
-                        VIDEO => "video",
-                        VOICE => "voice",
-                        _ => "file",
-                    },
-                );
+                //
+                // **Except where the description already says it.** A voice
+                // note describes itself as "[voice note 12s]", so the row
+                // read "voice [voice note 12s]" -- the same word twice, on
+                // the one kind that reaches this row with a kind in its
+                // name. Pictures and clips are drawn as pictures and never
+                // get here; a plain file's name says nothing about what it
+                // is, and keeps its word.
+                if a.kind != VOICE {
+                    ui.colored_label(
+                        theme.text_muted,
+                        match a.kind {
+                            IMAGE => "image",
+                            VIDEO => "video",
+                            _ => "file",
+                        },
+                    );
+                }
                 // A file that cannot be drawn keeps its button: there is
                 // nothing else to do with it, and nothing on screen to click.
                 //
