@@ -11463,3 +11463,78 @@ fn pressing_play_on_a_voice_note_asks_the_exchange_for_it() {
         "the press asked for nothing: {said}"
     );
 }
+
+/// The microphone is on the composer, beside the box.
+#[test]
+fn the_composer_offers_to_record_a_voice_note() {
+    let (mut h, _) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("Record a voice note");
+}
+
+/// It is not offered once there is something to send: the row is about to
+/// commit words, and a microphone beside the dart is a second thing to
+/// press by mistake.
+///
+/// The negative control for the test above as well: a client that drew the
+/// microphone unconditionally would pass that one for the wrong reason.
+#[test]
+fn the_microphone_goes_away_once_there_is_something_to_send() {
+    let (mut h, _) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("Record a voice note");
+    // Typed in, not set: what is being tested is what the row does with
+    // something in the box, and the box is how something gets there.
+    let field = composer(&h);
+    field.focus();
+    field.type_text("something");
+    h.run();
+    assert!(
+        h.query_by_label("Record a voice note").is_none(),
+        "the microphone stayed beside the dart"
+    );
+}
+
+/// Pressing it turns the composer into the recording: throw it away, or
+/// send it. Nothing to type into, because there is nothing to type.
+#[test]
+fn recording_replaces_the_composer_with_its_own_row() {
+    let (mut h, _) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("Record a voice note").click();
+    h.run_steps(3);
+    let said = text_of(&h);
+    assert!(said.contains("Throw it away"), "{said}");
+    assert!(
+        said.contains("Send"),
+        "there was no way to send what was recorded: {said}"
+    );
+    // Nothing to type into while talking: the box is gone, not disabled.
+    assert!(
+        h.query(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput"))
+        )
+        .is_none(),
+        "the box was still there to type into: {said}"
+    );
+}
+
+/// Thrown away, it is gone: the composer comes back and nothing was
+/// staged. A recording somebody discarded must not turn up in the next
+/// message.
+#[test]
+fn a_recording_thrown_away_leaves_nothing_behind() {
+    let (mut h, _) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("Record a voice note").click();
+    h.run_steps(3);
+    h.get_by_label("Throw it away").click();
+    h.run_steps(3);
+    let said = text_of(&h);
+    assert!(!said.contains("Throw it away"), "{said}");
+    // The box is back.
+    composer(&h);
+    // Nothing staged: no tile, and the microphone is on offer again.
+    h.get_by_label("Record a voice note");
+}

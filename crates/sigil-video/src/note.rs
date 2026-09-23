@@ -212,6 +212,109 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, Unreadable> {
     })
 }
 
+/// RFC 3533's CRC32 over a whole page: polynomial `0x04c11db7`, no
+/// reflection, zero init, no final xor, with the checksum field itself
+/// zeroed.
+///
+/// **Not the common CRC32.** zlib's is reflected and inverted; a page
+/// checksummed with that one is refused by every other Opus reader while
+/// looking perfectly fine to a reader that made the same mistake. Written
+/// out rather than taken from a crate for exactly that reason -- it is
+/// four lines, and the four lines are the specification.
+pub fn page_crc(page: &[u8]) -> u32 {
+    let mut crc: u32 = 0;
+    for (i, &b) in page.iter().enumerate() {
+        // The checksum field reads as nought while it is computed.
+        let b = if (22..26).contains(&i) { 0 } else { b };
+        crc ^= (b as u32) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04c1_1db7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// One Ogg page carrying one packet, checksummed.
+fn write_page(header_type: u8, granule: u64, serial: u32, seq: u32, packet: &[u8]) -> Vec<u8> {
+    let mut segments: Vec<u8> = Vec::new();
+    let mut left = packet.len();
+    loop {
+        let take = left.min(255);
+        segments.push(take as u8);
+        left -= take;
+        if take < 255 {
+            break;
+        }
+        // A packet whose length is a multiple of 255 ends with a
+        // nought-length segment, or a reader holds it open for ever.
+        if left == 0 {
+            segments.push(0);
+            break;
+        }
+    }
+    let mut out = Vec::with_capacity(27 + segments.len() + packet.len());
+    out.extend_from_slice(b"OggS");
+    out.push(0);
+    out.push(header_type);
+    out.extend_from_slice(&granule.to_le_bytes());
+    out.extend_from_slice(&serial.to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.push(segments.len() as u8);
+    out.extend_from_slice(&segments);
+    out.extend_from_slice(packet);
+    let crc = page_crc(&out);
+    out[22..26].copy_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// Wrap Opus packets as an Ogg Opus stream (RFC 7845): `OpusHead`,
+/// `OpusTags`, then one page a packet.
+///
+/// `serial` identifies the stream inside the file. It is arbitrary and it
+/// is the caller's, because a caller that wrote two streams with the same
+/// one would have written a file no reader can untangle.
+pub fn write_ogg(packets: &[Vec<u8>], pre_skip: u16, frame: u32, serial: u32) -> Vec<u8> {
+    let mut head = Vec::with_capacity(19);
+    head.extend_from_slice(b"OpusHead");
+    head.push(1);
+    head.push(1); // mono: SIP-18 says a note SHOULD be, and this writes one
+    head.extend_from_slice(&pre_skip.to_le_bytes());
+    head.extend_from_slice(&RATE.to_le_bytes());
+    head.extend_from_slice(&0u16.to_le_bytes()); // output gain
+    head.push(0); // channel mapping family 0
+    let mut tags = Vec::new();
+    tags.extend_from_slice(b"OpusTags");
+    // The vendor string. Not decoration: a reader looking at a file that
+    // will not play wants to know what wrote it.
+    const VENDOR: &str = "sigil";
+    tags.extend_from_slice(&(VENDOR.len() as u32).to_le_bytes());
+    tags.extend_from_slice(VENDOR.as_bytes());
+    tags.extend_from_slice(&0u32.to_le_bytes());
+
+    // The two header packets each take a page of their own, and the first
+    // is marked as the beginning of the stream.
+    let mut out = write_page(0x02, 0, serial, 0, &head);
+    out.extend_from_slice(&write_page(0x00, 0, serial, 1, &tags));
+    let mut granule = pre_skip as u64;
+    for (seq, (i, packet)) in (2u32..).zip(packets.iter().enumerate()) {
+        granule += frame as u64;
+        let last = i + 1 == packets.len();
+        out.extend_from_slice(&write_page(
+            if last { 0x04 } else { 0x00 },
+            granule,
+            serial,
+            seq,
+            packet,
+        ));
+    }
+    out
+}
+
 /// A decoded note, playing or ready to.
 ///
 /// Position is kept by the device callback -- it counts the samples it
@@ -364,6 +467,226 @@ fn open_device(decoded: Arc<Decoded>, shared: Arc<Playing>) -> Option<cpal::Stre
     Some(stream)
 }
 
+/// Recording a voice note: the microphone, Opus, and what it sounds like
+/// so far.
+///
+/// # What it is and is not
+///
+/// SIP-18 again: a note is **a file, not a stream**. Nothing here is sent
+/// as it is spoken, nothing is timestamped, and a dropped frame is a
+/// recording that is short rather than a gap somebody hears. So this
+/// collects, and `finish` hands over the whole thing at once.
+///
+/// **24 kbit/s mono, the rate the spec recommends** -- "the rate the
+/// reference voice implementation settled on". Six seconds is about 18 kB,
+/// which is a thumbnail.
+pub struct Recorder {
+    shared: Arc<Capture>,
+    /// The thread that owns the stream. It opens the device, keeps it
+    /// alive, and drops it when `stop` is set -- which is how a `cpal`
+    /// stream that must not cross threads is held without holding the
+    /// interface up.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What the microphone's callback fills and the interface reads.
+struct Capture {
+    /// Mono samples at [`RATE`], waiting to be encoded.
+    pending: std::sync::Mutex<Vec<f32>>,
+    /// How much has been taken in, in samples, so the length is the
+    /// device's count and not a wall clock that drifts from it.
+    taken: AtomicU64,
+    /// The loudest recent moment, on SIP-15's scale, for a meter that
+    /// shows somebody the microphone is hearing them.
+    level: std::sync::atomic::AtomicU8,
+    /// The device would not open. Said rather than recorded in silence.
+    deaf: AtomicBool,
+    /// Set by `finish`, read by the thread that holds the stream.
+    stop: AtomicBool,
+    ctx: egui::Context,
+}
+
+/// One Opus frame: 20 ms at 48 kHz, which is what a call uses and what
+/// every Opus encoder is happiest with.
+pub const FRAME: usize = 960;
+
+impl Recorder {
+    /// Start taking sound in.
+    ///
+    /// **Returns at once.** Opening an input device is not quick -- it
+    /// took thirty-six seconds on a Mac being asked for permission, and on
+    /// a phone it is long enough to see -- so the device is opened on a
+    /// thread of its own and this returns a recorder that has heard
+    /// nothing yet. A press that froze the interface until the microphone
+    /// was ready would be a press nobody makes twice.
+    ///
+    /// Never fails: a device that will not open is a recorder that hears
+    /// nothing and says so ([`Recorder::deaf`]), because the alternative
+    /// is a button that does nothing on the one phone whose microphone is
+    /// busy with a call.
+    pub fn start(ctx: egui::Context) -> Recorder {
+        let shared = Arc::new(Capture {
+            pending: std::sync::Mutex::new(Vec::new()),
+            taken: AtomicU64::new(0),
+            level: std::sync::atomic::AtomicU8::new(255),
+            deaf: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            ctx,
+        });
+        let mine = shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("sigil-voice-note".into())
+            .spawn(move || {
+                let stream = open_microphone(mine.clone());
+                if stream.is_none() {
+                    mine.deaf.store(true, Ordering::Relaxed);
+                    mine.ctx.request_repaint();
+                    return;
+                }
+                while !mine.stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                // Dropped here, on the thread that made it: some backends
+                // require that, and all of them stop the microphone.
+                drop(stream);
+            })
+            .ok();
+        Recorder { shared, thread }
+    }
+
+    /// The microphone would not open, so there will be nothing to send.
+    pub fn deaf(&self) -> bool {
+        self.shared.deaf.load(Ordering::Relaxed)
+    }
+
+    /// How long it has been recording.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.shared.taken.load(Ordering::Relaxed) * 1000 / RATE as u64
+    }
+
+    /// The loudest recent moment on SIP-15's scale: nought is full scale,
+    /// 255 is digital silence. The same number a bar in a waveform is.
+    pub fn level(&self) -> u8 {
+        self.shared.level.load(Ordering::Relaxed)
+    }
+
+    /// Stop, encode, and hand over the file.
+    ///
+    /// `None` when nothing was heard -- a microphone that would not open,
+    /// or a press so short that not one 20 ms frame went by. A caller that
+    /// sent that would be sending an empty file with a length of nought.
+    pub fn finish(mut self) -> Option<Vec<u8>> {
+        self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let samples = std::mem::take(&mut *self.shared.pending.lock().unwrap());
+        if samples.len() < FRAME {
+            return None;
+        }
+        encode(&samples)
+    }
+}
+
+impl Drop for Recorder {
+    /// Thrown away: the thread is told to stop and the microphone goes
+    /// with it. Not joined -- a recording somebody discarded must not hold
+    /// the interface up while a device closes.
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Mono samples at [`RATE`] as an Ogg Opus file, at the rate SIP-18
+/// recommends.
+pub fn encode(samples: &[f32]) -> Option<Vec<u8>> {
+    let mut encoder =
+        opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).ok()?;
+    // Not a guess: "RECOMMENDED 24 kbit/s -- the rate the reference voice
+    // implementation settled on."
+    let _ = encoder.set_bitrate(opus::Bitrate::Bits(24_000));
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    for frame in samples.chunks(FRAME) {
+        // The last part-frame is padded rather than dropped: a note that
+        // ends mid-word should end mid-word, not a fifth of a second
+        // earlier.
+        let padded;
+        let frame = if frame.len() == FRAME {
+            frame
+        } else {
+            padded = {
+                let mut v = frame.to_vec();
+                v.resize(FRAME, 0.0);
+                v
+            };
+            &padded
+        };
+        match encoder.encode_vec_float(frame, 4000) {
+            Ok(packet) => packets.push(packet),
+            Err(_) => break,
+        }
+    }
+    if packets.is_empty() {
+        return None;
+    }
+    // A serial that is this recording's and nothing else's. The clock is
+    // enough: two notes from one phone are not made in the same
+    // nanosecond, and nothing else reads it.
+    let serial = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
+        .unwrap_or(1);
+    Some(write_ogg(&packets, 0, FRAME as u32, serial))
+}
+
+/// The microphone, resampled to what Opus wants.
+fn open_microphone(shared: Arc<Capture>) -> Option<cpal::Stream> {
+    let device = cpal::default_host().default_input_device()?;
+    let supported = device.default_input_config().ok()?;
+    let config = supported.config();
+    let rate = config.sample_rate;
+    let channels = config.channels as usize;
+    // **Said, because a recording that comes out at half speed looks
+    // exactly like one that came out right until somebody listens to it.**
+    // The resampling is built on what the device claims, and nothing else
+    // in the file records what that was.
+    tracing::info!(rate, channels, "voice note: the microphone");
+    let mut carry: Vec<f32> = Vec::new();
+    let stream = device
+        .build_input_stream(
+            config,
+            move |input: &[f32], _| {
+                // Down to mono at 48 kHz, through the same `fit` the
+                // player uses in the other direction.
+                let mono = crate::player::fit(input, channels, rate, 1, RATE, &mut carry);
+                if mono.is_empty() {
+                    return;
+                }
+                let loud = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len() as f32).sqrt();
+                let level = if loud <= 0.0 {
+                    255
+                } else {
+                    (-2.0 * 20.0 * loud.log10()).round().clamp(0.0, 254.0) as u8
+                };
+                // The loudest of the last moment rather than this
+                // callback's: a meter that fell to silence between
+                // syllables would read as a microphone that had stopped.
+                let was = shared.level.load(Ordering::Relaxed);
+                shared
+                    .level
+                    .store(level.min(was.saturating_add(4)), Ordering::Relaxed);
+                shared.taken.fetch_add(mono.len() as u64, Ordering::Relaxed);
+                shared.pending.lock().unwrap().extend_from_slice(&mono);
+                shared.ctx.request_repaint();
+            },
+            |_| {},
+            None,
+        )
+        .ok()?;
+    stream.play().ok()?;
+    Some(stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +751,178 @@ mod tests {
         out.extend_from_slice(b"none");
         out.extend_from_slice(&0u32.to_le_bytes());
         out
+    }
+
+    /// What this writes, this reads: the round trip is the first thing a
+    /// writer has to earn.
+    #[test]
+    fn what_is_written_decodes_again() {
+        let ogg = write_ogg(&tone_packets(500), 312, FRAME as u32, 7);
+        let decoded = decode(&ogg).expect("decodes");
+        assert_eq!(decoded.channels, 1);
+        let ms = decoded.duration_ms();
+        assert!((480..=500).contains(&ms), "{ms} ms");
+    }
+
+    /// **Every page carries a correct Ogg CRC.** Checked by recomputing
+    /// it over each page, which is the check every other Opus reader
+    /// makes -- sigil's own reader does not, so nothing else in this
+    /// crate would notice a writer that got it wrong.
+    #[test]
+    fn every_page_is_checksummed() {
+        let ogg = write_ogg(&tone_packets(500), 0, FRAME as u32, 7);
+        let mut at = 0;
+        let mut pages = 0;
+        while let Some(p) = page(&ogg, at) {
+            let whole = &ogg[at..p.next];
+            let carried = u32::from_le_bytes(whole[22..26].try_into().unwrap());
+            assert_eq!(page_crc(whole), carried, "page {pages} at {at}");
+            assert_ne!(carried, 0, "page {pages} carried no checksum at all");
+            pages += 1;
+            at = p.next;
+        }
+        assert!(pages > 3, "only {pages} pages");
+    }
+
+    /// The negative control for the one above: a byte changed anywhere in
+    /// a page makes its checksum wrong. Without this, a `page_crc` that
+    /// returned a constant would satisfy the test above.
+    #[test]
+    fn a_changed_byte_breaks_the_checksum() {
+        let mut ogg = write_ogg(&tone_packets(200), 0, FRAME as u32, 7);
+        let first = page(&ogg, 0).expect("a page");
+        let whole = first.next;
+        let was = page_crc(&ogg[..whole]);
+        // A byte in the body, past the header.
+        ogg[30] ^= 0xff;
+        assert_ne!(page_crc(&ogg[..whole]), was);
+    }
+
+    /// Ogg's CRC is not zlib's. A writer that reached for the usual one
+    /// produces a file every other reader refuses and this crate's own
+    /// reader accepts, because it does not check.
+    ///
+    /// The vector is RFC 3533's polynomial over `b"sigil"`, computed the
+    /// long way here; zlib's over the same bytes is a different number,
+    /// which is the whole point of pinning it.
+    #[test]
+    fn the_checksum_is_oggs_and_not_zlibs() {
+        // A page short enough that the checksum field is past its end, so
+        // `page_crc` zeroes nothing and this is the bare polynomial.
+        let plain = page_crc(b"sigil");
+        let mut by_hand: u32 = 0;
+        for &b in b"sigil" {
+            by_hand ^= (b as u32) << 24;
+            for _ in 0..8 {
+                by_hand = if by_hand & 0x8000_0000 != 0 {
+                    (by_hand << 1) ^ 0x04c1_1db7
+                } else {
+                    by_hand << 1
+                };
+            }
+        }
+        assert_eq!(plain, by_hand);
+        // zlib's, for the same bytes: reflected, inverted, 0xedb88320.
+        let mut zlib: u32 = 0xffff_ffff;
+        for &b in b"sigil" {
+            zlib ^= b as u32;
+            for _ in 0..8 {
+                zlib = if zlib & 1 != 0 {
+                    (zlib >> 1) ^ 0xedb8_8320
+                } else {
+                    zlib >> 1
+                };
+            }
+        }
+        assert_ne!(
+            plain,
+            zlib ^ 0xffff_ffff,
+            "the two CRCs agreed, so one is wrong"
+        );
+    }
+
+    /// The last page says the stream ended there, and no other page does.
+    /// A reader that trusts the flag -- most do -- stops at the first page
+    /// wrongly marked.
+    #[test]
+    fn only_the_last_page_ends_the_stream() {
+        let ogg = write_ogg(&tone_packets(500), 0, FRAME as u32, 7);
+        let mut at = 0;
+        let mut ends = Vec::new();
+        let mut seen = 0;
+        while let Some(p) = page(&ogg, at) {
+            if p.header_type & 0x04 != 0 {
+                ends.push(seen);
+            }
+            seen += 1;
+            at = p.next;
+        }
+        assert_eq!(ends, vec![seen - 1], "{seen} pages, ends at {ends:?}");
+    }
+
+    /// What the recorder encodes is a file this reads back at the length
+    /// it was given: the round trip a recording actually makes, with only
+    /// the microphone left out.
+    #[test]
+    fn what_is_recorded_encodes_to_a_note_of_the_same_length() {
+        let samples: Vec<f32> = (0..RATE as usize)
+            .map(|i| {
+                let t = i as f32 / RATE as f32;
+                (t * 300.0 * std::f32::consts::TAU).sin() * 0.4
+            })
+            .collect();
+        let ogg = encode(&samples).expect("encodes");
+        let decoded = decode(&ogg).expect("decodes");
+        let ms = decoded.duration_ms();
+        assert!((980..=1020).contains(&ms), "a second came back as {ms} ms");
+        assert_eq!(decoded.channels, 1, "SIP-18 says mono");
+    }
+
+    /// A press and an immediate release is not a voice note.
+    #[test]
+    fn a_recording_shorter_than_a_frame_is_nothing() {
+        assert!(encode(&[]).is_none());
+        assert!(
+            encode(&vec![0.1; FRAME / 2]).is_some(),
+            "half a frame is padded, not dropped"
+        );
+    }
+
+    /// The bitrate SIP-18 recommends, checked by its consequence: a
+    /// second of speech at 24 kbit/s is about three kilobytes, and
+    /// nothing near the 4000-byte-a-packet ceiling the encoder is given.
+    #[test]
+    fn a_note_is_encoded_at_about_the_recommended_rate() {
+        let samples: Vec<f32> = (0..RATE as usize)
+            .map(|i| {
+                let t = i as f32 / RATE as f32;
+                (t * 300.0 * std::f32::consts::TAU).sin() * 0.4
+            })
+            .collect();
+        let ogg = encode(&samples).expect("encodes");
+        // Ogg's own framing is about 30 bytes a page and there are 50.
+        let audio = ogg.len() as f32 - 1_800.0;
+        let kbit = audio * 8.0 / 1000.0;
+        assert!(
+            (12.0..40.0).contains(&kbit),
+            "a second came out at {kbit:.1} kbit/s"
+        );
+    }
+
+    fn tone_packets(ms: usize) -> Vec<Vec<u8>> {
+        let mut encoder =
+            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        (0..ms / 20)
+            .map(|f| {
+                let pcm: Vec<f32> = (0..FRAME)
+                    .map(|i| {
+                        let t = (f * FRAME + i) as f32 / RATE as f32;
+                        (t * 440.0 * std::f32::consts::TAU).sin() * 0.5
+                    })
+                    .collect();
+                encoder.encode_vec_float(&pcm, 4000).unwrap()
+            })
+            .collect()
     }
 
     /// A real note: a tone, encoded by libopus, wrapped in Ogg.

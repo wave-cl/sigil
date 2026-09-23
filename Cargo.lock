@@ -6170,6 +6170,7 @@ dependencies = [
  "openh264",
  "opus",
  "symphonia",
+ "tracing",
 ]
 
 [[package]]

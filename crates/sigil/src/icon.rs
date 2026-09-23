@@ -114,6 +114,8 @@ icons! {
     More => "More",
     /// Be somebody else: back to the opening screen to choose an identity.
     Switch => "Switch identity",
+    /// Record a voice note.
+    Mic => "Record a voice note",
     /// Play a video, or carry on with one.
     Play => "Play",
     /// Hold a video where it is.
@@ -465,6 +467,21 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                     colour,
                 );
             }
+        }
+        Icon::Mic => {
+            // A capsule on a stand: the barrel, the arc that cradles it,
+            // and the stem down to a foot.
+            let barrel = egui::Rect::from_min_max(p(0.40, 0.16), p(0.60, 0.56));
+            painter.rect_filled(barrel, s * 0.10, colour);
+            let c = p(0.50, 0.46);
+            let mut cradle = Vec::new();
+            for step in 0..=12 {
+                let a = std::f32::consts::PI * step as f32 / 12.0;
+                cradle.push(c + egui::vec2(-a.cos() * s * 0.22, a.sin() * s * 0.22));
+            }
+            path(cradle);
+            line(p(0.50, 0.68), p(0.50, 0.82));
+            line(p(0.36, 0.82), p(0.64, 0.82));
         }
         Icon::Sound | Icon::Muted => {
             // A speaker: a small box and the cone out of it. With sound, a

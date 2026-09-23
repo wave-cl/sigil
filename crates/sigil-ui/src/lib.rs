@@ -336,6 +336,25 @@ pub fn field_with_slot(
     (response, at)
 }
 
+/// Draw more than one control in a field's slot, laid out from the right.
+///
+/// The slot has to have been asked for wide enough -- `field_with_slot`
+/// takes the width and keeps the text clear of it -- because a control
+/// drawn past the slot is drawn past the field, and a widget outside its
+/// clip cannot be pressed.
+pub fn in_slot_row<R>(
+    ui: &mut egui::Ui,
+    slot: egui::Rect,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(slot)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    add(&mut child)
+}
+
 /// Draw a control in a field's slot (see [`field_with_slot`]): a child ui
 /// over the slot, which takes nothing from the row's own layout.
 pub fn in_slot<R>(ui: &mut egui::Ui, slot: egui::Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {

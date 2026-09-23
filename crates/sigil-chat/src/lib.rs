@@ -1191,6 +1191,9 @@ struct Pane {
     /// leaves the conversation on screen; a conversation switched away
     /// from stops its video.
     players: HashMap<String, Playing>,
+    /// A voice note being recorded here, if one is. Dropping it stops
+    /// the microphone, which is what leaving the conversation does.
+    recording: Option<sigil_video::note::Recorder>,
     /// SIP-18 voice notes this pane has open, by attachment id. Made when
     /// somebody presses play and the bytes are in hand; dropped with the
     /// attachment, which stops the sound.
@@ -1478,6 +1481,7 @@ impl Default for Pane {
             claim_pending: None,
             players: HashMap::new(),
             notes: HashMap::new(),
+            recording: None,
             play_when_fetched: HashSet::new(),
             open_when_fetched: HashMap::new(),
             whole_screen: false,
@@ -7059,6 +7063,128 @@ impl ChatApp {
         }
     }
 
+    /// Write a recorded note where sigil keeps its own files, named for the
+    /// moment it was made.
+    ///
+    /// **Not a temporary file.** `std::env::temp_dir` is `/data/local/tmp` on
+    /// Android, which the app cannot write to; sigil's own data directory is
+    /// pointed inside the app's files directory by the Android entry point and
+    /// exists on every other platform too. The name carries the stamp for the
+    /// same reason a saved picture's does: a directory of `note.ogg`,
+    /// `note-1.ogg` says nothing about which is which.
+    fn write_note(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+        let dir = dirs::data_local_dir()
+            .ok_or_else(|| "nowhere to write the recording".to_string())?
+            .join("sigil")
+            .join("notes");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("voice-{}.ogg", sigil_ui::clock::file_stamp(at)));
+        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(path)
+    }
+
+    /// The composer while a voice note is being recorded: throw it away,
+    /// what it is hearing, how long it has been, and send.
+    ///
+    /// **The meter is the level the note will carry**, on SIP-15's scale,
+    /// so what somebody watches while talking is the same measurement the
+    /// bars are drawn from at the other end -- not a second, prettier one
+    /// that could disagree with it.
+    fn recording_ui(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let (elapsed, level, deaf) = match self.pane(at).recording.as_ref() {
+            Some(r) => (r.elapsed_ms(), r.level(), r.deaf()),
+            None => return,
+        };
+        let mut throw_away = false;
+        let mut send = false;
+        ui.horizontal(|ui| {
+            ui.set_min_height(tokens::FIELD_LG);
+            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Throw it away").clicked() {
+                throw_away = true;
+            }
+            if deaf {
+                // The microphone would not open -- busy with a call, or
+                // refused. Said here, where the press was, rather than
+                // left as a recording that turns out to be silence.
+                ui.colored_label(theme.warning, "no microphone");
+            } else {
+                // A dot that keeps time, the way a camera's does: it is
+                // the one part of this that says *recording* rather than
+                // *ready to*.
+                let on = self.now().is_multiple_of(2);
+                let (dot, _) = ui.allocate_exact_size(
+                    egui::vec2(tokens::ICON_SM, tokens::ICON_SM),
+                    egui::Sense::hover(),
+                );
+                if on {
+                    ui.painter()
+                        .circle_filled(dot.center(), tokens::ICON_SM * 0.25, theme.warning);
+                }
+                ui.colored_label(theme.text_primary, sigil_ui::video::clock(elapsed));
+                // The meter, in the room the row has left over.
+                let room = ui.available_width() - tokens::BUTTON_LG - tokens::SPACING_MD;
+                if room > tokens::ICON_MD {
+                    sigil_ui::attachment::waveform(
+                        ui,
+                        // One bar's worth of *now*, repeated: a meter is a
+                        // waveform of length one, and drawing it with the
+                        // same function is what stops the two disagreeing.
+                        &[level; 24],
+                        theme.accent,
+                        room,
+                        None,
+                    );
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Send)
+                    .on_hover_text("Send it")
+                    .clicked()
+                {
+                    send = true;
+                }
+            });
+        });
+        // Repainted while it records: the clock and the meter are only
+        // worth having if they move.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+        if throw_away {
+            // Dropped, which stops the microphone. Nothing is written and
+            // nothing is sent: a recording thrown away leaves no file on
+            // the machine to be found later.
+            self.pane(at).recording = None;
+            return;
+        }
+        if send {
+            let recorder = self.pane(at).recording.take();
+            match recorder.and_then(|r| r.finish()) {
+                Some(bytes) => {
+                    let ctx = ui.ctx().clone();
+                    match Self::write_note(&bytes) {
+                        // Staged rather than sent: it goes through the
+                        // same path a picked file does, which is what
+                        // gives it its waveform (`preview_of`) and lets
+                        // somebody put words beside it before it goes.
+                        Ok(path) => self.stage(at, vec![path], &ctx),
+                        Err(why) => self.pane(at).command_trouble = Some(why),
+                    }
+                }
+                // Nothing was heard: a press and a release, or a
+                // microphone that never opened. Saying so beats sending an
+                // empty file with a length of nought.
+                None => {
+                    self.pane(at).command_trouble =
+                        Some("nothing was recorded — the microphone heard nothing".into())
+                }
+            }
+        }
+    }
+
     fn composer_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
@@ -7287,6 +7413,16 @@ impl ChatApp {
 
         self.staged_ui(at, ui, theme);
 
+        // **While a note is being recorded the row is the recording.**
+        // Not a box with a microphone beside it: there is nothing to type
+        // into while talking, and a composer that looks unchanged is one
+        // somebody keeps typing in. Three things, which is all there is to
+        // decide -- throw it away, look at what it is hearing, send it.
+        if self.pane(at).recording.is_some() {
+            self.recording_ui(at, ui, theme);
+            return;
+        }
+
         ui.horizontal(|ui| {
             // Room for both controls, measured rather than guessed: the field
             // took `available - one button` while two sat beside it, and Send
@@ -7297,14 +7433,33 @@ impl ChatApp {
             let phone = form.is_phone();
             let button = form.button_size();
             let controls = (button + ui.spacing().item_spacing.x) * 2.0;
+            // **The microphone takes room from the box, and is decided
+            // before the box is drawn.** A widget outside its clip cannot
+            // be pressed -- so a microphone drawn after a field that took
+            // `available_width()` is a button that is *there*, in the
+            // accessibility tree and in a screenshot, and dead to a
+            // finger. Found by a test that pressed it and got nothing.
+            let ready =
+                !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
+            let mic = !ready;
             // On a phone the box is the whole width and a little taller,
-            // with the paperclip inside it at the right; there is no Send
-            // button, because the keyboard's own key sends. On a desktop the
-            // two buttons sit beside it as they always have.
+            // with its controls inside it at the right; there is no Send
+            // button, because the keyboard's own key sends. On a desktop
+            // the two buttons sit beside it as they always have.
             let width = if phone {
                 ui.available_width()
             } else {
                 (ui.available_width() - controls).max(80.0)
+            };
+            // **Two controls inside the box, not one beside it.** The
+            // microphone first went next to the field, which took a
+            // button's width off a box that is meant to run to the edge --
+            // and a test that had been asserting exactly that since the
+            // phone composer was built caught it.
+            let slot_width = if mic {
+                button * 2.0 + tokens::SPACING_XS
+            } else {
+                button
             };
             let (field, slot) = if phone {
                 let (field, slot) = sigil_ui::field_with_slot(
@@ -7313,7 +7468,7 @@ impl ChatApp {
                     "Write message",
                     width,
                     tokens::FIELD_LG,
-                    button,
+                    slot_width,
                 );
                 (field, Some(slot))
             } else {
@@ -7374,8 +7529,6 @@ impl ChatApp {
             // the box swallows, and then nothing happens at all -- so a
             // messenger that relies on it has no way to send. Empty, the
             // slot is the paperclip, which is what an empty box is for.
-            let ready =
-                !self.pane(at).composing.trim().is_empty() || !self.pane(at).staged.is_empty();
             let commits = phone && ready;
             let word = if editing.is_some() {
                 "Save the rewrite"
@@ -7391,10 +7544,29 @@ impl ChatApp {
                     attach(ui)
                 }
             };
-            let pressed = match slot {
-                Some(slot) => sigil_ui::in_slot(ui, slot, in_the_slot),
-                None => in_the_slot(ui),
+            // The microphone sits beside whatever the slot holds: it is
+            // the same sort of thing as the paperclip -- something to put
+            // in a message -- and it goes away once there is something to
+            // send, which is when the slot becomes the dart.
+            let with_mic = |ui: &mut egui::Ui| {
+                let first = in_the_slot(ui);
+                let recorded = mic
+                    && sigil_ui::icon_button(ui, sigil_ui::Icon::Mic)
+                        .on_hover_text(
+                            "Record a voice note. It is sealed before it leaves this \
+                             machine, like any other file.",
+                        )
+                        .clicked();
+                (first, recorded)
             };
+            let (pressed, record) = match slot {
+                Some(slot) => sigil_ui::in_slot_row(ui, slot, with_mic),
+                None => with_mic(ui),
+            };
+            if record {
+                let ctx = ui.ctx().clone();
+                self.pane(at).recording = Some(sigil_video::note::Recorder::start(ctx));
+            }
             if pressed && !commits {
                 self.picking = Some((at.clone(), files::pick_files()));
                 ui.ctx().request_repaint();

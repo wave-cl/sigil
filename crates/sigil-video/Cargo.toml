@@ -19,6 +19,7 @@ cpal = "0.18"
 # so the packets go to libopus -- the same decoder a call already uses, via
 # opusic-sys, which builds it from source and so needs no system package.
 opus = "0.4"
+tracing = { workspace = true }
 
 [dev-dependencies]
 image = { workspace = true }
