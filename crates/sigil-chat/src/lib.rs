@@ -5701,7 +5701,13 @@ impl ChatApp {
                 ui.add_space(tokens::SPACING_SM);
             }
             self.succeeded_ui(at, state, ui, theme);
-            for seq in self.trouble_ui(&state.trouble_with, public, ui, theme) {
+            for seq in self.trouble_ui(
+                &state.trouble_with,
+                public,
+                !state.copies.is_empty(),
+                ui,
+                theme,
+            ) {
                 self.send_as(Some(at), Cmd::Redact(seq));
             }
         }
@@ -5735,7 +5741,13 @@ impl ChatApp {
                         ui.add_space(tokens::SPACING_SM);
                     }
                     self.succeeded_ui(at, state, ui, theme);
-                    redact = self.trouble_ui(&state.trouble_with, public, ui, theme);
+                    redact = self.trouble_ui(
+                        &state.trouble_with,
+                        public,
+                        !state.copies.is_empty(),
+                        ui,
+                        theme,
+                    );
                 }
                 self.composer_ui(ctx, at, state, ui, theme)
             });
@@ -5980,6 +5992,7 @@ impl ChatApp {
         &self,
         trouble: &Trouble,
         public: bool,
+        kept: bool,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) -> Vec<u64> {
@@ -6101,12 +6114,26 @@ impl ChatApp {
             );
         }
         if trouble.restarted {
+            // **Two ways a sequence space restarts, and they are not the
+            // same news.** A channel destroyed and made again under the
+            // same name leaves nothing behind. One folded because it
+            // turned out to be a stray, or a direct message opened twice,
+            // leaves what this client had read -- SIP-60 keeps it, and it
+            // is drawn above under its own separator. Telling somebody
+            // their conversation was destroyed while their conversation
+            // is on the screen above is the worse of the two errors.
             say(
                 ui,
                 theme.warning,
-                "This conversation was destroyed and started again under the same name. \
-                 Nothing above is related to what follows."
-                    .to_string(),
+                if kept {
+                    "This conversation started again. What came before it is kept as an \
+                     earlier copy, above, and numbered on its own."
+                        .to_string()
+                } else {
+                    "This conversation was destroyed and started again under the same name. \
+                     Nothing above is related to what follows."
+                        .to_string()
+                },
             );
         }
         if trouble.forged > 0 {
@@ -6287,6 +6314,9 @@ impl ChatApp {
         let mut previous_day: Option<String> = None;
         let mut previous_author: Option<PubKey> = None;
         let mut previous_at: u64 = 0;
+        // Which copy of the conversation the last line drawn belonged to:
+        // `Some(i)` for the i-th earlier one, `None` for the live one.
+        let mut previous_copy: Option<Option<usize>> = None;
 
         // What happened to the channel, in the order it happened relative to
         // what was said. **Both sequences come from the exchange**, so one
@@ -6359,10 +6389,41 @@ impl ChatApp {
                     standing: session::Standing::Sound,
                     mentions: Vec::new(),
                     me_mentioned: false,
+                    earlier: false,
                 })
                 .collect();
 
-        for line in state.lines.iter().chain(echo.iter()) {
+        // **Earlier copies first, and never merged in** (SIP-60 §The client
+        // keeps what it read). Each is a whole conversation of its own: its
+        // sequence numbers belong to a channel that no longer exists, so
+        // nothing about it may be interleaved with the live one -- not the
+        // events, not the unread divider, not the remembered heights, which
+        // are keyed by a sequence number the live conversation also uses.
+        let drawn = state
+            .copies
+            .iter()
+            .enumerate()
+            .flat_map(|(i, copy)| copy.iter().map(move |l| (Some(i), l)))
+            .chain(state.lines.iter().chain(echo.iter()).map(|l| (None, l)));
+        for (copy, line) in drawn {
+            // The boundary between one copy and the next, and between the
+            // last of them and the conversation itself.
+            if previous_copy != Some(copy) {
+                if previous_copy.is_some() || copy.is_some() {
+                    sigil_ui::copy_separator(
+                        ui,
+                        &match (copy, state.copies.len()) {
+                            (None, _) => "This conversation".to_string(),
+                            (Some(_), 1) => "An earlier copy".to_string(),
+                            (Some(i), n) => format!("An earlier copy ({} of {n})", i + 1),
+                        },
+                    );
+                }
+                previous_copy = Some(copy);
+                previous_author = None;
+                previous_day = None;
+            }
+            let live = copy.is_none();
             // Nothing is done *to* a message that is not there yet: its
             // sequence number is this client's invention, and a reaction or
             // a deletion aimed at it would name a message the exchange has
@@ -6372,7 +6433,7 @@ impl ChatApp {
             // author` is cleared so the next message starts its own group: a
             // bubble grouped across a membership change reads as having been
             // said before it.
-            while events.peek().is_some_and(|e| e.seq < line.seq) {
+            while live && events.peek().is_some_and(|e| e.seq < line.seq) {
                 let event = events.next().expect("peeked");
                 self.event_ui(event, ui);
                 previous_author = None;
@@ -6391,7 +6452,7 @@ impl ChatApp {
             // The unread divider is **frozen** where it was on opening.
             // Reading advances the read mark, so one that tracked it would
             // vanish exactly when somebody wanted to see where they had got to.
-            if state.divider == Some(line.seq) {
+            if live && state.divider == Some(line.seq) {
                 sigil_ui::unread_divider(ui, state.unread_on_open);
                 previous_author = None;
             }
@@ -6401,7 +6462,7 @@ impl ChatApp {
             // its own time and name.
             let grouped = previous_author == Some(line.who)
                 && line.at.saturating_sub(previous_at) < 300
-                && state.divider != Some(line.seq);
+                && !(live && state.divider == Some(line.seq));
 
             // **Reserved rather than drawn, when nobody can see it.**
             //
@@ -6424,7 +6485,7 @@ impl ChatApp {
             // risk.
             let shape = shape_of(line, grouped);
             let width = ui.available_width();
-            let known = (line.attachments.is_empty())
+            let known = (live && line.attachments.is_empty())
                 .then(|| self.pane(at).tall.get(&line.seq).copied())
                 .flatten()
                 .filter(|(was, at_width, _)| *was == shape && *at_width == width)
@@ -6439,7 +6500,7 @@ impl ChatApp {
                 && (top + tall < near.top() || top > near.bottom())
             {
                 let (_, rect) = ui.allocate_space(egui::vec2(width, tall));
-                if jump == Some(line.seq) {
+                if live && jump == Some(line.seq) {
                     landed = Some(rect);
                 }
                 previous_author = Some(line.who);
@@ -6487,7 +6548,7 @@ impl ChatApp {
                 })
                 .collect();
             let bubble = sigil_ui::Bubble {
-                id: egui::Id::new(("message", at, line.seq)),
+                id: egui::Id::new(("message", at, copy, line.seq)),
                 key: &key,
                 name: line.name.as_deref(),
                 title,
@@ -6518,14 +6579,15 @@ impl ChatApp {
                 mentions: &mentioned,
                 mentions_me: line.me_mentioned,
                 verified: !line.mine && state.verified.contains_key(&line.who),
-                editable: line.mine && session::rewritable(line.at, now),
+                editable: live && line.mine && session::rewritable(line.at, now),
+                readonly: !live,
             };
             // Measured as it is drawn, so the next frame can reserve it.
             DREW.with(|n| n.set(n.get() + 1));
             // Reserved before the bubble and painted after it, so the wash
             // a landed message wears goes *under* the bubble.
             let wash = marked
-                .filter(|(seq, _)| *seq == line.seq)
+                .filter(|(seq, _)| live && *seq == line.seq)
                 .map(|(_, since)| (ui.painter().add(egui::Shape::Noop), since));
             let drawn = ui.scope(|ui| sigil_ui::bubble(ui, &bubble));
             let did = drawn.inner;
@@ -6533,7 +6595,7 @@ impl ChatApp {
             // `files` borrows the pane's players for the frames; what
             // follows wants the pane mutably.
             drop(files);
-            if jump == Some(line.seq) {
+            if live && jump == Some(line.seq) {
                 landed = Some(rect);
             }
             if let Some((shape, since)) = wash {
@@ -6552,9 +6614,11 @@ impl ChatApp {
                     self.pane(at).marked = None;
                 }
             }
-            self.pane(at)
-                .tall
-                .insert(line.seq, (shape, width, rect.height()));
+            if live {
+                self.pane(at)
+                    .tall
+                    .insert(line.seq, (shape, width, rect.height()));
+            }
             if !did.is_none() && !waiting {
                 acted = Some((line, did));
             }

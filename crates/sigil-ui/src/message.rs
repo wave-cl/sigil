@@ -255,6 +255,16 @@ pub struct Bubble<'a> {
     /// every reader drops the rewrite (SIP-19), so offering one would be
     /// offering a button that does nothing.
     pub editable: bool,
+    /// Nothing may be done *to* this message: it belongs to an earlier copy
+    /// of the conversation (SIP-60 §The client keeps what it read), whose
+    /// channel no longer exists.
+    ///
+    /// **Not drawn greyed.** Somebody said it, and it reads as something
+    /// somebody said; what is missing is the strip, because a Reply or a
+    /// React offered here would be aimed at a channel the exchange
+    /// destroyed. Its files stay its files -- SIP-60 keeps a folded
+    /// attachment fetchable by the two members -- so Save and Open remain.
+    pub readonly: bool,
     /// What happened to the message after it was said. Drawn **under** the
     /// bubble rather than inside it: it is not part of what was said, and
     /// having it in there made the bubble taller than its own contents, which
@@ -419,6 +429,27 @@ pub fn day_separator(ui: &mut egui::Ui, label: &str) {
     ui.add_space(tokens::SPACING_XS);
 }
 
+/// The boundary between one copy of a conversation and the next (SIP-60
+/// §The client keeps what it read).
+///
+/// Drawn as a separator and not as a sentence: what is above it and what is
+/// below it belong to **different channels**, which is a harder boundary
+/// than a new day, and the one thing a reader must not miss is that the
+/// numbering above has nothing to do with the numbering below.
+pub fn copy_separator(ui: &mut egui::Ui, label: &str) {
+    let theme = ColorTheme::current(ui.ctx());
+    ui.add_space(tokens::SPACING_MD);
+    let _ = centred(
+        ui,
+        egui::RichText::new(label)
+            .small()
+            .color(theme.text_secondary)
+            .into(),
+        Some(theme.border_default),
+    );
+    ui.add_space(tokens::SPACING_XS);
+}
+
 /// Something that happened *to* the conversation rather than in it.
 ///
 /// A membership or metadata change, which the exchange writes and signs
@@ -572,7 +603,9 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                     },
                 )
                 .inner;
-            strip(ui, b, bubble, &mut action);
+            if !b.readonly {
+                strip(ui, b, bubble, &mut action);
+            }
         });
     } else {
         ui.horizontal(|ui| {
@@ -597,7 +630,9 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
                     },
                 )
                 .inner;
-            strip(ui, b, bubble, &mut action);
+            if !b.readonly {
+                strip(ui, b, bubble, &mut action);
+            }
         });
     }
 
@@ -2118,6 +2153,7 @@ mod tests {
             mentions_me: false,
             verified: false,
             editable: false,
+            readonly: false,
         }
     }
 

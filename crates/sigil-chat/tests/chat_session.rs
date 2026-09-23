@@ -5236,3 +5236,120 @@ fn an_ogg_opus_note(amplitude_pct: u32) -> Vec<u8> {
     }
     out
 }
+
+/// **What the store archived comes back as an earlier copy** (SIP-60 §The
+/// client keeps what it read).
+///
+/// A direct message opened twice, or one folded because it turned out to be
+/// a stray, ends the channel's sequence space; the client archives what it
+/// read of the old incarnation and reads the rest of it from
+/// `/channel/folded`. The library has done that since 0.93.1 and sigil
+/// called `Chat::earlier` nowhere, so all of it sat on the disc unread
+/// while the reader was told the conversation had been destroyed.
+///
+/// The fold itself takes two exchanges and belongs to the library's own
+/// `fold_flow`. What is proved here is sigil's half: a channel whose
+/// sequence space restarted has its archived messages on screen, above,
+/// marked as an earlier copy.
+#[tokio::test]
+async fn what_the_store_archived_comes_back_as_an_earlier_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(61);
+    let (b_signer, b_id) = signer(62);
+    let b_store = dir.path().join("b.db");
+
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &b_store);
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+    alice.send(Cmd::Send("said before the sequence space ended".into()));
+    assert!(
+        until(
+            || {
+                bob.state()
+                    .lines
+                    .iter()
+                    .any(|l| l.text == "said before the sequence space ended")
+            },
+            20,
+        )
+        .await,
+        "Bob should have read it before it is archived: {:?}",
+        bob.state().trouble
+    );
+    let channel = bob.state().open.expect("open");
+
+    // Bob's client stops, and his store is told what a fold tells it: this
+    // channel's sequence space has ended. That archives what he read.
+    alice.stop();
+    let closing = bob.close();
+    assert!(
+        until(|| closing.is_finished(), 10).await,
+        "the store lock should be released"
+    );
+    {
+        let (seed, _) = signer(62);
+        let mut store =
+            sqex_chat::store::Store::open(&seed.seed(), Some(&b_store)).expect("the store opens");
+        store.scope_to(&PubKey::new(server_pub)).expect("scoped");
+        store
+            .reset_sequence_space(&channel)
+            .expect("the sequence space restarts");
+        // The control for the whole test: if this archived nothing there is
+        // nothing for sigil to fail to draw, and every assertion below would
+        // be about an empty list.
+        assert!(
+            !store
+                .message_history(&channel)
+                .expect("read back")
+                .is_empty(),
+            "nothing was archived, so this test cannot say anything"
+        );
+    }
+
+    // Bob comes back.
+    let (b_signer, _) = signer(62);
+    let bob = start_at(endpoint, b_signer, &b_store);
+    assert!(
+        until(|| bob.state().me == Some(b_id), 15).await,
+        "Bob's session should come up again"
+    );
+    bob.send(Cmd::Show(channel));
+    let kept = until(
+        || {
+            bob.state().copies.iter().flatten().any(|l| {
+                l.text == "said before the sequence space ended" && l.earlier && l.receipt.is_none()
+            })
+        },
+        20,
+    )
+    .await;
+    assert!(
+        kept,
+        "what was archived was not offered as an earlier copy: {:?}",
+        bob.state().copies
+    );
+    bob.stop();
+}

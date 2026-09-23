@@ -145,6 +145,12 @@ pub struct Line {
     pub mentions: Vec<Mentioned>,
     /// One of those keys is ours.
     pub me_mentioned: bool,
+    /// This message belongs to an **earlier copy** of the conversation
+    /// (SIP-60 §The client keeps what it read), not to the one that is
+    /// live. Its channel no longer exists, so there is nothing to reply
+    /// to, react to, edit or take down -- and its sequence numbers mean
+    /// nothing beside the live ones.
+    pub earlier: bool,
 }
 
 impl Line {
@@ -564,6 +570,10 @@ pub struct ChatState {
     /// Which conversation is on screen, and what is in it.
     pub open: Option<[u8; 32]>,
     pub lines: Vec<Line>,
+    /// Earlier copies of the open conversation, oldest first, each whole
+    /// (SIP-60 §The client keeps what it read). Drawn above `lines` with a
+    /// divider, and never merged into them.
+    pub copies: Vec<Vec<Line>>,
     /// What happened to the conversation, in the same sequence space as
     /// `lines` so the two interleave.
     pub events: Vec<Happened>,
@@ -3254,6 +3264,9 @@ pub(crate) trait Local {
     fn title_of(&self, account: &PubKey) -> Option<String>;
     fn handle(&self, account: &PubKey) -> Option<String>;
     fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline>;
+    /// SIP-60 §The client keeps what it read: earlier incarnations of this
+    /// channel that this client read, oldest first.
+    fn earlier(&self, channel: &[u8; 32], admins: &[PubKey]) -> Vec<Timeline>;
     fn dm_with(&self, them: &PubKey) -> [u8; 32];
     fn homed_elsewhere(&self, channel: &[u8; 32]) -> Option<(PubKey, String)>;
     fn link(&self) -> LinkState;
@@ -3274,6 +3287,9 @@ impl Local for Chat {
     }
     fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline> {
         Chat::history(self, channel, admins).ok()
+    }
+    fn earlier(&self, channel: &[u8; 32], admins: &[PubKey]) -> Vec<Timeline> {
+        Chat::earlier(self, channel, admins).unwrap_or_default()
     }
     fn dm_with(&self, them: &PubKey) -> [u8; 32] {
         Chat::dm_with(self, them)
@@ -3312,6 +3328,13 @@ impl Local for Offline<'_> {
     }
     fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline> {
         self.store.history(channel, admins).ok()
+    }
+    /// **Not from a store alone.** Folding an earlier copy opens its
+    /// entries under the keys of the incarnation they belong to, which is
+    /// `Chat`'s work and not the store's. Nothing is lost by waiting: this
+    /// view lasts until the session is up, and the copies appear with it.
+    fn earlier(&self, _channel: &[u8; 32], _admins: &[PubKey]) -> Vec<Timeline> {
+        Vec::new()
     }
     fn dm_with(&self, them: &PubKey) -> [u8; 32] {
         self.store.dm_with(&self.me, them)
@@ -5003,6 +5026,210 @@ pub fn verified_holder(
         .find(|k| handle_of(k).is_some_and(|h| h.to_lowercase() == wanted))
 }
 
+/// One timeline's messages as the interface draws them.
+///
+/// **Two callers, and they are not the same conversation.** The live one is
+/// windowed to what somebody has asked for and carries this device's read
+/// receipts. An earlier copy (SIP-60 §The client keeps what it read) is
+/// whole, has no receipts -- the channel it belongs to does not exist any
+/// more, so nobody's cursor is in it -- and is marked `earlier`, which is
+/// what stops the interface offering to reply to a message that can never
+/// be replied to.
+#[allow(clippy::too_many_arguments)]
+fn lines_of(
+    timeline: &Timeline,
+    window: usize,
+    receipts: Option<&Known>,
+    earlier: bool,
+    me: PubKey,
+    people: &HashMap<PubKey, Person>,
+    desk: &Desk,
+    chat: &impl Local,
+) -> Vec<Line> {
+    // A stub of what each message says, so a reply can name it. Built
+    // once rather than searched per reply: a conversation full of
+    // replies would otherwise be quadratic in its own length.
+    // `broken` is a list rather than a field on the message: the
+    // fold keeps it separate so that a client which ignores it still
+    // shows the message, which is right for a gap and would be wrong
+    // for a fork. Turned into a lookup once, not searched per line.
+    let standing: HashMap<u64, Standing> = timeline
+        .broken()
+        .iter()
+        .map(|(seq, verdict)| {
+            (
+                *seq,
+                match verdict {
+                    Verdict::Fork => Standing::Fork,
+                    Verdict::Unattributed => Standing::Unattributed,
+                    // `Gap` is what is left; `Valid` never reaches
+                    // this list and `Forged` never becomes a message.
+                    _ => Standing::Gap,
+                },
+            )
+        })
+        .collect();
+
+    // A stub of what each message says, so a reply can name it. Only
+    // for what a reply in the window actually points at, and looked up
+    // in the fold rather than built for every message that ever
+    // existed -- which is precisely the work the window exists to
+    // avoid doing.
+    let stubs: HashMap<u64, Stub> = timeline
+        .messages()
+        .skip(window)
+        .filter_map(|m| m.post.reply_to())
+        .filter_map(|target| timeline.get(target))
+        .map(|m| {
+            let pictures: Vec<_> = m
+                .post
+                .attachments()
+                .filter(|a| {
+                    let kind = a.effective_kind();
+                    kind == sqex_proto::blob::KIND_IMAGE || kind == sqex_proto::blob::KIND_VIDEO
+                })
+                .collect();
+            let words = m.post.body_text().unwrap_or_default();
+            let said = if m.redacted {
+                "deleted".to_string()
+            } else if !words.is_empty() {
+                stub(words)
+            } else {
+                only_files(m.post.attachments().map(|a| a.effective_kind()))
+            };
+            let preview = (!m.redacted)
+                .then(|| pictures.first())
+                .flatten()
+                .filter(|a| !a.preview.is_empty())
+                .map(|a| Thumb {
+                    id: bs58::encode(a.blob).into_string(),
+                    bytes: a.preview.as_slice().into(),
+                });
+            (m.seq, (m.account, said, preview))
+        })
+        .collect();
+    timeline
+        .messages()
+        .skip(window)
+        .map(|m| Line {
+            seq: m.seq,
+            who: m.account,
+            name: people.get(&m.account).and_then(|p| p.name.clone()),
+            mine: m.account == me,
+            at: m.posted,
+            text: m.post.body_text().unwrap_or_default().to_string(),
+            redacted: m.redacted,
+            edited: m.edited.is_some(),
+            via: m.post.via().map(|k| Chat::via_name(&k)),
+            reactions: m
+                .reactions
+                .iter()
+                .map(|(emoji, who)| {
+                    // Oneself first and by the word, the way one is
+                    // named anywhere a list includes you.
+                    let ours = who.contains(&me);
+                    let mut named: Vec<String> = who
+                        .iter()
+                        .filter(|k| **k != me)
+                        .map(|k| name_for(people, k, ""))
+                        .collect();
+                    named.sort();
+                    if ours {
+                        named.insert(0, "You".to_string());
+                    }
+                    sigil_ui::Reaction {
+                        emoji: emoji.clone(),
+                        who: named,
+                        ours,
+                    }
+                })
+                .collect(),
+            reply_to: m.post.reply_to().map(|target| {
+                stubs
+                    .get(&target)
+                    .map(|(account, said, preview)| Quoted {
+                        seq: target,
+                        who: people
+                            .get(account)
+                            .and_then(|p| p.name.clone())
+                            .unwrap_or_else(|| short(account)),
+                        said: said.clone(),
+                        preview: preview.clone(),
+                    })
+                    .unwrap_or_else(|| Quoted::unheld(target))
+            }),
+            // Only ever on our own. On somebody else's it would be a
+            // claim about our own reading, shown back to us.
+            receipt: (m.account == me)
+                .then(|| receipts.map(|k| receipt_for(k, m.seq, &me)))
+                .flatten(),
+            attachments: m
+                .post
+                .attachments()
+                .map(|a| Attached {
+                    // From the kind, never the mime: that is the
+                    // sender's claim, and SIP-18 forbids dispatching
+                    // on it beyond choosing how to display.
+                    kind: a.effective_kind(),
+                    described: sqex_chat::attach::describe(a),
+                    size: a.size,
+                    duration_ms: a.duration_ms().map(u64::from),
+                    shape: a.dimensions().map(|(w, h)| (u32::from(w), u32::from(h))),
+                    waveform: a.waveform().unwrap_or_default().into(),
+                    // A clip's own first frame where this device has
+                    // decoded one; the sender's 96-pixel thumbnail
+                    // otherwise. See `still_for_a_clip`.
+                    preview: desk
+                        .stills
+                        .get(&a.blob)
+                        .cloned()
+                        .unwrap_or_else(|| a.preview.as_slice().into()),
+                    bytes: desk.files.get(&a.blob).cloned(),
+                    // Asked for and refused, as against not reached
+                    // yet. The two look the same on screen otherwise,
+                    // and only one of them is worth waiting for.
+                    // Only a blob the exchange says it does not hold.
+                    // One waiting out a retry is not missing; it is
+                    // on its way, and saying otherwise is the fault
+                    // this told apart.
+                    missing: matches!(desk.unfetchable.get(&a.blob), Some(Unfetched::Gone)),
+                    held: !fetch_unasked(
+                        a.size,
+                        desk.wanted.contains(&a.blob),
+                        chat.store().has_blob(&a.blob).unwrap_or(false),
+                    ),
+                    // **The name says what is drawn, not just which
+                    // blob.** A texture is cached under a URI built
+                    // from this, and a preview that changes from the
+                    // sender's thumbnail to this device's own still
+                    // under the same name is a picture nobody sees
+                    // change. The old name stops being drawn, and
+                    // `forget_what_is_gone` puts its texture down.
+                    id: if desk.stills.contains_key(&a.blob) {
+                        format!("{}-still", bs58::encode(a.blob).into_string())
+                    } else {
+                        bs58::encode(a.blob).into_string()
+                    },
+                })
+                .collect(),
+            standing: standing.get(&m.seq).copied().unwrap_or_default(),
+            mentions: m
+                .post
+                .mentions()
+                .map(|key| Mentioned {
+                    key: *key,
+                    label: people
+                        .get(key)
+                        .map(|p| p.label(key))
+                        .unwrap_or_else(|| short(key)),
+                })
+                .collect(),
+            me_mentioned: m.post.mentions().any(|key| *key == me),
+            earlier,
+        })
+        .collect()
+}
+
 fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
     let verified: HashMap<PubKey, u64> = chat
         .store()
@@ -5067,194 +5294,35 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         .map(|(_, k)| k.timeline.messages().count())
         .unwrap_or(0);
 
+    // The **last** `wanted` of them, which is where a conversation is read
+    // from. Everything before that stays in the fold and in the store; this
+    // only bounds how much is turned into something drawable at once. See
+    // [`PAGE`].
+    let window = open
+        .map(|(_, k)| counted.saturating_sub(k.wanted))
+        .unwrap_or(0);
     let lines: Vec<Line> = open
-        .map(|(_, k)| {
-            // A stub of what each message says, so a reply can name it. Built
-            // once rather than searched per reply: a conversation full of
-            // replies would otherwise be quadratic in its own length.
-            // `broken` is a list rather than a field on the message: the
-            // fold keeps it separate so that a client which ignores it still
-            // shows the message, which is right for a gap and would be wrong
-            // for a fork. Turned into a lookup once, not searched per line.
-            let standing: HashMap<u64, Standing> = k
-                .timeline
-                .broken()
+        .map(|(_, k)| lines_of(&k.timeline, window, Some(k), false, me, &people, desk, chat))
+        .unwrap_or_default();
+    // SIP-60 §The client keeps what it read: what this client read of an
+    // earlier incarnation of the same conversation -- a direct message
+    // opened twice, or one folded when it turned out to be a stray. Shown
+    // before the conversation and **never merged into it**: their sequence
+    // numbers belong to channels that no longer exist.
+    //
+    // Read here, per publish, rather than cached on the channel. For every
+    // conversation that was never folded it is one indexed query that
+    // returns nothing, which is what almost all of them are; for one that
+    // was, it re-folds a log that ends at the fold and cannot grow. If a
+    // conversation with a large copy ever costs a frame, this is where the
+    // cache goes -- and it needs a place to live, because `publish` holds
+    // `desk` by shared reference.
+    let copies: Vec<Vec<Line>> = open
+        .map(|(c, k)| {
+            chat.earlier(&c, &k.admins)
                 .iter()
-                .map(|(seq, verdict)| {
-                    (
-                        *seq,
-                        match verdict {
-                            Verdict::Fork => Standing::Fork,
-                            Verdict::Unattributed => Standing::Unattributed,
-                            // `Gap` is what is left; `Valid` never reaches
-                            // this list and `Forged` never becomes a message.
-                            _ => Standing::Gap,
-                        },
-                    )
-                })
-                .collect();
-            // The **last** `wanted` of them, which is where a conversation is
-            // read from. Everything before that stays in the fold and in the
-            // store; this only bounds how much is turned into something
-            // drawable at once. See [`PAGE`].
-            let window = counted.saturating_sub(k.wanted);
-
-            // A stub of what each message says, so a reply can name it. Only
-            // for what a reply in the window actually points at, and looked up
-            // in the fold rather than built for every message that ever
-            // existed -- which is precisely the work the window exists to
-            // avoid doing.
-            let stubs: HashMap<u64, Stub> = k
-                .timeline
-                .messages()
-                .skip(window)
-                .filter_map(|m| m.post.reply_to())
-                .filter_map(|target| k.timeline.get(target))
-                .map(|m| {
-                    let pictures: Vec<_> = m
-                        .post
-                        .attachments()
-                        .filter(|a| {
-                            let kind = a.effective_kind();
-                            kind == sqex_proto::blob::KIND_IMAGE
-                                || kind == sqex_proto::blob::KIND_VIDEO
-                        })
-                        .collect();
-                    let words = m.post.body_text().unwrap_or_default();
-                    let said = if m.redacted {
-                        "deleted".to_string()
-                    } else if !words.is_empty() {
-                        stub(words)
-                    } else {
-                        only_files(m.post.attachments().map(|a| a.effective_kind()))
-                    };
-                    let preview = (!m.redacted)
-                        .then(|| pictures.first())
-                        .flatten()
-                        .filter(|a| !a.preview.is_empty())
-                        .map(|a| Thumb {
-                            id: bs58::encode(a.blob).into_string(),
-                            bytes: a.preview.as_slice().into(),
-                        });
-                    (m.seq, (m.account, said, preview))
-                })
-                .collect();
-            k.timeline
-                .messages()
-                .skip(window)
-                .map(|m| Line {
-                    seq: m.seq,
-                    who: m.account,
-                    name: people.get(&m.account).and_then(|p| p.name.clone()),
-                    mine: m.account == me,
-                    at: m.posted,
-                    text: m.post.body_text().unwrap_or_default().to_string(),
-                    redacted: m.redacted,
-                    edited: m.edited.is_some(),
-                    via: m.post.via().map(|k| Chat::via_name(&k)),
-                    reactions: m
-                        .reactions
-                        .iter()
-                        .map(|(emoji, who)| {
-                            // Oneself first and by the word, the way one is
-                            // named anywhere a list includes you.
-                            let ours = who.contains(&me);
-                            let mut named: Vec<String> = who
-                                .iter()
-                                .filter(|k| **k != me)
-                                .map(|k| name_for(&people, k, ""))
-                                .collect();
-                            named.sort();
-                            if ours {
-                                named.insert(0, "You".to_string());
-                            }
-                            sigil_ui::Reaction {
-                                emoji: emoji.clone(),
-                                who: named,
-                                ours,
-                            }
-                        })
-                        .collect(),
-                    reply_to: m.post.reply_to().map(|target| {
-                        stubs
-                            .get(&target)
-                            .map(|(account, said, preview)| Quoted {
-                                seq: target,
-                                who: people
-                                    .get(account)
-                                    .and_then(|p| p.name.clone())
-                                    .unwrap_or_else(|| short(account)),
-                                said: said.clone(),
-                                preview: preview.clone(),
-                            })
-                            .unwrap_or_else(|| Quoted::unheld(target))
-                    }),
-                    // Only ever on our own. On somebody else's it would be a
-                    // claim about our own reading, shown back to us.
-                    receipt: (m.account == me).then(|| receipt_for(k, m.seq, &me)),
-                    attachments: m
-                        .post
-                        .attachments()
-                        .map(|a| Attached {
-                            // From the kind, never the mime: that is the
-                            // sender's claim, and SIP-18 forbids dispatching
-                            // on it beyond choosing how to display.
-                            kind: a.effective_kind(),
-                            described: sqex_chat::attach::describe(a),
-                            size: a.size,
-                            duration_ms: a.duration_ms().map(u64::from),
-                            shape: a.dimensions().map(|(w, h)| (u32::from(w), u32::from(h))),
-                            waveform: a.waveform().unwrap_or_default().into(),
-                            // A clip's own first frame where this device has
-                            // decoded one; the sender's 96-pixel thumbnail
-                            // otherwise. See `still_for_a_clip`.
-                            preview: desk
-                                .stills
-                                .get(&a.blob)
-                                .cloned()
-                                .unwrap_or_else(|| a.preview.as_slice().into()),
-                            bytes: desk.files.get(&a.blob).cloned(),
-                            // Asked for and refused, as against not reached
-                            // yet. The two look the same on screen otherwise,
-                            // and only one of them is worth waiting for.
-                            // Only a blob the exchange says it does not hold.
-                            // One waiting out a retry is not missing; it is
-                            // on its way, and saying otherwise is the fault
-                            // this told apart.
-                            missing: matches!(desk.unfetchable.get(&a.blob), Some(Unfetched::Gone)),
-                            held: !fetch_unasked(
-                                a.size,
-                                desk.wanted.contains(&a.blob),
-                                chat.store().has_blob(&a.blob).unwrap_or(false),
-                            ),
-                            // **The name says what is drawn, not just which
-                            // blob.** A texture is cached under a URI built
-                            // from this, and a preview that changes from the
-                            // sender's thumbnail to this device's own still
-                            // under the same name is a picture nobody sees
-                            // change. The old name stops being drawn, and
-                            // `forget_what_is_gone` puts its texture down.
-                            id: if desk.stills.contains_key(&a.blob) {
-                                format!("{}-still", bs58::encode(a.blob).into_string())
-                            } else {
-                                bs58::encode(a.blob).into_string()
-                            },
-                        })
-                        .collect(),
-                    standing: standing.get(&m.seq).copied().unwrap_or_default(),
-                    mentions: m
-                        .post
-                        .mentions()
-                        .map(|key| Mentioned {
-                            key: *key,
-                            label: people
-                                .get(key)
-                                .map(|p| p.label(key))
-                                .unwrap_or_else(|| short(key)),
-                        })
-                        .collect(),
-                    me_mentioned: m.post.mentions().any(|key| *key == me),
-                })
+                .map(|t| lines_of(t, 0, None, true, me, &people, desk, chat))
+                .filter(|lines| !lines.is_empty())
                 .collect()
         })
         .unwrap_or_default();
@@ -5650,6 +5718,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(link, link);
         set!(conversations, summaries);
         set!(lines, lines);
+        set!(copies, copies);
         set!(events, events);
         set!(earlier, earlier);
         set!(loading, loading);

@@ -87,6 +87,7 @@ fn a_conversation() -> ChatState {
             },
         ],
         open: Some(channel),
+        copies: Vec::new(),
         lines: vec![
             Line {
                 seq: 1,
@@ -105,6 +106,7 @@ fn a_conversation() -> ChatState {
                 standing: Default::default(),
                 mentions: Vec::new(),
                 me_mentioned: false,
+                earlier: false,
             },
             Line {
                 seq: 2,
@@ -123,6 +125,7 @@ fn a_conversation() -> ChatState {
                 standing: Default::default(),
                 mentions: Vec::new(),
                 me_mentioned: false,
+                earlier: false,
             },
             Line {
                 seq: 3,
@@ -156,6 +159,7 @@ fn a_conversation() -> ChatState {
                 standing: Default::default(),
                 mentions: Vec::new(),
                 me_mentioned: false,
+                earlier: false,
             },
             Line {
                 seq: 4,
@@ -179,6 +183,7 @@ fn a_conversation() -> ChatState {
                 standing: Default::default(),
                 mentions: Vec::new(),
                 me_mentioned: false,
+                earlier: false,
             },
             Line {
                 seq: 5,
@@ -197,6 +202,7 @@ fn a_conversation() -> ChatState {
                 standing: Default::default(),
                 mentions: Vec::new(),
                 me_mentioned: false,
+                earlier: false,
             },
         ],
         typing: false,
@@ -3243,6 +3249,7 @@ fn a_page(from: u32, to: u32) -> ChatState {
             standing: Default::default(),
             mentions: Vec::new(),
             me_mentioned: false,
+            earlier: false,
         })
         .collect();
     state.events.clear();
@@ -6352,6 +6359,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         standing: Default::default(),
         mentions: Vec::new(),
         me_mentioned: false,
+        earlier: false,
     });
     state.lines.push(Line {
         seq: 10,
@@ -6372,6 +6380,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         standing: Default::default(),
         mentions: Vec::new(),
         me_mentioned: false,
+        earlier: false,
     });
     let mut h = harness_with(state, true);
     h.run();
@@ -11639,4 +11648,181 @@ fn a_staged_voice_note_shows_its_waveform_and_its_length() {
     );
     // The length is drawn beside the bars, not only spoken to the tree.
     assert!(said.contains("0:03"), "{said}");
+}
+
+// ---------------------------------------------------------------------------
+// SIP-60: earlier copies of the same conversation.
+// ---------------------------------------------------------------------------
+
+/// One message of an earlier copy: whole, with no receipt, because the
+/// channel it belongs to does not exist any more.
+fn an_earlier_line(seq: u64, said: &str) -> Line {
+    Line {
+        seq,
+        who: them(),
+        name: Some("Ada".into()),
+        mine: false,
+        at: NOW - 7 * DAY,
+        text: said.into(),
+        redacted: false,
+        edited: false,
+        via: None,
+        reactions: Vec::new(),
+        reply_to: None,
+        receipt: None,
+        attachments: Vec::new(),
+        standing: Default::default(),
+        mentions: Vec::new(),
+        me_mentioned: false,
+        earlier: true,
+    }
+}
+
+/// **An earlier copy is drawn, above, behind a separator.**
+///
+/// SIP-60 §The client keeps what it read: a direct message opened twice, or
+/// one folded because it turned out to be a stray, leaves what this client
+/// read of the earlier incarnation. sigil held it on the disc and drew none
+/// of it -- it read `Chat::earlier` nowhere -- so the reader was told their
+/// conversation had been destroyed while every word of it sat unread in
+/// their own store.
+#[test]
+fn an_earlier_copy_is_drawn_above_the_conversation() {
+    let mut state = a_conversation();
+    state.copies = vec![vec![
+        an_earlier_line(1, "from the copy that was folded"),
+        an_earlier_line(2, "and the second thing said in it"),
+    ]];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("from the copy that was folded"),
+        "the earlier copy was not drawn: {said}"
+    );
+    assert!(said.contains("An earlier copy"), "and unlabelled: {said}");
+    // And the boundary is said in both directions, or the live conversation
+    // reads as a continuation of a channel that no longer exists.
+    assert!(said.contains("This conversation"), "{said}");
+    // Above, not merged: the copy's words come before the live ones.
+    let copy = said.find("from the copy that was folded").expect("drawn");
+    let live = said.find("mine, on the other side").expect("drawn");
+    assert!(copy < live, "the copy was drawn below the conversation");
+}
+
+/// With one copy it is "an earlier copy"; with more than one they are
+/// numbered, because "an earlier copy" twice on one screen says nothing
+/// about which came first.
+#[test]
+fn several_copies_are_numbered_oldest_first() {
+    let mut state = a_conversation();
+    state.copies = vec![
+        vec![an_earlier_line(1, "the oldest thing")],
+        vec![an_earlier_line(1, "the middle thing")],
+    ];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("An earlier copy (1 of 2)"), "{said}");
+    assert!(said.contains("An earlier copy (2 of 2)"), "{said}");
+    let first = said.find("the oldest thing").expect("drawn");
+    let second = said.find("the middle thing").expect("drawn");
+    assert!(first < second, "oldest first: {said}");
+}
+
+/// **Nothing may be done to a message in an earlier copy.** Its channel was
+/// destroyed, so a Reply or a React offered on it is a button aimed at
+/// nowhere. The live conversation's own messages still offer both, which is
+/// what says the absence is about the copy and not about the harness.
+#[test]
+fn an_earlier_message_offers_nothing_to_do_to_it() {
+    let mut state = a_conversation();
+    // **Short enough that both are on the screen.** The transcript opens at
+    // the bottom, and a hover over a row scrolled out of view exercises
+    // nothing at all while reading exactly like a hover that did.
+    state.lines.truncate(1);
+    state.lines[0].text = "the one live message".into();
+    state.events.clear();
+    state.divider = None;
+    state.copies = vec![vec![an_earlier_line(1, "nothing to be done about this")]];
+    // A desktop, where Reply is a cell of the strip itself rather than a
+    // row inside the More menu a phone puts it in.
+    let mut h = harness_with(state, true);
+    h.run();
+    hide_column(&mut h);
+    h.run();
+    // The strip comes up under the pointer, and only once the message has
+    // held still for a frame -- which is why each of these runs twice.
+    h.get_by_label_contains("the one live message").hover();
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Reply"),
+        "the live message offered nothing either, so this proves nothing: {}",
+        text_of(&h)
+    );
+    h.get_by_label_contains("nothing to be done about this")
+        .hover();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("Reply"),
+        "an earlier copy offered a reply: {said}"
+    );
+}
+
+/// The restart notice tells the truth about which restart this was.
+///
+/// A channel destroyed and made again under the same name leaves nothing;
+/// one folded leaves what was read, and it is on the screen above. Saying
+/// "nothing above is related to what follows" over somebody's own
+/// conversation is the worse of the two errors.
+#[test]
+fn a_restart_that_kept_a_copy_does_not_claim_the_conversation_was_destroyed() {
+    let mut bare = a_conversation();
+    bare.trouble_with.restarted = true;
+    let (mut h, _) = harness_phone_with(bare, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("destroyed and started again"),
+        "with nothing kept, the old words are right: {said}"
+    );
+
+    let mut kept = a_conversation();
+    kept.trouble_with.restarted = true;
+    kept.copies = vec![vec![an_earlier_line(1, "what was kept")]];
+    let (mut h, _) = harness_phone_with(kept, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("destroyed"),
+        "told the conversation was destroyed with it on the screen: {said}"
+    );
+    assert!(said.contains("kept as an earlier copy"), "{said}");
+}
+
+/// What an earlier copy looks like on a phone.
+///
+/// A picture, because the question the assertions cannot answer is whether
+/// the boundary reads as one: above it is a conversation that no longer
+/// exists, below it the one that does, and a reader who takes the two for
+/// one conversation has been misled by the drawing and not by the words.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_earlier_copy() {
+    let mut state = a_conversation();
+    state.trouble_with.restarted = true;
+    // **Short enough that the boundary is in the picture.** The transcript
+    // opens at its foot, and the first rendering of this showed the live
+    // conversation and none of the copy it is about.
+    state.lines.truncate(1);
+    state.events.clear();
+    state.divider = None;
+    state.copies = vec![vec![an_earlier_line(1, "said in the copy that was folded")]];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.remove_cursor();
+    h.snapshot("phone_earlier_copy");
 }

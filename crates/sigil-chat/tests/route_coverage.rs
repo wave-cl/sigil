@@ -272,10 +272,18 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // exchange's record of what this device wrote disagrees with this
     // device's own. See `session::check_the_chain`.
     ("POST", "/channel/chain", Chat),
+    // SIP-60 §Reading the folded log. Asked by `Chat::poll` itself, when a
+    // channel this client holds messages for is refused as not found --
+    // sigil never calls it directly and has nothing to decide about it.
+    // What sigil *does* with the result is its own: the archived
+    // incarnation is drawn above the conversation as an earlier copy
+    // (`what_the_store_archived_comes_back_as_an_earlier_copy`). Reaching
+    // the route itself needs the fold, which needs two exchanges and a
+    // stray, and is the library's `fold_flow`.
     (
         "POST",
         "/channel/folded",
-        NotYet("SIP-60 §Reading the folded log, from sqex-chat"),
+        NotYet("asked inside Chat::poll; the fold itself is sqex-chat's fold_flow"),
     ),
     // SIP-27, both ways, from SIP-41's dialog: "Say at the exchange that we
     // compared them" lodges the one claim sigil makes, and opening the
