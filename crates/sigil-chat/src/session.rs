@@ -1058,6 +1058,16 @@ pub struct Trouble {
     /// for them — but counted and said, because something arrived claiming to
     /// be from somebody in this conversation and was not.
     pub forged: usize,
+    /// SIP-43 §The heads by position: the exchange's record of what *this
+    /// device* wrote here disagrees with this device's own.
+    ///
+    /// Not a lag: the exchange is asked about the one position this device
+    /// last signed, and this is set only when it holds a different head for
+    /// that same position. Either this store has been rolled back -- a
+    /// restore, a copy of a file, two machines sharing one device key --
+    /// or something was written here under this key that this machine did
+    /// not write.
+    pub chain_apart: bool,
 }
 
 impl Trouble {
@@ -2408,6 +2418,11 @@ async fn run(
                 // SIP-48: keep the backup up to date, for an account that
                 // has one.
                 keep_the_backup_fresh(&mut chat, &state, &mut desk).await;
+                // SIP-43: and whether what this device wrote here is what
+                // the exchange has for it.
+                if check_the_chain(&mut chat, &mut desk).await {
+                    desk.restructure = true;
+                }
                 // **SIP-30's events say which channels moved**, and that is
                 // what decides where to look. This used to drain and discard
                 // them and poll only whatever was on screen, so a message
@@ -2755,6 +2770,8 @@ struct Desk {
     no_still: HashSet<[u8; 32]>,
     /// The order they were fetched in, for [`to_put_down`].
     fetched: Vec<[u8; 32]>,
+    /// Conversations whose chain has been asked about this session.
+    chain_checked: HashSet<[u8; 32]>,
     /// When this session began, so the first backup is not a launch.
     started: std::time::Instant,
     /// When the backup was last considered. See [`keep_the_backup_fresh`].
@@ -2798,6 +2815,7 @@ impl Default for Desk {
             restale: HashSet::new(),
             answered: HashSet::new(),
             files: HashMap::new(),
+            chain_checked: HashSet::new(),
             started: std::time::Instant::now(),
             backup_tried: None,
             stills: HashMap::new(),
@@ -3587,6 +3605,9 @@ fn took(
         no_key: conversation.no_key,
         lost: conversation.lost,
         forged: known.timeline.forged().len(),
+        // Kept across a restructure: it is asked once a session and this
+        // runs on every change to the conversation.
+        chain_apart: known.trouble.chain_apart,
     };
     if !conversation.admins.is_empty() {
         known.admins = conversation.admins;
@@ -4585,6 +4606,76 @@ async fn keep_the_backup_fresh(chat: &mut Chat, state: &watch::Sender<ChatState>
             backup_status(chat, state).await;
         }
         Err(e) => tracing::warn!("the backup could not be written: {e}"),
+    }
+}
+
+/// SIP-43 §The heads by position: whether the exchange's record of this
+/// device's chain disagrees with this device's own.
+///
+/// `next` and `head` are this store's chain -- the position it would sign
+/// next, and the head after the last thing it signed -- and `heads` is what
+/// the exchange holds for this device by position.
+///
+/// **Only a shared position counts.** The exchange being *behind* is the
+/// ordinary case a second after posting, and a device that has signed
+/// nothing has nothing to disagree about. The one thing that means
+/// something is the same position with a different head.
+///
+/// A free function over plain data: the convention -- the exchange's
+/// positions are the position of an entry, this store's `next` is the one
+/// after it -- is the part that can be got wrong, and an exchange is the
+/// one thing a test cannot arrange.
+fn chain_apart(next: u64, head: [u8; 32], heads: &[(u64, [u8; 32])]) -> bool {
+    let Some(last) = next.checked_sub(1) else {
+        return false;
+    };
+    heads
+        .iter()
+        .any(|(at, theirs)| *at == last && *theirs != head)
+}
+
+/// Ask the exchange what it holds for this device in the open conversation,
+/// once per conversation per session, and say so when it disagrees.
+///
+/// Once: the answer only changes when this device signs something, and what
+/// this is for -- a store that has been rolled back, or a key used on two
+/// machines -- is a state, not an event. The cost is one request the first
+/// time a conversation is opened with the link up.
+async fn check_the_chain(chat: &mut Chat, desk: &mut Desk) -> bool {
+    if chat.link() != Link::Up {
+        return false;
+    }
+    let Some(channel) = desk.open else {
+        return false;
+    };
+    if !desk.chain_checked.insert(channel) {
+        return false;
+    }
+    let Ok((next, head)) = chat.store().chain(&channel) else {
+        return false;
+    };
+    let Some(from) = next.checked_sub(1) else {
+        return false;
+    };
+    match chat.chain_heads(&channel, from).await {
+        Ok(heads) if chain_apart(next, head, &heads) => {
+            tracing::warn!(
+                "the exchange holds a different head at position {from} for this device"
+            );
+            if let Some(known) = desk.channels.get_mut(&channel) {
+                known.trouble.chain_apart = true;
+            }
+            true
+        }
+        Ok(_) => false,
+        Err(e) => {
+            // An exchange that predates the route answers nothing, which
+            // `chain_heads` already turns into an empty list; anything else
+            // is a link that blinked, and the next session asks again.
+            tracing::debug!("the chain could not be read: {e}");
+            desk.chain_checked.remove(&channel);
+            false
+        }
     }
 }
 
@@ -7894,5 +7985,50 @@ mod backup_due_tests {
     fn a_stamp_from_the_future_is_not_due() {
         let now = 1_758_559_925;
         assert!(!backup_due(3, now + 600, now));
+    }
+}
+
+/// SIP-43: when this device's chain and the exchange's record of it are
+/// two different things.
+#[cfg(test)]
+mod chain_apart_tests {
+    use super::chain_apart;
+
+    const A: [u8; 32] = [1u8; 32];
+    const B: [u8; 32] = [2u8; 32];
+
+    /// The same position, a different head: the one thing that means
+    /// something. Two machines wrote under one device key, or this store
+    /// was rolled back to before what the exchange kept.
+    #[test]
+    fn the_same_position_with_another_head_is_a_disagreement() {
+        assert!(chain_apart(8, A, &[(7, B)]));
+        assert!(chain_apart(8, A, &[(3, A), (7, B)]));
+    }
+
+    /// The same position with the same head is agreement -- **the negative
+    /// control**: a check that answered "apart" for any answer at all would
+    /// pass the test above and shout at every conversation.
+    #[test]
+    fn the_same_head_at_the_same_position_is_agreement() {
+        assert!(!chain_apart(8, A, &[(7, A)]));
+        assert!(!chain_apart(8, A, &[(5, B), (7, A)]));
+    }
+
+    /// An exchange that is behind is the ordinary case a second after
+    /// posting, and one ahead is a copy this device has not caught up with:
+    /// neither is a disagreement about a position they share.
+    #[test]
+    fn a_position_they_do_not_share_says_nothing() {
+        assert!(!chain_apart(8, A, &[(6, B)]));
+        assert!(!chain_apart(8, A, &[(9, B)]));
+        assert!(!chain_apart(8, A, &[]));
+    }
+
+    /// A device that has signed nothing here has nothing to disagree about,
+    /// whatever the exchange says.
+    #[test]
+    fn a_device_that_has_written_nothing_is_never_apart() {
+        assert!(!chain_apart(0, A, &[(0, B), (1, B)]));
     }
 }

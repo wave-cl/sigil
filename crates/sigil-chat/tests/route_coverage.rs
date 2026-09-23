@@ -267,13 +267,11 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/account/hint",
         NotYet("reached through sqex-chat's open_dm and home; no test here makes the shape"),
     ),
-    (
-        "POST",
-        "/channel/chain",
-        NotYet(
-            "SIP-43 §The heads by position: this device's chain heads as the exchange holds them",
-        ),
-    ),
+    // SIP-43 §The heads by position: asked once a session for the
+    // conversation on screen, and the answer is a warning in it when the
+    // exchange's record of what this device wrote disagrees with this
+    // device's own. See `session::check_the_chain`.
+    ("POST", "/channel/chain", Chat),
     (
         "POST",
         "/channel/folded",
@@ -520,7 +518,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 89,
+        reached, 90,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

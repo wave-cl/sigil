@@ -5819,6 +5819,21 @@ impl ChatApp {
         fn say(ui: &mut egui::Ui, colour: egui::Color32, text: String) {
             ui.colored_label(colour, text);
         }
+        if trouble.chain_apart {
+            // SIP-43 §The heads by position. Said, not acted on: there is
+            // nothing here to press. What it means is that two things wrote
+            // under this device's key -- a store rolled back by a restore or
+            // a copied file, or the key itself on a second machine -- and
+            // the reader is the only one who can know which.
+            say(
+                ui,
+                theme.warning,
+                "The exchange's record of what this device wrote here does not match this \
+                 device's own. Something else has written here under this device's key, or \
+                 this machine's history was rolled back."
+                    .to_string(),
+            );
+        }
         if let Some(epoch) = trouble.no_key {
             // SIP-17's stranded member: every entry fetches and none of them
             // open. Without this the conversation simply reads as empty, which

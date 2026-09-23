@@ -10905,3 +10905,37 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
         text_of(&h)
     );
 }
+
+/// **A chain the exchange does not agree with is said in the conversation.**
+///
+/// SIP-43 §The heads by position: the exchange keeps what each device wrote
+/// by position, and a client can ask. Two things writing under one device's
+/// key -- a store rolled back by a restore, a copied file, the key on a
+/// second machine -- otherwise shows up as nothing at all until somebody's
+/// message is refused.
+#[test]
+fn a_chain_the_exchange_disagrees_with_is_said() {
+    let mut state = a_conversation();
+    state.trouble_with.chain_apart = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("does not match this device's own"),
+        "nothing said about a chain the exchange disagrees with: {said}"
+    );
+}
+
+/// And an ordinary conversation says nothing of the sort. The negative
+/// control: a line drawn unconditionally would pass the test above.
+#[test]
+fn an_ordinary_conversation_says_nothing_about_chains() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("does not match this device's own"),
+        "said of a conversation with nothing wrong"
+    );
+}
