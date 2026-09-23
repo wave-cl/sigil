@@ -54,6 +54,18 @@ pub const BUTTON_SM: f32 = 28.0;
 pub const BUTTON_MD: f32 = 34.0;
 pub const BUTTON_LG: f32 = 44.0;
 
+/// A menu hung off a control: wide enough that a row of one word is still
+/// a target, and no wider than a menu needs to be.
+///
+/// **A menu with no maximum is as wide as the window.** Its rows are
+/// `icon_item`s, and an icon row takes the width it is given so that the
+/// whole row is the hit target -- which is right inside a card and absurd
+/// inside a popup, where the width it is given is the screen. A menu of
+/// two short phrases spanned a phone edge to edge. A longer row still
+/// grows the menu: the maximum is what a row asks for, not a clip.
+pub const MENU_MIN: f32 = 200.0;
+pub const MENU_MAX: f32 = 260.0;
+
 /// The rail: one icon and its hit target, and no wider. On a phone the
 /// target is a finger's, so the rail is wider by the same amount.
 pub const RAIL_WIDTH: f32 = 52.0;

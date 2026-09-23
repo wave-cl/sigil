@@ -853,6 +853,7 @@ fn member_actions_ui(
         let more =
             sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "What may be done about them");
         egui::Popup::menu(&more).show(|ui| {
+            sigil_ui::menu_width(ui);
             // Rows with their icons, the shape every menu has: this one was
             // two words and a bare icon under them.
             for (label, hover, act) in acts {
@@ -3246,6 +3247,7 @@ impl ChatApp {
                 call = true;
             }
             egui::Popup::menu(&more).show(|ui| {
+                sigil_ui::menu_width(ui);
                 let mut who = if members > 0 && !dm {
                     format!("Members ({members})")
                 } else {
@@ -5507,6 +5509,7 @@ impl ChatApp {
                     let dots =
                         sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "More choices");
                     egui::Popup::menu(&dots).show(|ui| {
+                        sigil_ui::menu_width(ui);
                         if sigil_ui::icon_item(ui, sigil_ui::Icon::Compose, "Write to somebody")
                             .clicked()
                         {

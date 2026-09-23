@@ -1015,6 +1015,7 @@ impl Shell {
                                     .add(egui::Button::new(heading).frame(false))
                                     .on_hover_text("The other things sigil does");
                                 egui::Popup::menu(&button).show(|ui| {
+                                    sigil_ui::menu_width(ui);
                                     // **Each app by its own mark**, the shape
                                     // this menu has everywhere else: the
                                     // rail's icons are what these apps are

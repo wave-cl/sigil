@@ -805,6 +805,7 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         .kind(egui::PopupKind::Menu)
         .open_memory(None)
         .show(|ui| {
+            crate::menu_width(ui);
             if crate::icon_item(ui, crate::Icon::Reply, "Reply").clicked() {
                 action.reply = true;
                 ui.close();
@@ -873,6 +874,7 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         }
         let more = crate::emoji::cell_icon(ui, crate::Icon::More, "More", cell);
         egui::Popup::menu(&more).show(|ui| {
+            crate::menu_width(ui);
             if phone && crate::icon_item(ui, crate::Icon::Reply, "Reply").clicked() {
                 action.reply = true;
                 ui.close();

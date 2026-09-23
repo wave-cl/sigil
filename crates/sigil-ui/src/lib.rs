@@ -399,6 +399,18 @@ pub use message::{
     Bubble, BubbleAction, Quote, Reaction, Receipt, Thumb, bubble, copy_separator, day_separator,
     reaction_chip, short, system_line, unread_divider, unread_pill, verified_mark,
 };
+/// Give a menu the width a menu should be, from inside its body.
+///
+/// **The first line of every `Popup::menu(..).show(|ui| ..)` in sigil.** A
+/// menu's rows are [`icon_item`]s, and an icon row takes the width it is
+/// given so the whole row is a hit target; inside a popup the width it is
+/// given is the window's, so a menu of two short phrases spanned a phone
+/// edge to edge. A row longer than the maximum still grows the menu.
+pub fn menu_width(ui: &mut egui::Ui) {
+    ui.set_min_width(sigil::tokens::MENU_MIN);
+    ui.set_max_width(sigil::tokens::MENU_MAX);
+}
+
 pub use qr::qr;
 pub use roster::{Row, roster};
 pub use search_hit::{SearchHit, search_hit};

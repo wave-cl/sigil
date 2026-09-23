@@ -584,7 +584,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
 /// bare word is worse than it looks: everything else in this interface is
 /// found by its shape first, so an item with no shape is the one nobody sees.
 ///
-/// Full width, so the whole row is the hit target rather than the text in it.
+/// Full width, so the whole row is the hit target rather than the text in it
+/// -- which means **a menu of these must be given a width**, or it takes the
+/// window's. See [`crate::tokens::MENU_MAX`] and `sigil_ui::menu_width`.
 pub fn icon_item(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
     icon_item_as(ui, icon, text, false)
 }

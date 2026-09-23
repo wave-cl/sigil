@@ -11972,3 +11972,38 @@ fn phone_stranded_post() {
     h.remove_cursor();
     h.snapshot("phone_stranded_post");
 }
+
+// ---------------------------------------------------------------------------
+// A menu is as wide as a menu, not as wide as the window.
+// ---------------------------------------------------------------------------
+
+/// **A menu of two short phrases spanned the phone edge to edge.**
+///
+/// A menu's rows are `icon_item`s, and an icon row takes the width it is
+/// given so that the whole row is the hit target — which is right inside a
+/// card and absurd inside a popup, where the width it is given is the
+/// window's. Nothing was off screen and nothing was unreachable, so the
+/// existing phone-layout tests all passed.
+#[test]
+fn a_menu_is_no_wider_than_a_menu() {
+    // The list, not a conversation: the menu hangs off the list's heading.
+    let mut state = a_conversation();
+    state.open = None;
+    state.lines.clear();
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("More choices").click();
+    h.run_steps(3);
+    let row = h.get_by_label("Write to somebody").rect();
+    assert!(
+        row.width() <= sigil::tokens::MENU_MAX + 1.0,
+        "the menu is {} wide on a {PHONE_WIDTH}-point phone",
+        row.width()
+    );
+    // And still wide enough to be a target rather than the width of a word.
+    assert!(
+        row.width() >= sigil::tokens::MENU_MIN - 1.0,
+        "{}",
+        row.width()
+    );
+}
