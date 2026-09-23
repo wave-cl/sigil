@@ -9427,6 +9427,21 @@ impl ChatApp {
                 ui.colored_label(theme.text_secondary, "Nothing backed up at this exchange.");
             }
         }
+        // Said where the generation and the date are, because "daily" is a
+        // claim about *those* -- and because a backup that keeps itself up
+        // to date is a thing somebody should know is happening. It starts
+        // the moment there is a key: nothing is written under a key nobody
+        // has written down.
+        if backup.has_key {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(
+                    "Written again by itself once a day, while sigil is running and \
+                     connected. What has not changed is kept, not sent again.",
+                )
+                .small(),
+            );
+        }
         ui.colored_label(
             theme.text_muted,
             egui::RichText::new(format!("{} of {} bytes used.", backup.used, backup.quota)).small(),

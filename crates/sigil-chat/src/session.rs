@@ -2405,6 +2405,9 @@ async fn run(
                 } else if !desk.wake_told && desk.wake.is_some() {
                     tell_wake(&mut chat, &state, &mut desk).await;
                 }
+                // SIP-48: keep the backup up to date, for an account that
+                // has one.
+                keep_the_backup_fresh(&mut chat, &state, &mut desk).await;
                 // **SIP-30's events say which channels moved**, and that is
                 // what decides where to look. This used to drain and discard
                 // them and poll only whatever was on screen, so a message
@@ -2752,6 +2755,10 @@ struct Desk {
     no_still: HashSet<[u8; 32]>,
     /// The order they were fetched in, for [`to_put_down`].
     fetched: Vec<[u8; 32]>,
+    /// When this session began, so the first backup is not a launch.
+    started: std::time::Instant,
+    /// When the backup was last considered. See [`keep_the_backup_fresh`].
+    backup_tried: Option<std::time::Instant>,
     /// Blobs a fetch has failed on, and whether the failure was final.
     ///
     /// See [`Unfetched`]: a file the exchange no longer holds is different from
@@ -2791,6 +2798,8 @@ impl Default for Desk {
             restale: HashSet::new(),
             answered: HashSet::new(),
             files: HashMap::new(),
+            started: std::time::Instant::now(),
+            backup_tried: None,
             stills: HashMap::new(),
             no_still: HashSet::new(),
             fetched: Vec::new(),
@@ -4498,6 +4507,85 @@ fn still_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
     small.to_rgb8().write_with_encoder(encoder).ok()?;
     Some(out.into_inner())
+}
+
+/// Whether the backup at the exchange is old enough to write again.
+///
+/// A free function over plain data, because *when* is the part that can be
+/// got wrong and a live exchange is the one thing a test cannot arrange.
+/// Nothing held at all -- a key made and never used -- is due at once: that
+/// is an account that meant to have a backup and has none.
+fn backup_due(generation: u64, written: u64, now: u64) -> bool {
+    generation == 0 || now.saturating_sub(written) >= BACKUP_EVERY.as_secs()
+}
+
+/// How often a backup is written again, for an account that has one.
+///
+/// A day. The backup is incremental -- what has not changed is kept, not
+/// uploaded again -- so this costs what was said since, and a phone that is
+/// lost loses at most a day.
+const BACKUP_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// How long after the session starts the first one is considered, so a
+/// launch is not a backup and the link has settled.
+const BACKUP_AFTER_START: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// SIP-48: write the backup again when the one at the exchange is a day old.
+///
+/// **Only for an account that has already chosen to have one.** The key is
+/// the 24 words somebody wrote down; without one there is nothing to write
+/// with, and making one unasked would be making a secret on somebody's
+/// behalf. With one, a backup nobody ever writes again is a backup of the
+/// day it was made -- which is the shape almost every lost phone is in.
+///
+/// Quiet: it says nothing on success, because this is not something anybody
+/// asked for just now, and the Devices card shows the generation and the
+/// time. A failure is a log line; the next day comes round.
+async fn keep_the_backup_fresh(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk) {
+    if chat.link() != Link::Up {
+        return;
+    }
+    if desk.started.elapsed() < BACKUP_AFTER_START {
+        return;
+    }
+    if let Some(when) = desk.backup_tried
+        && when.elapsed() < BACKUP_EVERY
+    {
+        return;
+    }
+    let Ok(Some(key)) = chat.backup_key() else {
+        return;
+    };
+    // What the exchange holds now: the one fact that decides whether this is
+    // due, and it is a request, so it is made once a day and not every tick.
+    desk.backup_tried = Some(std::time::Instant::now());
+    let me = chat.me;
+    let held = match chat.backup_held(&me).await {
+        Ok(held) => held,
+        Err(e) => {
+            tracing::debug!("the backup's state could not be read: {e}");
+            return;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if !backup_due(held.generation, held.written, now) {
+        return;
+    }
+    match chat.backup(&key).await {
+        Ok(done) => {
+            tracing::info!(
+                "backup kept up to date: generation {}, {} uploaded, {} kept",
+                done.generation,
+                done.uploaded,
+                done.kept
+            );
+            backup_status(chat, state).await;
+        }
+        Err(e) => tracing::warn!("the backup could not be written: {e}"),
+    }
 }
 
 /// Whether a blob is being left alone: gone for good, or waiting out a retry.
@@ -7765,5 +7853,46 @@ mod still_tests {
     fn nothing_is_made_of_what_is_not_a_clip() {
         assert!(still_jpeg(b"not a video").is_none());
         assert!(still_jpeg(&[]).is_none());
+    }
+}
+
+/// SIP-48: when the backup is written again.
+#[cfg(test)]
+mod backup_due_tests {
+    use super::{BACKUP_EVERY, backup_due};
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// A key made and nothing written is due now. **This is the case that
+    /// matters**: somebody set a backup up, wrote the words down, and the
+    /// account has been carrying on with nothing at the exchange.
+    #[test]
+    fn a_backup_never_written_is_due_at_once() {
+        assert!(backup_due(0, 0, 1_758_559_925));
+    }
+
+    /// One written today is not.
+    #[test]
+    fn one_written_today_is_left_alone() {
+        let now = 1_758_559_925;
+        assert!(!backup_due(3, now - 60, now));
+        assert!(!backup_due(3, now - DAY + 60, now));
+    }
+
+    /// One written a day ago is.
+    #[test]
+    fn one_a_day_old_is_written_again() {
+        let now = 1_758_559_925;
+        assert!(backup_due(3, now - DAY, now));
+        assert!(backup_due(3, now - 9 * DAY, now));
+        assert_eq!(BACKUP_EVERY.as_secs(), DAY, "the period this all rests on");
+    }
+
+    /// A clock that went backwards -- the exchange's stamp ahead of this
+    /// machine's -- is not a reason to write one every tick.
+    #[test]
+    fn a_stamp_from_the_future_is_not_due() {
+        let now = 1_758_559_925;
+        assert!(!backup_due(3, now + 600, now));
     }
 }

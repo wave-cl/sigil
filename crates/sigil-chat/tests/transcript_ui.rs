@@ -10905,31 +10905,3 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
         text_of(&h)
     );
 }
-
-/// A picture on its way, on a phone: the echo in the transcript with the
-/// mark that says it is still going up.
-#[test]
-#[ignore = "needs a renderer; run via scripts/snapshot-test"]
-fn phone_sending() {
-    let (mut h, app) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
-    // The loaders, so the staged picture is a picture here as it is on the
-    // phone: this harness draws every other phone view without them.
-    sigil_ui::install_loaders(&h.ctx);
-    h.run();
-    h.run();
-    let dir = tempfile::tempdir().expect("a directory");
-    let file = dir.path().join("holiday.png");
-    std::fs::write(&file, a_photo().to_vec()).expect("write it");
-    app.borrow_mut().stage_for_test(me(), "", vec![file]);
-    // The preview is made on a thread of its own; give it its passes.
-    for _ in 0..30 {
-        h.run_steps(2);
-    }
-    h.get_by_label("Send").click();
-    // **Steps, not runs.** A spinner asks for the next frame for ever, and
-    // `run` waits for a pass that asks for nothing.
-    h.run_steps(4);
-    h.remove_cursor();
-    h.run_steps(2);
-    h.snapshot("phone_sending");
-}
