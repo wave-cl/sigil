@@ -145,6 +145,17 @@ pub struct Line {
     pub mentions: Vec<Mentioned>,
     /// One of those keys is ours.
     pub me_mentioned: bool,
+    /// SIP-53 §Posting again: when the poster says they first said this,
+    /// where a move stranded it and they posted it again.
+    ///
+    /// **Not what orders the log.** The entry's own `posted` stays `at`
+    /// for everything structural -- the day it falls under, whether it
+    /// groups with the one above -- because a time that runs backwards in
+    /// a transcript is a transcript lying about order. This is what the
+    /// message's own clock reads, which is what SIP-53 asks for. Ignored
+    /// where it is later than the entry, as the spec says: nothing was
+    /// first said after it was posted.
+    pub said: Option<u64>,
     /// This message belongs to an **earlier copy** of the conversation
     /// (SIP-60 §The client keeps what it read), not to the one that is
     /// live. Its channel no longer exists, so there is nothing to reply
@@ -570,6 +581,10 @@ pub struct ChatState {
     /// Which conversation is on screen, and what is in it.
     pub open: Option<[u8; 32]>,
     pub lines: Vec<Line>,
+    /// SIP-53 §Posting again: this client's own posts that a move stranded
+    /// in the open conversation, oldest first. Offered above the composer,
+    /// one at a time.
+    pub stranded: Vec<Stranded>,
     /// Earlier copies of the open conversation, oldest first, each whole
     /// (SIP-60 §The client keeps what it read). Drawn above `lines` with a
     /// divider, and never merged into them.
@@ -811,6 +826,29 @@ pub struct Linked {
     pub not_after: u64,
     /// This one — the client you are looking at.
     pub is_this_one: bool,
+}
+
+/// SIP-53 §Posting again: one of this client's own posts that a move
+/// stranded, waiting to be sent again or let go.
+///
+/// **Offered, never resent.** "Each stranded post is offered to the person,
+/// in the order it was first posted, and sent again only on their say: it
+/// is a new entry, and the person may have said it since, or no longer mean
+/// it." So this is a question the interface asks, one at a time, and not a
+/// queue it drains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stranded {
+    /// The stranded entry's sequence number, in the losing regime. The
+    /// handle for sending it again or letting it go, and nothing else: it
+    /// numbers a position in an ordering the members did not choose.
+    pub seq: u64,
+    /// When it was first posted -- what travels with it as SIP-53's `Said`
+    /// if it is sent again.
+    pub posted: u64,
+    pub text: String,
+    /// How many files went with it, so the offer can say what it is when
+    /// there are no words to show.
+    pub files: usize,
 }
 
 /// A file carried by a message.
@@ -1269,6 +1307,11 @@ pub enum Cmd {
     Reconnect,
     /// Put the open conversation away. What "back" means in a single pane.
     Close,
+    /// SIP-53 §Posting again: send one of this client's stranded posts
+    /// again, as a new entry saying when it was first said.
+    PostAgain(u64),
+    /// SIP-53 §Posting again: let a stranded post go unsent.
+    ForgetStranded(u64),
     /// Publish a display name and title (SIP-21). Empty clears them.
     SetProfile {
         name: String,
@@ -2065,6 +2108,7 @@ async fn run(
                             s.open = None;
                             s.lines.clear();
                             s.copies.clear();
+                            s.stranded.clear();
                             s.divider = None;
                             s.unread_on_open = 0;
                         });
@@ -3268,6 +3312,9 @@ pub(crate) trait Local {
     /// SIP-60 §The client keeps what it read: earlier incarnations of this
     /// channel that this client read, oldest first.
     fn earlier(&self, channel: &[u8; 32], admins: &[PubKey]) -> Vec<Timeline>;
+    /// SIP-53 §Posting again: this client's own posts a move stranded,
+    /// oldest first.
+    fn stranded_posts(&self, channel: &[u8; 32]) -> Vec<Stranded>;
     fn dm_with(&self, them: &PubKey) -> [u8; 32];
     fn homed_elsewhere(&self, channel: &[u8; 32]) -> Option<(PubKey, String)>;
     fn link(&self) -> LinkState;
@@ -3291,6 +3338,18 @@ impl Local for Chat {
     }
     fn earlier(&self, channel: &[u8; 32], admins: &[PubKey]) -> Vec<Timeline> {
         Chat::earlier(self, channel, admins).unwrap_or_default()
+    }
+    fn stranded_posts(&self, channel: &[u8; 32]) -> Vec<Stranded> {
+        Chat::stranded_posts(self, channel)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(seq, posted, post)| Stranded {
+                seq,
+                posted,
+                text: post.body_text().unwrap_or_default().to_string(),
+                files: post.attachments().count(),
+            })
+            .collect()
     }
     fn dm_with(&self, them: &PubKey) -> [u8; 32] {
         Chat::dm_with(self, them)
@@ -3335,6 +3394,12 @@ impl Local for Offline<'_> {
     /// `Chat`'s work and not the store's. Nothing is lost by waiting: this
     /// view lasts until the session is up, and the copies appear with it.
     fn earlier(&self, _channel: &[u8; 32], _admins: &[PubKey]) -> Vec<Timeline> {
+        Vec::new()
+    }
+    /// Nothing is offered before the session is up either: sending one
+    /// again needs the exchange, and an offer that cannot be taken is worse
+    /// than none.
+    fn stranded_posts(&self, _channel: &[u8; 32]) -> Vec<Stranded> {
         Vec::new()
     }
     fn dm_with(&self, them: &PubKey) -> [u8; 32] {
@@ -5121,6 +5186,7 @@ fn lines_of(
             text: m.post.body_text().unwrap_or_default().to_string(),
             redacted: m.redacted,
             edited: m.edited.is_some(),
+            said: m.post.said().filter(|first| *first <= m.posted),
             via: m.post.via().map(|k| Chat::via_name(&k)),
             reactions: m
                 .reactions
@@ -5318,6 +5384,12 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
     // conversation with a large copy ever costs a frame, this is where the
     // cache goes -- and it needs a place to live, because `publish` holds
     // `desk` by shared reference.
+    // SIP-53 §Posting again. Read here for the same reason the copies are:
+    // one indexed query for a conversation that was never forked, which is
+    // all of them until one is.
+    let stranded: Vec<Stranded> = open
+        .map(|(c, _)| chat.stranded_posts(&c))
+        .unwrap_or_default();
     let copies: Vec<Vec<Line>> = open
         .map(|(c, k)| {
             chat.earlier(&c, &k.admins)
@@ -5720,6 +5792,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(conversations, summaries);
         set!(lines, lines);
         set!(copies, copies);
+        set!(stranded, stranded);
         set!(events, events);
         set!(earlier, earlier);
         set!(loading, loading);
@@ -6251,12 +6324,36 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 desk.dirty.insert(channel);
             }
         }
+        // SIP-53 §Posting again: a new entry, carrying `Said` so every
+        // reader shows it at the time it was first said and marks it. The
+        // library drops it from the stranded set whichever way this goes.
+        Cmd::PostAgain(seq) => {
+            let Some(channel) = desk.open else { return };
+            match chat.post_again(&channel, seq).await {
+                Ok(_) => {
+                    desk.dirty.insert(channel);
+                    desk.restructure = true;
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
+        Cmd::ForgetStranded(seq) => {
+            let Some(channel) = desk.open else { return };
+            match chat.forget_stranded(&channel, seq) {
+                Ok(()) => {
+                    desk.dirty.insert(channel);
+                    desk.restructure = true;
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
         Cmd::Close => {
             desk.open = None;
             state.send_modify(|s| {
                 s.open = None;
                 s.lines.clear();
                 s.copies.clear();
+                s.stranded.clear();
                 s.divider = None;
                 s.unread_on_open = 0;
             });
@@ -7592,6 +7689,7 @@ fn close(desk: &mut Desk, state: &watch::Sender<ChatState>) {
         s.open = None;
         s.lines.clear();
         s.copies.clear();
+        s.stranded.clear();
         s.divider = None;
         s.unread_on_open = 0;
     });
@@ -7636,6 +7734,7 @@ fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
         // moment later either way, so an assertion here passes with the
         // line taken out, which is no assertion at all.
         s.copies.clear();
+        s.stranded.clear();
         s.unread_on_open = unread;
         s.divider = divider;
     });

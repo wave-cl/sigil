@@ -13,7 +13,7 @@ use session::RING_WINDOW;
 pub use session::{
     Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Found, Happened,
     HeldBackup, Hit, Line, LinkState, Linked, Member, Person, Posted, Quoted, Receipt, Report,
-    Ring, Standing, Succession, Summary, Thumb, Trouble,
+    Ring, Standing, Stranded, Succession, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -6357,6 +6357,7 @@ impl ChatApp {
                     text: u.composing.clone(),
                     redacted: false,
                     edited: false,
+                    said: None,
                     via: None,
                     reactions: Vec::new(),
                     reply_to: None,
@@ -6553,7 +6554,10 @@ impl ChatApp {
                 name: line.name.as_deref(),
                 title,
                 text: &line.text,
-                at: &sigil_ui::clock(line.at),
+                // SIP-53 §Posting again: "a reader that understands it
+                // shows the message at `said`". The clock only -- where it
+                // sits, and which day it falls under, are the entry's own.
+                at: &sigil_ui::clock(line.said.unwrap_or(line.at)),
                 mine: line.mine,
                 grouped,
                 edited: line.edited,
@@ -6581,6 +6585,7 @@ impl ChatApp {
                 verified: !line.mine && state.verified.contains_key(&line.who),
                 editable: live && line.mine && session::rewritable(line.at, now),
                 readonly: !live,
+                again: line.said.is_some(),
             };
             // Measured as it is drawn, so the next frame can reserve it.
             DREW.with(|n| n.set(n.get() + 1));
@@ -7347,6 +7352,59 @@ impl ChatApp {
         theme: &ColorTheme,
     ) {
         self.took_back(at, state);
+        // **SIP-53 §Posting again**: what a move stranded, offered one at a
+        // time, oldest first. "Each stranded post is offered to the person,
+        // in the order it was first posted, and sent again only on their
+        // say: it is a new entry, and the person may have said it since, or
+        // no longer mean it." One at a time because each answer is a
+        // separate decision, and a column of them above the box is a
+        // conversation somebody cannot get back to.
+        if let Some(first) = state.stranded.first() {
+            // "Today at 14:32", or the day by name once it is older --
+            // because what this asks is whether somebody still means what
+            // they said, and the answer turns on how long ago it was.
+            fn said_when(at: u64, now: u64) -> String {
+                let day = sigil_ui::day_label(at, now);
+                let clock = sigil_ui::clock(at);
+                match (day.is_empty(), clock.is_empty()) {
+                    (false, false) => format!("{day} at {clock}"),
+                    (false, true) => day,
+                    _ => clock,
+                }
+            }
+            let said = if !first.text.is_empty() {
+                format!("\"{}\"", sigil_ui::message::preview(&first.text, 32))
+            } else {
+                match first.files {
+                    1 => "a file".to_string(),
+                    n => format!("{n} files"),
+                }
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    theme.warning,
+                    egui::RichText::new(match state.stranded.len() {
+                        1 => format!("Not in this conversation: {said}, said {}.", said_when(first.posted, self.now())),
+                        n => format!(
+                            "{n} of yours are not in this conversation. The first: {said}, said {}.",
+                            said_when(first.posted, self.now())
+                        ),
+                    })
+                    .small(),
+                )
+                .on_hover_text(
+                    "This conversation moved while these were being posted, and the copy that \
+                     won does not have them. Sending one again posts it afresh, saying when \
+                     you first said it.",
+                );
+                if ui.small_button("Send again").clicked() {
+                    self.send_as(Some(at), Cmd::PostAgain(first.seq));
+                }
+                if ui.small_button("Let it go").clicked() {
+                    self.send_as(Some(at), Cmd::ForgetStranded(first.seq));
+                }
+            });
+        }
         // A refused message that could not go straight back: said, with
         // its first words, and the way to have it back or to let it go.
         if let Some((unsent, why)) = self.pane(at).put_back.take() {

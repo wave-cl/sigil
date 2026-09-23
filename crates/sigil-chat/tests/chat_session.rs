@@ -5353,3 +5353,152 @@ async fn what_the_store_archived_comes_back_as_an_earlier_copy() {
     );
     bob.stop();
 }
+
+/// **SIP-53 §Posting again, from end to end in sigil.**
+///
+/// A move can strand this client's own posts: they were ordered by the
+/// regime that lost, and the copy that won does not have them. The library
+/// keeps them and offers `stranded_posts`/`post_again`/`forget_stranded`;
+/// sigil called none of the three, so somebody's own messages left the
+/// conversation and nothing said so.
+///
+/// The fork itself takes two exchanges and a partition and belongs to the
+/// library's `strand_flow`. What is proved here is sigil's half: a stranded
+/// post is offered, and saying yes puts it back in the conversation with
+/// `Said` on it, so every reader shows it at the time it was first said.
+#[tokio::test]
+async fn a_stranded_post_is_offered_and_goes_back_with_the_time_it_was_first_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(71);
+    let (b_signer, b_id) = signer(72);
+    let b_store = dir.path().join("b.db");
+
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &b_store);
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+    // One real message, so the channel exists at the exchange and Bob's
+    // store is scoped and keyed for it.
+    alice.send(Cmd::Send("before any of this".into()));
+    assert!(
+        until(
+            || {
+                bob.state()
+                    .lines
+                    .iter()
+                    .any(|l| l.text == "before any of this")
+            },
+            20,
+        )
+        .await,
+        "the conversation should be live first"
+    );
+    let channel = bob.state().open.expect("open");
+
+    // A post of Bob's that a move stranded, put where a fork would have put
+    // it. `first_said` is a day ago: the whole point of `Said` is that it
+    // is not the time the entry lands.
+    let first_said = bob
+        .state()
+        .lines
+        .last()
+        .map(|l| l.at)
+        .expect("a message")
+        .saturating_sub(24 * 3600);
+    alice.stop();
+    let closing = bob.close();
+    assert!(
+        until(|| closing.is_finished(), 10).await,
+        "the store lock should be released"
+    );
+    {
+        let (seed, _) = signer(72);
+        let mut store =
+            sqex_chat::store::Store::open(&seed.seed(), Some(&b_store)).expect("the store opens");
+        store.scope_to(&PubKey::new(server_pub)).expect("scoped");
+        let body = sqex_proto::message::Body::Post(sqex_proto::message::Post::text(
+            "what the fork took from me",
+        ))
+        .encode();
+        store
+            .put_stranded(&channel, 9_001, first_said, 1, &body)
+            .expect("stranded");
+        assert_eq!(
+            store.stranded(&channel).expect("read back").len(),
+            1,
+            "nothing was stranded, so this test cannot say anything"
+        );
+    }
+
+    let (b_signer, _) = signer(72);
+    let bob = start_at(endpoint, b_signer, &b_store);
+    assert!(
+        until(|| bob.state().me == Some(b_id), 15).await,
+        "Bob's session should come up again"
+    );
+    bob.send(Cmd::Show(channel));
+    assert!(
+        until(
+            || {
+                bob.state()
+                    .stranded
+                    .iter()
+                    .any(|s| s.text == "what the fork took from me")
+            },
+            20,
+        )
+        .await,
+        "the stranded post was not offered: {:?}",
+        bob.state().stranded
+    );
+
+    // Said yes to. It goes back as a new entry, carrying the time it was
+    // first said -- and stops being offered.
+    bob.send(Cmd::PostAgain(9_001));
+    let landed = until(
+        || {
+            bob.state()
+                .lines
+                .iter()
+                .any(|l| l.text == "what the fork took from me" && l.said == Some(first_said))
+        },
+        20,
+    )
+    .await;
+    assert!(
+        landed,
+        "it did not go back with the time it was first said: {:?}",
+        bob.state()
+            .lines
+            .iter()
+            .map(|l| (l.text.clone(), l.said))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        until(|| bob.state().stranded.is_empty(), 10).await,
+        "it was still offered after it had gone back: {:?}",
+        bob.state().stranded
+    );
+    bob.stop();
+}

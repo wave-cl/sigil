@@ -88,6 +88,7 @@ fn a_conversation() -> ChatState {
         ],
         open: Some(channel),
         copies: Vec::new(),
+        stranded: Vec::new(),
         lines: vec![
             Line {
                 seq: 1,
@@ -98,6 +99,7 @@ fn a_conversation() -> ChatState {
                 text: "yesterday's message, so there is a separator above today".into(),
                 redacted: false,
                 edited: false,
+                said: None,
                 via: None,
                 reactions: Vec::new(),
                 reply_to: None,
@@ -117,6 +119,7 @@ fn a_conversation() -> ChatState {
                 text: "mine, on the other side".into(),
                 redacted: false,
                 edited: true,
+                said: None,
                 via: None,
                 reactions: vec![reacted("\u{1f44d}", &["You", "Ada"], true)],
                 reply_to: None,
@@ -136,6 +139,7 @@ fn a_conversation() -> ChatState {
                 text: "one".into(),
                 redacted: false,
                 edited: false,
+                said: None,
                 via: None,
                 reactions: Vec::new(),
                 reply_to: None,
@@ -170,6 +174,7 @@ fn a_conversation() -> ChatState {
                 text: "the second one, then".into(),
                 redacted: false,
                 edited: false,
+                said: None,
                 via: None,
                 reactions: Vec::new(),
                 reply_to: Some(Quoted {
@@ -194,6 +199,7 @@ fn a_conversation() -> ChatState {
                 text: "gone".into(),
                 redacted: true,
                 edited: false,
+                said: None,
                 via: None,
                 reactions: Vec::new(),
                 reply_to: None,
@@ -3241,6 +3247,7 @@ fn a_page(from: u32, to: u32) -> ChatState {
             text: format!("message {i}"),
             redacted: false,
             edited: false,
+            said: None,
             via: None,
             reactions: Vec::new(),
             reply_to: None,
@@ -6351,6 +6358,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         text: "ok".into(),
         redacted: false,
         edited: false,
+        said: None,
         via: None,
         reactions: vec![],
         reply_to: None,
@@ -6372,6 +6380,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
             .into(),
         redacted: false,
         edited: false,
+        said: None,
         via: None,
         reactions: vec![],
         reply_to: None,
@@ -11666,6 +11675,7 @@ fn an_earlier_line(seq: u64, said: &str) -> Line {
         text: said.into(),
         redacted: false,
         edited: false,
+        said: None,
         via: None,
         reactions: Vec::new(),
         reply_to: None,
@@ -11825,4 +11835,140 @@ fn phone_earlier_copy() {
     h.run();
     h.remove_cursor();
     h.snapshot("phone_earlier_copy");
+}
+
+// ---------------------------------------------------------------------------
+// SIP-53 §Posting again.
+// ---------------------------------------------------------------------------
+
+/// **A stranded post is offered, and only offered.**
+///
+/// "Each stranded post is offered to the person, in the order it was first
+/// posted, and sent again only on their say: it is a new entry, and the
+/// person may have said it since, or no longer mean it." sigil offered
+/// nothing: a move took your own messages out of the conversation and the
+/// only sign was that they were no longer there.
+#[test]
+fn a_stranded_post_is_offered_with_both_answers() {
+    let mut state = a_conversation();
+    state.stranded = vec![sigil_chat::Stranded {
+        seq: 41,
+        posted: NOW - DAY,
+        text: "the thing the fork took".into(),
+        files: 0,
+    }];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("the thing the fork took"),
+        "nothing said what was lost: {said}"
+    );
+    // Both answers, because a question with one answer is an instruction.
+    h.get_by_label("Send again");
+    h.get_by_label("Let it go");
+}
+
+/// One at a time, oldest first, and the rest counted.
+#[test]
+fn the_oldest_stranded_post_is_the_one_offered() {
+    let mut state = a_conversation();
+    state.stranded = vec![
+        sigil_chat::Stranded {
+            seq: 41,
+            posted: NOW - 2 * DAY,
+            text: "the older one".into(),
+            files: 0,
+        },
+        sigil_chat::Stranded {
+            seq: 42,
+            posted: NOW - DAY,
+            text: "the newer one".into(),
+            files: 0,
+        },
+    ];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("the older one"), "{said}");
+    assert!(
+        !said.contains("the newer one"),
+        "both were offered at once: {said}"
+    );
+    assert!(
+        said.contains("2 of yours"),
+        "and the rest uncounted: {said}"
+    );
+}
+
+/// A stranded post with no words is still a thing somebody sent.
+#[test]
+fn a_stranded_post_of_files_alone_says_so() {
+    let mut state = a_conversation();
+    state.stranded = vec![sigil_chat::Stranded {
+        seq: 41,
+        posted: NOW - DAY,
+        text: String::new(),
+        files: 2,
+    }];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("2 files"), "{said}");
+}
+
+/// **A message posted again reads at the time it was first said**, and says
+/// that it was posted again.
+///
+/// SIP-53: "A reader that understands it shows the message at `said` and
+/// marks it as posted again." Without the mark it is a message stamped a
+/// week ago sitting between two from this morning, explaining nothing.
+#[test]
+fn a_post_sent_again_reads_at_the_time_it_was_first_said() {
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "said before the fork, posted after it".into();
+    state.lines[n - 1].at = NOW;
+    state.lines[n - 1].said = Some(NOW - 3 * DAY - 1_500);
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("posted again"), "unmarked: {said}");
+    // The clock is the first time, not the landing time.
+    let first = sigil_ui::clock(NOW - 3 * DAY - 1_500);
+    assert!(
+        said.contains(&first),
+        "the clock is not when it was first said ({first}): {said}"
+    );
+}
+
+/// What the offer looks like on a phone, above the box.
+///
+/// A picture, because what the assertions cannot answer is whether a
+/// question about something somebody said a week ago reads as a question
+/// and not as an error — and whether the two answers are reachable with a
+/// thumb at the width a phone actually has.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_stranded_post() {
+    let mut state = a_conversation();
+    state.stranded = vec![
+        sigil_chat::Stranded {
+            seq: 41,
+            posted: NOW - DAY - 4200,
+            text: "the one the fork took, which was a fairly long thing to say".into(),
+            files: 0,
+        },
+        sigil_chat::Stranded {
+            seq: 42,
+            posted: NOW - DAY,
+            text: "and another".into(),
+            files: 0,
+        },
+    ];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.remove_cursor();
+    h.snapshot("phone_stranded_post");
 }

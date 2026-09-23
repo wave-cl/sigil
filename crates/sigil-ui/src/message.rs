@@ -225,6 +225,14 @@ pub struct Bubble<'a> {
     /// the name are left off and the gap above is smaller.
     pub grouped: bool,
     pub edited: bool,
+    /// SIP-53 §Posting again: the poster sent this again after a move
+    /// stranded it, and said when they first said it.
+    ///
+    /// The clock in `at` is already that first time -- "a reader that
+    /// understands it shows the message at `said`" -- so without this word
+    /// the transcript would show a message stamped a week ago sitting
+    /// between two from this morning, and say nothing about why.
+    pub again: bool,
     /// SIP-43: the exchange the sender says they posted this through, where
     /// that is not where the conversation lives. Already a name: the caller
     /// resolves the key by its own pin store, or shortens it.
@@ -1035,6 +1043,9 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
     if b.edited {
         meta += gap + measure("edited", egui::TextStyle::Small);
     }
+    if b.again {
+        meta += gap + measure("posted again", egui::TextStyle::Small);
+    }
     if let Some(via) = b.via {
         meta += gap + measure(&format!("via {via}"), egui::TextStyle::Small);
     }
@@ -1650,6 +1661,14 @@ fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::
     if b.edited {
         ui.colored_label(quiet, egui::RichText::new("edited").small());
     }
+    if b.again {
+        ui.colored_label(quiet, egui::RichText::new("posted again").small())
+            .on_hover_text(
+                "A move stranded this where it was first posted, and the sender posted it \
+                 again. The time is when they first said it — their word, signed with the \
+                 message.",
+            );
+    }
     // SIP-31 **requires** a fork be surfaced, so this is a word in the
     // message and not a line in a diagnostics pane somebody would have to go
     // and look at.
@@ -2154,6 +2173,7 @@ mod tests {
             verified: false,
             editable: false,
             readonly: false,
+            again: false,
         }
     }
 
