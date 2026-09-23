@@ -8195,8 +8195,11 @@ impl ChatApp {
             );
 
             ui.add_space(tokens::SPACING_SM);
-            if ui
-                .button("Mint a new key")
+            // A row with its mark, the shape everything else pressable in
+            // sigil has. **Not the destruction below**, which keeps a
+            // button of its own: a row that looks like every other row is
+            // the wrong shape for the one act that cannot be undone.
+            if sigil_ui::icon_item(ui, sigil_ui::Icon::Refresh, "Mint a new key")
                 .on_hover_text(
                     "Everybody present is given a new key. Anybody who has left keeps \
                      what they already had.",
@@ -8213,8 +8216,7 @@ impl ChatApp {
 
         // Leaving and destroying are not the same control and must not look
         // like one. One takes you out; the other ends it for everybody.
-        if ui
-            .button("Leave")
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Back, "Leave")
             .on_hover_text("You stop receiving this conversation. Nobody else loses it.")
             .clicked()
         {
