@@ -2064,6 +2064,7 @@ async fn run(
                         state.send_modify(|s| {
                             s.open = None;
                             s.lines.clear();
+                            s.copies.clear();
                             s.divider = None;
                             s.unread_on_open = 0;
                         });
@@ -6255,6 +6256,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             state.send_modify(|s| {
                 s.open = None;
                 s.lines.clear();
+                s.copies.clear();
                 s.divider = None;
                 s.unread_on_open = 0;
             });
@@ -7589,6 +7591,7 @@ fn close(desk: &mut Desk, state: &watch::Sender<ChatState>) {
     state.send_modify(|s| {
         s.open = None;
         s.lines.clear();
+        s.copies.clear();
         s.divider = None;
         s.unread_on_open = 0;
     });
@@ -7626,6 +7629,13 @@ fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
     state.send_modify(|s| {
         s.open = Some(channel);
         s.lines.clear();
+        // Cleared with the lines and for the same reason: a frame can land
+        // between this and the publish that fills them, and what it would
+        // draw is the copies of the conversation just left, above the one
+        // just opened. No test of it -- the publish recomputes them empty a
+        // moment later either way, so an assertion here passes with the
+        // line taken out, which is no assertion at all.
+        s.copies.clear();
         s.unread_on_open = unread;
         s.divider = divider;
     });
