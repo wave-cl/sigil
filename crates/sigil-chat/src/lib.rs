@@ -1231,6 +1231,9 @@ struct Pane {
     editing: Option<u64>,
     /// The directory search box.
     query: String,
+    /// The directory has been asked once for everything, on arriving. Not
+    /// [`Pane::looked`], which is about opening the newest conversation.
+    listed: bool,
     /// The key of a device being linked.
     linking: String,
     /// A credential another device wrote, being presented by this one.
@@ -1463,6 +1466,7 @@ impl Default for Pane {
             announced_typing: false,
             editing: None,
             query: String::new(),
+            listed: false,
             linking: String::new(),
             presenting: String::new(),
             searching: String::new(),
@@ -7524,10 +7528,22 @@ impl ChatApp {
         }
         ui.colored_label(
             theme.text_secondary,
-            "Anybody may join these, and nothing said in one is encrypted — everyone \
-             who may join would hold any key it used.",
+            egui::RichText::new(
+                "Anybody may join these, and nothing said in one is encrypted — everyone \
+                 who may join would hold any key it used.",
+            )
+            .small(),
         );
         ui.add_space(tokens::SPACING_SM);
+        // **A directory arrives full.** The empty box means "everything",
+        // which the hint says and nobody reads -- so this card opened on a
+        // sentence telling somebody to search a list it could simply have
+        // shown them. Asked once per pane: a search of their own replaces
+        // it, and coming back does not ask again.
+        if !self.pane(at).listed {
+            self.pane(at).listed = true;
+            self.send_as(Some(at), Cmd::Find(String::new()));
+        }
 
         // The same box as the chat list's, so the phone has one search
         // control rather than two that look unrelated: full width, a little

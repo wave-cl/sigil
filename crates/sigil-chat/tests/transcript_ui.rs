@@ -10981,3 +10981,43 @@ fn with_no_backup_key_nothing_is_claimed_about_keeping_one() {
         text_of(&h)
     );
 }
+
+/// **The directory arrives full.**
+///
+/// An empty box means "everything", which the hint says and nobody reads --
+/// so the card opened on a sentence telling somebody to search a list it
+/// could have shown them. It asks once, on arriving; a search of their own
+/// replaces it.
+#[test]
+fn the_directory_asks_for_everything_on_arriving() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_at_recording(
+        a_conversation(),
+        sigil_chat::Route::Directory,
+        asked.clone(),
+    );
+    h.run();
+    h.run();
+    let said = asked.borrow().join(" | ");
+    assert!(
+        said.contains("Find("),
+        "the directory asked for nothing: {said}"
+    );
+}
+
+/// And the conversation list does not: it has the conversations already,
+/// and a directory search from there is a request nobody made. The negative
+/// control for the test above.
+#[test]
+fn the_conversation_list_asks_the_directory_for_nothing() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_at_recording(
+        a_conversation(),
+        sigil_chat::Route::Conversations,
+        asked.clone(),
+    );
+    h.run();
+    h.run();
+    let said = asked.borrow().join(" | ");
+    assert!(!said.contains("Find("), "it searched the directory: {said}");
+}
