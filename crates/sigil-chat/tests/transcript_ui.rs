@@ -7045,8 +7045,9 @@ fn files_alone_are_a_message() {
         });
     h.run();
     h.get_by_label("Send").click();
-    h.run();
-    h.run();
+    // Steps, not runs: what is in flight draws a spinner, and a spinner
+    // asks for the next frame for ever.
+    h.run_steps(4);
     let sent = asked.borrow().join(" | ");
     assert!(
         sent.contains("Post(") && sent.contains("only.png"),
@@ -7736,8 +7737,9 @@ fn a_refused_message_comes_back_into_the_box() {
     composer(&h).type_text("from the walk");
     h.run();
     h.key_press(egui::Key::Enter);
-    h.run();
-    h.run();
+    // Steps: the picture on its way draws a spinner, and `run` waits for a
+    // pass that asks for nothing.
+    h.run_steps(4);
     let sent = asked.borrow().join(" | ");
     assert!(sent.contains("token: 1"), "{sent}");
     assert_eq!(composed(&h), "", "the box empties on Send");
@@ -7766,10 +7768,10 @@ fn a_refused_message_comes_back_into_the_box() {
     );
     assert!(!text_of(&h).contains("Put it back"), "{}", text_of(&h));
 
-    // Sent again, and taken this time: nothing comes back.
+    // Sent again, and taken this time: nothing comes back. Steps, because
+    // what is in flight draws a spinner.
     h.key_press(egui::Key::Enter);
-    h.run();
-    h.run();
+    h.run_steps(4);
     assert_eq!(composed(&h), "");
     let mut taken = the_room();
     taken.posted = Some(Posted {
@@ -10885,8 +10887,9 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
     );
 
     h.get_by_label("Send").click();
-    h.run();
-    h.run();
+    // Steps, not runs: what is in flight draws a spinner, and `run` waits
+    // for a pass that asks for nothing.
+    h.run_steps(4);
     // In the transcript, above the box -- not the staged row inside the
     // composer, which is what it looked like before the echo carried
     // files and is the thing this has to tell apart.
@@ -10901,4 +10904,32 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
         "a file in flight is nowhere in the transcript: {}",
         text_of(&h)
     );
+}
+
+/// A picture on its way, on a phone: the echo in the transcript with the
+/// mark that says it is still going up.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_sending() {
+    let (mut h, app) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    // The loaders, so the staged picture is a picture here as it is on the
+    // phone: this harness draws every other phone view without them.
+    sigil_ui::install_loaders(&h.ctx);
+    h.run();
+    h.run();
+    let dir = tempfile::tempdir().expect("a directory");
+    let file = dir.path().join("holiday.png");
+    std::fs::write(&file, a_photo().to_vec()).expect("write it");
+    app.borrow_mut().stage_for_test(me(), "", vec![file]);
+    // The preview is made on a thread of its own; give it its passes.
+    for _ in 0..30 {
+        h.run_steps(2);
+    }
+    h.get_by_label("Send").click();
+    // **Steps, not runs.** A spinner asks for the next frame for ever, and
+    // `run` waits for a pass that asks for nothing.
+    h.run_steps(4);
+    h.remove_cursor();
+    h.run_steps(2);
+    h.snapshot("phone_sending");
 }

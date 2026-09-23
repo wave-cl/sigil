@@ -409,7 +409,13 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                         ui.ctx().data_mut(|d| d.insert_temp(remembered, drawn.y));
                         ui.ctx().request_repaint();
                     }
-                    image.paint_at(ui, egui::Rect::from_center_size(rect.center(), drawn));
+                    let at = egui::Rect::from_center_size(rect.center(), drawn);
+                    image.paint_at(ui, at);
+                    // Still going up: the thumbnail this device made of it
+                    // is what is on screen, with the mark over it.
+                    if a.sending {
+                        sending_mark(ui, at);
+                    }
                     if response.clicked() {
                         action.open = true;
                     }
@@ -424,7 +430,7 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                             ui.close();
                         }
                     });
-                    if !whole {
+                    if !whole && !a.sending {
                         // A thumbnail is not the picture, and saying so stops
                         // somebody reading a blurry preview as the whole of
                         // what was sent. **Saying why** matters more: this
@@ -494,6 +500,12 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     });
                 }
             }
+        } else if a.sending {
+            // **Going up, not coming down.** Nothing to fetch, nothing to
+            // say about fetching, and a thumbnail this device has not
+            // finished making yet: the mark is the whole of what there is
+            // to show, and it says the one true thing.
+            sending_mark(ui, rect);
         } else if a.missing {
             inside(ui, &mut |ui| {
                 ui.colored_label(
@@ -568,6 +580,16 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     f32::INFINITY,
                     egui::TextStyle::Button,
                 );
+                // Still going up: there is nothing to save yet, and a
+                // spinner where the button will be says what is happening
+                // without the row changing size under it.
+                if a.sending {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(egui::Spinner::new().size(tokens::ICON_SM));
+                        ui.add(egui::Label::new(a.described).truncate());
+                    });
+                    return;
+                }
                 let padding = ui.spacing().button_padding.x * 2.0;
                 let need = name.size().x + ui.spacing().item_spacing.x + save.size().x + padding;
                 if need <= ui.available_width() {
