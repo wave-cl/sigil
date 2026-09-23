@@ -2268,7 +2268,7 @@ fn the_keyboard_takes_its_room_from_the_bottom_and_the_composer_sits_above_it() 
 /// **On a phone, a named view's name and its way back are in the bar.**
 ///
 /// `nav_title` answers for a view pushed onto the history with a name of its
-/// own -- Devices, Members, Channel settings. The shell drew the name in the
+/// own -- Devices, Members, Conversation settings. The shell drew the name in the
 /// bar and the view drew the same name again in the pane below it, under a
 /// Back button of its own: two bars on the screen with the least room for
 /// one. The bar carries both now, exactly as it already carried an open

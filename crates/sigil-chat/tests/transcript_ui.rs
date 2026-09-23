@@ -6190,7 +6190,7 @@ fn channel_settings_open_on_the_name_it_already_has() {
 
     let said = text_of(&h);
     assert!(
-        said.contains("Channel settings"),
+        said.contains("Conversation settings"),
         "the settings pane is not open: {said}"
     );
     assert!(
@@ -9205,7 +9205,7 @@ fn on_a_phone_a_named_view_says_its_name_once() {
     for (route, name) in [
         (sigil_chat::Route::Directory, "Public channels"),
         (sigil_chat::Route::Members, "Members"),
-        (sigil_chat::Route::Settings, "Channel settings"),
+        (sigil_chat::Route::Settings, "Conversation settings"),
         (sigil_chat::Route::Devices, "Devices"),
     ] {
         let mut h = harness_phone(a_conversation(), route.clone());
@@ -12058,4 +12058,50 @@ fn delete_is_offered_on_ones_own_message_and_not_on_anybody_elses() {
     // An admin may take anybody's down, and is offered it.
     let as_admin = strip_of("theirs, in a direct message", true);
     assert!(as_admin.contains("Delete"), "{as_admin}");
+}
+
+// ---------------------------------------------------------------------------
+// A direct message is not a channel with two people in it.
+// ---------------------------------------------------------------------------
+
+/// **A direct message has no name and no topic to set.**
+///
+/// The transcript's own heading has refused to rename one since it was
+/// written, and this page offered both anyway — two fields with a tick
+/// beside each, over the other person's name, on a conversation whose
+/// label is that person. And a button to destroy "this channel".
+#[test]
+fn a_direct_message_is_not_offered_a_name_a_topic_or_a_channel_to_destroy() {
+    // The public channel of the fixture: a real channel, where all of this
+    // belongs. The control for the whole test.
+    let mut channel = a_conversation();
+    channel.open = Some([8u8; 32]);
+    let (mut h, _) = harness_phone_with(channel, sigil_chat::Route::Settings);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Name"),
+        "a channel lost its name field: {said}"
+    );
+    assert!(said.contains("Topic"), "{said}");
+    assert!(said.contains("Destroy this channel"), "{said}");
+
+    // The direct message.
+    let (mut h, _) = harness_phone_with(a_conversation(), sigil_chat::Route::Settings);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("Topic"),
+        "a direct message was offered a topic: {said}"
+    );
+    assert!(
+        !said.contains("Destroy this channel"),
+        "a direct message is not a channel: {said}"
+    );
+    assert!(said.contains("Destroy this conversation"), "{said}");
+    // What a direct message *does* have: it is still kept for a while, it
+    // can still be left, and it is still yours to mute.
+    assert!(said.contains("Keep messages for"), "{said}");
+    assert!(said.contains("Leave"), "{said}");
+    assert!(said.contains("Mute this conversation"), "{said}");
 }

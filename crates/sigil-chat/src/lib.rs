@@ -2441,7 +2441,7 @@ impl App for ChatApp {
                 Route::Conversations => return None,
                 Route::Directory => "Public channels",
                 Route::Members => "Members",
-                Route::Settings => "Channel settings",
+                Route::Settings => "Conversation settings",
                 Route::Devices => "Devices",
                 Route::Search => "Search",
                 Route::Me => "Settings",
@@ -8688,9 +8688,20 @@ impl ChatApp {
                 if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
                     ctx.navigator.back();
                 }
-                ui.heading("Channel settings");
+                ui.heading("Conversation settings");
             });
         }
+
+        // **A direct message is not a channel with two people in it.** It
+        // has no name and no topic to set -- the transcript's own heading
+        // has refused to rename one since it was written (`may_rename`) --
+        // and this page was offering both, with a tick beside each, over
+        // the other person's name.
+        let dm = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open)
+            .is_some_and(|c| c.peer.is_some());
 
         // Yours, whatever your standing here: what this machine says out
         // loud about the conversation.
@@ -8718,34 +8729,36 @@ impl ChatApp {
 
         ui.add_space(tokens::SPACING_SM);
         ui.add_enabled_ui(state.i_am_admin, |ui| {
-            let (_, set_name) = sigil_ui::labelled_field(
-                ui,
-                "Name",
-                &mut self.panes.entry(at.clone()).or_default().channel_name,
-                "what this channel is called",
-                Some(sigil_ui::Action::Mark(
-                    sigil_ui::Icon::Check,
-                    "Set the name",
-                )),
-            );
-            if set_name {
-                let name = self.pane(at).channel_name.clone();
-                self.send_as(Some(at), Cmd::SetName(name));
-            }
-            ui.add_space(tokens::SPACING_SM);
-            let (_, set_topic) = sigil_ui::labelled_field(
-                ui,
-                "Topic",
-                &mut self.panes.entry(at.clone()).or_default().channel_topic,
-                "a line about what it is for",
-                Some(sigil_ui::Action::Mark(
-                    sigil_ui::Icon::Check,
-                    "Set the topic",
-                )),
-            );
-            if set_topic {
-                let topic = self.pane(at).channel_topic.clone();
-                self.send_as(Some(at), Cmd::SetTopic(topic));
+            if !dm {
+                let (_, set_name) = sigil_ui::labelled_field(
+                    ui,
+                    "Name",
+                    &mut self.panes.entry(at.clone()).or_default().channel_name,
+                    "what this channel is called",
+                    Some(sigil_ui::Action::Mark(
+                        sigil_ui::Icon::Check,
+                        "Set the name",
+                    )),
+                );
+                if set_name {
+                    let name = self.pane(at).channel_name.clone();
+                    self.send_as(Some(at), Cmd::SetName(name));
+                }
+                ui.add_space(tokens::SPACING_SM);
+                let (_, set_topic) = sigil_ui::labelled_field(
+                    ui,
+                    "Topic",
+                    &mut self.panes.entry(at.clone()).or_default().channel_topic,
+                    "a line about what it is for",
+                    Some(sigil_ui::Action::Mark(
+                        sigil_ui::Icon::Check,
+                        "Set the topic",
+                    )),
+                );
+                if set_topic {
+                    let topic = self.pane(at).channel_topic.clone();
+                    self.send_as(Some(at), Cmd::SetTopic(topic));
+                }
             }
 
             ui.add_space(tokens::SPACING_MD);
@@ -8817,7 +8830,12 @@ impl ChatApp {
         if !pane.confirming_destroy {
             if ui
                 .add(egui::Button::new(
-                    egui::RichText::new("Destroy this channel").color(theme.destructive),
+                    egui::RichText::new(if dm {
+                        "Destroy this conversation"
+                    } else {
+                        "Destroy this channel"
+                    })
+                    .color(theme.destructive),
                 ))
                 .clicked()
             {
