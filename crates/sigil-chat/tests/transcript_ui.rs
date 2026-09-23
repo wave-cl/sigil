@@ -10939,3 +10939,45 @@ fn an_ordinary_conversation_says_nothing_about_chains() {
         "said of a conversation with nothing wrong"
     );
 }
+
+/// **A backup that keeps itself up to date says so**, where the generation
+/// and the date are: it is a thing happening on somebody's behalf, and a
+/// backup nobody is told about is a backup nobody can decide about.
+#[test]
+fn the_devices_card_says_the_backup_keeps_itself_up_to_date() {
+    let mut h = harness_at(a_backup(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Written again by itself once a day"),
+        "nothing said about the backup keeping itself: {}",
+        text_of(&h)
+    );
+}
+
+/// And with no key there is nothing being kept, so nothing is claimed. The
+/// negative control: a line drawn unconditionally would pass the test above
+/// and promise a backup to an account that has none.
+fn a_backup_with_no_key() -> ChatState {
+    let mut state = a_backup();
+    state.backup = Some(sigil_chat::Backup {
+        has_key: false,
+        held: None,
+        used: 0,
+        quota: 1_048_576,
+        words: None,
+    });
+    state
+}
+
+#[test]
+fn with_no_backup_key_nothing_is_claimed_about_keeping_one() {
+    let mut h = harness_at(a_backup_with_no_key(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Written again by itself"),
+        "promised a backup to an account with no key: {}",
+        text_of(&h)
+    );
+}
