@@ -41,6 +41,9 @@ sigil-emoji = { path = "../sigil-emoji" }
 sqexd = { workspace = true }
 squic = { workspace = true }
 tempfile = "3"
+# To build a voice note in a test: the meta a sender writes is only worth
+# testing against audio libopus actually made.
+opus = "0.4"
 # The exchange's own request counter, read from `/status`, is the only place
 # the traffic two idle clients make is visible.
 serde_json = "1"

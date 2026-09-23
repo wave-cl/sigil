@@ -6020,6 +6020,7 @@ dependencies = [
  "hex",
  "http",
  "image",
+ "opus",
  "quinn",
  "rand_core 0.6.4",
  "rfd",

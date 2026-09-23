@@ -4141,8 +4141,54 @@ pub fn preview_of(path: &std::path::Path, kind: u8) -> Option<(Vec<u8>, Vec<u8>)
                 thumbnail_of(&frame_image(&first)).unwrap_or_default(),
             ))
         }
+        // **A voice note has no picture and is not exempt.** SIP-18 gives
+        // this kind a meta of its own -- `duration_ms | bars | level ×
+        // bars` -- and says why: "A voice note's `bars` are its waveform,
+        // so it draws before any audio is fetched." A note sent without it
+        // is a row of nothing at the far end until somebody fetches it.
+        sqex_proto::blob::KIND_VOICE => {
+            let bytes = std::fs::read(path).ok()?;
+            let decoded = sigil_video::note::decode(&bytes).ok()?;
+            Some((voice_meta(&decoded), Vec::new()))
+        }
         _ => None,
     }
+}
+
+/// SIP-18's meta for a voice note: `duration_ms: u32 | bars: u8 | level ×
+/// bars`, the levels in **SIP-15's scale**.
+///
+/// The scale is not a coincidence and not ours to choose: the spec reuses
+/// a live call's so that "one function in a client renders both a live
+/// call and a voice note" -- so this measures with the same
+/// [`sqex_voice::media::Comfort`] a call's meter does rather than
+/// re-deriving half-decibels here.
+fn voice_meta(decoded: &sigil_video::note::Decoded) -> Vec<u8> {
+    /// Enough to read as speech at a phone's bubble width and small enough
+    /// that the meta is a rounding error against the entry cap: 48 bars is
+    /// 53 bytes.
+    const BARS: usize = 48;
+    let channels = decoded.channels.max(1);
+    let frames = decoded.samples.len() / channels;
+    let bars = BARS.min(frames.max(1));
+    let mut meta = Vec::with_capacity(5 + bars);
+    meta.extend_from_slice(&(decoded.duration_ms().min(u32::MAX as u64) as u32).to_be_bytes());
+    meta.push(bars as u8);
+    let mut window: Vec<f32> = Vec::new();
+    for i in 0..bars {
+        let from = i * frames / bars;
+        let to = (((i + 1) * frames / bars).max(from + 1)).min(frames);
+        window.clear();
+        // Averaged across channels rather than taking the first: SIP-18
+        // says a note SHOULD be mono, and a sender that ignored that must
+        // not have half its sound silently dropped from the picture of it.
+        window.extend((from..to).map(|f| {
+            let at = f * channels;
+            decoded.samples[at..at + channels].iter().sum::<f32>() / channels as f32
+        }));
+        meta.push(sqex_voice::media::Comfort::measure(&window).level);
+    }
+    meta
 }
 
 fn shape_meta(width: u32, height: u32, duration_ms: Option<u64>) -> Vec<u8> {

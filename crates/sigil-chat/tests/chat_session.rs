@@ -5084,3 +5084,155 @@ async fn who_else_compared_the_words_is_read_back_for_the_dialog() {
     alice.stop();
     carol.stop();
 }
+
+/// A voice note attached with the paperclip carries its waveform.
+///
+/// SIP-18: "A voice note's `bars` are its waveform, so it draws before any
+/// audio is fetched." The meta is built by the sender, so this is the end
+/// that has to get it right — and it is read back here through
+/// `sqex_proto`'s own accessors, not by re-parsing the bytes this wrote.
+#[test]
+fn a_voice_notes_meta_carries_its_length_and_its_waveform() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let path = dir.path().join("note.ogg");
+    std::fs::write(&path, an_ogg_opus_note(1000)).expect("write");
+
+    let (meta, preview) =
+        sigil_chat::session::preview_of(&path, sqex_proto::blob::KIND_VOICE).expect("a voice note");
+    // No thumbnail: there is nothing to look at, and the bars are not one.
+    assert!(preview.is_empty(), "a voice note got a picture");
+
+    let a = sqex_proto::blob::Attachment {
+        kind: sqex_proto::blob::KIND_VOICE,
+        blob: [0; 32],
+        key: [0; 32],
+        size: 1,
+        chunks: 1,
+        mime: "audio/ogg".into(),
+        meta,
+        preview: Vec::new(),
+    };
+    let ms = a.duration_ms().expect("a length");
+    assert!((900..=1000).contains(&ms), "{ms} ms");
+    let bars = a.waveform().expect("a waveform");
+    assert_eq!(bars.len(), 48);
+    // A tone is not silence, and SIP-15 spells silence 255.
+    assert!(
+        bars.iter().any(|&b| b < 200),
+        "the whole note measured as silence: {bars:?}"
+    );
+}
+
+/// The negative control: the bars measure the *audio*. A silent note comes
+/// out quieter at its loudest than a tone is at its quietest — on SIP-15's
+/// scale, where a bigger number is quieter.
+///
+/// Compared against each other rather than against a threshold, because a
+/// threshold would be a guess about libopus: it reconstructs digital
+/// silence as very faint noise rather than as nought, so "silence is
+/// exactly 255" is a test that would fail on a true statement.
+#[test]
+fn the_bars_measure_the_audio_and_not_the_file() {
+    let quiet = bars_of(an_ogg_opus_note(0));
+    let loud = bars_of(an_ogg_opus_note(50));
+    let quietest_of_the_tone = loud.iter().copied().max().expect("bars");
+    let loudest_of_the_silence = quiet.iter().copied().min().expect("bars");
+    assert!(
+        loudest_of_the_silence > quietest_of_the_tone,
+        "silence at its loudest ({loudest_of_the_silence}) was not quieter than the \
+         tone at its quietest ({quietest_of_the_tone})"
+    );
+}
+
+fn bars_of(note: Vec<u8>) -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("a directory");
+    let path = dir.path().join("note.ogg");
+    std::fs::write(&path, note).expect("write");
+    let (meta, _) =
+        sigil_chat::session::preview_of(&path, sqex_proto::blob::KIND_VOICE).expect("a voice note");
+    sqex_proto::blob::Attachment {
+        kind: sqex_proto::blob::KIND_VOICE,
+        blob: [0; 32],
+        key: [0; 32],
+        size: 1,
+        chunks: 1,
+        mime: "audio/ogg".into(),
+        meta,
+        preview: Vec::new(),
+    }
+    .waveform()
+    .expect("a waveform")
+    .to_vec()
+}
+
+/// A second of Ogg-encapsulated Opus: a 440 Hz tone, or silence when
+/// `amplitude` is nought. Built here rather than checked in as a fixture so
+/// the bytes are made by libopus and the page layout by this test.
+fn an_ogg_opus_note(amplitude_pct: u32) -> Vec<u8> {
+    const RATE: u32 = 48_000;
+    const FRAME: usize = 960;
+    let mut encoder =
+        opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).expect("encoder");
+    let amplitude = amplitude_pct as f32 / 100.0;
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    for f in 0..50 {
+        let pcm: Vec<f32> = (0..FRAME)
+            .map(|i| {
+                let t = (f * FRAME + i) as f32 / RATE as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * amplitude
+            })
+            .collect();
+        packets.push(encoder.encode_vec_float(&pcm, 4000).expect("encode"));
+    }
+    let mut head = Vec::new();
+    head.extend_from_slice(b"OpusHead");
+    head.push(1);
+    head.push(1);
+    head.extend_from_slice(&0u16.to_le_bytes());
+    head.extend_from_slice(&RATE.to_le_bytes());
+    head.extend_from_slice(&0u16.to_le_bytes());
+    head.push(0);
+    let mut tags = Vec::new();
+    tags.extend_from_slice(b"OpusTags");
+    tags.extend_from_slice(&4u32.to_le_bytes());
+    tags.extend_from_slice(b"none");
+    tags.extend_from_slice(&0u32.to_le_bytes());
+
+    let page = |header_type: u8, granule: u64, seq: u32, packet: &[u8]| -> Vec<u8> {
+        let mut segments = Vec::new();
+        let mut left = packet.len();
+        loop {
+            let take = left.min(255);
+            segments.push(take as u8);
+            left -= take;
+            if take < 255 {
+                break;
+            }
+            if left == 0 {
+                segments.push(0);
+                break;
+            }
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"OggS");
+        out.push(0);
+        out.push(header_type);
+        out.extend_from_slice(&granule.to_le_bytes());
+        out.extend_from_slice(&7u32.to_le_bytes());
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.push(segments.len() as u8);
+        out.extend_from_slice(&segments);
+        out.extend_from_slice(packet);
+        out
+    };
+    let mut out = page(0x02, 0, 0, &head);
+    out.extend_from_slice(&page(0x00, 0, 1, &tags));
+    let mut granule = 0u64;
+    for (seq, (i, packet)) in (2u32..).zip(packets.iter().enumerate()) {
+        granule += FRAME as u64;
+        let last = i + 1 == packets.len();
+        out.extend_from_slice(&page(if last { 0x04 } else { 0x00 }, granule, seq, packet));
+    }
+    out
+}
