@@ -12,8 +12,8 @@ pub mod siblings;
 use session::RING_WINDOW;
 pub use session::{
     Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Found, Happened,
-    HeldBackup, Hit, Line, LinkState, Linked, Member, Person, Posted, Quoted, Receipt, Report,
-    Ring, Standing, Stranded, Succession, Summary, Thumb, Trouble,
+    HeldBackup, Hit, Line, LinkState, Linked, Member, Note, Person, Posted, Quoted, Receipt,
+    Report, Ring, Standing, Stranded, Succession, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -143,9 +143,25 @@ fn direct_allowed(ring_says: bool, preference: bool, carried: bool) -> bool {
     ring_says && preference && !carried
 }
 
-fn default_label(its: Option<ChatState>) -> String {
+/// The domain ordering the open conversation, when that is not this
+/// exchange (SIP-43/SIP-60) and it has a name to give.
+fn ordered_at(state: &ChatState) -> Option<&str> {
+    state
+        .home
+        .as_ref()
+        .map(|(_, domain)| domain.as_str())
+        .filter(|domain| !domain.is_empty())
+}
+
+/// What to call the default exchange: the domain it resolved to, a short
+/// key when it has none, and the word otherwise.
+///
+/// Takes the two fields and not the state they came out of: this is read
+/// on every frame that draws the title strip, and `ChatState` carries the
+/// open conversation's every line.
+fn default_label(its: Option<(Option<String>, Option<PubKey>)>) -> String {
     match its {
-        Some(s) => match (s.domain, s.exchange) {
+        Some((domain, exchange)) => match (domain, exchange) {
             (Some(domain), _) if !domain.is_empty() => domain,
             (_, Some(key)) => sigil_ui::message::short(&key.to_string()),
             (_, None) => "default".to_string(),
@@ -342,6 +358,20 @@ pub(crate) fn cross_key(bridge: [u8; 16]) -> [u8; 32] {
     key
 }
 
+/// How long before a peer's home is asked for again while it is still
+/// unknown.
+///
+/// Long enough that a conversation left open does not ask on a loop -- the
+/// answer is a round trip to the exchange -- and short enough that somebody
+/// who opens a chat and reaches for the handset is not still unknown by the
+/// time they press it.
+///
+/// In seconds off `ChatApp::now`, whose doc warns it is for how a time is
+/// *written* and never for deciding what is true. This is neither: it is
+/// how often this window repeats a question, which is its own business and
+/// nobody else's. It is also the only clock a test can move.
+const HOME_RETRY: u64 = 20;
+
 /// The words for a ringing call.
 ///
 /// A free function over plain data for the same reason as [`duplicate_of`]:
@@ -352,12 +382,26 @@ pub(crate) fn cross_key(bridge: [u8; 16]) -> [u8; 32] {
 /// holding. With one there is nothing to tell apart, and naming it states a
 /// fact nobody was in doubt about — the same rule as the exchange switcher
 /// that is not drawn over a single exchange.
-pub(crate) fn ring_said(from: &PubKey, label: &str, called: &str, held: usize) -> String {
+/// `dm` is whether the ring is in a direct message, where the conversation
+/// **is** the person: its label is `name_for(people, peer, ..)`, so
+/// "Ada — from 3kHi…" named the same human twice and read as though a
+/// conversation called Ada had a caller in it who was somebody else.
+/// Reported from the phone. A group keeps both, because there the channel
+/// and the caller really are two facts.
+pub(crate) fn ring_said(from: &PubKey, label: &str, called: &str, held: usize, dm: bool) -> String {
+    // The caller's key, abbreviated, either way: a name is an assertion
+    // (SIP-21) and the label is one, so the ring carries something that is
+    // not. What a direct message drops is the second naming, not this.
     let who = sigil_ui::message::short(&from.to_string());
-    if held > 1 {
-        format!("{label} — from {who}, to {called}")
+    let head = if dm {
+        format!("{label} — {who}")
     } else {
         format!("{label} — from {who}")
+    };
+    if held > 1 {
+        format!("{head}, to {called}")
+    } else {
+        head
     }
 }
 
@@ -513,6 +557,41 @@ pub(crate) fn arrivals_said(
         format!("{}: {}", last.from_label, last.said)
     } else {
         last.said.clone()
+    };
+    (summary, body)
+}
+
+/// **What a device missed while it was away**, in one line.
+///
+/// `arrivals_said` speaks for one conversation and names the last thing
+/// said in it, because a message that arrives while somebody is there is
+/// worth quoting. This speaks for everything at once and quotes nothing: a
+/// phone that was off overnight has no single last word worth raising above
+/// the rest, and the useful facts are how much there is and where to start.
+///
+/// `conversations` is how many carry it, `messages` how many there are, and
+/// `one` the name of the conversation when it is the only one.
+pub(crate) fn missed_said(
+    conversations: usize,
+    messages: usize,
+    one: Option<&str>,
+    called: &str,
+    held: usize,
+) -> (String, String) {
+    let mut summary = match (messages, one) {
+        (1, Some(name)) => name.to_string(),
+        (n, Some(name)) => format!("{n} messages in {name}"),
+        (n, None) => format!("{n} messages while you were away"),
+    };
+    if held > 1 {
+        summary.push_str(&format!(", as {called}"));
+    }
+    let body = match (one, conversations) {
+        // Named in the summary already; the body says what kind of absence
+        // this was, which is the thing that distinguishes it from a message
+        // that has just come in.
+        (Some(_), _) => "While you were away".to_string(),
+        (None, n) => format!("In {n} conversations"),
     };
     (summary, body)
 }
@@ -773,6 +852,21 @@ fn member_acts(
 ) -> Vec<(String, &'static str, MemberAct)> {
     let verified = state.verified.contains_key(&member.account);
     let blocked = state.blocked.contains(&member.account);
+    // **An admin's acts are a room's, and a direct message is not one.**
+    //
+    // Both parties of a direct message are admins -- the exchange makes
+    // them one on joining, which is what lets either mint an epoch key
+    // (SIP-17) -- so everything below the admin check was offered to each
+    // of them about the other. "Remove" ejects the only other person and
+    // mints a key; "Demote" takes away the admin-ness that lets them mint
+    // one at all, which is not a thing one half of a conversation should be
+    // able to do to the other half; and both hover texts say "this room",
+    // which this is not. Mute never appeared, but only by the accident that
+    // an admin cannot be muted.
+    //
+    // Verify and Block stay: neither is an admin's, and Block is precisely
+    // what somebody in a direct message they want out of reaches for.
+    let dm = state.open_is_direct();
     let mut acts: Vec<(String, &'static str, MemberAct)> = Vec::new();
     acts.push((
         if verified { "Verified" } else { "Verify" }.to_string(),
@@ -785,7 +879,7 @@ fn member_acts(
         },
         MemberAct::Verify,
     ));
-    if state.i_am_admin {
+    if state.i_am_admin && !dm {
         acts.push((
             "Remove".to_string(),
             "Removes them and mints a new key, so what follows is not theirs. What they \
@@ -1239,6 +1333,14 @@ struct Pane {
     /// The viewer is showing a video on the whole screen; put back when it
     /// closes.
     whole_screen: bool,
+    /// SIP-16: a channel's decoded picture, by channel.
+    ///
+    /// **Decoded once.** The bytes ride inline on the attachment, so there
+    /// is nothing to fetch -- but turning a PNG into a texture on every
+    /// frame, for every row, is the shape of the regression this window
+    /// has already paid for twice. Keyed by channel so a picture that
+    /// changes is a new decode and not a stale one.
+    pictures: HashMap<[u8; 32], egui::TextureHandle>,
     /// Why a video will not play, by blob id.
     unplayable: HashMap<String, String>,
     /// What is in the box. Taken out to be sent, and held in `in_flight`
@@ -1292,6 +1394,9 @@ struct Pane {
     /// The key being added as a contact.
     adding: String,
     add_trouble: Option<String>,
+    /// The exchange this identity already has, when adding it was refused
+    /// for that reason -- so the refusal can offer to undo itself.
+    add_duplicate: Option<String>,
     /// Which dialog is open over this pane, if any. One at a time: two forms
     /// over each other is a thing nobody can back out of.
     dialog: Option<Dialog>,
@@ -1356,10 +1461,24 @@ struct Pane {
     /// `None` until the pane has been drawn; see `fill_settings`.
     channel_name: String,
     channel_topic: String,
+    /// SIP-35: the exchange being authorised to carry a copy, in base58.
+    replica_key: String,
     settings_for: Option<[u8; 32]>,
     retention_days: u32,
     /// Destroying a channel is asked twice, because it cannot be undone.
     confirming_destroy: bool,
+    /// Signing *this* device out is not undone from this device, so it is
+    /// asked twice like the destruction is.
+    confirming_sign_out: bool,
+    /// Whether the device list has been asked for since the link last came
+    /// up.
+    ///
+    /// **`Cmd::Devices` is sent once, when the menu item is pressed.** A
+    /// session that is still connecting drops it, and nothing ever asks
+    /// again -- so the card sat on "asking the exchange..." for ever over a
+    /// question it had never managed to put. Opening the card a second
+    /// later worked, which is what made it look intermittent.
+    asked_devices: bool,
     /// What is being typed into it. Held separately from the published
     /// profile so cancelling really cancels.
     name: String,
@@ -1536,6 +1655,7 @@ impl Default for Pane {
             field: None,
             adding: String::new(),
             add_trouble: None,
+            add_duplicate: None,
             dialog: None,
             replying: None,
             announced_typing: false,
@@ -1554,6 +1674,8 @@ impl Default for Pane {
             naming: String::new(),
             channel_name: String::new(),
             channel_topic: String::new(),
+            replica_key: String::new(),
+            pictures: HashMap::new(),
             settings_for: None,
             asking: false,
             saw: (None, 0),
@@ -1568,6 +1690,8 @@ impl Default for Pane {
             // refuse, and the refusal would read as sigil's fault.
             retention_days: 30,
             confirming_destroy: false,
+            confirming_sign_out: false,
+            asked_devices: false,
             name: String::new(),
             title: String::new(),
         }
@@ -1660,6 +1784,19 @@ pub struct ChatApp {
     /// Calls this window has left, by conversation and ring, so a ring still
     /// listed as answered is not joined again on the way out.
     left: HashSet<([u8; 32], u64)>,
+    /// SIP-59: peers whose home has been asked for and when, so a draw that
+    /// happens sixty times a second asks once -- and so a failed ask is
+    /// asked again.
+    ///
+    /// **A `HashSet` here meant asked-once-for-ever.** The answer is
+    /// dropped silently when the exchange refuses or returns no domain
+    /// (`Cmd::PeerHome`), so one bad moment -- a reconnect, a slow
+    /// exchange, an account mid-succession -- left `peer_home` unknown for
+    /// the life of the window. And unknown is not harmless: it is read as
+    /// "they are at this exchange", so every call to that peer then took
+    /// the ordinary path, rang, connected to a room at the wrong exchange
+    /// and carried nothing. Seen live, twice.
+    asked_home: HashMap<(PubKey, PubKey), u64>,
     /// A ring whose **Answer** was pressed on a notification, waiting for
     /// the conversation it belongs to to be in hand.
     ///
@@ -1669,6 +1806,18 @@ pub struct ChatApp {
     /// Held with the moment it was pressed so a ring that never turns up
     /// stops being waited for rather than latching forever.
     answering: Option<(At, [u8; 32], std::time::Instant)>,
+    /// A call for a conversation that lives at **another** exchange this
+    /// client is also connected to, waiting for that session to have it
+    /// open.
+    ///
+    /// `Cmd::Call` calls in whatever channel its session has open -- `let
+    /// Some(channel) = desk.open else { return }` -- so a call sent to a
+    /// session looking at something else is dropped without a word and the
+    /// button does nothing at all. Which is what it did, once, in front of
+    /// somebody. So the conversation is opened there first and the call
+    /// follows when it is in hand, the way a ring answered from a
+    /// notification waits for the ring to land.
+    calling_elsewhere: Option<(At, [u8; 32], std::time::Instant)>,
     /// What tells the platform about rings, mentions and arrivals -- from a
     /// frame, or from a session's wake when no frame is coming. See
     /// [`announce::Announcer`].
@@ -1684,6 +1833,12 @@ pub struct ChatApp {
     /// the dialog is modal on a desktop and an activity on a phone, and
     /// neither runs two.
     picking: Option<(At, files::Pick)>,
+    /// SIP-16: a picture being chosen for the open channel.
+    ///
+    /// Its own slot rather than `picking`'s: that one stages files into
+    /// the composer, and a picture chosen for a room must not arrive as a
+    /// message nobody asked to send.
+    picturing: Option<(At, files::Pick)>,
     /// Where to save an attachment, and which one: conversation, entry,
     /// index.
     saving: Option<(At, u64, usize, files::Pick)>,
@@ -1717,6 +1872,17 @@ struct Live {
     /// conversation, so there is no entry to record its end in --
     /// `channel` and `seq` are zero and `leave_call` writes nothing.
     cross: bool,
+    /// Whether this call's detail is open.
+    ///
+    /// **The engine has always counted; nothing ever showed the count.** It
+    /// reports a line every second -- sent, received, loss, late, duplicate,
+    /// concealed, underruns, round trip -- and every one of them was dropped
+    /// on the floor, so a call that carried nothing looked exactly like a
+    /// call that carried everything. Off by default, because a working call
+    /// needs no numbers; one tap away, because a call that is not working
+    /// needs them immediately and there is nowhere else on a handset to
+    /// look.
+    detail: bool,
 }
 
 impl Default for ChatApp {
@@ -1751,11 +1917,14 @@ impl ChatApp {
             drawn: std::collections::HashSet::new(),
             calls: HashMap::new(),
             left: HashSet::new(),
+            asked_home: HashMap::new(),
             answering: None,
+            calling_elsewhere: None,
             announcer: announce::Announcer::new(None),
             asked_succession: std::collections::HashSet::new(),
             wake: None,
             picking: None,
+            picturing: None,
             saving: None,
             away: false,
             asked: Vec::new(),
@@ -1883,9 +2052,59 @@ impl ChatApp {
                 handle,
                 since: std::time::Instant::now(),
                 saw_peer: false,
+                detail: false,
                 cross: false,
             },
         );
+    }
+
+    /// The same, for a call the two exchanges are carrying between them
+    /// (SIP-39). A second seam rather than a fifth argument, so that every
+    /// test holding an ordinary call goes on reading as one.
+    #[doc(hidden)]
+    pub fn hold_cross_call_for_test(&mut self, me: PubKey, handle: sigil_net::CallHandle) {
+        self.calls.insert(
+            me,
+            Live {
+                channel: [0u8; 32],
+                seq: 0,
+                handle,
+                since: std::time::Instant::now(),
+                saw_peer: false,
+                detail: false,
+                cross: true,
+            },
+        );
+    }
+
+    /// A channel's picture as a texture, decoded once and kept.
+    ///
+    /// **SIP-16's avatar, from the preview bytes.** An attachment carries a
+    /// small copy inline, which is what a message thumbnail is drawn from,
+    /// so nothing is fetched here. Bytes that will not decode are dropped
+    /// rather than retried: a picture nobody can read is the same to a
+    /// reader as no picture, and retrying every frame would be the worst
+    /// possible answer to a malformed one.
+    fn channel_picture(
+        &mut self,
+        at: &At,
+        egui_ctx: &egui::Context,
+        channel: [u8; 32],
+        bytes: &[u8],
+    ) -> Option<egui::TextureHandle> {
+        if let Some(held) = self.pane(at).pictures.get(&channel) {
+            return Some(held.clone());
+        }
+        let decoded = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let size = [decoded.width() as usize, decoded.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+        let texture = egui_ctx.load_texture(
+            format!("channel-{}", bs58::encode(channel).into_string()),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.pane(at).pictures.insert(channel, texture.clone());
+        Some(texture)
     }
 
     /// Which identities this window is carrying audio for.
@@ -1916,18 +2135,37 @@ impl ChatApp {
     /// or not the default is what is being shown.
     fn exchange_label(&self, me: PubKey, name: &str) -> String {
         if name.is_empty() {
-            default_label(self.sessions.get(&(me, String::new())).map(|s| s.state()))
+            default_label(
+                self.sessions
+                    .get(&(me, String::new()))
+                    .map(|s| s.how_it_is_named()),
+            )
         } else {
             // SIP-85: carried through the home, said where the name is.
             match self
                 .sessions
                 .get(&(me, name.to_string()))
-                .and_then(|s| s.state().carried)
+                .and_then(|s| s.where_it_is().1)
             {
                 Some(home) => format!("{name} via {home}"),
                 None => name.to_string(),
             }
         }
+    }
+
+    /// The key of the exchange this identity's session at `name` reached.
+    ///
+    /// **Not through `state_of`.** That clones the whole of what the
+    /// interface reads — every line of the open conversation, every
+    /// profile — and this is read once per exchange row on every frame the
+    /// title strip is drawn.
+    fn exchange_key(&self, me: PubKey, name: &str) -> Option<PubKey> {
+        if let Some(fixed) = &self.fixed {
+            return fixed.exchange;
+        }
+        self.sessions
+            .get(&(me, name.to_string()))
+            .and_then(|s| s.where_it_is().0)
     }
 
     /// SIP-85: the domain of the active identity's default exchange -- the
@@ -2568,6 +2806,7 @@ impl App for ChatApp {
         self.asked.extend(self.announcer.take_wants());
         self.join_answered_calls(ctx, egui_ctx);
         self.answer_pressed(ctx, egui_ctx);
+        self.call_when_open(ctx);
         self.end_calls_nobody_is_in();
         self.announce_calling(ctx);
         // **A window carrying audio is not idle.** Everything else here sleeps
@@ -2877,6 +3116,11 @@ impl App for ChatApp {
                 // another spelling -- could only be taken back by editing
                 // the roster file by hand. The default is not one of these.
                 removable: !name.is_empty(),
+                // What this identity's session there has actually
+                // reached, so the key offered is the one its receipts
+                // verify under -- and `None` for an exchange nothing has
+                // answered from, where there is no key to give.
+                key: self.exchange_key(me, name).map(|k| k.to_string()),
             })
             .collect();
         let did = sigil_ui::exchange_control(ui, &theme, &shown, &at.1, &rows, true);
@@ -3148,12 +3392,7 @@ impl ChatApp {
         // them back up. A note is about an **action** and a trouble is about
         // a state; the state is rebuilt every refresh, so merging them would
         // put each confirmation on screen for less than a tick.
-        if let Some(note) = &state.note {
-            ui.add(
-                egui::Label::new(egui::RichText::new(&note.said).small().color(theme.success))
-                    .truncate(),
-            );
-        }
+
         // A lock this identity's *own* other session is holding reads, from
         // the store's point of view, exactly like a second program. It is not
         // one, and saying so sends somebody hunting for a client that is not
@@ -3178,6 +3417,30 @@ impl ChatApp {
             None => {
                 if let Some(trouble) = &state.trouble {
                     ui.colored_label(theme.destructive, trouble);
+                }
+                // **SIP-24, which had no way to ask.** An exchange running
+                // a whitelist refuses every gated route, so a session there
+                // can do nothing -- except this, the one route it leaves
+                // open. Offered where the refusal is said, because that is
+                // the only place somebody learns they need it.
+                if let Some(where_it_is) = &state.not_admitted {
+                    ui.colored_label(
+                        theme.text_secondary,
+                        egui::RichText::new(format!(
+                            "An administrator of {where_it_is} decides who it serves. You can ask; the answer comes to them, not back to you."
+                        ))
+                        .small(),
+                    );
+                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Ask to be let in").clicked()
+                    {
+                        // The label is who is asking, which is all an
+                        // administrator has to go on. Their own name if
+                        // they have published one, and the key otherwise
+                        // -- never nothing, which would be a row of
+                        // anonymous requests to choose between.
+                        let asking = state.mine.label(&me);
+                        self.send_as(Some(at), Cmd::RequestAdmission(asking));
+                    }
                 }
             }
         }
@@ -3218,6 +3481,21 @@ impl ChatApp {
         let mut go = None;
         let may_call =
             callable && !self.calls.contains_key(&me) && !state.ringing.iter().any(|r| r.mine);
+        // SIP-59, off the opening path: whether the handset wants SIP-39's
+        // bridge turns on where their account lives. Asked again after
+        // `HOME_RETRY` while it is still unknown, because the ask can fail
+        // and its failure is silent.
+        let now_secs = self.now();
+        if let Some(peer) = open.peer
+            && state.peer_home.is_none()
+            && self
+                .asked_home
+                .get(&(me, peer))
+                .is_none_or(|asked| now_secs.saturating_sub(*asked) >= HOME_RETRY)
+        {
+            self.asked_home.insert((me, peer), now_secs);
+            self.send_as(Some(at), Cmd::PeerHome(peer));
+        }
         let mut call = false;
         if narrow {
             // **The call is its own button, not a menu item.** It is the
@@ -3318,11 +3596,80 @@ impl ChatApp {
             call = true;
         }
         if call {
-            // Say in the invitation whether this side will ask for an
-            // introduction, so the other side is not left waiting on one
-            // that is never asked for.
-            let direct = ctx.accounts.prefs.direct_calls;
-            self.send_as(Some(at), Cmd::Call { direct });
+            // **Where does this call meet?** SIP-36's invitation carries a
+            // SIP-13 room secret and never says which exchange the room is
+            // at, so each side joins a room at whichever exchange it is
+            // connected to. For two people at one exchange that is the same
+            // room. For two people at different ones it is two rooms with
+            // one secret, and the call rings, is answered, and carries
+            // nothing.
+            //
+            // SIP-39 is the answer and has been all along: the call is
+            // placed at *our* exchange for their handle, and our exchange
+            // carries it to theirs, which rings them. This app already
+            // answers the other end of it (`cross_ring_ui`,
+            // `spawn_cross_answer`); only placing one was missing.
+            // **A call cannot be placed until it is known where they
+            // live.** Which exchange a peer's account is at decides between
+            // the two paths above, and it is the one question that has no
+            // sensible default: guessing "here" is what made a call ring,
+            // connect to a room at the wrong exchange and carry nothing --
+            // twice, in front of somebody, with nothing on screen to say
+            // why.
+            //
+            // Unknown is not the same as *homeless*: a peer whose exchange
+            // is reached by address has no domain to be bridged to, and the
+            // handler records that as an empty one, which falls through to
+            // the ordinary path below. This is only the case where the
+            // question has not been answered at all -- never asked, or the
+            // ask failed -- and the answer is to ask, say so, and let them
+            // press again rather than place a call that cannot work.
+            if let Some(peer) = open.peer
+                && state.peer_home.is_none()
+            {
+                // Stamped now, not zero: zero reads as an ask from long
+                // ago, and the draw's own retry would then fire on every
+                // frame. This *is* the ask for this interval.
+                let asked_at = self.now();
+                self.asked_home.insert((me, peer), asked_at);
+                self.send_as(Some(at), Cmd::PeerHome(peer));
+                self.pane(at).command_trouble = Some(
+                    "Still finding which exchange they are at — try again in a moment.".into(),
+                );
+            } else {
+                // Why a call went the way it did, at the moment it is
+                // placed. Five silent calls were diagnosed by inference and
+                // four of the inferences were wrong; this says it outright.
+                tracing::info!(
+                    ordered_at = ?ordered_at(state),
+                    our_domain = ?state.domain,
+                    peer_home = ?state.peer_home.as_ref().map(|(_, d)| d),
+                    handle = ?open.peer.and_then(|p| state.people.get(&p).and_then(|x| x.handle.clone())),
+                    sessions = ?self.sessions.keys().map(|(_, e)| e.clone()).collect::<Vec<_>>(),
+                    "placing a call"
+                );
+                // **Not "open it at its home and call from there".** That
+                // was tried and cannot work: a conversation's origin and an
+                // *identity's* home are different things. The origin here
+                // is trunk, because SIP-60 puts a direct message at the
+                // lower key's home -- but this identity lives at squic.org,
+                // and trunk answers `Moved` for it and hands its services
+                // back. The session exists and will serve nothing.
+                //
+                // SIP-39's bridge is the mechanism, and it needs no session
+                // there at all: the call is placed at *our* exchange for
+                // their target, and the two exchanges carry it.
+                match self.elsewhere_handle(state, open) {
+                    Some(target) => self.place_cross_call(ctx, at, target, ui.ctx()),
+                    None => {
+                        // Say in the invitation whether this side will ask
+                        // for an introduction, so the other side is not left
+                        // waiting on one that is never asked for.
+                        let direct = ctx.accounts.prefs.direct_calls;
+                        self.send_as(Some(at), Cmd::Call { direct });
+                    }
+                }
+            }
         }
     }
 
@@ -3736,14 +4083,15 @@ impl ChatApp {
         let _ = me;
     }
 
-    /// The key of the exchange this identity is talking to.
+    /// SIP-85: whose home carries this connection, when one does.
     ///
-    /// **Only the key.** Which exchange, and the way to another or a new one,
-    /// moved to the window's title strip -- see [`ChatApp::chrome_ui`] -- where
-    /// it can be seen without opening anything. What stays here is the full
-    /// key of whatever is being talked to, always reachable and **labelled**:
-    /// unlabelled beside the account's own key it was a second string of
-    /// base58 with nothing saying which was which.
+    /// **The exchange's key is not here any more.** It was: labelled, in
+    /// full, with a way to copy it. But it is not one of this identity's
+    /// keys, and under the reader's own it was a second string of base58
+    /// beside the one string on this menu that is about them. It lives on
+    /// the exchange control in the title strip -- the thing that says
+    /// which exchange this is and offers the others -- where it is still
+    /// shown in full for the one being looked at, and copied from its row.
     ///
     /// # Why an exchange is not a setting
     ///
@@ -3754,38 +4102,6 @@ impl ChatApp {
     /// adding an account than to changing a preference, and switching between
     /// them changes the whole conversation list.
     fn exchanges_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
-        let Some(key) = state.exchange else {
-            ui.horizontal(|ui| {
-                ui.colored_label(theme.text_muted, egui::RichText::new("at").small());
-                ui.colored_label(theme.text_muted, egui::RichText::new("connecting…").small());
-            });
-            return;
-        };
-        // **The caption and the control share a row; the key has its own.**
-        // A `horizontal` does not wrap: a 44-character key beside a button
-        // is wider than a phone's menu, and what came after it was drawn
-        // off the edge. The same shape as the key above it.
-        ui.horizontal(|ui| {
-            ui.colored_label(theme.text_muted, egui::RichText::new("at").small());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy the exchange's key")
-                    .clicked()
-                {
-                    ui.ctx().copy_text(key.to_string());
-                }
-            });
-        });
-        // **In full**, by `the_exchange_this_list_belongs_to_is_shown_in_full`:
-        // it is the key a receipt verifies under and the one a client pins
-        // independently of whatever it is connected to, and a phone has no
-        // hover to hide the rest of it behind.
-        ui.add(
-            egui::Label::new(egui::RichText::new(key.to_string()).monospace().small())
-                .wrap()
-                .selectable(true),
-        )
-        .on_hover_text("the exchange this conversation list belongs to");
-        // SIP-85: it sees the home's address, not this machine's.
         if let Some(home) = &state.carried {
             ui.colored_label(
                 theme.text_muted,
@@ -4609,7 +4925,7 @@ impl ChatApp {
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
                     Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
-                    Dialog::Report { target } => self.report_dialog(at, target, ui, theme),
+                    Dialog::Report { target } => self.report_dialog(at, state, target, ui, theme),
                 }
             });
         if response.should_close() {
@@ -4928,12 +5244,38 @@ impl ChatApp {
     /// SIP-56: what is wrong, in one of the four words the wire has, and a
     /// note. Said plainly where it is typed: the note is stored in the clear
     /// at the exchange, and the admins see who reported.
-    fn report_dialog(&mut self, at: &At, target: u64, ui: &mut egui::Ui, theme: &ColorTheme) {
+    #[allow(clippy::too_many_arguments)]
+    fn report_dialog(
+        &mut self,
+        at: &At,
+        state: &ChatState,
+        target: u64,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let dm = state.open_is_direct();
         ui.heading(if target == 0 {
-            "Report this room"
+            if dm {
+                "Report this conversation"
+            } else {
+                "Report this room"
+            }
         } else {
             "Report this message"
         });
+        // The same fact as at the control, because this is the last place
+        // before it is sent: in a direct message the admins are the two of
+        // you, so the report goes to the person it is about.
+        if dm {
+            ui.add_space(tokens::SPACING_XS);
+            ui.colored_label(
+                theme.warning,
+                egui::RichText::new(
+                    "In a direct message the only admins are the two of you. They will see this report and that you made it, and no operator will.",
+                )
+                .small(),
+            );
+        }
         ui.add_space(tokens::SPACING_SM);
         ui.label("Why");
         {
@@ -5120,14 +5462,31 @@ impl ChatApp {
             ui.add_space(tokens::SPACING_SM);
         }
         let pane = self.panes.entry(at.clone()).or_default();
+        // **What ticking it does, where there is no pointer.** This makes a
+        // signed statement other people can read; that it does so was in a
+        // tooltip, and a phone has none. The same rule the Leave row and
+        // the call bar follow: drawn on a phone, hovered on a desktop.
+        const ATTESTING: &str = "A signed statement others may read and must not act on. It \
+                                 tells the exchange, and anyone who asks, that the two of \
+                                 you spoke.";
         ui.checkbox(
             &mut pane.attest_too,
             "Say at the exchange that we compared them",
         )
-        .on_hover_text(
-            "A signed statement others may read and must not act on. It tells the \
-             exchange, and anyone who asks, that the two of you spoke.",
-        );
+        .on_hover_text(ATTESTING);
+        // **Not drawn here, and that is a finding rather than a choice.**
+        // Every other consequence in this app is drawn on a phone, because
+        // a phone cannot hover. This one is not, because the verify dialog
+        // already stands at 360 points on a phone held sideways and *any*
+        // addition puts its way out off the screen -- the full sentence by
+        // twelve points, five words by five. The dialog cannot scroll
+        // either, which is what `a_dialog_too_tall_for_the_screen_can_
+        // still_be_left` exists to catch.
+        //
+        // So the tooltip stays the only home for it until this dialog can
+        // scroll or gives up some room. Leaving it undrawn is worse than
+        // the rest of the app and better than a dialog somebody cannot
+        // dismiss.
         ui.add_space(tokens::SPACING_SM);
         ui.horizontal(|ui| {
             if verified_at.is_none() {
@@ -5198,11 +5557,16 @@ impl ChatApp {
         match &home {
             Some(home) => {
                 let pane = self.panes.entry(at.clone()).or_default();
+                // Same again: what this hides, and from whom, is the whole
+                // reason to tick it, and it was reachable only by hovering.
+                const CARRIED: &str = "your home carries the connection: the exchange sees \
+                                       your home's address and your own key, never where \
+                                       you are (SIP-85)";
                 ui.checkbox(&mut pane.exchange_via, format!("Reach it through {home}"))
-                    .on_hover_text(
-                        "your home carries the connection: the exchange sees your home's \
-                         address and your own key, never where you are (SIP-85)",
-                    );
+                    .on_hover_text(CARRIED);
+                if sigil::Form::of(ui.ctx()).is_phone() {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(CARRIED).small());
+                }
             }
             None => {
                 ui.colored_label(
@@ -5217,6 +5581,35 @@ impl ChatApp {
         }
         if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
             ui.colored_label(theme.destructive, trouble);
+            // **A refusal that offers the way out of itself.** Removing an
+            // exchange lives as a small cross in the title strip's
+            // dropdown, which is not where somebody who has just tried to
+            // add one is looking -- so "you already have this" was a dead
+            // end and the only move was to cancel and go hunting for it.
+            // Found by walking into it while putting a phone back as it was.
+            if let Some(name) = self.panes.get(at).and_then(|p| p.add_duplicate.clone())
+                && ui.button(format!("Remove {name}")).clicked()
+            {
+                let which = ctx.accounts.active_index();
+                ctx.accounts.drop_exchange(which, &name);
+                // **Back to the default**, the same thing the dropdown's
+                // own cross does and for its reason: the window would
+                // otherwise go on showing a conversation list for an
+                // exchange it is no longer connected to. A pane is keyed
+                // by `(identity, exchange)`, so this is also what takes
+                // the dialog off the screen -- the resets below reach a
+                // pane nothing draws any more, except on the one path
+                // where the exchange removed *was* the default and the
+                // view does not move. A test that asserted the field
+                // rather than the effect passed with them deleted.
+                ctx.accounts.show_exchange(me, None);
+                let pane = self.pane(at);
+                pane.add_trouble = None;
+                pane.add_duplicate = None;
+                pane.exchange.clear();
+                pane.exchange_via = false;
+                pane.dialog = None;
+            }
         }
         // **What this exchange federates with** (SIP-39 §The peer directory), each one press
         // away -- through the same path as a domain typed by hand, which
@@ -5287,6 +5680,7 @@ impl ChatApp {
                     pane.exchange.clear();
                     pane.exchange_via = false;
                     pane.add_trouble = None;
+                    pane.add_duplicate = None;
                     pane.dialog = None;
                     // Shown straight away: adding one and staying where you
                     // were makes it look as though nothing happened.
@@ -5301,6 +5695,7 @@ impl ChatApp {
                     } else {
                         format!("This identity is already connected to {named}.")
                     });
+                    self.pane(at).add_duplicate = (!named.is_empty()).then(|| named.clone());
                 }
             }
             if ui.button("Cancel").clicked() {
@@ -5634,6 +6029,13 @@ impl ChatApp {
                 for convo in &state.conversations {
                     let id = bs58::encode(convo.channel).into_string();
                     let selected = state.open == Some(convo.channel);
+                    // Decoded on the first frame that draws it and kept, so
+                    // a list of rooms with pictures costs one decode each
+                    // and not one a frame.
+                    let picture = convo
+                        .avatar
+                        .as_ref()
+                        .and_then(|bytes| self.channel_picture(at, ui.ctx(), convo.channel, bytes));
                     let row = sigil_ui::ConversationRow {
                         id: &id,
                         label: &convo.label,
@@ -5651,6 +6053,7 @@ impl ChatApp {
                         muted: ctx.accounts.quiet.is_muted(&at.1, &convo.channel),
                         presence: convo.peer.map(|peer| self.presence_of(state, &peer)),
                         verified: convo.peer.is_some_and(|p| state.verified.contains_key(&p)),
+                        picture: picture.as_ref(),
                     };
                     if sigil_ui::conversation_row(ui, &row, selected).clicked() {
                         self.send_as(Some(at), Cmd::Show(convo.channel));
@@ -5704,20 +6107,27 @@ impl ChatApp {
                 ui.add_space(tokens::SPACING_SM);
             }
             self.succeeded_ui(at, state, ui, theme);
-            for seq in self.trouble_ui(
+            Self::note_ui(state, ui, theme);
+            let (seqs, ask_for_key) = self.trouble_ui(
                 &state.trouble_with,
                 public,
                 !state.copies.is_empty(),
+                ordered_at(state),
                 ui,
                 theme,
-            ) {
+            );
+            for seq in seqs {
                 self.send_as(Some(at), Cmd::Redact(seq));
+            }
+            if ask_for_key {
+                self.send_as(Some(at), Cmd::AskForKey);
             }
         }
 
         // The composer is laid out first, from the bottom, so the transcript
         // gets the remaining height rather than pushing it off the screen.
         let mut redact: Vec<u64> = Vec::new();
+        let mut ask_for_key = false;
         egui::Panel::bottom("chat_composer")
             .frame(
                 egui::Frame::NONE
@@ -5744,16 +6154,23 @@ impl ChatApp {
                         ui.add_space(tokens::SPACING_SM);
                     }
                     self.succeeded_ui(at, state, ui, theme);
-                    redact = self.trouble_ui(
+                    Self::note_ui(state, ui, theme);
+                    let asked = self.trouble_ui(
                         &state.trouble_with,
                         public,
                         !state.copies.is_empty(),
+                        ordered_at(state),
                         ui,
                         theme,
                     );
+                    redact = asked.0;
+                    ask_for_key = asked.1;
                 }
                 self.composer_ui(ctx, at, state, ui, theme)
             });
+        if ask_for_key {
+            self.send_as(Some(at), Cmd::AskForKey);
+        }
         for seq in std::mem::take(&mut redact) {
             self.send_as(Some(at), Cmd::Redact(seq));
         }
@@ -5981,6 +6398,24 @@ impl ChatApp {
             });
     }
 
+    /// Whatever was just done, where it was done.
+    ///
+    /// **Beside the control, not only on the conversation.** A note is the
+    /// answer to an action, and the actions are not all in one place:
+    /// minting a key, setting a name, a topic or a retention window are
+    /// all on the settings page, and their answers were drawn under the
+    /// *conversation's* title row — a page the person pressing them is not
+    /// looking at. Pressing "Mint a new key" and being told nothing is how
+    /// this was found.
+    fn note_ui(state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        if let Some(note) = &state.note {
+            ui.add(
+                egui::Label::new(egui::RichText::new(&note.said).small().color(theme.success))
+                    .wrap(),
+            );
+        }
+    }
+
     /// What is wrong with this conversation, said in words.
     ///
     /// Each of these is a **different thing to do**, so none of them may be
@@ -5996,12 +6431,14 @@ impl ChatApp {
         trouble: &Trouble,
         public: bool,
         kept: bool,
+        ordered_at: Option<&str>,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
-    ) -> Vec<u64> {
+    ) -> (Vec<u64>, bool) {
         let mut delete = Vec::new();
+        let mut ask_for_key = false;
         if trouble.is_clear() {
-            return delete;
+            return (delete, ask_for_key);
         }
         // A function rather than a closure over `ui`, so the button below can
         // borrow `ui` too.
@@ -6027,16 +6464,69 @@ impl ChatApp {
             // SIP-17's stranded member: every entry fetches and none of them
             // open. Without this the conversation simply reads as empty, which
             // is indistinguishable from nobody having written.
+            //
+            // **One line, with the count in it.** This and the unreadable
+            // count below were two lines saying one thing, and the second
+            // contradicted the first: "their key may still arrive" under
+            // "somebody has to hand you one". They are not two facts -- the
+            // entries are unreadable *because* there is no key -- so the
+            // count belongs in this sentence and the other line is not
+            // drawn at all.
+            //
+            // And **somebody**, not an admin: a direct message has no
+            // admin, and the person being told this is stranded in one as
+            // easily as in a channel.
+            let held = match trouble.unreadable {
+                0 => format!("You hold no key for this conversation (epoch {epoch})."),
+                1 => format!(
+                    "You hold no key for this conversation (epoch {epoch}), so its \
+                     1 message cannot be read."
+                ),
+                n => format!(
+                    "You hold no key for this conversation (epoch {epoch}), so none of \
+                     its {n} messages can be read."
+                ),
+            };
+            // **Where it is ordered, in the same breath.** A conversation
+            // can move: a direct message lives at the home of the lower of
+            // the two keys (SIP-60), so one party moving home moves the
+            // conversation, and the other party meets a copy it was never
+            // sealed into. sigil said both halves -- "no key" here, "lives
+            // at trunk.exchange" quietly up in the bar -- and left somebody
+            // to put them together. Said together, it is one fact with a
+            // cause.
             say(
                 ui,
                 theme.destructive,
-                format!(
-                    "You hold no key for this conversation (epoch {epoch}). \
-                     An admin has to hand you one before anything here can be read."
-                ),
+                match ordered_at {
+                    Some(domain) => format!(
+                        "{held} It is ordered by {domain}, so the key has to reach you \
+                         from somebody there."
+                    ),
+                    None => format!("{held} Somebody in it has to send you one."),
+                },
             );
+            // **And a way to ask.** Being told a key has to reach you, with
+            // nothing to press, is the whole of what somebody stranded
+            // could do about it -- which is nothing. This is SIP-17's own
+            // way out: ask the exchange for an envelope sealed to this
+            // device, and where none comes and this account may mint one
+            // (in a direct message both parties may), mint the next epoch
+            // and seal it to everybody present.
+            if ui
+                .button("Ask for the key")
+                .on_hover_text(
+                    "Asks for an envelope sealed to this device. If none has been left \
+                     and you may mint one, a fresh key is made and given to everybody in \
+                     the conversation — which does not open what was said under the old \
+                     one.",
+                )
+                .clicked()
+            {
+                ask_for_key = true;
+            }
         }
-        if trouble.unreadable > 0 {
+        if trouble.unreadable > 0 && trouble.no_key.is_none() {
             // **Which kind of unreadable.** The fold says "well formed and not
             // understood, or sealed under a key we lack -- either way it
             // happened", and the two need different words. In a private
@@ -6159,7 +6649,7 @@ impl ChatApp {
                 },
             );
         }
-        delete
+        (delete, ask_for_key)
     }
 
     /// One membership or metadata change, centred in the transcript.
@@ -6168,7 +6658,15 @@ impl ChatApp {
     /// name is an assertion attested by nobody (SIP-21) — so the accounts the
     /// exchange actually recorded are on the same line, one hover away.
     fn event_ui(&self, event: &session::Happened, ui: &mut egui::Ui) {
-        let row = sigil_ui::system_line(ui, &event.said);
+        // A call is drawn as a call: with the time it happened, and
+        // coloured when it is still somebody's move. Everything else is a
+        // sentence about the conversation and wants neither.
+        let row = match event.call {
+            Some(call) => {
+                sigil_ui::call_line(ui, &event.said, event.at, call == session::Call::Missed)
+            }
+            None => sigil_ui::system_line(ui, &event.said),
+        };
         let mut hover = format!("{}\nby {}", event.subject, event.actor);
         if let Some(caveat) = event.caveat {
             hover = format!("{caveat}\n\n{hover}");
@@ -6262,10 +6760,7 @@ impl ChatApp {
         // Whether this conversation is already somebody's direct message,
         // in which case "direct message" on their bubbles would open the
         // conversation it is in.
-        let in_direct = state
-            .conversations
-            .iter()
-            .any(|c| Some(c.channel) == state.open && c.peer.is_some());
+        let in_direct = state.open_is_direct();
         // **The videos, before the bubbles.** Players for messages no longer
         // on screen are dropped -- which stops them -- and a video whose
         // bytes have just arrived after it was pressed is started, in the
@@ -6587,10 +7082,24 @@ impl ChatApp {
                 mentions_me: line.me_mentioned,
                 verified: !line.mine && state.verified.contains_key(&line.who),
                 editable: live && line.mine && session::rewritable(line.at, now),
-                // SIP-19: the author, or an admin of the channel. In a
-                // direct message nobody is an admin, so it is one's own or
-                // nothing.
-                deletable: live && (line.mine || state.i_am_admin),
+                // SIP-19: the author, or an admin of the channel.
+                //
+                // **In a direct message both parties are admins**, which is
+                // the opposite of what this line used to assume. The
+                // exchange makes a party an admin on joining -- it is what
+                // lets either of them mint an epoch key -- and the members
+                // view says so on both rows. So `i_am_admin` was true here
+                // for everybody, and sigil offered Delete on the *other*
+                // person's messages in a direct message, which the exchange
+                // then accepted: `redact` takes the author or any admin.
+                //
+                // The intent was already written down one line up -- "in a
+                // direct message ... it is one's own or nothing" -- so this
+                // restores it rather than deciding anything new. A
+                // moderation power is for a room with a moderator in it;
+                // between two people it is just one of them reaching into
+                // what the other said.
+                deletable: live && (line.mine || (state.i_am_admin && !in_direct)),
                 readonly: !live,
                 again: line.said.is_some(),
             };
@@ -6938,6 +7447,20 @@ impl ChatApp {
             self.picking = None;
             if let Some(paths) = answer {
                 self.stage(&at, paths, ctx);
+            }
+        }
+        if let Some((at, pick)) = &self.picturing
+            && let Some(answer) = pick.take()
+        {
+            let at = at.clone();
+            self.picturing = None;
+            // One picture, whatever was chosen: a channel has one, and
+            // taking the first is kinder than refusing a multiple
+            // selection somebody made by habit.
+            if let Some(mut paths) = answer
+                && let Some(path) = paths.drain(..).next()
+            {
+                self.send_as(Some(&at), Cmd::SetChannelAvatar(Some(path)));
             }
         }
         if let Some((at, seq, index, pick)) = &self.saving
@@ -8006,7 +8529,16 @@ impl ChatApp {
                     .set_muted(&at.1, &c.channel, matches!(cmd, Command::Mute));
             }
             Command::Topic(text) => {
-                here()?;
+                // The same refusal `/name` already makes, for the same
+                // reason: a direct message has neither, and its settings
+                // page offers neither. The rule was written at one of the
+                // two operations and implemented at one of the two, so the
+                // command path could still set a topic on a conversation
+                // that has nowhere to show one.
+                let c = here()?;
+                if c.peer.is_some() {
+                    return Err("A direct message has no topic to set.".into());
+                }
                 self.send_as(Some(at), Cmd::SetTopic(text));
             }
             Command::Name(text) => {
@@ -8129,26 +8661,29 @@ impl ChatApp {
             let control = form.button_size() + ui.spacing().item_spacing.x * 2.0;
             let width = ui.available_width() - if phone { 0.0 } else { control };
             let pane = self.panes.entry(at.clone()).or_default();
+            // **Short enough to be read where it is narrow.** The full
+            // sentence is about 45 characters and a phone's field holds
+            // about 36 with the magnifier beside it, so it arrived as
+            // "name a channel, or leave empty for e..." -- truncated at
+            // precisely the clause that says what leaving it empty does,
+            // which is the only part a reader could not have guessed.
+            let hint = if phone {
+                "a name, or empty for all"
+            } else {
+                "name a channel, or leave empty for everything"
+            };
             let (field, slot) = if phone {
                 let (field, slot) = sigil_ui::field_with_slot(
                     ui,
                     &mut pane.query,
-                    "name a channel, or leave empty for everything",
+                    hint,
                     width,
                     tokens::FIELD_LG,
                     form.button_size(),
                 );
                 (field, Some(slot))
             } else {
-                (
-                    sigil_ui::field(
-                        ui,
-                        &mut pane.query,
-                        "name a channel, or leave empty for everything",
-                        width,
-                    ),
-                    None,
-                )
+                (sigil_ui::field(ui, &mut pane.query, hint, width), None)
             };
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let control = |ui: &mut egui::Ui| sigil_ui::icon_button(ui, sigil_ui::Icon::Search);
@@ -8166,7 +8701,12 @@ impl ChatApp {
         // A join that was refused says so here, where the button is. It
         // used to be said only in a conversation's bar, which this pane is
         // not -- so a refused join looked like a button that did nothing.
-        if let Some(trouble) = &state.trouble {
+        // **This pane's own refusal, not the session's last one.** It used
+        // to draw `state.trouble`, which any failing command sets and
+        // nothing clears -- so a call that could not be placed hours
+        // earlier was still shown here, in red, above a listing that had
+        // just answered, where it reads as "this pane is not connected".
+        if let Some(trouble) = &state.join_trouble {
             ui.colored_label(theme.destructive, trouble);
             ui.add_space(tokens::SPACING_SM);
         }
@@ -8322,7 +8862,14 @@ impl ChatApp {
             });
         }
 
-        if state.i_am_admin {
+        // **Not into a direct message.** Both parties are admins there, so
+        // this was offered on every one of them -- and a third member in a
+        // channel whose identifier is derived from *two* accounts leaves
+        // the identifier meaning something that is no longer true. A
+        // conversation with three people in it is a group, and starting one
+        // is how you get one.
+        let dm = state.open_is_direct();
+        if state.i_am_admin && !dm {
             ui.add_space(tokens::SPACING_SM);
             let (_, add) = sigil_ui::labelled_field(
                 ui,
@@ -8582,10 +9129,35 @@ impl ChatApp {
                 // on this card has: a bare word in a box, alone under a list
                 // of rows, read as something left over rather than as the
                 // one thing anybody does *to* a room they are in.
-                if sigil_ui::icon_item(ui, sigil_ui::Icon::Flag, "Report this room…")
-                    .on_hover_text("Tell the room's admins something is wrong with it.")
-                    .clicked()
-                {
+                let report = if dm {
+                    "Report this conversation…"
+                } else {
+                    "Report this room…"
+                };
+                // **Who a report reaches, said where it is offered.**
+                //
+                // SIP-56 sends it to the channel's admins. In a direct
+                // message both parties *are* admins -- the exchange makes a
+                // party one on joining, which is what lets either mint an
+                // epoch key -- so "the admins" is the person on the other
+                // side and nobody else. No operator sees it. Somebody
+                // reporting abuse here is handing it to the person they are
+                // reporting, with their name on it, and the only thing that
+                // ever hinted at any of this was a tooltip saying "the
+                // room's admins" that a phone cannot reach at all.
+                let reaches = if dm {
+                    "In a direct message the only admins are the two of you, so they will see this report and that you made it. No operator sees it."
+                } else {
+                    "Tell the room's admins something is wrong with it. They see who reported it."
+                };
+                let asked = sigil_ui::icon_item(ui, sigil_ui::Icon::Flag, report)
+                    .on_hover_text(reaches);
+                // A phone has no pointer, and this is the sentence somebody
+                // most needs before pressing.
+                if sigil::Form::of(ui.ctx()).is_phone() || dm {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(reaches).small());
+                }
+                if asked.clicked() {
                     let pane = self.pane(at);
                     pane.report_note.clear();
                     pane.report_reason = 1;
@@ -8624,10 +9196,34 @@ impl ChatApp {
                                 .get(&report.reporter)
                                 .and_then(|p| p.named())
                                 .unwrap_or_else(|| sigil_ui::short(&report.reporter.to_string()));
+                            // **Which message, in words.** `target` is a
+                            // sequence number -- this client's own index
+                            // into the channel -- and "message 3" names
+                            // nothing a reader has ever seen. The
+                            // transcript is right here, so the message can
+                            // be quoted; "Show" below goes to it, and this
+                            // says what it will find. A report about a
+                            // message no longer on this page falls back to
+                            // "a message", which is honest: the number
+                            // would not have helped either.
                             let what = if report.target == 0 {
                                 "the room".to_string()
                             } else {
-                                format!("message {}", report.target)
+                                match state
+                                    .lines
+                                    .iter()
+                                    .find(|l| l.seq == report.target)
+                                    .filter(|l| !l.text.trim().is_empty())
+                                {
+                                    Some(line) => {
+                                        let said = sigil_ui::one_line(&line.text, 40);
+                                        match line.name.as_deref() {
+                                            Some(name) => format!("{name}'s \u{201c}{said}\u{201d}"),
+                                            None => format!("\u{201c}{said}\u{201d}"),
+                                        }
+                                    }
+                                    None => "a message".to_string(),
+                                }
                             };
                             let mut said = format!("{who} reported {what} as {}", report.reason);
                             if !report.note.is_empty() {
@@ -8697,25 +9293,40 @@ impl ChatApp {
         // has refused to rename one since it was written (`may_rename`) --
         // and this page was offering both, with a tick beside each, over
         // the other person's name.
-        let dm = state
-            .conversations
-            .iter()
-            .find(|c| Some(c.channel) == state.open)
-            .is_some_and(|c| c.peer.is_some());
+        let dm = state.open_is_direct();
+
+        Self::note_ui(&state, ui, &theme);
 
         // Yours, whatever your standing here: what this machine says out
         // loud about the conversation.
         if let Some(channel) = state.open {
-            let mut muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
-            if ui
-                .checkbox(&mut muted, "Mute this conversation")
-                .on_hover_text(
+            let muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
+            // **The same control as every other switch here.** This was an
+            // `egui::checkbox`, the only one on the screen: a small circle
+            // with a word beside it, in an app whose other booleans -- do
+            // not disturb, calls connect directly -- are an icon, a
+            // sentence that changes with the state, and the row itself
+            // lit. Two shapes for one kind of choice, and the odd one out
+            // does not say what it is *now* without reading the tick.
+            //
+            // The bell is the same pair the conversation's own menu uses
+            // for this, so the two places agree.
+            let (bell, said) = if muted {
+                (sigil_ui::Icon::BellOff, "Muted")
+            } else {
+                (sigil_ui::Icon::Bell, "Said out loud")
+            };
+            if sigil_ui::icon_item_as(ui, bell, said, muted)
+                .on_hover_text(if muted {
                     "Nothing in it is said out loud or counted on sigil's icon; its own \
-                     row still shows what is waiting.",
-                )
-                .changed()
+                     row still shows what is waiting. Press to hear it again."
+                } else {
+                    "Press to silence this conversation: nothing said out loud, nothing \
+                     counted on sigil's icon, its own row unchanged."
+                })
+                .clicked()
             {
-                ctx.accounts.quiet.set_muted(&at.1, &channel, muted);
+                ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
             }
             ui.add_space(tokens::SPACING_SM);
         }
@@ -8759,6 +9370,84 @@ impl ChatApp {
                     let topic = self.pane(at).channel_topic.clone();
                     self.send_as(Some(at), Cmd::SetTopic(topic));
                 }
+
+                // **SIP-35: another exchange may carry a copy.**
+                //
+                // The command, its handler and the library call were all
+                // built; nothing sent it. Not offered in a direct message:
+                // the identifier of one stands for two accounts, and a
+                // third party holding a copy of it is not what SIP-35 is
+                // for.
+                //
+                // **The log is the readout.** SIP-35 makes this an entry
+                // rather than an arrangement between two operators
+                // precisely so that "a channel's copies" are visible to
+                // the people in it -- and the transcript already words
+                // both events, replication deliberately among the few it
+                // will not treat as plumbing. So there is no separate list
+                // to keep in step: authorising one writes a line everybody
+                // in the conversation reads.
+                // **SIP-16: the channel's picture.**
+                //
+                // `Cmd::SetChannelAvatar` uploads the file and publishes it
+                // as channel metadata, and was built with nothing to send
+                // it. A room only: a direct message is drawn as the person
+                // in it, whose picture is their profile's (SIP-21).
+                ui.add_space(tokens::SPACING_MD);
+                ui.horizontal(|ui| {
+                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Attach, "Set a picture")
+                        .on_hover_text(
+                            "Everybody here sees it. It rides with the channel, so it \
+                             reaches whoever holds a copy of it too.",
+                        )
+                        .clicked()
+                    {
+                        self.picturing = Some((at.clone(), files::pick_files()));
+                        ui.ctx().request_repaint();
+                    }
+                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Close, "Remove it").clicked() {
+                        self.send_as(Some(at), Cmd::SetChannelAvatar(None));
+                    }
+                });
+
+                ui.add_space(tokens::SPACING_MD);
+                ui.label("Let another exchange carry a copy");
+                let width = ui.available_width();
+                sigil_ui::field(
+                    ui,
+                    &mut self.panes.entry(at.clone()).or_default().replica_key,
+                    "the exchange's key, in base58",
+                    width,
+                );
+                ui.horizontal(|ui| {
+                    let typed = self.pane(at).replica_key.trim().to_string();
+                    let key: Option<PubKey> = typed.parse().ok();
+                    ui.add_enabled_ui(key.is_some(), |ui| {
+                        if ui.button("Authorise").clicked()
+                            && let Some(exchange) = key
+                        {
+                            self.send_as(Some(at), Cmd::Replicate { exchange, on: true });
+                            self.pane(at).replica_key.clear();
+                        }
+                        if ui.button("Withdraw").clicked()
+                            && let Some(exchange) = key
+                        {
+                            self.send_as(Some(at), Cmd::Replicate { exchange, on: false });
+                            self.pane(at).replica_key.clear();
+                        }
+                    });
+                });
+                // Never "recall": SIP-35 is explicit that withdrawing ends
+                // a subscription and takes nothing back. What a replica
+                // already holds was lawfully obtained and no protocol can
+                // unsend it.
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(
+                        "Withdrawing stops what follows. What it already holds, it keeps.",
+                    )
+                    .small(),
+                );
             }
 
             ui.add_space(tokens::SPACING_MD);
@@ -8771,8 +9460,13 @@ impl ChatApp {
                     .range(1..=365)
                     .suffix(" days"),
                 );
-                if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Set how long").clicked()
-                {
+                // **A word where there is no pointer.** The tick is named
+                // for a screen reader and hovers on a desktop, and a phone
+                // has neither -- so the control that applies a change which
+                // *deletes immediately* was a bare glyph beside a number.
+                // The same rule the call bar and the Leave row already
+                // follow here: drawn on a phone, hovered on a desktop.
+                if sigil_ui::apply_button(ui, "Set how long").clicked() {
                     let days = self.pane(at).retention_days;
                     self.send_as(
                         Some(at),
@@ -8800,14 +9494,53 @@ impl ChatApp {
             // sigil has. **Not the destruction below**, which keeps a
             // button of its own: a row that looks like every other row is
             // the wrong shape for the one act that cannot be undone.
+            const MINTING: &str = "Everybody present is given a new key. Anybody who has \
+                                   left keeps what they already had.";
             if sigil_ui::icon_item(ui, sigil_ui::Icon::Refresh, "Mint a new key")
-                .on_hover_text(
-                    "Everybody present is given a new key. Anybody who has left keeps \
-                     what they already had.",
-                )
+                .on_hover_text(MINTING)
                 .clicked()
             {
                 self.send_as(Some(at), Cmd::Rotate);
+            }
+            // **Drawn on a phone, not hovered.** This row acts on one
+            // press and cannot be pressed back: the old epoch is
+            // superseded, and a device that does not get the new key reads
+            // nothing sealed under it. All of that was explained in hover
+            // text, which a phone has no pointer to reach -- so on a
+            // handset it was an unexplained single tap, beside a
+            // *destruction* that asks twice.
+            if sigil::Form::of(ui.ctx()).is_phone() {
+                ui.colored_label(theme.text_muted, egui::RichText::new(MINTING).small());
+            }
+
+            // **SIP-42, which was built and had no control.**
+            //
+            // The devices card states the problem plainly -- "registering
+            // does not bring any conversation with it; an epoch key is
+            // sealed to a device, so the other one has to hand them over
+            // before anything already said can be read here" -- and this is
+            // the handing over. `Cmd::ResealToSiblings` and
+            // `reseal_to_siblings` were both complete; nothing anywhere
+            // sent the command.
+            //
+            // **Offered only when there is somewhere to send it.** With no
+            // sibling the library seals nothing and returns `Ok(0)`, which
+            // the session reports as "your other devices already hold this
+            // conversation's key" -- true of a device that has them and of
+            // an account that has no other device at all. `devices_known`
+            // keeps the third case out of it: not having asked is not the
+            // same as having asked and been told none.
+            if state.devices_known && state.devices.len() > 1 {
+                const RESEAL: &str = "Your other devices are sent this conversation's current key, so they can read what is said from now on. What came before stays where it was read.";
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Device, "Give the key to your devices")
+                    .on_hover_text(RESEAL)
+                    .clicked()
+                {
+                    self.send_as(Some(at), Cmd::ResealToSiblings);
+                }
+                if sigil::Form::of(ui.ctx()).is_phone() {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(RESEAL).small());
+                }
             }
         });
 
@@ -8817,15 +9550,29 @@ impl ChatApp {
 
         // Leaving and destroying are not the same control and must not look
         // like one. One takes you out; the other ends it for everybody.
+        const LEAVING: &str = "You stop receiving this conversation. Nobody else loses it.";
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Back, "Leave")
-            .on_hover_text("You stop receiving this conversation. Nobody else loses it.")
+            .on_hover_text(LEAVING)
             .clicked()
         {
             self.send_as(Some(at), Cmd::Leave);
             ctx.navigator.back();
         }
+        // The same reason as the row above: leaving and destroying sit next
+        // to each other, and which one this is must not depend on a pointer
+        // the reader does not have.
+        if sigil::Form::of(ui.ctx()).is_phone() {
+            ui.colored_label(theme.text_muted, egui::RichText::new(LEAVING).small());
+        }
 
-        ui.add_space(tokens::SPACING_SM);
+        // **Room, and a rule.** The comment above says leaving and
+        // destroying must not look like one control, and then they sat
+        // eight points apart with nothing between them -- on a phone, a
+        // thumb's width. The confirmation below catches a mis-press; this
+        // is so there is less to catch.
+        ui.add_space(tokens::SPACING_LG);
+        ui.separator();
+        ui.add_space(tokens::SPACING_MD);
         let pane = self.panes.entry(at.clone()).or_default();
         if !pane.confirming_destroy {
             if ui
@@ -8946,6 +9693,7 @@ impl ChatApp {
                 handle,
                 since: std::time::Instant::now(),
                 saw_peer: false,
+                detail: false,
                 cross: false,
             },
         );
@@ -9001,6 +9749,37 @@ impl ChatApp {
     /// when the window is starting from cold and the session has not
     /// reconnected yet. Answering goes through the same two steps the Answer
     /// button takes, so there is one way a call is answered.
+    /// Place a call that is waiting for its conversation to be open at the
+    /// exchange the conversation lives at.
+    ///
+    /// The same shape as [`Self::answer_pressed`] and for the same reason:
+    /// the thing to act on arrives a frame or several after the press, and
+    /// something has to hold the intention without latching for ever.
+    fn call_when_open(&mut self, ctx: &mut AppContext<'_>) {
+        let Some((at, channel, asked)) = self.calling_elsewhere.clone() else {
+            return;
+        };
+        // A conversation that will not open in the time a ring would have
+        // lasted is one to stop waiting on, and to say so about.
+        if asked.elapsed() > RING_WINDOW {
+            self.calling_elsewhere = None;
+            self.pane(&at).command_trouble = Some(format!(
+                "Could not open this conversation at {} to call from there.",
+                at.1
+            ));
+            return;
+        }
+        let Some(session) = self.sessions.get(&at) else {
+            return;
+        };
+        if session.state().open != Some(channel) {
+            return; // not in hand yet
+        }
+        self.calling_elsewhere = None;
+        let direct = ctx.accounts.prefs.direct_calls;
+        self.send_as(Some(&at), Cmd::Call { direct });
+    }
+
     fn answer_pressed(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         let Some((at, channel, asked)) = self.answering.clone() else {
             return;
@@ -9135,6 +9914,108 @@ impl ChatApp {
         Some((live.channel, live.seq, seconds))
     }
 
+    /// The peer's target at their own exchange, when their account lives at
+    /// another one than this session is connected to, and `None` otherwise.
+    ///
+    /// **A key is as good a target as a name**, and this said otherwise for
+    /// as long as it existed: "a peer known only by key cannot be reached
+    /// this way". The far exchange has always disagreed -- `relay.rs`
+    /// resolves the local part with `label.parse::<PubKey>()` first and
+    /// falls back to a name only when that fails -- so the name is a
+    /// convenience, not a requirement.
+    ///
+    /// It matters because a SIP-38 handle is registered *per exchange*:
+    /// somebody whose account lives only at their own exchange has no name
+    /// at ours, and no reason to have one. Insisting on a name left every
+    /// call to such a person falling back to a room at this exchange that
+    /// they had never been in -- it rang, it was answered, and it carried
+    /// nothing.
+    fn elsewhere_handle(&self, state: &ChatState, open: &session::Summary) -> Option<String> {
+        let peer = open.peer?;
+        // **Where their account lives, not where their name is bound.** A
+        // SIP-38 handle is registered per exchange, so somebody living at
+        // one may hold a name at another as an alias -- and asking the
+        // wrong question makes exactly the call that cannot work look like
+        // one that can. SIP-59's home is the fact that decides it.
+        let (_, theirs) = state.peer_home.as_ref()?;
+        let ours = state.domain.as_deref()?;
+        if theirs.is_empty() || ours.is_empty() || theirs == ours {
+            return None;
+        }
+        // The target is **at their home**, which is what SIP-39 resolves:
+        // the local part of whatever name we know them by, at the domain
+        // they actually live at -- or their key, where we know no name.
+        let name = state
+            .people
+            .get(&peer)
+            .and_then(|p| p.handle.clone())
+            .and_then(|h| h.split_once('@').map(|(n, _)| n.to_string()))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| peer.to_string());
+        Some(format!("{name}@{theirs}"))
+    }
+
+    /// **SIP-39: call somebody whose account lives at another exchange.**
+    ///
+    /// Placed at the exchange this identity already holds a connection to,
+    /// naming the other by handle; that exchange carries it to theirs and
+    /// theirs rings them. Neither exchange can hear it -- the session key
+    /// is derived over the two identities and the two ephemerals (SIP-12),
+    /// and one more relay in the path does not change who can complete
+    /// that agreement.
+    ///
+    /// **No entry is posted**, so the conversation gets no record of the
+    /// call. A bridged call has no channel at either exchange to write one
+    /// in; that is SIP-39's shape rather than a choice taken here, and it
+    /// is why `leave_call` returns `None` for a call marked `cross`.
+    fn place_cross_call(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        target: String,
+        egui_ctx: &egui::Context,
+    ) {
+        let me = at.0;
+        if self.calls.contains_key(&me) {
+            return;
+        }
+        let Some((_, unlocked)) = ctx.accounts.unlocked().find(|(k, _)| *k == me) else {
+            return;
+        };
+        let Some(held) = self
+            .sessions
+            .get(at)
+            .map(|s| s.connection())
+            .filter(|h| h.is_live())
+        else {
+            self.pane(at).command_trouble =
+                Some("A call to another exchange needs this one answering.".into());
+            return;
+        };
+        tracing::info!(%target, "placing a call at another exchange");
+        let wake = egui_ctx.clone();
+        let handle = sigil_net::spawn_cross_call(
+            sigil_net::Dial::On(held),
+            unlocked.signer(),
+            target,
+            120,
+            self.call_opts.clone(),
+            move || wake.request_repaint(),
+        );
+        self.calls.insert(
+            me,
+            Live {
+                channel: [0u8; 32],
+                seq: 0,
+                handle,
+                since: std::time::Instant::now(),
+                saw_peer: false,
+                detail: false,
+                cross: true,
+            },
+        );
+    }
+
     /// **SIP-39: take a call another exchange carried here.** A session is
     /// opened back toward the caller on the connection this identity already
     /// holds -- our exchange matches it to the bridge it is holding for them
@@ -9185,6 +10066,7 @@ impl ChatApp {
                 handle,
                 since: std::time::Instant::now(),
                 saw_peer: false,
+                detail: false,
                 cross: true,
             },
         );
@@ -9286,6 +10168,19 @@ impl ChatApp {
         self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
         self.announcer
             .arrivals_in(ctx.notify, ctx.unfocused, held, found);
+        self.asked.extend(self.announcer.take_wants());
+    }
+
+    #[cfg(test)]
+    fn announce_missed_in(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        held: usize,
+        found: Vec<(At, String, Vec<session::Arrival>)>,
+    ) {
+        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .missed_in(ctx.notify, ctx.unfocused, held, found);
         self.asked.extend(self.announcer.take_wants());
     }
 
@@ -9538,6 +10433,8 @@ impl ChatApp {
             return;
         };
         let call = live.handle.state();
+        let cross = live.cross;
+        let detail = live.detail;
         let seconds = live.since.elapsed().as_secs();
         // Whose call it is, when it is not the identity being looked at. Named
         // rather than implied: a hang-up button that ends somebody else's call
@@ -9558,17 +10455,39 @@ impl ChatApp {
             .corner_radius(tokens::RADIUS_LG)
             .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
             .show(ui, |ui| {
+                // Decided in the row and said again under it on a phone, so
+                // it is worked out once.
+                let mut travel: Option<(&str, String)> = None;
                 ui.horizontal(|ui| {
                     let up = matches!(call.phase, sigil_net::Phase::Live);
+                    // **A call that is up and hears nothing is not a working
+                    // call.** The engine raises `deaf` once frames have gone
+                    // out and not one has come back -- with no discontinuous
+                    // transmission a peer in a call sends fifty a second, so
+                    // silence is a fault and never a quiet room. A green dot
+                    // and a running clock hid exactly that for five minutes
+                    // of a field test that looked perfect and carried no
+                    // sound, which is the one thing a call must never do.
+                    let silent = up && call.deaf;
                     sigil_ui::dot(
                         ui,
-                        up,
+                        up && !silent,
                         theme.success,
                         theme.warning,
-                        if up { "connected" } else { "connecting" },
+                        if silent {
+                            "connected, but nothing is arriving"
+                        } else if up {
+                            "connected"
+                        } else {
+                            "connecting"
+                        },
                     );
                     ui.colored_label(
-                        if up { theme.success } else { theme.warning },
+                        if up && !silent {
+                            theme.success
+                        } else {
+                            theme.warning
+                        },
                         match (&elsewhere, up) {
                             (Some(who), true) => format!("In a call as {who}"),
                             (Some(who), false) => format!("Connecting… as {who}"),
@@ -9576,38 +10495,128 @@ impl ChatApp {
                             (None, false) => "Connecting…".to_string(),
                         },
                     );
-                    ui.colored_label(
-                        theme.text_muted,
-                        format!("{:02}:{:02}", seconds / 60, seconds % 60),
-                    );
+                    // The clock is the way in to the numbers. A call's
+                    // elapsed time is the one thing on this row somebody
+                    // already looks at, so it is where the detail hangs
+                    // from -- no second control, and nothing drawn until
+                    // it is asked for.
+                    // A frameless button, not a label that happens to take
+                    // clicks: it reads as a control to a keyboard and to
+                    // anything speaking the screen, and looks like the
+                    // quiet clock it replaces.
+                    let clock = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{:02}:{:02}",
+                                    seconds / 60,
+                                    seconds % 60
+                                ))
+                                .color(if detail {
+                                    theme.accent
+                                } else {
+                                    theme.text_muted
+                                }),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if !sigil::Form::of(ui.ctx()).is_phone() {
+                        clock.clone().on_hover_text(if detail {
+                            "Hide what the call is carrying"
+                        } else {
+                            "Show what the call is carrying"
+                        });
+                    }
+                    if clock.clicked()
+                        && let Some(held) = self.calls.get_mut(&me)
+                    {
+                        held.detail = !held.detail;
+                    }
                     // Which way the audio is going, once that is settled.
                     // Said in a word because it is the one fact about a
                     // call a person can do something about -- and, for a
                     // while, the one the field test needs to read.
-                    match call.path {
-                        Some(sigil_net::Path::Direct) => {
-                            ui.colored_label(
-                                theme.text_muted,
-                                egui::RichText::new("direct").small(),
-                            )
-                            .on_hover_text(
-                                "Connected straight to them: the exchange introduced you \
-                                     and is not carrying the call.",
-                            );
+                    // **Which way the sound is going, always.**
+                    //
+                    // This used to read `call.path` alone and say nothing
+                    // when it was unset. A DM call always settles it --
+                    // `spawn_dm_call` reports `Relayed` with a `why` on
+                    // each of its three fallbacks -- but `spawn_room` and
+                    // `spawn_cross_call` report neither, so a group call
+                    // and a call across two exchanges both left the row
+                    // blank, looking exactly like one that had not decided
+                    // yet. (An earlier draft of this comment said no
+                    // library path ever set it, which is wrong in the one
+                    // case that is most of them; grep `Event::Relayed` in
+                    // sigil-net before believing it again.)
+                    //
+                    // So the decision is made here, and it is sound: the
+                    // only route to a direct call is the introduction
+                    // (SIP-25), and that reports itself. A call that is up
+                    // and has not reported one is being carried. Whether by
+                    // one exchange or two is the one thing `path` could not
+                    // have told us anyway, and `cross` does.
+                    travel = match (up, call.path, cross) {
+                        (true, Some(sigil_net::Path::Direct), _) => Some((
+                            "direct",
+                            "Connected straight to them: the exchange introduced you \
+                             and is not carrying the call."
+                                .to_string(),
+                        )),
+                        // **And that the setting was not ignored.** A
+                        // call to somebody at another exchange is relayed
+                        // by both of them whatever "Calls connect
+                        // directly" says -- SIP-39 §Rationale, "always
+                        // relay; no direct-connect attempt first" -- and
+                        // somebody who has just turned that setting on and
+                        // reads "via both exchanges" is owed the reason
+                        // rather than left to conclude the switch does
+                        // nothing. Which is the same defect as the switch
+                        // that toggled without looking like it had.
+                        (true, _, true) => Some((
+                            "via both exchanges",
+                            "Each of you is connected only to your own exchange, and \
+                             the two carry the call between them. A call to somebody at \
+                             another exchange is always carried this way, whatever \
+                             \"Calls connect directly\" says."
+                                .to_string(),
+                        )),
+                        (true, _, false) => Some((
+                            "via exchange",
+                            // Not *why*: this side cannot tell whether the
+                            // other never asked, the punch failed, or its
+                            // own connection is carried and may not ask
+                            // (SIP-85). `why` would have said, and nothing
+                            // ever sets it, so saying what is true is
+                            // better than picking one of four guesses --
+                            // which is what the old fallback text did.
+                            call.why
+                                .clone()
+                                .map(|w| format!("Relayed by the exchange: {w}."))
+                                .unwrap_or_else(|| {
+                                    "The exchange is carrying this call: \
+                                     no direct connection was made."
+                                        .to_string()
+                                }),
+                        )),
+                        // Nothing is settled while it is still connecting,
+                        // and guessing early would be a label that changes
+                        // under somebody reading it.
+                        (false, _, _) => None,
+                    };
+                    if let Some((word, _)) = &travel {
+                        let said =
+                            ui.colored_label(theme.text_muted, egui::RichText::new(*word).small());
+                        // **On a phone the reason is drawn, not hovered.**
+                        // There is no pointer, so `on_hover_text` is a place
+                        // nothing can reach; the line under the row carries
+                        // it there instead.
+                        if !sigil::Form::of(ui.ctx()).is_phone()
+                            && let Some((_, why)) = &travel
+                        {
+                            said.on_hover_text(why.clone());
                         }
-                        Some(sigil_net::Path::Relayed) => {
-                            ui.colored_label(
-                                theme.text_muted,
-                                egui::RichText::new("via exchange").small(),
-                            )
-                            .on_hover_text(format!(
-                                "Relayed by the exchange: {}.",
-                                call.why
-                                    .as_deref()
-                                    .unwrap_or("no introduction was asked for")
-                            ));
-                        }
-                        None => {}
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // The struck-through handset, in the destructive
@@ -9635,6 +10644,49 @@ impl ChatApp {
                         }
                     });
                 });
+                // Nothing at all has arrived from the other side. Under the
+                // row, in words, on every form: the dot says something is
+                // wrong and this says what it is, which is the difference
+                // between a call worth waiting out and one to hang up and
+                // place again.
+                if matches!(call.phase, sigil_net::Phase::Live) && call.deaf {
+                    ui.colored_label(
+                        theme.warning,
+                        egui::RichText::new("Nothing is coming through from the other side.")
+                            .small(),
+                    );
+                }
+                // What the call is actually carrying, when it has been
+                // asked for. The engine's own line, unedited: every field
+                // in it is a fact somebody debugging a silent call needs,
+                // and rewording them would only lose the ones I failed to
+                // anticipate. `final_stats` survives the call ending, so
+                // the numbers are still there to read afterwards.
+                // Asked for, **or** a call that hears nothing -- which is
+                // the one moment the numbers are the point rather than a
+                // curiosity. `sent 12000 · recv 0` under "nothing is coming
+                // through" turns the claim into its own evidence, and it
+                // reaches a phone, which cannot hover the clock to ask.
+                let wanted = detail || (matches!(call.phase, sigil_net::Phase::Live) && call.deaf);
+                if wanted && let Some(line) = call.stats.as_ref().or(call.final_stats.as_ref()) {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(line).small());
+                }
+                // The reason a call is relayed, under the row, where a
+                // phone can read it: there is no pointer to hover with, and
+                // this is the one fact about a call somebody can act on.
+                // **Only when there is something to act on.** A phone
+                // cannot hover, so the reason a call is *carried* is drawn
+                // here -- but a direct call has no reason to give, and
+                // saying "connected straight to them" under every working
+                // call is a line nobody needs twice. Unifying the decision
+                // above accidentally extended this to the happy path; the
+                // render said so.
+                if sigil::Form::of(ui.ctx()).is_phone()
+                    && call.path != Some(sigil_net::Path::Direct)
+                    && let Some((_, why)) = &travel
+                {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(why).small());
+                }
             });
     }
 }
@@ -9856,21 +10908,21 @@ impl ChatApp {
     /// their own key is send it to somebody, and what they do with the
     /// exchange's is compare it -- which the head and tail settle. The whole
     /// of it goes to the clipboard, and is on the hover for a pointer.
+    /// Your key, and nothing else.
+    ///
+    /// **The exchange's key is not yours and does not live here.** It was
+    /// a second row under this one, which put a key you cannot act on
+    /// beside the one key on this card that is about you. It is copied
+    /// where the exchange itself is chosen -- the domain control at the
+    /// top of the chat list -- which is where somebody wanting it is
+    /// already looking.
     fn me_keys_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme, key: &str) {
-        let mut rows: Vec<(&str, String, &str, &str)> = vec![(
+        let rows: Vec<(&str, String, &str, &str)> = vec![(
             "You",
             key.to_string(),
             "Copy your key",
             "the only thing that identifies you to somebody who wants to write to you",
         )];
-        if let Some(exchange) = state.exchange {
-            rows.push((
-                "Exchange",
-                exchange.to_string(),
-                "Copy the exchange's key",
-                "the exchange this conversation list belongs to",
-            ));
-        }
         for (said, whole, button, hover) in rows {
             ui.horizontal(|ui| {
                 ui.colored_label(theme.text_muted, egui::RichText::new(said).small());
@@ -10005,6 +11057,41 @@ impl ChatApp {
         {
             ctx.accounts.quiet.set_dnd(!dnd);
         }
+        // **How a call connects.** The switch existed only in the desktop's
+        // platform pane, which Android does not have -- so on a phone the
+        // preference was read by `direct_allowed` on every call and could
+        // never be set. Beside Do not disturb because it is the same kind
+        // of thing: the person's, across every identity, and a disclosure
+        // they should be the one to choose.
+        let direct = ctx.accounts.prefs.direct_calls;
+        // **It says which it is, not what pressing it would do.**
+        //
+        // It read "Connect calls directly" in both states and changed only
+        // a thin border, so pressing it looked like nothing happening --
+        // reported as "the button does not toggle" when it was toggling
+        // perfectly. A command names an action and invites a press; the
+        // switch beside it names a *state* ("Do not disturb" against
+        // "Notifications") and changes its mark with it, which is the
+        // shape somebody reads as a setting rather than a button.
+        let (said, icon) = if direct {
+            ("Calls connect directly", sigil_ui::Icon::Call)
+        } else {
+            ("Calls go through the exchange", sigil_ui::Icon::Public)
+        };
+        if sigil_ui::icon_item_as(ui, icon, said, direct)
+            .on_hover_text(if direct {
+                "The exchange introduces the two of you and the call goes straight between \
+             you — and the other person learns this device's address. Press to relay \
+             every call through the exchange instead."
+            } else {
+                "Every call is relayed by the exchange, which never learns less but never \
+             gives your address away either. Press to let calls go straight between you \
+             when both sides allow it."
+            })
+            .clicked()
+        {
+            ctx.accounts.prefs.set_direct_calls(!direct);
+        }
         ui.add_space(tokens::SPACING_MD);
         ui.colored_label(
             theme.text_muted,
@@ -10109,7 +11196,82 @@ impl ChatApp {
 
         ui.add_space(tokens::SPACING_SM);
         let backed_up = state.backup.as_ref().is_some_and(|b| b.held.is_some());
-        if state.devices.len() <= 1 && !backed_up {
+        // **Nothing has been said yet, so nothing is claimed.** Until the
+        // exchange has answered, an empty list is a question and not a
+        // fact; the warning below is about an account with one device, and
+        // drawing it here told somebody whose exchange was unreachable
+        // that their conversations were unrecoverable.
+        // Ask again once there is a link to ask over, and exactly once per
+        // link: an idempotent repeat every frame would spend a rate limit
+        // that the things somebody is waiting for also spend.
+        let up = state.link == session::LinkState::Up;
+        if !up {
+            self.pane(at).asked_devices = false;
+        } else if !state.devices_known && !self.pane(at).asked_devices {
+            self.pane(at).asked_devices = true;
+            self.send_as(Some(at), Cmd::Devices);
+        }
+        match (state.devices_known, state.devices_trouble.as_deref()) {
+            // Not connected, so the question has not been asked yet and
+            // saying it is being asked would be untrue.
+            (false, None) if !up => {
+                ui.colored_label(
+                    theme.text_muted,
+                    "Waiting for the exchange before asking which devices are linked…",
+                );
+                ui.add_space(tokens::SPACING_SM);
+            }
+            (false, Some(why)) => {
+                ui.colored_label(
+                    theme.warning,
+                    format!("Could not ask the exchange which devices are linked: {why}"),
+                );
+                ui.add_space(tokens::SPACING_SM);
+            }
+            (false, None) => {
+                ui.colored_label(
+                    theme.text_muted,
+                    "Asking the exchange which devices are linked…",
+                );
+                ui.add_space(tokens::SPACING_SM);
+            }
+            (true, _) => {}
+        }
+        // **An empty list is not "nothing else".**
+        //
+        // The warning below says *nothing else* is linked, which takes for
+        // granted that this device is. When the exchange answers with no
+        // devices at all, that reading is wrong and the card draws no row
+        // either -- so it warned about linking a second device while
+        // silently saying nothing about the first.
+        if state.devices_known && state.devices.is_empty() {
+            ui.colored_label(
+                theme.warning,
+                "The exchange lists no devices for this account — not even this one.",
+            );
+            ui.add_space(tokens::SPACING_SM);
+        }
+        // What this device holds, said whatever the exchange's list says.
+        // The count arrives on every catch-up and belongs on this device's
+        // row -- but there is no row when the list comes back empty, and
+        // the number is just as true then.
+        if state.devices.is_empty()
+            && let Some(n) = state.prekeys
+        {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!(
+                    "This device has {n} one-time keys at the exchange."
+                ))
+                .small(),
+            );
+            ui.add_space(tokens::SPACING_SM);
+        }
+        if state.devices_known
+            && !state.devices.is_empty()
+            && state.devices.len() <= 1
+            && !backed_up
+        {
             ui.colored_label(
                 theme.warning,
                 "Nothing else is linked. The conversations on this machine cannot be \
@@ -10128,6 +11290,7 @@ impl ChatApp {
             // revocation at its end; the whole key and the dates have rows
             // of their own, wrapped.
             let mut revoke = false;
+            let mut sign_out = false;
             ui.horizontal(|ui| {
                 sigil_ui::identicon(ui, &key, tokens::AVATAR_SM);
                 ui.add_space(tokens::SPACING_SM);
@@ -10143,6 +11306,26 @@ impl ChatApp {
                         .on_hover_text(
                             "It stops acting for you. It keeps every key it was already \
                              given, so rotate anything it could read.",
+                        )
+                        .clicked();
+                        ui.add_space(tokens::SPACING_SM);
+                    }
+                    // **The one row that had nothing to press.** Every
+                    // other device can be revoked; this one could not be
+                    // signed out, on any platform. Revoking is for a device
+                    // you have lost -- it keeps the keys it was given --
+                    // and is the wrong shape for the one in your hand.
+                    if device.is_this_one {
+                        sign_out = sigil_ui::icon_button_as_named(
+                            ui,
+                            sigil_ui::Icon::Switch,
+                            "Sign out",
+                            Some(theme.destructive),
+                            false,
+                        )
+                        .on_hover_text(
+                            "This device stops acting for the account. What is on this \
+                             disc stays on it and can no longer be fetched or posted to.",
                         )
                         .clicked();
                         ui.add_space(tokens::SPACING_SM);
@@ -10168,17 +11351,69 @@ impl ChatApp {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(format!(
-                        "linked {} · credential expires {}",
+                        "linked {} · credential expires {}{}",
                         sigil_ui::brief(device.added, self.now()),
-                        sigil_ui::brief(device.not_after, self.now())
+                        sigil_ui::brief(device.not_after, self.now()),
+                        // **SIP-23, and only for this device.** The
+                        // exchange counts one-time prekeys per device and
+                        // tells each one its own number on every catch-up;
+                        // it says nothing about anybody else's, so the
+                        // other rows must not imply a count they do not
+                        // have. `None` is a client that has not been told
+                        // yet, which is not a pool of nothing.
+                        match (device.is_this_one, state.prekeys) {
+                            (true, Some(n)) => format!(" · {n} one-time keys"),
+                            _ => String::new(),
+                        }
                     ))
                     .small()
                     .color(theme.text_muted),
                 )
                 .wrap(),
             );
+            // **A drained pool is not a broken one, and saying so wrongly
+            // would be worse than saying nothing.** The exchange serves the
+            // fallback prekey once the one-time pool runs dry, so people can
+            // still reach this device -- but a fallback is reused until it
+            // is replaced, and everything sealed against it shares that one
+            // secret. The device republishes as soon as it can reach the
+            // exchange, so this is a state to understand rather than an
+            // instruction to act on, and it is worded that way.
+            if device.is_this_one && state.prekeys == Some(0) {
+                ui.colored_label(
+                    theme.warning,
+                    egui::RichText::new(
+                        "No one-time keys left here. New conversations fall back to this device's last-resort key, which is reused until it is replaced; it publishes more as soon as it reaches the exchange.",
+                    )
+                    .small(),
+                );
+            }
             if revoke {
                 self.send_as(Some(at), Cmd::RevokeDevice(device.device));
+            }
+            if sign_out {
+                self.pane(at).confirming_sign_out = true;
+            }
+            // Asked twice, and told what it costs: from this device there
+            // is no undoing it, and a store with nothing else linked holds
+            // conversations nobody can read again (see this card's own
+            // heading).
+            if device.is_this_one && self.pane(at).confirming_sign_out {
+                ui.colored_label(
+                    theme.destructive,
+                    "This device stops acting for the account. It cannot sign itself back \
+                     in, and if nothing else is linked, what is only on this disc stays \
+                     unreadable.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Yes, sign out").clicked() {
+                        self.pane(at).confirming_sign_out = false;
+                        self.send_as(Some(at), Cmd::SignOutDevice(device.device));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pane(at).confirming_sign_out = false;
+                    }
+                });
             }
             ui.separator();
         }
@@ -10204,10 +11439,7 @@ impl ChatApp {
                 "Its key",
                 &mut self.panes.entry(at.clone()).or_default().linking,
                 "the new device's key, in base58",
-                Some(sigil_ui::Action::Mark(
-                    sigil_ui::Icon::Check,
-                    "Write credential",
-                )),
+                Some(sigil_ui::Action::Word("Write credential")),
             );
             if write {
                 // A phone shows its key as `sqx-device:<key>` (SIP-47), and
@@ -10281,7 +11513,10 @@ impl ChatApp {
             "",
             &mut self.panes.entry(at.clone()).or_default().pairing,
             "sqx-pair:<account>@<domain>, or name@domain",
-            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Check, "Go there")),
+            // A tick says "yes, that one"; this goes somewhere. The rule
+            // on `Action` says a word stays where no picture means the
+            // thing, and no picture here means "go".
+            Some(sigil_ui::Action::Word("Go there")),
         );
         if go {
             let typed = self.pane(at).pairing.trim().to_string();
@@ -10340,10 +11575,7 @@ impl ChatApp {
             "",
             &mut self.panes.entry(at.clone()).or_default().presenting,
             "the credential your other device wrote, in base58",
-            Some(sigil_ui::Action::Mark(
-                sigil_ui::Icon::Check,
-                "Register this device",
-            )),
+            Some(sigil_ui::Action::Word("Register this device")),
         );
         if register {
             let typed = self.pane(at).presenting.trim().to_string();
@@ -10521,7 +11753,7 @@ impl ChatApp {
             egui::vec2(ui.available_width(), rows),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                restore = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Restore")
+                restore = sigil_ui::apply_button(ui, "Restore")
                     .on_hover_text("Open the backup with these words and add what it holds")
                     .clicked();
                 ui.add_space(tokens::SPACING_SM);
@@ -10627,10 +11859,7 @@ impl ChatApp {
                 "",
                 &mut self.panes.entry(at.clone()).or_default().successor,
                 "the successor's key, in base58",
-                Some(sigil_ui::Action::Mark(
-                    sigil_ui::Icon::Check,
-                    "Write the will",
-                )),
+                Some(sigil_ui::Action::Word("Write the will")),
             );
             if write {
                 let typed = self.pane(at).successor.trim().to_string();
@@ -10734,7 +11963,7 @@ impl ChatApp {
                     ui.label("It takes");
                     ui.add(egui::DragValue::new(&mut threshold).range(1..=n as u8));
                     ui.label(format!("of {n}"));
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Lodge").clicked() {
+                    if sigil_ui::apply_button(ui, "Lodge").clicked() {
                         self.send_as(
                             Some(at),
                             Cmd::NameGuardians {
@@ -10826,7 +12055,7 @@ impl ChatApp {
             egui::vec2(ui.available_width(), rows),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                take = sigil_ui::icon_button_named(ui, sigil_ui::Icon::Check, "Take it")
+                take = sigil_ui::apply_button(ui, "Take it")
                     .on_hover_text("Present this and become the account")
                     .clicked();
                 ui.add_space(tokens::SPACING_SM);
@@ -10980,8 +12209,8 @@ mod ring_tests {
     /// leaves them with no way to tell where either of those is.
     #[test]
     fn a_ring_names_the_identity_it_arrived_at() {
-        let said = ring_said(&key(2), "Ada", "colin@squic.org", 3);
-        assert!(said.contains("Ada"), "{said}");
+        let said = ring_said(&key(2), "#general", "colin@squic.org", 3, false);
+        assert!(said.contains("#general"), "{said}");
         assert!(said.contains("colin@squic.org"), "{said}");
         // And the caller's key, abbreviated. A name is an assertion (SIP-21)
         // and the label above is one; this is not.
@@ -10991,11 +12220,33 @@ mod ring_tests {
         );
     }
 
+    /// **A direct message names the caller once.** Its label is the peer's
+    /// own name, so the group wording said the same human twice and read as
+    /// though a conversation called Ada contained a caller who was not Ada.
+    /// The group is the control: there the channel and the caller are two
+    /// different facts and both belong.
+    #[test]
+    fn a_direct_message_ring_does_not_name_the_conversation_as_well() {
+        let dm = ring_said(&key(2), "Ada", "colin@squic.org", 1, true);
+        assert!(!dm.contains("from"), "the caller is named twice: {dm}");
+        assert!(dm.contains("Ada"), "{dm}");
+        // The key is kept: a name is an assertion and this is not.
+        assert!(
+            dm.contains(&sigil_ui::message::short(&key(2).to_string())),
+            "{dm}"
+        );
+        let group = ring_said(&key(2), "#general", "colin@squic.org", 1, false);
+        assert!(
+            group.contains("from"),
+            "a group ring lost the caller: {group}"
+        );
+    }
+
     /// With one identity there is nothing to tell apart.
     #[test]
     fn a_ring_at_the_only_identity_does_not_name_it() {
-        let said = ring_said(&key(2), "Ada", "colin@squic.org", 1);
-        assert!(said.contains("Ada"), "{said}");
+        let said = ring_said(&key(2), "#general", "colin@squic.org", 1, false);
+        assert!(said.contains("#general"), "{said}");
         assert!(
             !said.contains("colin@squic.org"),
             "a fact nobody was in doubt about: {said}"
@@ -11061,6 +12312,200 @@ mod mention_notice_tests {
         let mut m = an_arrival(seq, in_open);
         m.mentions_me = true;
         m
+    }
+
+    /// The same, in a conversation of its own: for the missed-while-away
+    /// summary, which counts conversations as well as messages.
+    fn an_arrival_in(channel: u8, seq: u64) -> session::Arrival {
+        session::Arrival {
+            channel: [channel; 32],
+            conversation: format!("room-{channel}"),
+            ..an_arrival(seq, false)
+        }
+    }
+
+    /// **What a phone missed while it slept is said once, as one line.**
+    ///
+    /// `arrivals` is what came in while the session watched; a phone that
+    /// was off watched nothing, so its news lands in `unseen` -- which was
+    /// computed on every publish and read by nothing, so a window that woke
+    /// had always had the news and never said it.
+    #[test]
+    fn what_was_missed_while_away_is_one_notification() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        // Three missed in one conversation: one notice, counted, named,
+        // and leading back to the one place there is to go.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_missed_in(
+            &mut c,
+            1,
+            vec![(
+                at(),
+                "me".into(),
+                vec![
+                    an_arrival(1, false),
+                    an_arrival(2, false),
+                    an_arrival(3, false),
+                ],
+            )],
+        );
+        assert_eq!(noted.0.borrow().len(), 1, "{:?}", noted.0.borrow());
+        let (summary, body) = noted.0.borrow()[0].clone();
+        assert_eq!(summary, "3 messages in #general");
+        assert_eq!(body, "While you were away");
+        let (target, sound) = noted.1.borrow()[0].clone();
+        assert_eq!(
+            target,
+            Some(Target {
+                identity: key(4),
+                exchange: String::new(),
+                channel: [8u8; 32],
+                answer: false,
+            })
+        );
+        // Not the arrival tone: this lands as a phone is picked up, and an
+        // alert for something that happened hours ago is a startle.
+        assert_eq!(sound, Sound::None);
+
+        // The same three again, on the next publish of the same session:
+        // said once, not once a frame.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_missed_in(
+            &mut c,
+            1,
+            vec![(
+                at(),
+                "me".into(),
+                vec![
+                    an_arrival(1, false),
+                    an_arrival(2, false),
+                    an_arrival(3, false),
+                ],
+            )],
+        );
+        assert_eq!(
+            noted.0.borrow().len(),
+            1,
+            "said twice: {:?}",
+            noted.0.borrow()
+        );
+    }
+
+    /// Across several conversations it is still one notification, and it
+    /// leads nowhere in particular: with three places to go, pointing at
+    /// any one of them is a guess.
+    #[test]
+    fn what_was_missed_in_several_conversations_names_no_one_of_them() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_missed_in(
+            &mut c,
+            1,
+            vec![(
+                at(),
+                "me".into(),
+                vec![
+                    an_arrival_in(1, 1),
+                    an_arrival_in(1, 2),
+                    an_arrival_in(2, 1),
+                    an_arrival_in(3, 1),
+                ],
+            )],
+        );
+        assert_eq!(noted.0.borrow().len(), 1, "{:?}", noted.0.borrow());
+        let (summary, body) = noted.0.borrow()[0].clone();
+        assert_eq!(summary, "4 messages while you were away");
+        assert_eq!(body, "In 3 conversations");
+        assert_eq!(noted.1.borrow()[0].0, None, "it led somewhere it guessed");
+    }
+
+    /// **The control that matters.** Every live arrival is also unseen --
+    /// `live_from` is at or above `held_from` -- so a summary that did not
+    /// share the `announced` set would say everything twice: once as it
+    /// arrived, and again as though it had been missed.
+    #[test]
+    fn a_message_said_as_it_arrived_is_not_said_again_as_missed() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert_eq!(noted.0.borrow().len(), 1, "the arrival was not said");
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_missed_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert_eq!(
+            noted.0.borrow().len(),
+            1,
+            "a message that was said as it arrived was said again as missed: {:?}",
+            noted.0.borrow()
+        );
+    }
+
+    /// And in front of somebody, nothing: the conversation list's own
+    /// counts say it better than an interruption can. The control for the
+    /// three tests above, which all run away from the window.
+    #[test]
+    fn nothing_missed_is_announced_while_somebody_is_looking() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_missed_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert!(
+            noted.0.borrow().is_empty(),
+            "interrupted somebody who was looking: {:?}",
+            noted.0.borrow()
+        );
+
+        // And it is **absorbed**, not merely skipped: `unseen` keeps its
+        // floor for the life of the session, so anything still pending here
+        // would be announced the moment the window went to the back --
+        // "1 message while you were away", about a message read a second
+        // ago in front of them.
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_missed_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+        assert!(
+            noted.0.borrow().is_empty(),
+            "a message read in front of somebody was announced once they looked away: {:?}",
+            noted.0.borrow()
+        );
     }
 
     fn an_arrival(seq: u64, in_open: bool) -> session::Arrival {
@@ -11243,6 +12688,64 @@ mod mention_notice_tests {
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
         app.announce_rings(&mut c);
         assert!(noted.withdrawn().is_empty(), "a ring was taken down twice");
+    }
+
+    /// **A ring that was answered is taken down.**
+    ///
+    /// Answering does not remove a ring from `ringing` — it sets
+    /// `answered`, deliberately, because the log cannot say what is
+    /// *happening* and something has to. `withdraw_gone` withdrew only
+    /// rings that had left the list, on a comment that said all four
+    /// endings did, so the notification for a call somebody had just
+    /// picked up stayed on the shade: ongoing, unswipeable, still offering
+    /// Answer. Reported from the phone.
+    ///
+    /// The unanswered ring is the control: it is still ringing and must
+    /// stay up, or this would pass by withdrawing everything.
+    #[test]
+    fn answering_a_ring_takes_its_notification_down() {
+        for answered in [false, true] {
+            let noted = Noted::new();
+            let app = ChatApp::new();
+
+            let state = session::ChatState {
+                ringing: vec![session::Ring {
+                    channel: [8u8; 32],
+                    seq: 1,
+                    from: key(2),
+                    mine: false,
+                    secret: [0u8; 32],
+                    answered,
+                    label: "Ada".into(),
+                    direct: false,
+                    peer: Some(key(2)),
+                }],
+                ..Default::default()
+            };
+            let (tx, rx) = tokio::sync::watch::channel(state);
+            // Kept alive: a dropped sender closes the channel and the
+            // session is no longer watched.
+            let _tx = tx;
+            app.announcer.watch(at(), rx);
+
+            let to = target(&at(), [8u8; 32]);
+            app.announcer.post_ring_for_test(([8u8; 32], 1), to.clone());
+
+            // **`rings_only`, not `announce_rings`.** The latter calls
+            // `frame` first, which replaces the watched sessions with
+            // `ChatApp`'s own -- empty here -- so the ring would look gone
+            // for the reason this test is not about, and both legs would
+            // pass. That wiring is covered by the test above; what is
+            // being checked here is which rings `withdraw_gone` counts as
+            // still live.
+            app.announcer.rings_only(&noted);
+            let taken = noted.withdrawn();
+            assert_eq!(
+                taken,
+                if answered { vec![to] } else { vec![] },
+                "answered={answered}: the wrong thing was taken down"
+            );
+        }
     }
 
     /// With several identities held, which one was mentioned; with one,
@@ -11508,12 +13011,12 @@ mod showing_tests {
 mod label_tests {
     use super::*;
 
-    fn at(domain: Option<&str>, key: Option<u8>) -> ChatState {
-        ChatState {
-            domain: domain.map(str::to_string),
-            exchange: key.map(|b| PubKey::new([b; 32])),
-            ..ChatState::default()
-        }
+    /// The two fields the label is made of, which is all it is given.
+    fn at(domain: Option<&str>, key: Option<u8>) -> (Option<String>, Option<PubKey>) {
+        (
+            domain.map(str::to_string),
+            key.map(|b| PubKey::new([b; 32])),
+        )
     }
 
     /// The domain, when the connection was discovered at one.
@@ -11565,6 +13068,7 @@ mod first_look_tests {
             group: false,
             typing: false,
             waiting: false,
+            avatar: None,
         }
     }
 

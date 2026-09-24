@@ -238,6 +238,22 @@ pub struct Arrival {
 /// called when only mentions were said out loud.
 pub type Mention = Arrival;
 
+/// Whether an event is a call, and whether anybody took it.
+///
+/// A call is the one thing in a transcript a reader may still act on --
+/// ring back -- so it gets a clock beside it that a membership change does
+/// not, and the one that went unanswered is the only one coloured. A
+/// missed call used to read in the same muted grey as "Ada added Bram",
+/// and in a column of them there was nothing to catch the eye.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Call {
+    /// Answered, declined, cancelled, or placed from here and not taken.
+    /// Something a reader may want the time of, but nothing is owed.
+    Was,
+    /// Somebody rang this account and nobody here answered.
+    Missed,
+}
+
 /// Something that happened *to* the conversation rather than in it.
 ///
 /// The exchange writes and signs an entry for every membership and metadata
@@ -259,6 +275,9 @@ pub struct Happened {
     /// Anything a reader would otherwise have to know. `None` for the events
     /// that mean exactly what they say.
     pub caveat: Option<&'static str>,
+    /// When this event is a call, which kind. `None` for everything else:
+    /// a membership change wants no clock beside it.
+    pub call: Option<Call>,
 }
 
 /// What a message replies to, as the reply shows it.
@@ -524,6 +543,16 @@ pub struct Summary {
     /// A conversation waiting to start, **not** a failure to open one — the
     /// difference is what somebody sees on the screen.
     pub waiting: bool,
+    /// SIP-16: the channel's picture, as the bytes that draw it.
+    ///
+    /// **The preview, not the blob.** An attachment carries a small copy
+    /// inline -- the same bytes a message thumbnail is drawn from -- so a
+    /// picture costs no fetch and no second lifetime rule. At the size a
+    /// row draws a mark, the preview is the whole of what is needed.
+    ///
+    /// Only a room has one. A direct message draws the other party, whose
+    /// picture is their profile's (SIP-21) and not this.
+    pub avatar: Option<Vec<u8>>,
 }
 
 /// Everything the interface needs to draw chat.
@@ -570,6 +599,49 @@ pub struct ChatState {
     /// version restarted such a session every three seconds and minted
     /// sixty-five prekeys each time, for a week (2026-09-22).
     pub moved_to: Option<(PubKey, String)>,
+    /// Whether [`ChatState::devices`] is the exchange's answer or just a
+    /// vector nobody has filled yet.
+    ///
+    /// **An empty list and an unanswered one looked identical**, and the
+    /// card drew its "nothing else is linked" warning on `len() <= 1` --
+    /// which is exactly as true of a fetch that failed as of an account
+    /// with one device. A refusal, an exchange that could not be reached,
+    /// a card opened a moment too early: each of them rendered as a
+    /// confident claim about the account.
+    pub devices_known: bool,
+    /// Why a join from the public-channels pane was refused, if one was.
+    ///
+    /// **Its own field, because the pane drew the general `trouble`.** That
+    /// field is set by *any* failing command and cleared by none, so a call
+    /// that could not be placed hours earlier was still being drawn in red
+    /// above a directory listing that had just answered perfectly -- where
+    /// it reads as "this pane is not connected", which it was not.
+    pub join_trouble: Option<String>,
+    /// SIP-24: this exchange does not admit this account, named as this
+    /// client reaches it.
+    ///
+    /// An exchange running a whitelist refuses every gated route with
+    /// `NotWhitelisted`, so the session cannot do anything at all -- and
+    /// the one route left open is `/admission/request`, which is the way
+    /// in. Without this the refusal arrived as an ordinary error string and
+    /// retried for ever, and the whole of SIP-24 had nothing that asked.
+    pub not_admitted: Option<String>,
+    /// Why the device list could not be fetched, if it could not.
+    ///
+    /// Its own field rather than the general `trouble`, because this card
+    /// has to choose between three sentences -- asking, could not ask, and
+    /// nothing else is linked -- and the general one cannot tell it which.
+    pub devices_trouble: Option<String>,
+    /// SIP-23: one-time prekeys this exchange still holds for **this**
+    /// device, as it counted them at the last catch-up.
+    ///
+    /// `None` until an exchange has said, which is not the same fact as
+    /// zero: zero is a drained pool, and not knowing is a client that has
+    /// not asked yet. The number arrived on every catch-up from the day
+    /// catch-up existed and went straight into a log line, so a pool that
+    /// had run dry was invisible here while being perfectly visible to the
+    /// exchange serving the fallback in its place.
+    pub prekeys: Option<u16>,
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
@@ -581,6 +653,12 @@ pub struct ChatState {
     /// Which conversation is on screen, and what is in it.
     pub open: Option<[u8; 32]>,
     pub lines: Vec<Line>,
+    /// SIP-59: where the open direct message's peer's account lives, when
+    /// this exchange knows. **Not the domain their handle is registered
+    /// at** — a name is bound per exchange and somebody may hold one here
+    /// as an alias while living somewhere else, which is exactly the case
+    /// that decides whether a call needs SIP-39's bridge.
+    pub peer_home: Option<(PubKey, String)>,
     /// SIP-53 §Posting again: this client's own posts that a move stranded
     /// in the open conversation, oldest first. Offered above the composer,
     /// one at a time.
@@ -746,6 +824,26 @@ pub struct ChatState {
     pub divider: Option<u64>,
     /// How many there were, for the divider's label. Frozen with it.
     pub unread_on_open: usize,
+}
+
+impl ChatState {
+    /// Whether the conversation on screen is a direct message.
+    ///
+    /// **One answer, because five copies of it disagreed.** A direct
+    /// message is a conversation whose identifier stands for two accounts,
+    /// which is what `peer` records. The fold below was written out
+    /// independently at every place that needed it, and the places that
+    /// needed it are the places that decide whether a *room's* rules apply
+    /// -- naming, moderation, who may take a message down. One of them
+    /// reached for `i_am_admin` instead and offered one party of a direct
+    /// message a moderator's powers over the other, on the strength of a
+    /// comment claiming direct messages have no admins. They have two.
+    pub fn open_is_direct(&self) -> bool {
+        self.conversations
+            .iter()
+            .find(|c| Some(c.channel) == self.open)
+            .is_some_and(|c| c.peer.is_some())
+    }
 }
 
 /// One message a local search turned up.
@@ -1307,6 +1405,22 @@ pub enum Cmd {
     Reconnect,
     /// Put the open conversation away. What "back" means in a single pane.
     Close,
+    /// SIP-59: where a peer's account lives, asked once and cached.
+    ///
+    /// **Its own command, not part of opening.** It was a round trip inside
+    /// `Show`'s handler, which runs on the session's own loop on the way
+    /// in — so opening a conversation waited on a lookup that opening a
+    /// conversation does not need. Whether a call to them wants SIP-39's
+    /// bridge is not urgent; the chat list is.
+    PeerHome(PubKey),
+    /// SIP-17: ask for an epoch key this device was not sent.
+    ///
+    /// Asks the exchange for an envelope sealed to this device, and where
+    /// none has been left and this account may mint one, mints the next
+    /// epoch and seals it to everybody present. In a direct message both
+    /// parties may, which is what makes this the way out of being
+    /// stranded there.
+    AskForKey,
     /// SIP-53 §Posting again: send one of this client's stranded posts
     /// again, as a new entry saying when it was first said.
     PostAgain(u64),
@@ -1537,6 +1651,10 @@ pub enum Cmd {
     /// with a credential the account signed *after* the revocation — the one
     /// thing that was never on it.
     RevokeDevice(PubKey),
+    /// SIP-22: sign *this* client out, locally. The exchange records it on
+    /// its own authority — a device holds no account key, so there is no
+    /// artifact to repeat. For a device you have lost, revoke it instead.
+    SignOutDevice(PubKey),
     /// Hand the open channel's key to our own other devices.
     ResealToSiblings,
     /// Ask an exchange that does not admit us to let us in (SIP-24).
@@ -1657,6 +1775,25 @@ impl Closing {
 impl ChatHandle {
     pub fn state(&self) -> ChatState {
         self.state.borrow().clone()
+    }
+
+    /// The exchange this session reached, and the home carrying it —
+    /// **without cloning the state around them**.
+    ///
+    /// `state()` copies the whole of what the interface reads: the open
+    /// conversation's lines, everybody's profile, the conversation list.
+    /// The title strip wanted two fields out of it *per exchange row, per
+    /// frame*, and paid for all of it each time.
+    pub fn where_it_is(&self) -> (Option<PubKey>, Option<String>) {
+        let state = self.state.borrow();
+        (state.exchange, state.carried.clone())
+    }
+
+    /// The same, plus the domain: what the title strip calls this
+    /// exchange, again without copying what the strip is not drawing.
+    pub fn how_it_is_named(&self) -> (Option<String>, Option<PubKey>) {
+        let state = self.state.borrow();
+        (state.domain.clone(), state.exchange)
     }
 
     /// The state's own channel, to be read without this handle: what the
@@ -2255,6 +2392,38 @@ async fn run(
             (wake)();
             return Ok(());
         }
+        // **Unverified against a real refusal (2026-09-24).** Pointing this
+        // client at an exchange whose whitelist excludes it did *not* reach
+        // here: the session sat in `Retrying` indefinitely, because the
+        // library retries the connection internally and reports only
+        // `Link::Retrying` -- no code, no reason. So this arm fires for an
+        // exchange that admits the *connection* and refuses the account's
+        // routes, which is what `server.admitted` does and why
+        // `/admission/request` is exempt from it; it does not fire when the
+        // connection itself never completes. Telling those apart needs the
+        // library to surface why a dial failed, which it does not.
+        //
+        // **SIP-24: not admitted here.** An exchange with a whitelist
+        // refuses every gated route with this code, so nothing else this
+        // session would try can succeed -- retrying is the wrong shape.
+        // Parked like the moved case above, and said with the one thing
+        // that can be done about it, because `/admission/request` is open
+        // exactly when everything else is not.
+        Err(sqex_chat::client::ChatError::Refused(_, ref r))
+            if r.code == sqex_proto::refusal::Code::NotWhitelisted =>
+        {
+            let here = chat
+                .domain()
+                .map(str::to_string)
+                .unwrap_or_else(|| endpoint.server.to_string());
+            state.send_modify(|s| {
+                s.link = LinkState::Gone;
+                s.not_admitted = Some(here.clone());
+                s.trouble = Some(format!("{here} does not admit this account"));
+            });
+            (wake)();
+            return Ok(());
+        }
         Err(e) => return Err(e.to_string()),
     }
     // SIP-47 §Catching up in one round trip: everything that moved while this client was away, in one
@@ -2660,6 +2829,19 @@ impl Known {
             unread: self.unread,
             mentioned: self.mentioned,
             waiting: self.waiting,
+            // A direct message is drawn as the person in it, so a channel
+            // picture on one would be a second mark for the same party.
+            avatar: self
+                .peer
+                .is_none()
+                .then(|| {
+                    self.timeline
+                        .avatar
+                        .as_ref()
+                        .map(|a| a.preview.clone())
+                        .filter(|b| !b.is_empty())
+                })
+                .flatten(),
             preview: self.preview(me),
             at: (self.last_at > 0).then_some(self.last_at),
             public: self.public,
@@ -2760,6 +2942,9 @@ struct Desk {
     dirty: HashSet<[u8; 32]>,
     /// SIP-56: reports announced since the admin last read them.
     reports_pending: usize,
+    /// SIP-23: one-time prekeys the exchange still holds for this device,
+    /// as of the last catch-up. `None` until one has said.
+    prekeys: Option<u16>,
     /// SIP-39: a cross-exchange call ringing, and when it began, so one
     /// nobody answers stops ringing on its own.
     cross_ring: Option<(CrossRing, std::time::Instant)>,
@@ -2860,15 +3045,20 @@ struct Desk {
     /// fixed length: the loop waits on the exchange and falls back to a timer
     /// whose interval depends on whether anything is outstanding.
     synced_at: std::time::Instant,
+    /// SIP-59: where each peer's account lives, asked once. A round trip,
+    /// and the answer only changes when somebody moves home.
+    peer_homes: HashMap<PubKey, (PubKey, String)>,
 }
 
 impl Default for Desk {
     fn default() -> Self {
         Desk {
             channels: HashMap::new(),
+            peer_homes: HashMap::new(),
             open: None,
             dirty: HashSet::new(),
             reports_pending: 0,
+            prekeys: None,
             cross_ring: None,
             roster_dirty: HashSet::new(),
             cursors_moved: HashSet::new(),
@@ -3955,6 +4145,10 @@ async fn catch_up(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut 
         prekeys = answer.prekeys,
         "caught up in one round trip"
     );
+    // The count the exchange just gave us, kept rather than only logged: a
+    // pool that has run dry is a fact about this device somebody can act on,
+    // and a log line is not somewhere anybody looks.
+    desk.prekeys = Some(answer.prekeys);
     desk.answered.extend(accepted);
     let _ = publish(chat, state, desk, me);
 }
@@ -4117,13 +4311,20 @@ async fn refresh_devices(chat: &mut Chat, state: &watch::Sender<ChatState>, desk
             })
             .collect(),
         Err(e) => {
+            // Said on the card as well as in the general place: a list that
+            // stays empty because nobody answered must not read as a list
+            // that is empty, and "asking..." for ever is its own untruth.
+            let why = e.to_string();
             trouble(state, e);
+            state.send_modify(|s| s.devices_trouble = Some(why));
             return;
         }
     };
     let linked = chat.still_linked().await.ok().flatten();
     state.send_modify(|s| {
         s.devices = devices;
+        s.devices_known = true;
+        s.devices_trouble = None;
         s.linked = linked;
     });
 }
@@ -5387,6 +5588,9 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
     // SIP-53 §Posting again. Read here for the same reason the copies are:
     // one indexed query for a conversation that was never forked, which is
     // all of them until one is.
+    let peer_home = open
+        .and_then(|(_, k)| k.peer)
+        .and_then(|peer| desk.peer_homes.get(&peer).cloned());
     let stranded: Vec<Stranded> = open
         .map(|(c, _)| chat.stranded_posts(&c))
         .unwrap_or_default();
@@ -5546,6 +5750,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                         actor,
                         subject,
                         caveat,
+                        call: None,
                     }
                 })
                 .collect()
@@ -5606,6 +5811,16 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                 actor: call.account,
                 subject: call.account,
                 caveat: None,
+                // **Only a call nobody here took is coloured.** Declining
+                // and cancelling are decisions somebody made, and a call
+                // this side placed that went unanswered is the caller's
+                // own business -- none of them is owed anything. A call
+                // that rang here and was not answered is the one line in a
+                // transcript that is still a thing to do.
+                call: Some(match outcome {
+                    CALL_MISSED if !mine => Call::Missed,
+                    _ => Call::Was,
+                }),
             });
         }
         // Back into the exchange's own order: the calls were appended and the
@@ -5793,6 +6008,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(lines, lines);
         set!(copies, copies);
         set!(stranded, stranded);
+        set!(peer_home, peer_home);
         set!(events, events);
         set!(earlier, earlier);
         set!(loading, loading);
@@ -5804,6 +6020,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(members, members);
         set!(i_am_admin, i_am_admin);
         set!(reports_pending, desk.reports_pending);
+        set!(prekeys, desk.prekeys);
         set!(topic, topic);
         set!(home, home);
         set!(ringing, ringing);
@@ -5916,7 +6133,7 @@ mod stub_tests {
     #[test]
     fn a_short_message_is_quoted_whole_and_on_one_line() {
         assert_eq!(stub("two\nlines"), "two lines");
-        assert_eq!(stub("  spaced   out  "), "spaced out");
+        assert_eq!(stub("  spaced out  "), "spaced out");
         assert!(!stub("short").ends_with('…'));
     }
 }
@@ -6269,6 +6486,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         },
         Cmd::Show(channel) => {
             open(desk, state, channel);
+
             // **At once, from the disc.** `open` clears the transcript and
             // marks the channel for the next poll, and the poll is a round
             // trip: until this, opening a conversation showed an empty pane
@@ -6322,6 +6540,57 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             {
                 known.wanted += PAGE;
                 desk.dirty.insert(channel);
+            }
+        }
+        Cmd::PeerHome(peer) => {
+            // **A failure here is said, not swallowed.** Where a peer lives
+            // decides whether a call is placed at this exchange or bridged
+            // to theirs (SIP-39), and an unknown home is read as "here" --
+            // so a dropped error becomes a call that rings, connects to a
+            // room at the wrong exchange and carries nothing. That is what
+            // it did, twice, with nothing in the log to say why.
+            if desk.peer_homes.contains_key(&peer) {
+                return;
+            }
+            match chat.account_home(&peer).await {
+                Ok(homed) if !homed.domain.is_empty() => {
+                    desk.peer_homes.insert(peer, (homed.home, homed.domain));
+                    desk.restructure = true;
+                }
+                // **No domain is an answer, and is recorded as one.** An
+                // account at an exchange reached by address has no name to
+                // be bridged to (SIP-39 takes a handle), so the ordinary
+                // path is right for it -- and leaving the entry out made
+                // that indistinguishable from never having found out,
+                // which is a different thing entirely and wants different
+                // handling at the handset. `elsewhere_handle` already
+                // reads an empty domain as "here"; what it could not read
+                // was the absence.
+                Ok(homed) => {
+                    tracing::debug!(%peer, "this peer's home has no domain; the ordinary path it is");
+                    desk.peer_homes.insert(peer, (homed.home, String::new()));
+                    desk.restructure = true;
+                }
+                Err(why) => tracing::warn!(%peer, %why, "could not ask where this peer lives"),
+            }
+        }
+        Cmd::AskForKey => {
+            let Some(channel) = desk.open else { return };
+            match chat.ensure_epoch(&channel).await {
+                Ok(epoch) => {
+                    desk.dirty.insert(channel);
+                    desk.restructure = true;
+                    note(
+                        state,
+                        format!(
+                            "You hold the key for epoch {epoch}. What was said under an \
+                             earlier one stays with it."
+                        ),
+                    );
+                }
+                // The honest answer where nobody has sealed one and this
+                // account may not mint: there is nothing more to press.
+                Err(e) => trouble(state, e),
             }
         }
         // SIP-53 §Posting again: a new entry, carrying `Said` so every
@@ -7148,6 +7417,16 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 },
             }
         }
+        Cmd::SignOutDevice(device) => match chat.sign_out_device(&device).await {
+            Ok(()) => {
+                note(
+                    state,
+                    "Signed out. This device no longer acts for the account.".into(),
+                );
+                desk.restructure = true;
+            }
+            Err(e) => trouble(state, e),
+        },
         Cmd::RevokeDevice(device) => match chat.revoke_device(&device).await {
             Ok(()) => {
                 refresh_devices(chat, state, desk).await;
@@ -7329,6 +7608,9 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         // from before answers only its own, which `search` reads for us.
         Cmd::Find(query) => match chat.search(&query, 0).await {
             Ok(listing) => {
+                // A new search is a new question, and a refusal from the
+                // last one must not be drawn over its answer.
+                state.send_modify(|s| s.join_trouble = None);
                 let mut found = Vec::with_capacity(listing.rows.len());
                 for c in listing.rows {
                     // SIP-43: a copy of a room from elsewhere is listed with
@@ -7366,9 +7648,17 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::Join { channel, instance } => match chat.join(&channel, instance).await {
             Ok(()) => {
                 desk.restructure = true;
+                state.send_modify(|s| s.join_trouble = None);
                 open(desk, state, channel);
             }
-            Err(e) => trouble(state, e),
+            // Said in the general place as well, which is where somebody
+            // looking at a conversation would see it -- and in the pane's
+            // own field, which is the one the pane draws.
+            Err(e) => {
+                let why = e.to_string();
+                trouble(state, e);
+                state.send_modify(|s| s.join_trouble = Some(why));
+            }
         },
 
         Cmd::Invite(who) => {
