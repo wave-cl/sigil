@@ -82,6 +82,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = claim(dir.path()).unwrap();
         drop(first);
-        assert!(claim(dir.path()).is_ok(), "a released claim can be retaken");
+        // **Say what went wrong, not that something did.** `claim` fails
+        // for a held lock *and* for a path it cannot open, and a bare
+        // `is_ok()` reported both as "a released claim can be retaken" --
+        // which names the expectation and hides the cause. This failed
+        // twice under `cargo test --workspace` and never alone, and the
+        // message was the same both times and told nobody anything.
+        if let Err(why) = claim(dir.path()) {
+            panic!("a released claim could not be retaken: {why}");
+        }
     }
 }
