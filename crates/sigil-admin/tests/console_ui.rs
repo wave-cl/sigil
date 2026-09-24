@@ -578,6 +578,22 @@ fn nothing_in_the_console_is_out_of_reach_on_a_phone() {
         let mut h = harness_phone(state);
         h.run();
         h.run();
+        // **Opened first.** The console's areas are folded on a phone, so
+        // shut it fits the screen -- which is what the fold is for, and
+        // which leaves nothing for the sweep below to prove. What this
+        // test is about is the console at its longest: every area open,
+        // and still nothing out of reach.
+        for area in [
+            "Whitelist",
+            "Admission",
+            "Names",
+            "Relay peers",
+            "Audit and status",
+            "Answers",
+        ] {
+            h.get_by_label(area).click();
+            h.run();
+        }
         let before = deepest(&h);
         // The control, inside the test: a pane that already fits has nothing
         // to scroll, and then scrolling proves nothing about it.

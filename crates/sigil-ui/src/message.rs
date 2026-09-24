@@ -418,21 +418,38 @@ fn centred(
     );
     let gap = ui.spacing().item_spacing.x;
     let width = ((ui.available_width() - text.size().x) * 0.5 - gap).max(0.0);
-    let row = ui.horizontal(|ui| {
-        let line = |ui: &mut egui::Ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-            if let Some(colour) = rule {
-                ui.painter()
-                    .hline(rect.x_range(), rect.center().y, (1.0, colour));
-            }
-        };
-        line(ui);
-        ui.add(egui::Label::new(text).selectable(false));
-        line(ui);
-    });
+    // **Nothing here is tappable, so nothing here is finger-sized.** A
+    // row is at least `interact_size.y` tall, which the phone form raises
+    // to a thumb's worth -- so every centred marker stood 44 high around
+    // fourteen pixels of text, and four calls in a row ate a quarter of
+    // the screen with nothing in it. The rules and the label allocate
+    // exactly what they need; this lets them.
+    //
+    // Set on the ui the row is *made from*: a row's minimum is fixed when
+    // it is created, so doing this inside the closure changed nothing and
+    // the measurement said so.
+    let row = ui
+        .scope(|ui| {
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.horizontal(|ui| {
+                let line = |ui: &mut egui::Ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+                    if let Some(colour) = rule {
+                        ui.painter()
+                            .hline(rect.x_range(), rect.center().y, (1.0, colour));
+                    }
+                };
+                line(ui);
+                ui.add(egui::Label::new(text).selectable(false));
+                line(ui);
+            })
+            .response
+        })
+        .inner;
     // `horizontal` senses nothing on its own, so the row it returns would
     // never report a hover -- the same trap as a `Frame`'s response.
-    row.response.interact(egui::Sense::hover())
+    row.interact(egui::Sense::hover())
 }
 
 /// A date, once, above the first message of each day.
@@ -475,22 +492,61 @@ pub fn copy_separator(ui: &mut egui::Ui, label: &str) {
 /// and a client that dressed it as a message would be putting words in the
 /// mouth of whoever it names.
 /// Returns the row, so a caller can hang the keys it names off it.
+/// A call in the transcript: what it was, when, and whether it is still
+/// a thing to do.
+///
+/// **The clock is the point.** Every message beside these carries one and
+/// a call carried none, so a column of "Ada called, 31s" answered
+/// everything except the question somebody actually has about a missed
+/// call. `Happened` held the time all along.
+///
+/// `missed` is the only one coloured, and only for a call that rang *here*
+/// and went unanswered: declining and cancelling are decisions somebody
+/// made, and one placed from here that nobody took is the caller's own
+/// business. Colouring all of them would make the colour mean "a call"
+/// rather than "your move".
+pub fn call_line(ui: &mut egui::Ui, said: &str, at: u64, missed: bool) -> egui::Response {
+    let theme = ColorTheme::current(ui.ctx());
+    let colour = if missed {
+        theme.destructive
+    } else {
+        theme.text_muted
+    };
+    marker(ui, &format!("{said} · {}", crate::clock(at)), colour)
+}
+
 pub fn system_line(ui: &mut egui::Ui, said: &str) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
-    ui.add_space(tokens::SPACING_SM);
-    let row = centred(
-        ui,
-        egui::RichText::new(said)
-            .small()
-            .color(theme.text_muted)
-            .into(),
-        // No rules. The day separator and the unread mark both have them, and
-        // a third thing wearing the same clothes reads as one of those two --
-        // this one is a sentence, and should look like one.
-        None,
-    );
-    ui.add_space(tokens::SPACING_XS);
-    row
+    marker(ui, said, theme.text_muted)
+}
+
+/// One centred line of small text, and the room around it.
+fn marker(ui: &mut egui::Ui, said: &str, colour: egui::Color32) -> egui::Response {
+    // **One line's worth of room, not four gaps' worth.** This is three
+    // items in a vertical layout -- a space, a row, a space -- and egui
+    // puts `item_spacing.y` between each of them *and* around the lot, so
+    // the 12px asked for here arrived as 50. On a phone that made a
+    // fourteen-pixel sentence 64 tall, and four calls in a row ate a
+    // quarter of the screen with nothing in it. Measured off a screenshot
+    // of a real conversation, then off the harness; the test below this
+    // holds the number.
+    //
+    // Zeroed inside and spaced by hand, so the padding is the padding.
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add_space(tokens::SPACING_SM);
+        let row = centred(
+            ui,
+            egui::RichText::new(said).small().color(colour).into(),
+            // No rules. The day separator and the unread mark both have them, and
+            // a third thing wearing the same clothes reads as one of those two --
+            // this one is a sentence, and should look like one.
+            None,
+        );
+        ui.add_space(tokens::SPACING_XS);
+        row
+    })
+    .inner
 }
 
 /// The frozen line above the first message that was unread on opening.

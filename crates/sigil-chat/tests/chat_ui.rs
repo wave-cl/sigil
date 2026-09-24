@@ -632,3 +632,80 @@ fn the_same_state_draws_the_same_way_twice() {
         "something drawn here changes between runs, so no snapshot of it can pass twice"
     );
 }
+
+/// **A refusal that offers the way out of itself.**
+///
+/// Adding an exchange this identity already has is refused where it was
+/// typed. But removing one lives as a small cross in the title strip's
+/// dropdown, which is not where somebody who has just tried to add one is
+/// looking — so the refusal was a dead end, and the only move was to
+/// cancel and go hunting. Found by walking into it.
+#[test]
+fn being_told_you_already_have_an_exchange_offers_to_remove_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift(unlocked(dir.path()));
+    h.run();
+
+    fn type_and_add(h: &mut egui_kittest::Harness<'static>, domain: &str) {
+        let field = h.get(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        );
+        field.focus();
+        field.type_text(domain);
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+        h.run();
+    }
+
+    h.get_by_label("Add a different exchange").click();
+    h.run();
+    type_and_add(&mut h, "indra.org");
+
+    // The same one again, by the route that still exists once there is an
+    // exchange: the title strip's own list.
+    h.get_by_label("Exchange").click();
+    h.run();
+    h.get_by_label("Add a domain…").click();
+    h.run();
+    type_and_add(&mut h, "indra.org");
+
+    let said = text_of(&h);
+    assert!(
+        said.contains("already connected to indra.org"),
+        "adding the same exchange twice was not refused: {said}"
+    );
+    assert!(
+        said.contains("Remove indra.org"),
+        "the refusal was a dead end: {said}"
+    );
+
+    // **And pressing it visibly finishes.** The dialog closes and the
+    // exchange is gone -- a modal that stayed put after the thing it was
+    // arguing about had been removed would be a press that looks like it
+    // did nothing, which is how the switch on this same card was reported
+    // broken while working perfectly.
+    h.get_by_label("Remove indra.org").click();
+    h.run();
+    h.run();
+    let after = text_of(&h);
+    assert!(
+        !after.contains("already connected to indra.org"),
+        "the dialog is still arguing about an exchange that is gone: {after}"
+    );
+    assert!(
+        !after.contains("Remove indra.org"),
+        "the offer outlived the thing it offered: {after}"
+    );
+    // **And the window is not left showing a removed exchange.** A pane is
+    // keyed by `(identity, exchange)`, so going back to the default is what
+    // actually takes the dialog off the screen here -- the `dialog = None`
+    // beside it only bites on the path where the exchange removed *was* the
+    // default. Asserting the pane field instead passed with that line
+    // deleted, which is how this one came to be written.
+    assert!(
+        !after.contains("indra.org"),
+        "the window is still showing the exchange that was removed: {after}"
+    );
+}

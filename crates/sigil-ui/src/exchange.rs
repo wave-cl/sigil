@@ -19,6 +19,18 @@ pub struct ExchangeRow {
     /// not a name in the roster but what the identity resolves to, and there
     /// would be nothing to remove.
     pub removable: bool,
+    /// Its public key, where this identity has reached it and knows one.
+    ///
+    /// **Copied from here, and not drawn.** It used to sit on the Settings
+    /// card under the reader's own key, which put a key nobody can act on
+    /// beside the one key that is about them; it belongs where the
+    /// exchange is chosen, because somebody who wants an exchange's key is
+    /// looking at the list of exchanges. It is *offered* and not shown:
+    /// forty-four characters of base58 in a menu row is a wall nobody
+    /// reads, and what anybody does with this key is paste it. (It was
+    /// drawn in full until 2026-09-23 on the argument that a client must
+    /// be able to pin it; the copy is that, without the wall.)
+    pub key: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -91,8 +103,14 @@ pub fn exchange_control(
             ui.set_max_width(260.0);
             for row in rows {
                 let is_selected = row.name == selected;
-                let (chosen, removed) =
-                    exchange_row(ui, theme, &row.label, is_selected, row.removable);
+                let (chosen, removed) = exchange_row(
+                    ui,
+                    theme,
+                    &row.label,
+                    is_selected,
+                    row.removable,
+                    row.key.as_deref(),
+                );
                 if chosen && !is_selected {
                     action.chosen = Some(row.name.clone());
                     ui.close();
@@ -132,6 +150,7 @@ fn exchange_row(
     label: &str,
     selected: bool,
     removable: bool,
+    key: Option<&str>,
 ) -> (bool, bool) {
     // A finger's row on a phone, a pointer's in a window: this is a menu
     // reached from the app bar, where the other rows are already the
@@ -171,6 +190,26 @@ fn exchange_row(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let mut removed = false;
+    // **From the right, in the order they are drawn.** Remove keeps the
+    // corner it has always had; the copy sits inside it, so a row with
+    // both does not move the control somebody already knows where to find.
+    let taken = if removable { height } else { 0.0 };
+    if let Some(key) = key {
+        let square = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - taken - height / 2.0, rect.center().y),
+            egui::vec2(height, height),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(square), |ui| {
+            if sigil::icon::icon_button_named(ui, sigil::Icon::Copy, "Copy the exchange's key")
+                .on_hover_text(format!(
+                    "{key}\nthe key this exchange's receipts verify under"
+                ))
+                .clicked()
+            {
+                ui.ctx().copy_text(key.to_string());
+            }
+        });
+    }
     if removable {
         // Drawn **into** the row's rectangle, at its right, after the row --
         // so it is on top and wins the press over the row underneath it, and

@@ -20,7 +20,7 @@ pub mod working;
 
 pub use attachment::{Attachment, AttachmentAction, GalleryAction, attachment, gallery};
 pub use clock::{brief, clock, day_label, day_of, stamp};
-pub use conversation_row::{ConversationRow, conversation_row};
+pub use conversation_row::{ConversationRow, conversation_row, one_line};
 pub use dot::dot;
 pub use exchange::{ExchangeAction, ExchangeRow, exchange_control};
 pub use video::{Standing, Video, VideoAction, video};
@@ -396,8 +396,8 @@ fn field_as(
     )
 }
 pub use message::{
-    Bubble, BubbleAction, Quote, Reaction, Receipt, Thumb, bubble, copy_separator, day_separator,
-    reaction_chip, short, system_line, unread_divider, unread_pill, verified_mark,
+    Bubble, BubbleAction, Quote, Reaction, Receipt, Thumb, bubble, call_line, copy_separator,
+    day_separator, reaction_chip, short, system_line, unread_divider, unread_pill, verified_mark,
 };
 /// Give a menu the width a menu should be, from inside its body.
 ///
@@ -416,6 +416,6 @@ pub use roster::{Row, roster};
 pub use search_hit::{SearchHit, search_hit};
 pub use sigil::icon;
 pub use sigil::icon::{
-    Icon, icon_button, icon_button_as_named, icon_button_named, icon_button_tinted, icon_item,
-    icon_item_as, icon_item_counted,
+    Icon, apply_button, icon_button, icon_button_as_named, icon_button_named, icon_button_tinted,
+    icon_item, icon_item_as, icon_item_counted,
 };

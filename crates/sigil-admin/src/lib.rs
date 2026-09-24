@@ -218,6 +218,10 @@ impl AdminApp {
                     removable: !name.is_empty(),
                     name,
                     label,
+                    // The console holds one connection, and prints its
+                    // exchange's key in its own strip; it has nothing to
+                    // say about the others it merely lists.
+                    key: None,
                 })
             })
             .collect()
@@ -316,8 +320,24 @@ impl App for AdminApp {
         };
         let state = self.state_of(Some(me));
         let acting = self.acting.get(&me).cloned();
+        // **The same words the control above it uses.** The header named
+        // the exchange by its *roster name*, which for the default is no
+        // name at all -- so the strip said "trunk.exchange" and the line
+        // under it said "the default", on one screen, about one exchange.
+        // `rows_for` is where a name is decided, and this is the same
+        // answer it gives the dropdown.
+        let named = {
+            let selected = acting
+                .clone()
+                .or_else(|| ctx.accounts.shown_exchange(me).cloned())
+                .unwrap_or_default();
+            self.rows_for(ctx)
+                .into_iter()
+                .find(|r| r.name == selected)
+                .map(|r| r.label)
+        };
 
-        self.header_ui(&state, acting.as_deref(), ui, &theme);
+        self.header_ui(&state, named.as_deref().or(acting.as_deref()), ui, &theme);
         if let Some(trouble) = &state.trouble {
             ui.colored_label(theme.destructive, trouble);
         }
@@ -341,17 +361,35 @@ impl App for AdminApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.whitelist_ui(me, ui, &theme);
-                ui.separator();
-                self.admission_ui(me, ui, &theme);
-                ui.separator();
-                self.names_ui(me, ui, &theme);
-                ui.separator();
-                self.peers_ui(me, ui, &theme);
-                ui.separator();
-                self.audit_ui(me, ui, &theme);
-                ui.separator();
-                self.answers_ui(&state, ui, &theme);
+                // **Folded, one area at a time.** The console was a
+                // single scroll of all six: a heading, a paragraph of why,
+                // and a row of controls, six times -- six screens on a
+                // phone, with whatever somebody came for below the fold
+                // whichever one it was. Folded, the headings are a list of
+                // what the console does, and the area being used is the
+                // only one open. Nothing is hidden that was not already
+                // off the bottom of the screen.
+                //
+                // **Folded on a phone, open on a desktop.** The fold is
+                // for a short screen: a window with room for the whole
+                // console should show it, and an administrator who has to
+                // open six headings to find one control has been given
+                // work, not a tidier page.
+                let shut = sigil::Form::of(ui.ctx()).is_phone();
+                let fold = |ui: &mut egui::Ui, title: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    egui::CollapsingHeader::new(egui::RichText::new(title).heading())
+                        .id_salt(title)
+                        .default_open(!shut)
+                        .show(ui, |ui| add(ui));
+                };
+                fold(ui, "Whitelist", &mut |ui| self.whitelist_ui(me, ui, &theme));
+                fold(ui, "Admission", &mut |ui| self.admission_ui(me, ui, &theme));
+                fold(ui, "Names", &mut |ui| self.names_ui(me, ui, &theme));
+                fold(ui, "Relay peers", &mut |ui| self.peers_ui(me, ui, &theme));
+                fold(ui, "Audit and status", &mut |ui| {
+                    self.audit_ui(me, ui, &theme)
+                });
+                fold(ui, "Answers", &mut |ui| self.answers_ui(&state, ui, &theme));
             });
         AppResponse::default()
     }
@@ -382,6 +420,9 @@ impl AdminApp {
             // Which one, by the name somebody chose it under: the key below
             // is the exchange's answer, this is the person's.
             match acting {
+                // Only where nothing named it: `rows_for` gives the
+                // default the domain it resolved to, and that is what the
+                // control beside this one says.
                 Some("") => {
                     ui.colored_label(theme.text_secondary, "the default");
                 }
@@ -498,7 +539,6 @@ impl AdminApp {
     }
 
     fn whitelist_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Whitelist");
         // Since sqexd 0.57.0 the list is on the transport: enabling it closes
         // the exchange to every key not on it, at the door, and closes what
         // is already connected. Administrators and peering exchanges pass
@@ -592,7 +632,6 @@ impl AdminApp {
     }
 
     fn admission_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Admission");
         // The line that decides how this screen should be read.
         ui.colored_label(
             theme.text_secondary,
@@ -624,7 +663,6 @@ impl AdminApp {
     }
 
     fn names_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Names");
         ui.colored_label(
             theme.text_secondary,
             "SIP-38. Assigning reassigns an existing binding and is not subject to the \
@@ -660,7 +698,6 @@ impl AdminApp {
     }
 
     fn peers_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Relay peers");
         ui.colored_label(
             theme.text_secondary,
             "SIP-39. Removing one stops the next call across it, not one already up.",
@@ -691,7 +728,6 @@ impl AdminApp {
     }
 
     fn audit_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Audit and status");
         let _ = theme;
         ui.horizontal_wrapped(|ui| {
             ui.add(
@@ -770,7 +806,6 @@ impl AdminApp {
     }
 
     fn answers_ui(&self, state: &AdminState, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Answers");
         if let Some(status) = &state.status {
             ui.collapsing("status", |ui| {
                 ui.add(

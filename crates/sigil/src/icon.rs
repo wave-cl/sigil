@@ -722,6 +722,26 @@ pub fn icon_button_named(ui: &mut egui::Ui, icon: Icon, word: &str) -> egui::Res
     icon_button_as(ui, icon, word, None)
 }
 
+/// A control that applies something, named where a name can be read.
+///
+/// **A tick is not a word, and a phone has no hover.** `icon_button_named`
+/// gives a glyph a name for a screen reader and a tooltip for a pointer,
+/// and a phone has neither — so "apply this retention", "restore from
+/// these words", "lodge this key" all arrived as the same bare ✓ beside a
+/// field, and which one it was had to be inferred from what was above it.
+/// Two of those delete or replace things.
+///
+/// The rule the rest of this app already follows: drawn on a phone,
+/// hovered on a desktop. Here rather than at each call site, so the next
+/// one is right without anybody remembering.
+pub fn apply_button(ui: &mut egui::Ui, word: &str) -> egui::Response {
+    if crate::Form::of(ui.ctx()).is_phone() {
+        ui.button(word)
+    } else {
+        icon_button_named(ui, Icon::Check, word)
+    }
+}
+
 /// The same, in a colour of its own — for anything destructive.
 pub fn icon_button_tinted(
     ui: &mut egui::Ui,

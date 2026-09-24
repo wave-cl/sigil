@@ -52,6 +52,11 @@ fn a_conversation() -> ChatState {
     let channel = [9u8; 32];
     ChatState {
         me: Some(me()),
+        prekeys: None,
+        devices_known: true,
+        join_trouble: None,
+        not_admitted: None,
+        devices_trouble: None,
         exchange: Some(PubKey::new([3u8; 32])),
         domain: Some("squic.org".into()),
         carried: None,
@@ -65,6 +70,7 @@ fn a_conversation() -> ChatState {
                 label: "Ada".into(),
                 unread: 2,
                 mentioned: 0,
+                avatar: None,
                 waiting: false,
                 preview: Some("the second one, then".into()),
                 at: Some(NOW - 60),
@@ -78,6 +84,7 @@ fn a_conversation() -> ChatState {
                 label: "release check".into(),
                 unread: 0,
                 mentioned: 0,
+                avatar: None,
                 waiting: false,
                 preview: Some("anybody may join this one".into()),
                 at: Some(NOW - 2 * DAY),
@@ -89,6 +96,7 @@ fn a_conversation() -> ChatState {
         open: Some(channel),
         copies: Vec::new(),
         stranded: Vec::new(),
+        peer_home: None,
         lines: vec![
             Line {
                 seq: 1,
@@ -285,6 +293,7 @@ fn a_conversation() -> ChatState {
             actor: them(),
             subject: PubKey::new([4u8; 32]),
             caveat: None,
+            call: None,
         }],
         // The whole conversation, so the paging control is out of the way of
         // everything else here. `a_paged_conversation` is what covers it.
@@ -335,6 +344,33 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
     app.set_now_for_test(NOW);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
+        })
+}
+
+/// The same, with this machine's call-path preference set either way.
+fn harness_at_prefs(state: ChatState, route: sigil_chat::Route, direct: bool) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(state);
+    let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
+    accounts.prefs.set_direct_calls(direct);
     let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))
@@ -471,12 +507,25 @@ fn harness_watching_asks(
 const STRIP: f32 = sigil::tokens::BUTTON_SM;
 
 fn harness_at_exchanges(state: ChatState, extra: &[&str]) -> Harness<'static> {
+    harness_showing_exchange(state, extra, None)
+}
+
+/// The same, looking at one of them: what the exchange control calls the
+/// selected row, and the one whose key it shows in full.
+fn harness_showing_exchange(
+    state: ChatState,
+    extra: &[&str],
+    shown: Option<&str>,
+) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     for name in extra {
         assert!(accounts.add_exchange(0, name, None));
+    }
+    if let Some(name) = shown {
+        accounts.show_exchange(me(), Some(name.to_string()));
     }
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))
@@ -959,6 +1008,27 @@ fn a_long_conversation() -> ChatState {
 ///
 /// A widget a little past the edge is how a control becomes unreachable, and
 /// on a phone there is no window to widen.
+/// The routes the three phone-layout tests must cover, held to the enum.
+///
+/// All three listed five of the seven by hand — `no_phone_pane_is_wider_
+/// than_the_phone`, `no_widget_on_any_route_is_drawn_off_the_screen` and
+/// `nothing_on_a_phone_is_drawn_where_it_cannot_be_reached` — so Search and
+/// Me were covered by none of them, which is exactly the shape those tests
+/// exist to stop. This stops compiling if a `Route` is added and the lists
+/// are not extended: the table is something the code has to satisfy rather
+/// than something somebody remembers.
+fn _every_route_is_measured(r: sigil_chat::Route) {
+    match r {
+        sigil_chat::Route::Conversations
+        | sigil_chat::Route::Directory
+        | sigil_chat::Route::Members
+        | sigil_chat::Route::Settings
+        | sigil_chat::Route::Devices
+        | sigil_chat::Route::Search
+        | sigil_chat::Route::Me => {}
+    }
+}
+
 fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
     // The accesskit node's own bounding box, not `Node::rect`: that one
     // `expect`s a rectangle and the root has none, so it panics -- a test
@@ -1023,6 +1093,8 @@ fn no_phone_pane_is_wider_than_the_phone() {
             sigil_chat::Route::Members,
             sigil_chat::Route::Settings,
             sigil_chat::Route::Devices,
+            sigil_chat::Route::Search,
+            sigil_chat::Route::Me,
         ] {
             let mut state = build();
             // A hit to find, a report to show: a pane that draws nothing cannot
@@ -1086,6 +1158,8 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             sigil_chat::Route::Members,
             sigil_chat::Route::Settings,
             sigil_chat::Route::Devices,
+            sigil_chat::Route::Search,
+            sigil_chat::Route::Me,
         ] {
             let mut state = build();
             state.found = vec![sigil_chat::Found {
@@ -2396,13 +2470,18 @@ fn phone_dialog_verify() {
     h.snapshot("phone_dialog_verify");
 }
 
-/// SIP-56's report, on a phone: a reason to choose and a note to write.
+/// SIP-56's report, on a phone: a reason to choose and a note to write,
+/// and who it reaches.
+///
+/// The fixture is a **direct message**, where the control names one — a
+/// room is what the public channel beside it is. It used to say "room"
+/// whatever it was open on.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn phone_dialog_report() {
     let mut h = harness_phone(a_conversation(), sigil_chat::Route::Members);
     h.run();
-    h.get_by_label("Report this room…").click();
+    h.get_by_label("Report this conversation…").click();
     h.run();
     h.run();
     // The harness leaves the pointer where it clicked, and it lands on
@@ -5147,21 +5226,22 @@ fn a_revoked_device_says_it_has_been_revoked() {
     assert!(text_of(&h).contains("revoked"), "{}", text_of(&h));
 }
 
-/// The exchange a conversation list belongs to is on screen, in full.
+/// The exchange a conversation list belongs to can be **taken**, from the
+/// control that says which exchange it is.
 ///
-/// It is the key a receipt verifies under, and the one a client must pin
-/// independently of whatever it is connected to. A name for it is not enough.
+/// It is the key a receipt verifies under, and the one a client pins
+/// independently of whatever it is connected to, so a name for it is not
+/// enough. It used to be drawn in full — on the identity menu, under the
+/// reader's own key, where it read as a second key of theirs — and the
+/// user's call (2026-09-23) is that a copy is what it is for: forty-four
+/// characters of base58 in a menu is a wall, and what anybody does with
+/// this key is paste it.
 #[test]
-fn the_exchange_this_list_belongs_to_is_shown_in_full() {
-    let mut h = harness(true);
+fn the_exchange_control_offers_the_exchange_key() {
+    let mut h = harness_showing_exchange(a_conversation(), &["indra.org"], Some("indra.org"));
     h.run();
-    open_identity(&mut h);
-    let key = PubKey::new([3u8; 32]).to_string();
-    assert!(
-        text_of(&h).contains(&key),
-        "the exchange's key belongs on screen: {}",
-        text_of(&h)
-    );
+    open_exchanges(&mut h);
+    h.get_by_label("Copy the exchange's key");
 }
 
 /// The control is there with one exchange too: it says which, and it is the
@@ -8484,20 +8564,23 @@ fn the_channel_settings_carry_the_mute() {
     state.i_am_admin = false;
     let mut h = harness_at(state, sigil_chat::Route::Settings);
     h.run();
-    let checkbox = h.get_by_label("Mute this conversation");
+    // **Read as a person reads it: the words change.** This asked
+    // accesskit for a checkbox's `toggled` state -- which is exactly what
+    // a switch reported as working while looking unchanged on screen,
+    // once before today. The control is now the app's own and says what it
+    // is rather than ticking a box.
+    let said = text_of(&h);
     assert!(
-        format!("{:?}", checkbox.accesskit_node().toggled()).contains("False"),
-        "not muted to begin with: {:?}",
-        checkbox.accesskit_node().toggled()
+        said.contains("Said out loud") && !said.contains("Muted"),
+        "not muted to begin with: {said}"
     );
-    checkbox.click();
+    h.get_by_label("Said out loud").click();
     h.run();
     h.run();
-    let checkbox = h.get_by_label("Mute this conversation");
+    let said = text_of(&h);
     assert!(
-        format!("{:?}", checkbox.accesskit_node().toggled()).contains("True"),
-        "muted: {:?}",
-        checkbox.accesskit_node().toggled()
+        said.contains("Muted") && !said.contains("Said out loud"),
+        "it did not read as muted after the press: {said}"
     );
 }
 
@@ -8932,7 +9015,12 @@ fn a_refused_join_is_said_where_the_button_is() {
     h.run();
     assert!(!text_of(&h).contains("cannot be reached"));
 
-    state.trouble = Some(
+    // **The join's own field, not the session's last failure.** This pane
+    // used to draw `trouble`, which any failing command sets and nothing
+    // clears -- so a call that could not be placed hours earlier was drawn
+    // in red over a directory that had just answered. A refused join sets
+    // both; only this one reaches the pane.
+    state.join_trouble = Some(
         "this conversation lives at another exchange, which cannot be reached right now; \
          nothing was sent"
             .into(),
@@ -9004,10 +9092,21 @@ fn a_room_listed_from_elsewhere_offers_its_exchange_not_join() {
 
 /// SIP-56 in the members view: an admin can mute a member and sees who is
 /// muted; a muted member's button reads Unmute; a member who is not an
-/// admin gets neither, and everybody may report the room.
+/// admin gets neither, and everybody may report.
+///
+/// **The fixture is a room, and used to be a direct message.** It passed
+/// there only because it made the other member a non-admin, which a real
+/// direct message cannot: the exchange makes both parties admins on
+/// joining, which is what lets either mint an epoch key. Muting is a
+/// moderator's act and a direct message has no moderator, so it is not
+/// offered in one — see `a_direct_message_offers_no_remove_and_no_demote`.
+/// The direct-message wording of the report has its own test.
 #[test]
 fn an_admin_mutes_from_the_members_view_and_a_member_only_reports() {
     let mut state = a_conversation();
+    for c in &mut state.conversations {
+        c.peer = None;
+    }
     let mut h = harness_at(state.clone(), sigil_chat::Route::Members);
     h.run();
     let said = text_of(&h);
@@ -9033,7 +9132,12 @@ fn an_admin_mutes_from_the_members_view_and_a_member_only_reports() {
     let said = text_of(&h);
     assert!(said.contains("muted"), "the roster's word: {said}");
     assert!(said.contains("Unmute"), "{said}");
-    assert!(said.contains("reported message 3 as spam: links"), "{said}");
+    // The message is quoted, not numbered: "message 3" is this client's own
+    // index into the channel and names nothing a reader has ever seen.
+    assert!(
+        said.contains("reported Ada's \u{201c}one\u{201d} as spam: links"),
+        "{said}"
+    );
     assert!(said.contains("Dismiss"), "{said}");
 
     state.i_am_admin = false;
@@ -9120,6 +9224,8 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             sigil_chat::Route::Members,
             sigil_chat::Route::Settings,
             sigil_chat::Route::Devices,
+            sigil_chat::Route::Search,
+            sigil_chat::Route::Me,
         ] {
             let mut state = build();
             state.reports = vec![sigil_chat::Report {
@@ -10783,11 +10889,13 @@ fn the_identity_menu_offers_its_keys_to_a_finger() {
     );
 }
 
-/// And the exchange's key, which stays on screen in full -- see
-/// `the_exchange_this_list_belongs_to_is_shown_in_full`, whose reason a
-/// phone does not change -- can be taken from there without selecting it.
+/// **The exchange's key is not one of yours**, and is not in this menu.
+///
+/// It sat under your own, which put a key you cannot act on beside the one
+/// key here that is about you. It is copied where the exchange is chosen
+/// -- see `the_exchange_control_offers_the_exchange_key`.
 #[test]
-fn the_identity_menu_offers_the_exchange_key_to_a_finger() {
+fn the_identity_menu_does_not_carry_the_exchange_key() {
     let mut state = a_conversation();
     state.exchange = Some(them());
     let mut h = harness_with(state, true);
@@ -10796,12 +10904,16 @@ fn the_identity_menu_offers_the_exchange_key_to_a_finger() {
     open_identity(&mut h);
     let said = text_of(&h);
     assert!(
-        said.contains(&them().to_string()),
-        "the exchange's key belongs on screen whole: {said}"
+        h.query_by_label("Copy your key").is_some(),
+        "your own key went with it: {said}"
     );
     assert!(
-        h.query_by_label("Copy the exchange's key").is_some(),
-        "and there is no way to take it"
+        h.query_by_label("Copy the exchange's key").is_none(),
+        "the exchange's key is still here: {said}"
+    );
+    assert!(
+        !said.contains(&them().to_string()),
+        "and drawn in full: {said}"
     );
 }
 
@@ -11346,7 +11458,12 @@ fn the_card_shows_keys_short_with_a_way_to_copy_them() {
         "the whole key was drawn where the short form belongs: {said}"
     );
     h.get_by_label("Copy your key");
-    h.get_by_label("Copy the exchange's key");
+    // And only yours: the exchange's key is copied where the exchange is
+    // chosen, not from the card about you.
+    assert!(
+        h.query_by_label("Copy the exchange's key").is_none(),
+        "{said}"
+    );
 }
 
 /// The rail, for a screen with no room for one: the other things sigil
@@ -12012,14 +12129,27 @@ fn a_menu_is_no_wider_than_a_menu() {
 ///
 /// SIP-19: a `Redact` "MUST be accepted only from the account of `target`,
 /// or from an account the channel lists as an admin", and the exchange
-/// enforces the same. It was offered on every message, so Delete on a
-/// stranger's message in a direct message — where nobody is an admin —
-/// sent a redaction for the exchange to refuse.
+/// enforces the same.
+///
+/// **This test used to say "in a direct message, where nobody is an
+/// admin".** That is false: the exchange makes a direct message's parties
+/// admins when they join — it is what lets either of them mint an epoch
+/// key — and the members view shows the badge on both rows. So the admin
+/// case below was asserting that one party may delete the other's
+/// messages, which the exchange would have carried out. A moderation power
+/// belongs to a room with a moderator in it; the last case keeps it there.
 #[test]
 fn delete_is_offered_on_ones_own_message_and_not_on_anybody_elses() {
-    let strip_of = |text: &str, admin: bool| -> String {
+    let strip_of = |text: &str, admin: bool, dm: bool| -> String {
         let mut state = a_conversation();
         state.i_am_admin = admin;
+        if !dm {
+            // A room is a conversation with no peer: the open one's
+            // identifier stops standing for two accounts.
+            for c in &mut state.conversations {
+                c.peer = None;
+            }
+        }
         state.lines.truncate(1);
         state.lines[0].text = "theirs, in a direct message".into();
         state.lines[0].mine = false;
@@ -12045,19 +12175,33 @@ fn delete_is_offered_on_ones_own_message_and_not_on_anybody_elses() {
         text_of(&h)
     };
 
-    let own = strip_of("mine, in a direct message", false);
+    let own = strip_of("mine, in a direct message", false, true);
     assert!(
         own.contains("Delete"),
         "one's own message offered no Delete, so this proves nothing: {own}"
     );
-    let theirs = strip_of("theirs, in a direct message", false);
+    let theirs = strip_of("theirs, in a direct message", false, true);
     assert!(
         !theirs.contains("Delete"),
         "Delete was offered on somebody else's message with no admin to back it: {theirs}"
     );
-    // An admin may take anybody's down, and is offered it.
-    let as_admin = strip_of("theirs, in a direct message", true);
-    assert!(as_admin.contains("Delete"), "{as_admin}");
+    // **Being an admin of a direct message buys nothing**, because both
+    // parties are one. Otherwise the person you are talking to is offered a
+    // control that reaches into what you said, and the exchange accepts it.
+    let admin_of_a_dm = strip_of("theirs, in a direct message", true, true);
+    assert!(
+        !admin_of_a_dm.contains("Delete"),
+        "one party of a direct message was offered Delete on the other's message: \
+         {admin_of_a_dm}"
+    );
+    // And in a room, where an admin is somebody the others are not, the
+    // power is real and is offered. The control for the case above: without
+    // it, hiding Delete everywhere would pass.
+    let admin_of_a_room = strip_of("theirs, in a direct message", true, false);
+    assert!(
+        admin_of_a_room.contains("Delete"),
+        "an admin of a room was not offered Delete on a member's message: {admin_of_a_room}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -12103,5 +12247,1356 @@ fn a_direct_message_is_not_offered_a_name_a_topic_or_a_channel_to_destroy() {
     // can still be left, and it is still yours to mute.
     assert!(said.contains("Keep messages for"), "{said}");
     assert!(said.contains("Leave"), "{said}");
-    assert!(said.contains("Mute this conversation"), "{said}");
+    // Its own mute, whatever else a direct message lacks — named by what
+    // it is now, as the app's other switches are.
+    assert!(
+        said.contains("Said out loud") || said.contains("Muted"),
+        "{said}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stranded, and why.
+// ---------------------------------------------------------------------------
+
+/// **One line, with the count in it, and the cause beside it.**
+///
+/// A stranded member (SIP-17) got three messages for one fact: the
+/// library's error in the banner, "an admin has to hand you one" in the
+/// transcript, and under it "their key may still arrive" — which
+/// contradicts the line above it. And when the reason was that the
+/// conversation had *moved* (SIP-60: a direct message lives at the home of
+/// the lower key, so one party moving moves the conversation), that was
+/// said quietly up in the bar and nowhere near the trouble it caused.
+#[test]
+fn being_stranded_is_said_once_and_says_where_the_key_must_come_from() {
+    let mut state = a_conversation();
+    state.trouble_with.no_key = Some(1);
+    state.trouble_with.unreadable = 156;
+    let (mut h, _) = harness_phone_with(state.clone(), sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("none of its 156 messages can be read"),
+        "the count belongs in the sentence: {said}"
+    );
+    assert!(
+        !said.contains("may still arrive"),
+        "still promising the key might turn up on its own: {said}"
+    );
+    // Not "an admin": a direct message has none.
+    assert!(!said.contains("An admin"), "{said}");
+
+    // And when it is ordered elsewhere, that is the cause, said here.
+    let mut moved = state;
+    moved.home = Some((them(), "trunk.exchange".into()));
+    let (mut h, _) = harness_phone_with(moved, sigil_chat::Route::Conversations);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("ordered by trunk.exchange"),
+        "the conversation moved and the trouble does not say so: {said}"
+    );
+}
+
+/// **And something to press.** Being told a key has to reach you, with
+/// nothing to do about it, is the whole of what somebody stranded could do
+/// — which is nothing. SIP-17's own way out is to ask for an envelope, and
+/// to mint the next epoch where none comes and this account may.
+#[test]
+fn being_stranded_offers_a_way_to_ask_for_the_key() {
+    let mut state = a_conversation();
+    state.trouble_with.no_key = Some(1);
+    state.trouble_with.unreadable = 156;
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.get_by_label("Ask for the key");
+
+    // And not offered where there is no key missing, or it reads as
+    // something a healthy conversation needs.
+    let (mut h, _) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    assert!(
+        h.query_by_label("Ask for the key").is_none(),
+        "offered with nothing wrong: {}",
+        text_of(&h)
+    );
+}
+
+/// **An action's answer belongs on the page the action is on.**
+///
+/// Minting a key, setting a name, a topic, a retention window — all on the
+/// settings page, and every one of their answers was drawn under the
+/// *conversation's* title row, which is not the page somebody pressing
+/// them is looking at. Pressing "Mint a new key" and being told nothing at
+/// all is how this was found.
+#[test]
+fn what_was_just_done_is_said_on_the_page_it_was_done_on() {
+    let mut state = a_conversation();
+    state.note = Some(sigil_chat::Note {
+        said: "New key minted (epoch 2).".into(),
+        at: NOW,
+    });
+    let (mut h, _) = harness_phone_with(state.clone(), sigil_chat::Route::Settings);
+    h.run();
+    assert!(
+        text_of(&h).contains("New key minted (epoch 2)."),
+        "the settings page said nothing about what it had just done: {}",
+        text_of(&h)
+    );
+    // And still on the conversation, which is where the other actions are.
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    h.run();
+    assert!(
+        text_of(&h).contains("New key minted (epoch 2)."),
+        "{}",
+        text_of(&h)
+    );
+}
+
+/// **The direct-calls switch exists on a phone.**
+///
+/// `direct_allowed` reads `prefs.direct_calls` on every call, and the only
+/// control for it was in the desktop's platform pane — which Android does
+/// not have. So on a phone the preference decided every call and could
+/// never be set.
+#[test]
+fn the_card_can_choose_whether_calls_connect_directly() {
+    // A harness that keeps the accounts, since the switch is the person's
+    // and not the conversation's.
+    let accounts = std::rc::Rc::new(std::cell::RefCell::new(sigil::accounts::Accounts::of(
+        vec![account()],
+    )));
+    let held = accounts.clone();
+    let mut app = ChatApp::new();
+    app.set_now_for_test(NOW);
+    app.show_state_for_test(a_conversation());
+    let siblings = three_apps();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let mut nav = Navigator::default();
+            nav.set_siblings(siblings.clone());
+            let mut accounts = held.borrow_mut();
+            let mut app_ctx = AppContext {
+                navigator: &mut nav,
+                accounts: &mut accounts,
+                unfocused: false,
+                away: false,
+                notify: &sigil::Silent,
+                connections: &Default::default(),
+            };
+            let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(sigil_chat::Route::Me);
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
+        });
+    h.run();
+    assert!(
+        accounts.borrow().prefs.direct_calls,
+        "on by default, so pressing it below is turning it off"
+    );
+    // **The label follows the state**, so each press is found by what the
+    // switch says it is *now* -- which is the whole point of the change:
+    // it read the same in both states and so looked like it had not moved.
+    h.get_by_label_contains("Calls connect directly").click();
+    h.run();
+    assert!(
+        !accounts.borrow().prefs.direct_calls,
+        "the switch did not reach the preference"
+    );
+    h.get_by_label_contains("Calls go through the exchange")
+        .click();
+    h.run();
+    assert!(accounts.borrow().prefs.direct_calls, "and back on again");
+}
+
+/// **The device in your hand could not be signed out.**
+///
+/// Every other device on the card can be revoked; this one had no control
+/// at all. Revoking is for a device you have *lost* — it keeps every key
+/// it was already given — and is the wrong shape for the one you are
+/// holding. SIP-22 has `sign_out_device` for that, and no client called it.
+#[test]
+fn this_device_can_be_signed_out_and_is_asked_twice() {
+    let mut state = a_conversation();
+    state.devices = vec![
+        sigil_chat::Linked {
+            device: me(),
+            added: NOW - 10 * DAY,
+            not_after: NOW + 30 * DAY,
+            is_this_one: true,
+        },
+        sigil_chat::Linked {
+            device: them(),
+            added: NOW - 5 * DAY,
+            not_after: NOW + 30 * DAY,
+            is_this_one: false,
+        },
+    ];
+    let (mut h, _) = harness_phone_with(state, sigil_chat::Route::Devices);
+    h.run();
+    // The other device is revoked; this one is signed out. Neither offers
+    // the other's control.
+    h.get_by_label("Sign out");
+    h.get_by_label("Revoke");
+
+    // Asked twice, and the cost said before the second press.
+    h.get_by_label("Sign out").click();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("cannot sign itself back in"),
+        "signed out with no warning about what it costs: {said}"
+    );
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(
+        !text_of(&h).contains("cannot sign itself back in"),
+        "cancelling left the warning up"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SIP-39: calling somebody at another exchange, from the conversation.
+// ---------------------------------------------------------------------------
+
+/// **The handset takes the SIP-39 path when the peer lives elsewhere.**
+///
+/// SIP-36's invitation carries a room secret and never says which exchange
+/// the room is at, so two people at different exchanges each join a room at
+/// their own — same secret, two rooms, and a call that rings, is answered
+/// and carries nothing. sigil already *answers* a call another exchange
+/// carried here; placing one was the missing half.
+#[test]
+fn a_peer_at_another_exchange_is_called_across_the_bridge() {
+    // `lives` is where their account is (SIP-59); `bound` is the exchange
+    // their name happens to be registered at. The two differ exactly in
+    // the case that matters: somebody living elsewhere who holds a name
+    // here as an alias.
+    fn asked(lives: &str, bound: &str, ours: &str) -> Vec<String> {
+        let mut state = a_conversation();
+        state.domain = Some(ours.to_string());
+        state.peer_home = Some((them(), lives.to_string()));
+        state.people.insert(
+            them(),
+            sigil_chat::Person {
+                name: Some("Ada".into()),
+                title: None,
+                handle: Some(format!("ada@{bound}")),
+            },
+        );
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut h = harness_at_recording(state, sigil_chat::Route::Conversations, asked.clone());
+        h.run();
+        h.get_by_label("Call").click();
+        h.run();
+        asked.borrow().clone()
+    }
+
+    // Living here: the room path, which is a posted invitation.
+    let same = asked("squic.org", "squic.org", "squic.org");
+    assert!(
+        same.iter().any(|c| c.contains("Call")),
+        "a call at one exchange still posts its invitation: {same:?}"
+    );
+
+    // Living elsewhere: nothing is posted — the call is placed at our own
+    // exchange for a handle at *their* home instead.
+    let cross = asked("trunk.exchange", "trunk.exchange", "squic.org");
+    assert!(
+        !cross.iter().any(|c| c.contains("Call")),
+        "a cross-exchange call posted a room invitation nobody can join: {cross:?}"
+    );
+
+    // **The case that caught the first version.** They live at trunk and
+    // hold a name *here* as an alias, so their handle's domain is ours.
+    // Asking about the handle says "same exchange" and takes the room
+    // path; asking about the home says otherwise, and is right.
+    let alias = asked("trunk.exchange", "squic.org", "squic.org");
+    assert!(
+        !alias.iter().any(|c| c.contains("Call")),
+        "somebody living elsewhere who holds a name here was called through a room: \
+         {alias:?}"
+    );
+}
+
+/// Two devices, one of them this one, with whatever the exchange last said
+/// about this device's one-time prekeys.
+fn devices_with_prekeys(prekeys: Option<u16>) -> ChatState {
+    let mut state = a_conversation();
+    state.prekeys = prekeys;
+    state.devices = vec![
+        sigil_chat::Linked {
+            device: me(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: true,
+        },
+        sigil_chat::Linked {
+            device: them(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: false,
+        },
+    ];
+    state
+}
+
+/// **SIP-23: how many one-time keys this device has left is on its row.**
+///
+/// The exchange counts them per device and tells each one its own number on
+/// every catch-up. That number arrived from the day catch-up existed and
+/// went into a `tracing` line, so a pool that had run dry was invisible in
+/// the one place somebody looks at their devices.
+#[test]
+fn this_devices_remaining_one_time_keys_are_on_its_row() {
+    let mut h = harness_at(devices_with_prekeys(Some(42)), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("42 one-time keys"),
+        "the count is not on the row: {}",
+        text_of(&h)
+    );
+}
+
+/// And a client nobody has told yet says nothing, rather than implying a
+/// pool of nothing. The control: `None` and `Some(0)` are different facts,
+/// and a row drawn unconditionally would make them the same one.
+#[test]
+fn a_device_nobody_has_counted_yet_claims_no_count() {
+    let mut h = harness_at(devices_with_prekeys(None), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("one-time keys"),
+        "a count was claimed before any exchange gave one: {}",
+        text_of(&h)
+    );
+    assert!(
+        !text_of(&h).contains("last-resort key"),
+        "a drained pool was claimed before any exchange gave a count: {}",
+        text_of(&h)
+    );
+}
+
+/// **A drained pool says what it means.**
+///
+/// Not that the device is unreachable -- the exchange serves the fallback
+/// prekey once the one-time pool runs dry, which is what stops a dry pool
+/// becoming an unreachable device -- but that everything sealed to it now
+/// shares one reused secret until the device republishes.
+#[test]
+fn a_drained_pool_says_what_falls_back() {
+    let mut h = harness_at(devices_with_prekeys(Some(0)), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("No one-time keys left here"),
+        "a drained pool said nothing: {said}"
+    );
+    assert!(
+        said.contains("last-resort key"),
+        "it did not say what happens instead: {said}"
+    );
+}
+
+/// And a pool with keys in it stays quiet about the fallback. The control
+/// for the test above.
+#[test]
+fn a_full_pool_says_nothing_about_a_fallback() {
+    let mut h = harness_at(devices_with_prekeys(Some(42)), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("last-resort key"),
+        "a fallback was announced for a pool that has keys: {}",
+        text_of(&h)
+    );
+}
+
+/// **An empty device list and an unanswered one are different facts.**
+///
+/// The card's "nothing else is linked" warning fired on `len() <= 1`, which
+/// is as true of a fetch that failed as of an account with one device — so
+/// an unreachable exchange told somebody their conversations could not be
+/// recovered. Three states, three sentences, one test each way.
+#[test]
+fn a_device_list_nobody_has_answered_claims_nothing() {
+    let mut state = devices_with_prekeys(None);
+    state.devices = Vec::new();
+    state.devices_known = false;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Asking the exchange which devices are linked"),
+        "it did not say it was still asking: {said}"
+    );
+    assert!(
+        !said.contains("Nothing else is linked"),
+        "it claimed nothing was linked before anybody answered: {said}"
+    );
+}
+
+/// And when the asking failed, it says so rather than asking for ever.
+#[test]
+fn a_device_list_that_could_not_be_fetched_says_why() {
+    let mut state = devices_with_prekeys(None);
+    state.devices = Vec::new();
+    state.devices_known = false;
+    state.devices_trouble = Some("the exchange is not answering".into());
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Could not ask the exchange which devices are linked"),
+        "the failure was silent: {said}"
+    );
+    assert!(
+        said.contains("the exchange is not answering"),
+        "it did not say why: {said}"
+    );
+    // The *whole* sentence: the backup section a little further down this
+    // same card says "Asking the exchange…" about itself, so the short
+    // substring is true of a card that says nothing about devices at all.
+    assert!(
+        !said.contains("Asking the exchange which devices are linked"),
+        "it is still claiming to be asking: {said}"
+    );
+    assert!(
+        !said.contains("Nothing else is linked"),
+        "a failed fetch was drawn as a fact about the account: {said}"
+    );
+}
+
+/// The control: once the exchange has answered and the answer is one
+/// device, the warning is exactly right and must still be drawn.
+#[test]
+fn one_device_that_the_exchange_confirmed_is_still_warned_about() {
+    let mut state = devices_with_prekeys(Some(53));
+    state.devices.truncate(1);
+    state.devices_known = true;
+    state.backup = None;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Nothing else is linked"),
+        "an account with one device was not warned: {said}"
+    );
+    // As above: the backup section says "Asking the exchange…" about
+    // itself, and this card is not the only thing on it that asks.
+    assert!(
+        !said.contains("Asking the exchange which devices are linked")
+            && !said.contains("Could not ask"),
+        "it is still claiming not to know: {said}"
+    );
+}
+
+/// **An empty list is not "nothing else".**
+///
+/// The warning takes for granted that *this* device is linked and says
+/// nothing else is. When the exchange answers with no devices at all — as
+/// trunk does for this account — that reading is wrong, and the card drew
+/// no row either: it warned about linking a second device while saying
+/// nothing whatever about the first.
+#[test]
+fn an_exchange_that_lists_no_devices_says_that_instead() {
+    let mut state = devices_with_prekeys(Some(53));
+    state.devices = Vec::new();
+    state.devices_known = true;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("The exchange lists no devices for this account"),
+        "an empty list said nothing about being empty: {said}"
+    );
+    assert!(
+        !said.contains("Nothing else is linked"),
+        "it claimed this device is linked when the exchange lists none: {said}"
+    );
+}
+
+/// And what this device holds is still said, because it is still true.
+///
+/// The count arrives on every catch-up and belongs on this device's row —
+/// but there is no row when the list comes back empty, and a number we
+/// have is not worth hiding behind a list we could not get.
+#[test]
+fn this_devices_keys_are_said_even_with_no_row_to_put_them_on() {
+    let mut state = devices_with_prekeys(Some(53));
+    state.devices = Vec::new();
+    state.devices_known = true;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("This device has 53 one-time keys at the exchange"),
+        "the count we hold was hidden behind the list we did not get: {}",
+        text_of(&h)
+    );
+}
+
+/// The control: with no count yet, nothing is claimed about one.
+#[test]
+fn no_count_yet_claims_no_count_with_an_empty_list() {
+    let mut state = devices_with_prekeys(None);
+    state.devices = Vec::new();
+    state.devices_known = true;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("one-time keys"),
+        "a count was claimed before any exchange gave one: {}",
+        text_of(&h)
+    );
+}
+
+/// **A card cannot be asking a question it never managed to put.**
+///
+/// `Cmd::Devices` is sent once, when the menu item is pressed. A session
+/// still connecting drops it and nothing asks again, so the card sat on
+/// "asking the exchange…" for ever — and opening it a second later worked,
+/// which is what made the bug look intermittent rather than ordered.
+#[test]
+fn a_device_list_with_no_link_says_it_is_waiting_for_one() {
+    let mut state = devices_with_prekeys(None);
+    state.devices = Vec::new();
+    state.devices_known = false;
+    state.link = sigil_chat::session::LinkState::Connecting;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Waiting for the exchange before asking"),
+        "it claimed to be asking over a link it does not have: {said}"
+    );
+    assert!(
+        !said.contains("Asking the exchange which devices are linked"),
+        "it is asking without a link: {said}"
+    );
+}
+
+/// And with a link and no answer yet, it is genuinely asking. The control:
+/// the two sentences must not collapse into one.
+#[test]
+fn a_device_list_with_a_link_and_no_answer_is_asking() {
+    let mut state = devices_with_prekeys(None);
+    state.devices = Vec::new();
+    state.devices_known = false;
+    state.link = sigil_chat::session::LinkState::Up;
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Asking the exchange which devices are linked"),
+        "it is not asking over a link it has: {said}"
+    );
+    assert!(
+        !said.contains("Waiting for the exchange before asking"),
+        "it is waiting for a link it has: {said}"
+    );
+}
+
+/// **What an irreversible row costs is drawn on a phone, not hovered.**
+///
+/// "Mint a new key" acts on one press and cannot be pressed back: the old
+/// epoch is superseded, and a device that does not get the new key reads
+/// nothing sealed under it. That was explained only in hover text, which a
+/// handset has no pointer to reach — so on a phone it was an unexplained
+/// single tap, sitting beside a *destruction* that asks twice.
+#[test]
+fn on_a_phone_what_minting_a_key_costs_is_on_the_screen() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Mint a new key"),
+        "the row is not on screen at all: {said}"
+    );
+    assert!(
+        said.contains("Everybody present is given a new key"),
+        "a phone is told nothing about what the row does: {said}"
+    );
+    assert!(
+        said.contains("You stop receiving this conversation"),
+        "a phone is told nothing about what leaving does: {said}"
+    );
+}
+
+/// And a pointer does not need it drawn: it hovers. The control — the same
+/// sentences must not be duplicated into a desktop that already has them,
+/// or every settings page grows a second copy of its own tooltips.
+#[test]
+fn with_a_pointer_the_same_words_stay_in_the_hover() {
+    let mut h = harness_at(a_conversation(), sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Mint a new key"),
+        "the row is not on screen at all: {said}"
+    );
+    assert!(
+        !said.contains("Everybody present is given a new key"),
+        "the tooltip was drawn as well on a form that can hover it: {said}"
+    );
+}
+
+/// **A report in a direct message goes to the person it is about.**
+///
+/// SIP-56 sends a report to the channel's admins. In a direct message both
+/// parties *are* admins — the exchange makes a party one on joining, which
+/// is what lets either mint an epoch key — so "the admins" is the other
+/// side and nobody else, and no operator ever sees it. Somebody reporting
+/// abuse here is handing it to the person they are reporting, with their
+/// name on it. The only thing that hinted at any of it was a tooltip about
+/// "the room's admins", which a phone cannot reach at all.
+#[test]
+fn reporting_a_direct_message_says_it_goes_to_the_other_party() {
+    let mut h = harness_at(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Report this conversation"),
+        "the control is not on screen: {said}"
+    );
+    assert!(
+        said.contains("the only admins are the two of you"),
+        "it does not say who the report reaches: {said}"
+    );
+    assert!(
+        said.contains("No operator sees it"),
+        "it implies somebody official is listening: {said}"
+    );
+}
+
+/// The control: a room has admins who are not the person being reported, so
+/// the direct-message sentence must not be shown there — it would be false,
+/// and it is the sentence that makes the warning worth reading.
+#[test]
+fn reporting_a_room_does_not_claim_the_admins_are_the_two_of_you() {
+    let mut state = a_conversation();
+    // A room: the open conversation has no peer, which is what makes a
+    // channel a channel rather than a direct message.
+    for c in &mut state.conversations {
+        c.peer = None;
+    }
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("the only admins are the two of you"),
+        "a room was described as a direct message: {said}"
+    );
+}
+
+/// **A room's moderation is not offered inside a direct message.**
+///
+/// Both parties of a direct message are admins — the exchange makes them
+/// one on joining, which is what lets either mint an epoch key (SIP-17) —
+/// so every admin act was offered to each of them about the other.
+/// "Remove" ejects the only other person and mints a key; "Demote" takes
+/// away the admin-ness that lets them mint one at all. Both hover texts
+/// call it "this room", which it is not.
+#[test]
+fn a_direct_message_offers_no_remove_and_no_demote() {
+    let mut state = devices_with_prekeys(None);
+    state.i_am_admin = true;
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    for act in ["Remove", "Demote", "Make admin"] {
+        assert!(
+            !said.contains(act),
+            "a direct message offered {act:?} about the only other person: {said}"
+        );
+    }
+    // What is not an admin's stays: blocking is the control somebody in a
+    // conversation they want out of actually reaches for, and it is
+    // personal rather than moderation.
+    assert!(
+        said.contains("Block") || said.contains("Unblock"),
+        "blocking was taken away with the moderation: {said}"
+    );
+}
+
+/// And a room still has them, or the test above would pass by hiding every
+/// act everywhere. The control.
+#[test]
+fn a_room_still_offers_its_admin_their_acts() {
+    let mut state = devices_with_prekeys(None);
+    state.i_am_admin = true;
+    for c in &mut state.conversations {
+        c.peer = None;
+    }
+    let mut h = harness_at(state, sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Remove"),
+        "an admin of a room was not offered Remove: {said}"
+    );
+}
+
+/// **The public-channels pane shows its own refusal, not the last one.**
+///
+/// It drew `state.trouble`, which any failing command sets and nothing
+/// clears — so a call that could not be placed hours earlier was still in
+/// red above a directory listing that had just answered perfectly, where
+/// it reads as "this pane is not connected". Found on the phone, with the
+/// chat list showing a green dot at the same moment.
+#[test]
+fn the_directory_does_not_show_an_unrelated_failure() {
+    let mut state = a_conversation();
+    state.trouble = Some("not connected to the exchange".into());
+    state.join_trouble = None;
+    let mut h = harness_at(state, sigil_chat::Route::Directory);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("not connected to the exchange"),
+        "a failure from somewhere else was drawn over the directory: {}",
+        text_of(&h)
+    );
+}
+
+/// And a join that really was refused still says so, where the button is.
+/// The control: hiding everything would pass the test above.
+#[test]
+fn a_refused_join_still_says_so_in_the_directory() {
+    let mut state = a_conversation();
+    state.trouble = None;
+    state.join_trouble = Some("this channel does not admit you".into());
+    let mut h = harness_at(state, sigil_chat::Route::Directory);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("this channel does not admit you"),
+        "a refused join said nothing where the button is: {}",
+        text_of(&h)
+    );
+}
+
+/// **SIP-42 had a command, a handler and a library call, and no control.**
+///
+/// The devices card states the problem — "an epoch key is sealed to a
+/// device, so the other one has to hand them over before anything already
+/// said can be read here" — and this is the handing over. Nothing anywhere
+/// sent `Cmd::ResealToSiblings`.
+#[test]
+fn a_second_device_can_be_given_the_conversations_key() {
+    let mut state = devices_with_prekeys(Some(53));
+    state.devices_known = true;
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Give the key to your devices"),
+        "an account with a second device was offered no way to hand it the key: {}",
+        text_of(&h)
+    );
+}
+
+/// And with nowhere to send it, it is not offered. The library seals
+/// nothing and returns `Ok(0)`, which the session reports as "your other
+/// devices already hold this conversation's key" — true of a device that
+/// has them, and false of an account that has no other device at all.
+#[test]
+fn with_no_second_device_the_key_is_not_offered_anywhere() {
+    let mut state = devices_with_prekeys(Some(53));
+    state.devices_known = true;
+    state.devices.truncate(1);
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Give the key to your devices"),
+        "offered to hand a key to devices that do not exist: {}",
+        text_of(&h)
+    );
+}
+
+/// And not having asked is not the same as having asked and been told
+/// none: an unanswered device list claims nothing either way.
+#[test]
+fn an_unasked_device_list_offers_no_key_handover() {
+    let mut state = devices_with_prekeys(Some(53));
+    state.devices_known = false;
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Give the key to your devices"),
+        "acted on a device list nobody had answered: {}",
+        text_of(&h)
+    );
+}
+
+/// **SIP-24 had a command, a handler, a library call — and nothing asked.**
+///
+/// An exchange running a whitelist refuses every gated route with
+/// `NotWhitelisted`, so a session there can do nothing at all. The one
+/// route it leaves open is `/admission/request`, which the exchange's own
+/// comment calls "SIP-24's one way in, which answers everyone identically
+/// so it is not an oracle". The refusal used to arrive as an ordinary
+/// error string and retry for ever.
+#[test]
+fn an_exchange_that_does_not_admit_you_offers_the_way_in() {
+    let mut state = a_conversation();
+    state.not_admitted = Some("ex.squic.org".into());
+    state.trouble = Some("ex.squic.org does not admit this account".into());
+    let mut h = harness_at(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Ask to be let in"),
+        "refused, and offered no way to ask: {said}"
+    );
+    // And it does not promise an answer, because the route deliberately
+    // gives the same reply either way.
+    assert!(
+        said.contains("not back to you"),
+        "it implied an answer would come back: {said}"
+    );
+}
+
+/// The control: an exchange that admits you says nothing about admission.
+#[test]
+fn an_exchange_that_admits_you_says_nothing_about_being_let_in() {
+    let mut state = a_conversation();
+    state.not_admitted = None;
+    let mut h = harness_at(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Ask to be let in"),
+        "offered a way in to somebody already inside: {}",
+        text_of(&h)
+    );
+}
+
+/// **SIP-35 had a command, a handler and a library call, and nothing sent it.**
+///
+/// A channel's copies are deliberately entries rather than an arrangement
+/// between two operators, so that the people in it can see them — and the
+/// transcript already words both events, replication being one of the few
+/// it refuses to treat as plumbing. The log is the readout; what was
+/// missing was any way to author one.
+#[test]
+fn a_room_can_let_another_exchange_carry_a_copy() {
+    let mut state = a_conversation();
+    state.i_am_admin = true;
+    for c in &mut state.conversations {
+        c.peer = None;
+    }
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Let another exchange carry a copy"),
+        "a room's admin was offered no way to authorise a replica: {said}"
+    );
+    // Never "recall": SIP-35 is explicit that withdrawing ends a
+    // subscription and takes nothing back.
+    assert!(
+        said.contains("What it already holds, it keeps"),
+        "it implied a copy could be taken back: {said}"
+    );
+    assert!(
+        !said.to_lowercase().contains("recall"),
+        "SIP-35 forbids describing this as recalling anything: {said}"
+    );
+}
+
+/// And not in a direct message: its identifier stands for two accounts,
+/// and a third party holding a copy of one is not what SIP-35 is for. The
+/// control for the test above.
+#[test]
+fn a_direct_message_is_not_offered_to_another_exchange() {
+    let mut state = a_conversation();
+    state.i_am_admin = true;
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Let another exchange carry a copy"),
+        "offered to hand a direct message to a third operator: {}",
+        text_of(&h)
+    );
+}
+
+/// A room with a picture, drawn in the conversation list.
+///
+/// **SIP-16's avatar was carried and never drawn.** The bytes ride inline
+/// on the attachment — a preview, the same ones a message thumbnail uses —
+/// so there is nothing to fetch, and `sigil_ui::avatar` has always been "a
+/// picture if there is one, and the identicon if there is not". Every
+/// caller passed `None`, so every row was an identicon whatever the
+/// channel carried.
+///
+/// A direct message is deliberately left with its identicon: it is drawn
+/// as the person in it, whose picture is their profile's (SIP-21).
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_chats_with_a_picture() {
+    let mut state = a_conversation();
+    // A plain green square, big enough to see and small enough to be the
+    // kind of preview an attachment really carries.
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(24, 24, image::Rgb([0x3d, 0xd6, 0x8c]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode the picture");
+    let bytes = png.into_inner();
+    for c in &mut state.conversations {
+        // Only the room: the direct message keeps the person's mark.
+        if c.peer.is_none() {
+            c.avatar = Some(bytes.clone());
+        }
+    }
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_chats_with_a_picture");
+}
+
+/// **SIP-16's picture could be drawn and not set.**
+///
+/// `Cmd::SetChannelAvatar` uploads the file and publishes it as channel
+/// metadata; nothing sent it. Offering it was pointless while nothing drew
+/// a channel's picture — and that was the reason not to build it, until
+/// the drawing existed.
+#[test]
+fn a_rooms_picture_can_be_set_and_taken_down() {
+    let mut state = a_conversation();
+    state.i_am_admin = true;
+    for c in &mut state.conversations {
+        c.peer = None;
+    }
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Set a picture"),
+        "a room's admin was offered no way to give it one: {said}"
+    );
+    assert!(
+        said.contains("Remove it"),
+        "a picture could be set and never taken down: {said}"
+    );
+}
+
+/// And not in a direct message, which is drawn as the person in it — their
+/// picture is their profile's, not the conversation's. The control.
+#[test]
+fn a_direct_message_has_no_picture_of_its_own() {
+    let mut state = a_conversation();
+    state.i_am_admin = true;
+    let mut h = harness_at(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Set a picture"),
+        "offered a direct message a picture that would compete with the person in it: {}",
+        text_of(&h)
+    );
+}
+
+/// **A switch says which it is, not what pressing it would do.**
+///
+/// This read "Connect calls directly" in both states and changed only a
+/// thin border, so pressing it looked like nothing happening — reported as
+/// "the button does not toggle" while it was toggling perfectly. The
+/// switch beside it names a state ("Do not disturb" against
+/// "Notifications") and changes its mark with it.
+#[test]
+fn the_call_path_switch_names_the_state_it_is_in() {
+    for direct in [true, false] {
+        let mut h = harness_at_prefs(a_conversation(), sigil_chat::Route::Me, direct);
+        h.run();
+        h.run();
+        let said = text_of(&h);
+        let (want, avoid) = if direct {
+            ("Calls connect directly", "Calls go through the exchange")
+        } else {
+            ("Calls go through the exchange", "Calls connect directly")
+        };
+        assert!(
+            said.contains(want),
+            "direct={direct}: the switch does not say which it is: {said}"
+        );
+        assert!(
+            !said.contains(avoid),
+            "direct={direct}: it says both at once: {said}"
+        );
+        // And never the old wording, which named an action and so read as
+        // a button that had done nothing.
+        assert!(
+            !said.contains("Connect calls directly"),
+            "direct={direct}: back to naming the action: {said}"
+        );
+    }
+}
+
+/// **A one-line event takes one line's room.**
+///
+/// A system line is a space, a centred row and a space in a vertical
+/// layout, and egui puts `item_spacing.y` between each of them and around
+/// the lot — so the 12px of padding it asks for arrived as 50, and a
+/// fourteen-pixel sentence stood 64 tall. Four calls in a row then ate a
+/// quarter of a phone screen with nothing in it, which is what a
+/// screenshot of a real conversation showed.
+///
+/// The bound is on the *stride* between consecutive events rather than on
+/// any one line's height: the waste was all in the gaps, and a height
+/// assertion would have passed throughout.
+#[tokio::test(flavor = "multi_thread")]
+async fn consecutive_events_do_not_each_take_a_paragraph() {
+    let mut state = a_conversation();
+    state.events = (0..4)
+        .map(|i| Happened {
+            seq: 3,
+            at: NOW - 120,
+            said: format!("Colin Lyons called, {i}s"),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: Some(sigil_chat::session::Call::Was),
+        })
+        .collect();
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    // A call line carries its clock, so the label is the sentence and the
+    // time -- computed here rather than matched loosely, which would pass
+    // against the wrong row.
+    let when = sigil_ui::clock(NOW - 120);
+    let tops: Vec<f32> = (0..4)
+        .map(|i| {
+            h.get_by_label(&format!("Colin Lyons called, {i}s · {when}"))
+                .rect()
+                .top()
+        })
+        .collect();
+    let strides: Vec<f32> = tops.windows(2).map(|w| w[1] - w[0]).collect();
+    // 34 as this is written -- 14pt of small text, the 12 of padding
+    // `system_line` asks for, and the parent's own gap. It was 64, all of
+    // the difference being a row held open to `interact_size.y` because
+    // the phone form sizes rows for a thumb. The bound is loose enough to
+    // survive a pixel of font or layout drift and nowhere near 64.
+    const ROOM: f32 = 40.0;
+    for (i, stride) in strides.iter().enumerate() {
+        assert!(
+            *stride <= ROOM,
+            "event {i} to {}: {stride}px apart, wanted at most {ROOM}. \
+             tops={tops:?}",
+            i + 1
+        );
+    }
+}
+
+/// **A call says when it was.**
+///
+/// Every message in the transcript carries a clock and a call carried
+/// none, so a column of "Ada called, 31s" answered everything except the
+/// question somebody actually has about a missed call — `Happened` held
+/// the time the whole time. And a missed call read in exactly the muted
+/// grey of "Ada added Bram", so in a run of call lines there was nothing
+/// to catch the eye.
+///
+/// The membership line is the control: it is not a call and must carry no
+/// clock. **The colouring is not asserted here** — the accessibility tree
+/// carries text and not paint, so a name claiming it would be claiming
+/// what this cannot see. `phone_call_log` holds that.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_carries_its_clock() {
+    let mut state = a_conversation();
+    state.events = vec![
+        Happened {
+            seq: 3,
+            at: NOW - 120,
+            said: "Ada called, 31s".into(),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: Some(sigil_chat::session::Call::Was),
+        },
+        Happened {
+            seq: 3,
+            at: NOW - 60,
+            said: "Missed call from Ada".into(),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: Some(sigil_chat::session::Call::Missed),
+        },
+        // The control for the clock: a membership change is not a call and
+        // wants no time beside it.
+        Happened {
+            seq: 3,
+            at: NOW - 30,
+            said: "Ada added Bram".into(),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: None,
+        },
+    ];
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    let said = labels(&h);
+
+    for (what, at) in [
+        ("Ada called, 31s", NOW - 120),
+        ("Missed call from Ada", NOW - 60),
+    ] {
+        let want = format!("{what} · {}", sigil_ui::clock(at));
+        assert!(
+            said.iter().any(|l| l == &want),
+            "a call did not carry its clock, wanted {want:?}: {said:?}"
+        );
+    }
+    assert!(
+        said.iter().any(|l| l == "Ada added Bram"),
+        "the membership line is missing: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l.starts_with("Ada added Bram · ")),
+        "a membership change was given a clock it did not ask for: {said:?}"
+    );
+}
+
+/// **A call log on a phone: the clock on each, the colour on one.**
+///
+/// The pixels are the only place the colouring can be checked — the
+/// accessibility tree carries text and not paint — so this is what holds
+/// the claim that a missed call looks different from a call that
+/// happened, and that a membership line is neither.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_log() {
+    let mut state = a_conversation();
+    state.events = vec![
+        Happened {
+            seq: 3,
+            at: NOW - 3600,
+            said: "You called, no answer".into(),
+            actor: me(),
+            subject: me(),
+            caveat: None,
+            call: Some(sigil_chat::session::Call::Was),
+        },
+        Happened {
+            seq: 3,
+            at: NOW - 1800,
+            said: "Missed call from Ada".into(),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: Some(sigil_chat::session::Call::Missed),
+        },
+        Happened {
+            seq: 3,
+            at: NOW - 900,
+            said: "Ada called, 31s".into(),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: Some(sigil_chat::session::Call::Was),
+        },
+        Happened {
+            seq: 3,
+            at: NOW - 300,
+            said: "Ada added Bram".into(),
+            actor: them(),
+            subject: them(),
+            caveat: None,
+            call: None,
+        },
+    ];
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_call_log");
+}
+
+/// **A home that could not be asked for is asked for again.**
+///
+/// SIP-59's `account_home` decides whether a call is placed at this
+/// exchange or bridged to the peer's (SIP-39), and the ask can fail — a
+/// reconnect, a slow exchange, an account mid-succession — with the
+/// failure dropped. The guard was a `HashSet`, so one failure meant the
+/// home stayed unknown for the life of the window; and unknown is read as
+/// "they are here", so every later call rang, connected to a room at the
+/// wrong exchange and carried nothing. Seen live, twice.
+///
+/// Both halves are asserted, and the first is the control: a question
+/// asked from a draw is asked sixty times a second unless something stops
+/// it, so "asks again" must not be bought with "asks always".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_home_is_asked_for_again_but_not_on_every_frame() {
+    let mut state = a_conversation();
+    state.peer_home = None;
+    let (mut h, app) = harness_phone_with(state, sigil_chat::Route::Conversations);
+    let asks = |app: &std::rc::Rc<std::cell::RefCell<ChatApp>>| {
+        app.borrow()
+            .sent_for_test()
+            .iter()
+            .filter(|c| c.contains("PeerHome"))
+            .count()
+    };
+
+    // Many frames, one question: a draw runs sixty times a second.
+    h.run();
+    h.run();
+    h.run();
+    assert_eq!(
+        asks(&app),
+        1,
+        "a draw asked more than once: {:?}",
+        app.borrow().sent_for_test()
+    );
+
+    // Still unknown a moment later: still one question, not a loop. This is
+    // the control — "asks again" must not be bought with "asks always".
+    app.borrow_mut().set_now_for_test(NOW + 5);
+    h.run();
+    h.run();
+    assert_eq!(asks(&app), 1, "it asked again far too soon");
+
+    // And past the retry it asks again, rather than giving up for the life
+    // of the window on one failure nobody saw.
+    app.borrow_mut().set_now_for_test(NOW + 25);
+    h.run();
+    assert_eq!(asks(&app), 2, "a failed ask was never repeated");
+}
+
+/// **A call is not placed until it is known which exchange they are at.**
+///
+/// Which exchange a peer's account is at decides between an ordinary call
+/// and a SIP-39 bridge, and an unanswered question was read as "here" — so
+/// a call to somebody at another exchange rang, connected to a room at the
+/// wrong exchange and carried nothing, with nothing on screen to say why.
+/// Seen live, twice.
+///
+/// The second case is the one that makes a refusal safe, and the reason
+/// this could not be decided until the state could tell them apart: a peer
+/// whose exchange is reached by an address has **no domain** to be bridged
+/// to, and the ordinary path is right for them. That is an answer, and is
+/// recorded as an empty domain. Refusing it too would have broken calls
+/// that work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_waits_until_it_is_known_where_they_live() {
+    for (what, home, placed) in [
+        ("unknown", None, false),
+        // Asked, and they live at an exchange with no name to bridge to.
+        (
+            "homeless",
+            Some((PubKey::new([9u8; 32]), String::new())),
+            true,
+        ),
+        // Asked, and they live here.
+        (
+            "here",
+            Some((PubKey::new([9u8; 32]), "squic.org".to_string())),
+            true,
+        ),
+    ] {
+        let mut state = a_conversation();
+        state.peer_home = home;
+        state.domain = Some("squic.org".into());
+        let (mut h, app) = harness_phone_with(state, sigil_chat::Route::Conversations);
+        h.run();
+        h.run();
+        h.get_by_label("Call").click();
+        h.run();
+
+        let sent = app.borrow().sent_for_test().to_vec();
+        let rang = sent.iter().any(|c| c.starts_with("Call"));
+        assert_eq!(
+            rang, placed,
+            "{what}: placing the call was {rang}, wanted {placed}: {sent:?}"
+        );
+        if !placed {
+            // And it says so, rather than doing nothing visible.
+            let said = text_of(&h);
+            assert!(
+                said.contains("Still finding which exchange"),
+                "{what}: the press was silent: {said}"
+            );
+            // And asks, so pressing again shortly after can work.
+            assert!(
+                sent.iter().any(|c| c.contains("PeerHome")),
+                "{what}: it refused without asking: {sent:?}"
+            );
+        }
+    }
+}
+
+/// **A call to somebody at another exchange is bridged, not rung here.**
+///
+/// A room exists only at the exchange it was made at, so a call placed
+/// here for somebody who lives elsewhere rings, is answered, and carries
+/// nothing — they joined a room of the same name at their own exchange.
+/// That happened five times in one evening.
+///
+/// SIP-39's bridge is the mechanism, and it needs only a target: the far
+/// exchange resolves the local part with `label.parse::<PubKey>()` before
+/// it tries a name, so a peer with no name *here* is still reachable by
+/// key. Insisting on a name was what fell back to the room.
+///
+/// The peer at this exchange is the control: nothing to bridge, and an
+/// ordinary call is right.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_to_another_exchange_is_bridged_rather_than_rung_here() {
+    for (what, peer_at, rings_here) in [
+        ("peer elsewhere", "trunk.exchange", false),
+        ("peer here", "squic.org", true),
+    ] {
+        let mut state = a_conversation();
+        state.domain = Some("squic.org".into());
+        state.peer_home = Some((PubKey::new([9u8; 32]), peer_at.to_string()));
+        let (mut h, app) = harness_phone_with(state, sigil_chat::Route::Conversations);
+        h.run();
+        h.run();
+        h.get_by_label("Call").click();
+        h.run();
+
+        let sent = app.borrow().sent_for_test().to_vec();
+        let rang = sent.iter().any(|c| c.starts_with("Call"));
+        assert_eq!(
+            rang, rings_here,
+            "{what}: ringing here was {rang}, wanted {rings_here}: {sent:?}"
+        );
+        if !rings_here {
+            // The bridge was attempted. It cannot complete in a harness with
+            // no live connection, and says so — which is the observable.
+            let said = text_of(&h);
+            assert!(
+                said.contains("call to another exchange"),
+                "{what}: it neither rang here nor tried to bridge: {said}"
+            );
+        }
+    }
 }

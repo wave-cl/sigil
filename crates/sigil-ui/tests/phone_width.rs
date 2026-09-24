@@ -96,6 +96,7 @@ fn a_conversation_row_with_a_long_name_fits() {
                     muted: true,
                     presence: None,
                     verified: true,
+                    picture: None,
                 },
                 false,
             );

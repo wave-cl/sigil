@@ -51,6 +51,15 @@ pub struct ConversationRow<'a> {
     pub presence: Option<(crate::Presence, String)>,
     /// The other person's key was verified (SIP-41): the mark after the name.
     pub verified: bool,
+    /// SIP-16: the channel's picture, already decoded.
+    ///
+    /// **A channel, not a person.** A direct message draws the other
+    /// party's mark and their presence on it; a room has neither, and drew
+    /// an identicon whatever picture it carried. The bytes ride inline on
+    /// the attachment -- a preview, the same ones a message thumbnail is
+    /// drawn from -- so this costs no fetch, and `None` is both "no
+    /// picture" and "not decoded yet", which draw the same thing.
+    pub picture: Option<&'a egui::TextureHandle>,
 }
 
 /// Draw one row. Returns its response, so the caller decides what a click means.
@@ -161,7 +170,10 @@ fn row_body(
                         );
                     }
                     None => {
-                        crate::identicon(ui, row.id, tokens::AVATAR_MD);
+                        // `avatar` is "a picture if there is one, and the
+                        // identicon if there is not", so this is the same
+                        // call either way.
+                        crate::avatar(ui, row.id, row.picture, tokens::AVATAR_MD);
                     }
                 }
                 ui.add_space(tokens::SPACING_SM);
@@ -308,7 +320,7 @@ fn row_body(
                     } else if row.typing {
                         (theme.accent, "typing…".to_string())
                     } else {
-                        (theme.text_secondary, one_line(row.preview))
+                        (theme.text_secondary, one_line(row.preview, 80))
                     };
                     // Truncated for the same reason the name is: a label with
                     // no width to fit into keeps drawing, and this one ran
@@ -330,16 +342,17 @@ fn row_body(
     inner.response.rect
 }
 
-/// A preview is one line. A message with newlines in it must not push every
-/// other conversation down the list.
-fn one_line(text: &str) -> String {
+/// A preview is one line, at most `limit` characters. A message with
+/// newlines in it must not push every other conversation down the list --
+/// and a quotation of one, somewhere narrower, wants less again.
+pub fn one_line(text: &str, limit: usize) -> String {
     let flat: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 80 {
-        let cut: String = flat.chars().take(79).collect();
+    if flat.chars().count() > limit {
+        let cut: String = flat.chars().take(limit.saturating_sub(1)).collect();
         format!("{cut}…")
     } else {
         flat
@@ -352,14 +365,14 @@ mod tests {
 
     #[test]
     fn a_preview_never_carries_a_newline_into_the_list() {
-        assert_eq!(one_line("one\ntwo\r\nthree"), "one two three");
-        assert!(!one_line("a\nb").contains('\n'));
+        assert_eq!(one_line("one\ntwo\r\nthree", 80), "one two three");
+        assert!(!one_line("a\nb", 80).contains('\n'));
     }
 
     #[test]
     fn a_long_preview_is_cut_and_says_it_was() {
         let long = "x".repeat(500);
-        let out = one_line(&long);
+        let out = one_line(&long, 80);
         assert!(out.ends_with('…'));
         assert!(out.chars().count() <= 80);
     }
@@ -369,7 +382,7 @@ mod tests {
         // A multi-byte character cut in half is a panic, and somebody writing
         // in a non-latin script would find it first.
         let long = "é".repeat(500);
-        let out = one_line(&long);
+        let out = one_line(&long, 80);
         assert!(out.chars().count() <= 80);
     }
 }

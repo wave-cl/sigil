@@ -1011,8 +1011,50 @@ impl Shell {
                                     ui.label(heading);
                                     return;
                                 }
-                                let button = ui
-                                    .add(egui::Button::new(heading).frame(false))
+                                // **The heading is the app menu, and on a
+                                // phone nothing said so.**
+                                //
+                                // Its only hint was hover text, which a
+                                // handset has no pointer to reach -- so the
+                                // one route between Chat, Exchange and
+                                // Phone was a grey word indistinguishable
+                                // from the titles on every other card, and
+                                // the Phone card read as somewhere you
+                                // could only leave by the hardware button.
+                                //
+                                // The mark is the one the chat header's
+                                // exchange dropdown already uses for "there
+                                // is a menu under this", and the word and
+                                // the mark are one target: an affordance
+                                // that is not itself pressable teaches the
+                                // wrong thing twice.
+                                let phone = Form::of(ui.ctx()).is_phone();
+                                let group = ui.scope_builder(
+                                    egui::UiBuilder::new().sense(egui::Sense::click()),
+                                    |ui| {
+                                        ui.style_mut().interaction.selectable_labels = false;
+                                        ui.label(heading);
+                                        if phone {
+                                            let side =
+                                                ui.text_style_height(&egui::TextStyle::Small);
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(side, side),
+                                                egui::Sense::hover(),
+                                            );
+                                            if ui.is_rect_visible(rect) {
+                                                sigil::icon::draw(
+                                                    ui.painter(),
+                                                    rect,
+                                                    sigil::Icon::Chevron,
+                                                    theme.text_secondary,
+                                                );
+                                            }
+                                        }
+                                    },
+                                );
+                                let button = group
+                                    .response
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                                     .on_hover_text("The other things sigil does");
                                 egui::Popup::menu(&button).show(|ui| {
                                     sigil_ui::menu_width(ui);
