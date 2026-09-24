@@ -188,6 +188,13 @@ impl Report for Bridge {
     }
 }
 
+/// How long a hung-up call has to drain and post its `/session/close`
+/// before it is dropped where it stands.
+///
+/// The engine's own drain is 500 ms plus the jitter depth; the rest is room
+/// for one round trip to the exchange on a path that is already unwell.
+const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// A running call.
 ///
 /// Dropping this does **not** end the call — the task owns it. Use
@@ -206,6 +213,18 @@ pub struct CallHandle {
     /// happened: pressing Leave ended the call and left its screen up, with no
     /// way back.
     ending: watch::Sender<CallState>,
+    /// Asks the engine to end the call the way its source running out does:
+    /// drain what is in flight, then post `/session/close`.
+    ///
+    /// **Aborting the task skips that close**, because it cancels the task
+    /// at its next await. On a dialled connection the connection dropping
+    /// is itself the signal, so it did not matter. On a **borrowed** one
+    /// -- a SIP-39 call across exchanges rides the chat session, which is
+    /// not ours to drop -- the far side is told nothing and goes on
+    /// sending into a session this end has forgotten. Seen live: a phone
+    /// still streaming 24 minutes after the desktop hung up, its frames
+    /// counted and discarded as `stale` at the next call.
+    stop: watch::Sender<bool>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -238,7 +257,25 @@ impl CallHandle {
         // how it went.
         let last = self.ending.borrow().stats.clone();
         tracing::info!(stats = ?last, "hung up");
-        self.task.abort();
+        // **Asked, not killed.** The engine drains what is in flight and
+        // posts `/session/close`, which is the only thing that tells a peer
+        // on a borrowed connection that the call is over.
+        let _ = self.stop.send(true);
+        // With a backstop, because a task that cannot reach its close would
+        // otherwise hold the microphone for the life of the window and the
+        // next call would find it taken. The grace is the engine's own
+        // drain plus room for the post; past that, the old behaviour.
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                let abort = self.task.abort_handle();
+                rt.spawn(async move {
+                    tokio::time::sleep(HANGUP_GRACE).await;
+                    abort.abort();
+                });
+            }
+            // Nowhere to wait: end it now rather than leave it running.
+            Err(_) => self.task.abort(),
+        }
         // Said here rather than left to the task, which will not run again.
         self.ending.send_modify(|s| {
             s.phase = Phase::Ended;
@@ -396,6 +433,13 @@ pub fn spawn_call(
         ..CallState::default()
     });
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    // Asked-to-stop, so hanging up drains and closes rather than dropping
+    // the task at its next await; see `CallHandle::stop`.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let opts = CallOpts {
+        stop: Some(stop_rx),
+        ..opts
+    };
     let wake = Arc::new(wake);
 
     let ending = state_tx.clone();
@@ -459,6 +503,7 @@ pub fn spawn_call(
     });
 
     CallHandle {
+        stop: stop_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -496,6 +541,13 @@ pub fn spawn_cross_call(
         ..CallState::default()
     });
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    // Asked-to-stop, so hanging up drains and closes rather than dropping
+    // the task at its next await; see `CallHandle::stop`.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let opts = CallOpts {
+        stop: Some(stop_rx),
+        ..opts
+    };
     let wake = Arc::new(wake);
 
     let ending = state_tx.clone();
@@ -546,6 +598,7 @@ pub fn spawn_cross_call(
     });
 
     CallHandle {
+        stop: stop_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -579,6 +632,13 @@ pub fn spawn_cross_answer(
         ..CallState::default()
     });
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    // Asked-to-stop, so hanging up drains and closes rather than dropping
+    // the task at its next await; see `CallHandle::stop`.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let opts = CallOpts {
+        stop: Some(stop_rx),
+        ..opts
+    };
     let wake = Arc::new(wake);
 
     let ending = state_tx.clone();
@@ -625,6 +685,7 @@ pub fn spawn_cross_answer(
     });
 
     CallHandle {
+        stop: stop_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -679,6 +740,13 @@ pub fn spawn_room(
         ..CallState::default()
     });
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    // Asked-to-stop, so hanging up drains and closes rather than dropping
+    // the task at its next await; see `CallHandle::stop`.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let opts = CallOpts {
+        stop: Some(stop_rx),
+        ..opts
+    };
     let wake = Arc::new(wake);
     let dial = dial.into();
 
@@ -724,6 +792,7 @@ pub fn spawn_room(
     });
 
     CallHandle {
+        stop: stop_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -761,6 +830,13 @@ pub fn spawn_dm_call(
         ..CallState::default()
     });
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    // Asked-to-stop, so hanging up drains and closes rather than dropping
+    // the task at its next await; see `CallHandle::stop`.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let opts = CallOpts {
+        stop: Some(stop_rx),
+        ..opts
+    };
     let wake = Arc::new(wake);
     let dial = dial.into();
 
@@ -831,6 +907,7 @@ pub fn spawn_dm_call(
     });
 
     CallHandle {
+        stop: stop_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -847,7 +924,10 @@ impl CallHandle {
         let (state_tx, state_rx) = watch::channel(state);
         let (_events_tx, events_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(std::future::pending());
+        // Nothing is listening; the handle only has to be whole.
+        let (stop_tx, _stop_rx) = watch::channel(false);
         CallHandle {
+            stop: stop_tx,
             state: state_rx,
             events: events_rx,
             task,

@@ -161,6 +161,9 @@ impl Announcer {
         inner.rings(notify);
         inner.mentions(notify, unfocused);
         inner.arrivals(notify, unfocused);
+        // Last, so that everything said as a ring, a mention or a live
+        // arrival is already in `announced` and is not counted twice.
+        inner.missed(notify, unfocused);
     }
 
     // The deciding halves, over what a walk of the sessions found. Tests
@@ -192,6 +195,17 @@ impl Announcer {
         found: Vec<(At, String, Vec<session::Arrival>)>,
     ) {
         self.lock().arrivals_in(notify, unfocused, held, found);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn missed_in(
+        &self,
+        notify: &dyn Notify,
+        unfocused: bool,
+        held: usize,
+        found: Vec<(At, String, Vec<session::Arrival>)>,
+    ) {
+        self.lock().missed_in(notify, unfocused, held, found);
     }
 
     /// The rings walk alone, with the withdrawals: for the test that proves
@@ -231,7 +245,7 @@ impl Inner {
                     .insert((ring.channel, ring.seq), target(at, ring.channel));
                 let me = state.mine.label(&at.0);
                 fresh.push((
-                    ring_said(&ring.from, &ring.label, &me, held),
+                    ring_said(&ring.from, &ring.label, &me, held, ring.peer.is_some()),
                     target(at, ring.channel),
                 ));
             }
@@ -303,8 +317,15 @@ impl Inner {
     /// for good: ongoing, so it could not be swiped away, and still offering
     /// Answer for a call that had ended minutes before.
     ///
-    /// A ring that is no longer in the session's list has been answered,
-    /// declined, cancelled or missed. All four mean the same thing here.
+    /// A ring that is no longer in the session's list has been declined,
+    /// cancelled or missed, and **a ring still in it but answered is over
+    /// too** -- which is what this used to miss. Answering does not take a
+    /// ring out of `ringing`; it sets `answered`, on purpose, because the
+    /// log cannot say what is *happening* and something has to. So the
+    /// notification for a call somebody had just picked up stayed on the
+    /// shade, ongoing and unswipeable, still offering Answer. Reported
+    /// from the phone: "the answer button doesn't dismiss the
+    /// notification".
     fn withdraw_gone(&mut self, notify: &dyn Notify) {
         if self.ringing_out.is_empty() {
             return;
@@ -312,7 +333,13 @@ impl Inner {
         let mut live: HashSet<([u8; 32], u64)> = HashSet::new();
         for (_, session) in &self.sessions {
             let state = session.borrow();
-            live.extend(state.ringing.iter().map(|r| (r.channel, r.seq)));
+            live.extend(
+                state
+                    .ringing
+                    .iter()
+                    .filter(|r| !r.answered)
+                    .map(|r| (r.channel, r.seq)),
+            );
             if let Some(c) = &state.cross_ring {
                 live.insert((cross_key(c.bridge), 0));
             }
@@ -438,6 +465,136 @@ impl Inner {
                     sound: Sound::Default,
                 });
             }
+        }
+    }
+
+    /// **Say what this device missed while it was away.**
+    ///
+    /// `arrivals` is what came in while the session was watching. A phone
+    /// that slept, or that the system stopped, watched nothing: those
+    /// messages arrived before it connected, so they are history to
+    /// `arrivals` and news to nobody. `unseen` is the same record above a
+    /// different floor -- what this device did not hold when the session
+    /// started -- and it was computed on every publish from the day it was
+    /// written and read by nothing at all. The window that wakes has always
+    /// had the news and never said it.
+    ///
+    /// **One notification, whatever the size of it.** A phone off overnight
+    /// comes back to a hundred missed messages, and a hundred notifications
+    /// is not news, it is a punishment. How much there is and where to
+    /// start are the useful facts, and both fit in one line.
+    fn missed(&mut self, notify: &dyn Notify, unfocused: bool) {
+        let held = self.sessions.len();
+        // **Only what has not been said, and borrowed to find that out.**
+        //
+        // `arrivals` may be cloned whole because it is empty on an ordinary
+        // pass -- it holds what came in since the last one. `unseen` is the
+        // opposite: its floor is what the device held when the session
+        // started and it keeps that floor for the session's life, so it is
+        // *never* empty and it holds the whole backlog. Cloning it here on
+        // every pass allocated all of it every time the announcer ran,
+        // which is the shape of the regression this window has already paid
+        // for once. After the first pass every one of them is in
+        // `announced`, so the filter yields nothing and the walk costs a
+        // borrow.
+        let mut found: Vec<(At, String, Vec<session::Arrival>)> = Vec::new();
+        for (at, session) in &self.sessions {
+            let state = session.borrow();
+            let fresh: Vec<session::Arrival> = state
+                .unseen
+                .iter()
+                .filter(|a| !self.announced.contains(&(a.channel, a.seq)))
+                .cloned()
+                .collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            let me = state.mine.label(&at.0);
+            found.push((at.clone(), me, fresh));
+        }
+        if found.is_empty() {
+            return;
+        }
+        self.missed_in(notify, unfocused, held, found);
+    }
+
+    /// The deciding half. One notice per identity: two accounts that both
+    /// missed something are two different absences, and collapsing them
+    /// would leave neither with a conversation to open.
+    fn missed_in(
+        &mut self,
+        notify: &dyn Notify,
+        unfocused: bool,
+        held: usize,
+        found: Vec<(At, String, Vec<session::Arrival>)>,
+    ) {
+        // **In front of somebody, this is absorbed rather than skipped.**
+        //
+        // `unseen` does not shrink as things are read -- its floor is what
+        // the device held when the session started, and it keeps that floor
+        // for the life of the session. An early return here would leave
+        // every one of them pending, so opening the app, reading everything
+        // and then switching away announced "12 messages while you were
+        // away" about messages just read.
+        //
+        // Marking them said instead is the same rule the rest of this file
+        // already follows: a live arrival while the window is in front is
+        // not owed a notification later either, because the list's own
+        // counts say it better than an interruption can.
+        if !unfocused {
+            for (_, _, unseen) in found {
+                for a in unseen {
+                    self.announced.insert((a.channel, a.seq));
+                }
+            }
+            return;
+        }
+        for (at, me, unseen) in found {
+            let mut fresh: BTreeMap<[u8; 32], Vec<session::Arrival>> = Default::default();
+            for a in unseen {
+                // Already said by one of the three passes before this one,
+                // or said by this one on an earlier publish of the same
+                // session. Either way it is not news twice.
+                if !self.announced.insert((a.channel, a.seq)) {
+                    continue;
+                }
+                if self.quiet.silenced(&at.1, &a.channel) {
+                    continue;
+                }
+                fresh.entry(a.channel).or_default().push(a);
+            }
+            if fresh.is_empty() {
+                continue;
+            }
+            let messages: usize = fresh.values().map(Vec::len).sum();
+            // Only when there is exactly one is there somewhere obvious to
+            // go; with several, pointing at any of them would be a guess.
+            let only = (fresh.len() == 1).then(|| {
+                let (channel, together) = fresh.iter().next().expect("one conversation");
+                let last = together.last().expect("at least one message");
+                let room = if last.public {
+                    format!("#{}", last.conversation)
+                } else {
+                    last.conversation.clone()
+                };
+                (*channel, room)
+            });
+            let (summary, body) = crate::missed_said(
+                fresh.len(),
+                messages,
+                only.as_ref().map(|(_, room)| room.as_str()),
+                &me,
+                held,
+            );
+            notify.notice(Notice {
+                summary: &summary,
+                body: &body,
+                target: only.map(|(channel, _)| target(&at, channel)),
+                // Not the arrival sound: this is a summary of an absence,
+                // and it arrives at the moment a phone is picked up, when
+                // an alert tone would be startling rather than useful.
+                sound: Sound::None,
+            });
         }
     }
 }

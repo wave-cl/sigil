@@ -189,3 +189,82 @@ async fn without_a_second_asker_the_call_is_relayed_in_time() {
     b.finished().await.expect("B's call");
     heard_tone(&a_wav, "A");
 }
+
+/// **Hanging up asks the call to end; it does not kill it.**
+///
+/// `engine::call` posts `/session/close` as its last act, and `hang_up` used
+/// to `abort()` the task — which cancels it at its next await, so the close
+/// was never sent. On a dialled connection the connection dropping is the
+/// signal and nothing was lost. On a **borrowed** one, a SIP-39 call across
+/// exchanges riding the chat session, there is no drop and the far side is
+/// told nothing: it goes on sending into a session this end has forgotten.
+/// Seen live, for 24 minutes.
+///
+/// `Event::Draining` is the discriminator. The engine raises it when it
+/// starts letting what is in flight arrive, on the one path that reaches
+/// the close; an aborted task raises nothing at all, so this test fails on
+/// the old behaviour for the right reason rather than by timing.
+#[tokio::test(flavor = "multi_thread")]
+async fn hanging_up_lets_the_call_close_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(1);
+    let (b_signer, _b_id) = signer(2);
+    let room = RoomId::generate();
+
+    // Long enough that it cannot end on its own inside the test: what ends
+    // it has to be the hang-up.
+    let mut a = spawn_dm_call(
+        endpoint,
+        a_signer,
+        PubKey::new([9u8; 32]),
+        room,
+        false,
+        tone_to(&dir.path().join("a.wav"), 600),
+        || {},
+    );
+    let mut b = spawn_dm_call(
+        endpoint,
+        b_signer,
+        a_id,
+        room,
+        false,
+        tone_to(&dir.path().join("b.wav"), 600),
+        || {},
+    );
+    assert_eq!(settled(&mut a).await.phase, Phase::Live, "a is in the call");
+    assert_eq!(settled(&mut b).await.phase, Phase::Live, "b is in the call");
+
+    a.hang_up();
+
+    // The engine says it is draining, which only the path that reaches
+    // `/session/close` does.
+    let drained = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if a.drain()
+                .iter()
+                .any(|e| matches!(e, sigil_net::Event::Draining))
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        drained,
+        "hanging up never reached the drain, so the session was never closed"
+    );
+    // And the interface still hears about the ending at once, rather than
+    // waiting out the drain.
+    assert_eq!(
+        a.state().phase,
+        Phase::Ended,
+        "the screen was left in a call"
+    );
+}

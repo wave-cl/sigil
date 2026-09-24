@@ -257,7 +257,13 @@ async fn the_call_bar_says_which_way_the_audio_goes() {
             Some("via exchange"),
             "direct",
         ),
-        (None, None, None, "via exchange"),
+        // **Unset is the ordinary case, not an undecided one.**
+        // `Event::Relayed` is emitted only by the `sqex-voice` binary, so
+        // on the library path a window takes, `path` stays `None` for
+        // every relayed call -- and this row used to say nothing at all.
+        // The only route to a direct call reports itself, so a call that
+        // is up and has not reported one is being carried.
+        (None, None, Some("via exchange"), "direct"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let egui_ctx = egui::Context::default();
@@ -635,4 +641,438 @@ async fn phone_in_a_call() {
     let (mut h, _, _dir) = phone_call("Alexandra Constantinopoulos-Whitmore");
     h.run_steps(3);
     h.snapshot("phone_in_a_call");
+}
+
+/// **On a phone the reason a call is relayed is drawn, not hovered.**
+///
+/// Which of the four reasons it is — the other side did not ask, this
+/// side's preference is off, the connection is carried through the home,
+/// or the punch failed — is the one fact about a call somebody can act on,
+/// and it was behind `on_hover_text`, which on a phone is a place nothing
+/// can reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn on_a_phone_the_reason_a_call_is_relayed_is_on_the_screen() {
+    use egui_kittest::Harness;
+
+    const WHY: &str = "the other side did not ask to be introduced";
+    for (form, shown) in [(sigil::Form::Phone, true), (sigil::Form::Desktop, false)] {
+        let (wide, tall) = if form.is_phone() {
+            (360.0f32, 804.0f32)
+        } else {
+            (1000.0f32, 620.0f32)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let egui_ctx = egui::Context::default();
+        let mut app = app_at(dir.path().to_path_buf());
+        let one = Account::unlocked_for_test([1u8; 32]);
+        let me = one.unlocked().expect("an open account").me();
+        let mut accounts = Accounts::of(vec![one]);
+        pass(&mut app, &mut accounts, &egui_ctx);
+
+        let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+            phase: sigil_net::Phase::Live,
+            path: Some(sigil_net::Path::Relayed),
+            why: Some(WHY.to_string()),
+            me: Some(me),
+            ..Default::default()
+        });
+        app.hold_call_for_test(me, [3u8; 32], 9, handle);
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(wide, tall))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+                sigil::Form::install(&ctx, form);
+                ctx.set_theme(egui::Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+            });
+        harness.run_steps(3);
+        let said = labels(&harness);
+        let on_screen = said.iter().any(|l| l.contains(WHY));
+        assert_eq!(
+            on_screen, shown,
+            "{form:?}: the reason on screen was {on_screen}, wanted {shown}: {said:?}"
+        );
+        // Either way the word itself is there.
+        assert!(said.iter().any(|l| l == "via exchange"), "{said:?}");
+    }
+}
+
+/// **A call that hears nothing says so.**
+///
+/// The engine raises `deaf` once frames have gone out and not one has come
+/// back; with no discontinuous transmission a peer in a call sends fifty a
+/// second, so silence is a fault and never a quiet room. The bar used to
+/// draw a green dot and a running clock either way, which is how five
+/// minutes of a field test looked perfect and carried no sound.
+///
+/// The `false` case is the control: it proves the assertion can fail, so
+/// the `true` case passing means something.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_that_hears_nothing_says_so() {
+    use egui_kittest::Harness;
+
+    const SILENCE: &str = "Nothing is coming through from the other side.";
+
+    for deaf in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let egui_ctx = egui::Context::default();
+        let mut app = app_at(dir.path().to_path_buf());
+        let one = Account::unlocked_for_test([1u8; 32]);
+        let me = one.unlocked().expect("an open account").me();
+        let mut accounts = Accounts::of(vec![one]);
+        pass(&mut app, &mut accounts, &egui_ctx);
+
+        let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+            phase: sigil_net::Phase::Live,
+            me: Some(me),
+            deaf,
+            // Both cases carry a line, so the difference the assertion
+            // measures is whether it is *drawn*, never whether it exists.
+            stats: Some("sent 900 · recv 0 · loss 100.0%".to_string()),
+            ..Default::default()
+        });
+        app.hold_call_for_test(me, [3u8; 32], 9, handle);
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 620.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+                ctx.set_theme(egui::Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+            });
+        harness.run_steps(3);
+        let said = labels(&harness);
+        // The call is on screen either way: a deaf call is still a call,
+        // and the point is what it admits, not that it disappears.
+        assert!(
+            said.iter().any(|l| l == "In a call"),
+            "the call is not on screen: {said:?}"
+        );
+        assert_eq!(
+            said.iter().any(|l| l == SILENCE),
+            deaf,
+            "deaf={deaf}: the bar said the wrong thing about what it hears: {said:?}"
+        );
+        // The dot carries it too, for anything that cannot read a colour.
+        assert_eq!(
+            said.iter()
+                .any(|l| l == "connected, but nothing is arriving"),
+            deaf,
+            "deaf={deaf}: the dot said the wrong thing: {said:?}"
+        );
+        // And the numbers come out unasked, because this is the one moment
+        // they are the point -- a phone cannot hover the clock to ask for
+        // them, and "nothing is coming through" is worth more with its own
+        // evidence under it.
+        assert_eq!(
+            said.iter().any(|l| l.contains("recv 0")),
+            deaf,
+            "deaf={deaf}: the numbers were wrong to be there or wrong to be missing: {said:?}"
+        );
+    }
+}
+
+/// **A call across two exchanges says which way the sound goes.**
+///
+/// Neither side dialled the other, so there is no introduction to report and
+/// `path` stays unsettled — which left the bar silent about a call whose
+/// media is travelling through two exchanges. The ordinary call is the
+/// control: nothing is settled for it either, and it must stay silent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_across_two_exchanges_says_so() {
+    use egui_kittest::Harness;
+
+    for cross in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let egui_ctx = egui::Context::default();
+        let mut app = app_at(dir.path().to_path_buf());
+        let one = Account::unlocked_for_test([1u8; 32]);
+        let me = one.unlocked().expect("an open account").me();
+        let mut accounts = Accounts::of(vec![one]);
+        pass(&mut app, &mut accounts, &egui_ctx);
+
+        // `path` is None in both: that is the state a cross-exchange call is
+        // always in, and the difference has to come from the call being one.
+        let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+            phase: sigil_net::Phase::Live,
+            me: Some(me),
+            ..Default::default()
+        });
+        if cross {
+            app.hold_cross_call_for_test(me, handle);
+        } else {
+            app.hold_call_for_test(me, [3u8; 32], 9, handle);
+        }
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 620.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+                ctx.set_theme(egui::Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+            });
+        harness.run_steps(3);
+        let said = labels(&harness);
+        assert_eq!(
+            said.iter().any(|l| l == "via both exchanges"),
+            cross,
+            "cross={cross}: the bar said the wrong thing about the path: {said:?}"
+        );
+        // The ordinary call is the control, and it is not silent either --
+        // it is carried by one exchange, and says so. The two wordings must
+        // not be confused: one exchange between you is not two.
+        assert_eq!(
+            said.iter().any(|l| l == "via exchange"),
+            !cross,
+            "cross={cross}: the single-exchange wording is wrong here: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|l| l == "direct"),
+            "cross={cross}: no introduction was made and the bar says direct: {said:?}"
+        );
+    }
+}
+
+/// **A setting that cannot apply here says so.**
+///
+/// "Calls connect directly" is on by default, and a call to somebody at
+/// another exchange is relayed by both of them whatever it says — SIP-39
+/// §Rationale, "always relay; no direct-connect attempt first". So somebody
+/// who turns that switch on, calls a person at another exchange and reads
+/// "via both exchanges" has been handed a label and no reason, and the
+/// reasonable thing to conclude is that the switch does nothing. Found by
+/// being asked why the other side never asked for an introduction.
+///
+/// The single-exchange call is the control: it is carried too, and must
+/// *not* blame a setting that could really have applied to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cross_exchange_call_says_the_setting_could_not_apply() {
+    use egui_kittest::Harness;
+
+    const NAMED: &str = "Calls connect directly";
+    for cross in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let egui_ctx = egui::Context::default();
+        let mut app = app_at(dir.path().to_path_buf());
+        let one = Account::unlocked_for_test([1u8; 32]);
+        let me = one.unlocked().expect("an open account").me();
+        let mut accounts = Accounts::of(vec![one]);
+        pass(&mut app, &mut accounts, &egui_ctx);
+
+        // Unsettled in both: that is the state a cross-exchange call is
+        // always in, so the difference has to come from the call being one.
+        let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+            phase: sigil_net::Phase::Live,
+            me: Some(me),
+            ..Default::default()
+        });
+        if cross {
+            app.hold_cross_call_for_test(me, handle);
+        } else {
+            app.hold_call_for_test(me, [3u8; 32], 9, handle);
+        }
+
+        // A phone, where the reason is drawn rather than hovered -- which is
+        // the only form a test can read it in.
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(360.0, 804.0))
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+                sigil::Form::install(&ctx, sigil::Form::Phone);
+                ctx.set_theme(egui::Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+            });
+        harness.run_steps(3);
+        let said = labels(&harness);
+        let named = said.iter().any(|l| l.contains(NAMED));
+        assert_eq!(
+            named, cross,
+            "cross={cross}: naming the setting was {named}, wanted {cross}: {said:?}"
+        );
+    }
+}
+
+/// **What a call is carrying is one tap away, and not before.**
+///
+/// The engine reports a line every second — sent, received, loss, late,
+/// duplicate, concealed, underruns, round trip — and nothing ever drew it,
+/// so a call carrying nothing looked exactly like a call carrying
+/// everything. The clock opens it. The closed case is the control: it
+/// proves the assertion can fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_clock_opens_what_a_call_is_carrying() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    const LINE: &str = "sent 120 · recv 0 · loss 100.0%";
+
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = one.unlocked().expect("an open account").me();
+    let mut accounts = Accounts::of(vec![one]);
+    pass(&mut app, &mut accounts, &egui_ctx);
+
+    // **Not deaf**, deliberately. A call that hears nothing draws its
+    // numbers unasked -- that is the whole point of the other test -- so
+    // using one here would measure the deafness and never the clock.
+    let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+        phase: sigil_net::Phase::Live,
+        me: Some(me),
+        deaf: false,
+        stats: Some(LINE.to_string()),
+        ..Default::default()
+    });
+    app.hold_call_for_test(me, [3u8; 32], 9, handle);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            egui::CentralPanel::default().show(ui, |ui| {
+                let mut nav = Navigator::default();
+                let mut app_ctx = AppContext {
+                    navigator: &mut nav,
+                    accounts: &mut accounts,
+                    unfocused: false,
+                    away: false,
+                    notify: &Silent,
+                    connections: &Default::default(),
+                };
+                let _ = app.render(&mut app_ctx, ui);
+            });
+        });
+    harness.run_steps(3);
+
+    // Closed: a working call needs no numbers, so none are drawn.
+    let said = labels(&harness);
+    assert!(
+        !said.iter().any(|l| l.contains("sent 120")),
+        "the numbers are on screen before anybody asked: {said:?}"
+    );
+    // The clock is the way in, and it is a control -- findable and
+    // clickable, not a label that happens to take a press.
+    let clock = said
+        .iter()
+        .find(|l| l.len() == 5 && l.as_bytes()[2] == b':')
+        .cloned()
+        .unwrap_or_else(|| panic!("no clock on the call bar: {said:?}"));
+    harness.get_by_label(&clock).click();
+    harness.run_steps(3);
+
+    let said = labels(&harness);
+    assert!(
+        said.iter().any(|l| l.contains("sent 120")),
+        "the clock was pressed and the numbers did not open: {said:?}"
+    );
+}
+
+/// **While it is still connecting, nothing is claimed.**
+///
+/// The control for the rule that an unset `path` on a live call means
+/// "carried". Before the call is up there is nothing to be carried yet, and
+/// a word that appears and then changes under somebody reading it is worse
+/// than a word that waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_still_connecting_says_nothing_about_the_path() {
+    use egui_kittest::Harness;
+
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = one.unlocked().expect("an open account").me();
+    let mut accounts = Accounts::of(vec![one]);
+    pass(&mut app, &mut accounts, &egui_ctx);
+
+    let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+        phase: sigil_net::Phase::Connecting,
+        me: Some(me),
+        ..Default::default()
+    });
+    app.hold_call_for_test(me, [3u8; 32], 9, handle);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 620.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            egui::CentralPanel::default().show(ui, |ui| {
+                let mut nav = Navigator::default();
+                let mut app_ctx = AppContext {
+                    navigator: &mut nav,
+                    accounts: &mut accounts,
+                    unfocused: false,
+                    away: false,
+                    notify: &Silent,
+                    connections: &Default::default(),
+                };
+                let _ = app.render(&mut app_ctx, ui);
+            });
+        });
+    harness.run_steps(3);
+    let said = labels(&harness);
+    assert!(
+        said.iter().any(|l| l == "Connecting…"),
+        "the call is not on screen: {said:?}"
+    );
+    for word in ["direct", "via exchange", "via both exchanges"] {
+        assert!(
+            !said.iter().any(|l| l == word),
+            "it claimed {word:?} before the call was up: {said:?}"
+        );
+    }
 }
