@@ -642,6 +642,14 @@ pub struct ChatState {
     /// had run dry was invisible here while being perfectly visible to the
     /// exchange serving the fallback in its place.
     pub prekeys: Option<u16>,
+    /// How many conversations this session has folded from the disc.
+    ///
+    /// A conversation is folded when something needs it -- opened, polled,
+    /// searched -- and listing them needs none. That is the whole of the
+    /// difference between a window that draws at once and one that reads
+    /// every message on the disc first, and nothing else about it is
+    /// observable, so the number is published rather than logged.
+    pub folds: usize,
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
@@ -2273,15 +2281,44 @@ async fn run(
                 connected = &mut connect => break connected?,
                 cmd = cmds.recv() => match cmd {
                     Some(Cmd::Show(channel)) => {
-                        open(&mut desk, &state, channel);
-                        // Borrowed for the publish only: a `&Store` held
-                        // across the await above would make this task
-                        // un-spawnable.
+                        // Borrowed for the open and the publish only: a
+                        // `&Store` held across the await above would make
+                        // this task un-spawnable.
                         let offline = Offline {
                             store: &store,
                             me: acting,
                             domain: domain.clone(),
                         };
+                        open(&offline, &mut desk, &state, channel);
+                        let _ = publish(&offline, &state, &desk, acting);
+                        (wake)();
+                    }
+                    // **Answered from the disc, like `Show`.** A search
+                    // reads words this machine already holds and asks the
+                    // exchange nothing, so deferring it until a connection
+                    // exists would make a reader wait for a round trip that
+                    // has nothing to do with their question -- and, at an
+                    // exchange that never answers, wait for ever.
+                    Some(Cmd::Search(query)) => {
+                        let offline = Offline {
+                            store: &store,
+                            me: acting,
+                            domain: domain.clone(),
+                        };
+                        search_local(&offline, &mut desk, &state, acting, &query);
+                        // Searching folds whatever it had not folded yet, so
+                        // what the list says about those conversations has
+                        // just changed.
+                        let _ = publish(&offline, &state, &desk, acting);
+                        (wake)();
+                    }
+                    Some(Cmd::Earlier) => {
+                        let offline = Offline {
+                            store: &store,
+                            me: acting,
+                            domain: domain.clone(),
+                        };
+                        reach_earlier(&offline, &mut desk);
                         let _ = publish(&offline, &state, &desk, acting);
                         (wake)();
                     }
@@ -2817,7 +2854,22 @@ struct Known {
     /// Fetched only for the conversation on screen: it is another round trip,
     /// and nobody is reading a receipt in a channel they are not looking at.
     marks: Vec<sqex_proto::channel::Mark>,
+    /// The conversation, folded -- **or a short tail of it**, while `folded`
+    /// is false.
     timeline: Timeline,
+    /// Whether `timeline` is the whole conversation.
+    ///
+    /// False for one this session has not needed yet: what it holds then is
+    /// the last few rows, plus the name, topic and picture the store
+    /// remembered -- the one line a list draws, and nothing else. **This is
+    /// not a cache flag.** Opening an epoch key spends the prekey it was
+    /// sealed against, so the fold of this machine's own rows is the only
+    /// reading of the conversation there will ever be; what is deferred is
+    /// *when* it happens, never whether. Everything that draws a transcript,
+    /// counts a conversation, searches it or polls it goes through
+    /// [`ensure_folded`] first -- a tail handed to `poll` would be appended
+    /// to above the cursor and leave a hole where the middle was.
+    folded: bool,
     /// How many messages we had last time, so a new one can be counted unread
     /// without diffing two timelines.
     seen: usize,
@@ -2991,6 +3043,9 @@ struct Desk {
     /// SIP-23: one-time prekeys the exchange still holds for this device,
     /// as of the last catch-up. `None` until one has said.
     prekeys: Option<u16>,
+    /// How many conversations have been folded this session; see
+    /// [`ensure_folded`] and [`ChatState::folds`].
+    folds: usize,
     /// SIP-39: a cross-exchange call ringing, and when it began, so one
     /// nobody answers stops ringing on its own.
     cross_ring: Option<(CrossRing, std::time::Instant)>,
@@ -3105,6 +3160,7 @@ impl Default for Desk {
             dirty: HashSet::new(),
             reports_pending: 0,
             prekeys: None,
+            folds: 0,
             cross_ring: None,
             roster_dirty: HashSet::new(),
             cursors_moved: HashSet::new(),
@@ -3350,13 +3406,18 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             .put_channel(&m.channel, group, Some(public), &label, &admins);
 
         let entry = desk.channels.entry(m.channel).or_insert_with(|| {
-            // Folded from the store, so history is on screen before the
-            // exchange has answered anything -- and stays there when it never
-            // does. The local copy is the only one that can be read anyway:
-            // opening an epoch key spends the prekey it was sealed against.
-            let timeline = chat.history(&m.channel, &admins).unwrap_or_default();
+            // A channel the exchange named that `sync_local` did not find on
+            // the disc. What this machine holds of it is drawn at once -- the
+            // local copy is the only one that can ever be read, since opening
+            // an epoch key spends the prekey it was sealed against -- but the
+            // *list* needs one line of it, so the fold waits for whatever
+            // needs the rest. The poll this channel is about to get is one of
+            // those, and folds it.
+            let timeline = chat
+                .store()
+                .history_tail(&m.channel, &admins, PREVIEW_ROWS)
+                .unwrap_or_default();
             let last_at = timeline.messages().last().map(|m| m.posted).unwrap_or(0);
-            let seen = timeline.messages().count();
             Known {
                 peer: None,
                 public: Some(public),
@@ -3366,7 +3427,8 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
                 members: Vec::new(),
                 marks: Vec::new(),
                 timeline,
-                seen,
+                folded: false,
+                seen: 0,
                 wanted: PAGE,
                 last_at,
                 unread: 0,
@@ -3419,6 +3481,10 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
             members: Vec::new(),
             marks: Vec::new(),
             timeline: Timeline::default(),
+            // A contact nothing has ever been exchanged with: there is
+            // nothing on the disc to fold, and the one query that finds that
+            // out waits until somebody opens the conversation.
+            folded: false,
             seen: 0,
             wanted: PAGE,
             unread: 0,
@@ -3660,6 +3726,14 @@ impl Local for Offline<'_> {
     }
 }
 
+/// How many stored rows a conversation's preview line is folded from.
+///
+/// Rows, not messages, so that a conversation whose last words are buried
+/// under reactions still shows a line. Twenty is enough for that and small
+/// enough that a list of a hundred conversations opens two thousand bodies
+/// rather than every body on the disc.
+pub const PREVIEW_ROWS: usize = 20;
+
 fn sync_local(chat: &impl Local, desk: &mut Desk, me: PubKey) {
     let Ok(channels) = chat.store().channels() else {
         return;
@@ -3671,11 +3745,44 @@ fn sync_local(chat: &impl Local, desk: &mut Desk, me: PubKey) {
             public,
             label,
             admins,
+            topic,
+            avatar,
+            meta_seq,
         } = known;
-        let timeline = chat.history(&channel, &admins).unwrap_or_default();
-        let last_at = timeline.messages().last().map(|m| m.posted).unwrap_or(0);
-        let held_from = timeline.messages().last().map_or(0, |m| m.seq);
-        let seen = timeline.messages().count();
+        // **The list, and not the conversations in it.** What a row draws is
+        // a name, a time and a line; folding a channel to arrive at those
+        // reads every row it holds and opens every sealed body, for
+        // conversations nobody is going to open. The store answers the first
+        // two outright and the third from its last few rows.
+        let newest = chat.store().newest_message(&channel).ok().flatten();
+        let mut timeline = chat
+            .store()
+            .history_tail(&channel, &admins, PREVIEW_ROWS)
+            .unwrap_or_default();
+        // The room's own name, topic and picture as the last fold read them.
+        // Seeded only when the tail read no metadata entry of its own: a
+        // twenty-row tail almost never contains the entry that named the
+        // room, and a list drawn without them would lose every channel
+        // picture on the first frame of every launch.
+        if timeline.metadata_seq() == 0 && meta_seq > 0 {
+            timeline.topic = topic;
+            timeline.avatar = avatar;
+        }
+        let last_at = timeline
+            .messages()
+            .last()
+            .map(|m| m.posted)
+            .or(newest.map(|(_, posted)| posted))
+            .unwrap_or(0);
+        // The newest *row*, not the newest message: everything above it is
+        // new to this device, and a row this store already holds is not.
+        // Taking the last message instead would leave the reactions and
+        // system entries above it looking like arrivals.
+        let held_from = newest.map_or(0, |(seq, _)| seq);
+        // Nothing is folded yet, so nothing has been seen yet -- and nothing
+        // reads this until `ensure_folded` sets it from the fold, which is
+        // the same number the eager fold had here.
+        let seen = 0;
         let peer = (!group)
             .then(|| admins.iter().copied().find(|a| *a != me))
             .flatten()
@@ -3691,11 +3798,12 @@ fn sync_local(chat: &impl Local, desk: &mut Desk, me: PubKey) {
             group,
             label,
             // Remembered from the last time the exchange said so, which is
-            // what the fold above just used.
+            // what a fold of this channel will need.
             admins,
             members: Vec::new(),
             marks: Vec::new(),
             timeline,
+            folded: false,
             seen,
             wanted: PAGE,
             last_at,
@@ -3714,6 +3822,48 @@ fn sync_local(chat: &impl Local, desk: &mut Desk, me: PubKey) {
     // `ask_about_unfetched`: everything here is asked about once, so a
     // conversation that moved overnight says so without being opened.
     ask_about_unfetched(desk);
+}
+
+/// Fold a conversation whole, if this session has not already.
+///
+/// **The one place a conversation stops being a preview and becomes itself.**
+/// A fold is not free -- every row read, every sealed body opened -- and it is
+/// also not optional for anything that reads more than the last line: the
+/// store's rows are the only copy of this conversation there is. So it
+/// happens on the first thing that needs it (opening, searching, scrolling
+/// back) and on every poll, because `poll` appends above the cursor of the
+/// timeline it is handed and would leave a hole in one that began at the
+/// twentieth row from the end.
+///
+/// Returns whether it folded, which is only of interest to the count.
+fn ensure_folded(chat: &impl Local, desk: &mut Desk, channel: &[u8; 32]) -> bool {
+    let Some(known) = desk.channels.get_mut(channel) else {
+        return false;
+    };
+    if known.folded {
+        return false;
+    }
+    let mut timeline = chat.history(channel, &known.admins).unwrap_or_default();
+    // **A fold that read no metadata entry knows nothing that could replace
+    // what was remembered**, which is the rule the store follows when it
+    // writes the row and the rule the list follows when it reads it. Without
+    // this, a room whose naming entry has since passed out of retention would
+    // lose its topic and picture the moment somebody opened it -- the fold
+    // finding nothing would be read as the room having nothing.
+    if timeline.metadata_seq() == 0 {
+        timeline.topic = std::mem::take(&mut known.timeline.topic);
+        timeline.avatar = known.timeline.avatar.take();
+    }
+    // What the disc held, counted as the eager fold counted it at start: the
+    // floor an arrival is counted unread against.
+    known.seen = timeline.messages().count();
+    if let Some(newest) = timeline.messages().last().map(|m| m.posted) {
+        known.last_at = known.last_at.max(newest);
+    }
+    known.timeline = timeline;
+    known.folded = true;
+    desk.folds += 1;
+    true
 }
 
 /// How many conversations one tick will ask the exchange about.
@@ -4053,6 +4203,16 @@ async fn refresh(
 
     for channel in to_poll {
         attend(chat, state, desk, cmds).await;
+        // **Whole, or not polled at all.** `poll` appends above the cursor of
+        // the timeline it is handed, so handing it a preview tail would leave
+        // a hole where the middle of the conversation was. With no link there
+        // is nothing to append -- `post_within` refuses while offline -- and
+        // folding a conversation for a request that cannot be made is work
+        // nobody asked for, so it waits for the link.
+        if chat.link() != Link::Up {
+            continue;
+        }
+        ensure_folded(&*chat, desk, &channel);
         let Some(known) = desk.channels.get_mut(&channel) else {
             continue;
         };
@@ -4165,6 +4325,9 @@ async fn catch_up(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut 
         let Some(fetched) = caught.fetched else {
             continue;
         };
+        // What `refresh` does before a poll, for the same reason: `absorb`
+        // appends to the timeline it is handed.
+        ensure_folded(&*chat, desk, &caught.channel);
         let Some(known) = desk.channels.get_mut(&caught.channel) else {
             continue;
         };
@@ -4296,6 +4459,11 @@ async fn sync_siblings(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: 
                             known.admins.clone()
                         };
                         known.timeline = chat.history(channel, &admins).unwrap_or_default();
+                        // Folded here whether or not anything had folded it
+                        // before: a sibling's entries land *below* the poll
+                        // cursor, which is why this re-folds rather than
+                        // polls.
+                        known.folded = true;
                         known.seen = known.timeline.messages().count();
                         known.last_at = known
                             .timeline
@@ -5196,6 +5364,107 @@ fn wanted_names(desk: &Desk, me: PubKey) -> Vec<PubKey> {
 }
 
 /// Everything we can say about who somebody is, read back out of the store.
+/// Another page of the open conversation, from what this machine holds.
+///
+/// Like [`search_local`], this asks the exchange nothing: the entries are on
+/// the disc and the window over them is a number. One copy of it, because
+/// both the ordinary loop and the one that runs while the exchange is being
+/// dialled answer it -- and a reader at an exchange that never answers is
+/// exactly the reader who has time to scroll.
+fn reach_earlier(chat: &impl Local, desk: &mut Desk) {
+    let Some(channel) = desk.open else {
+        return;
+    };
+    ensure_folded(chat, desk, &channel);
+    if let Some(known) = desk.channels.get_mut(&channel) {
+        known.wanted += PAGE;
+        desk.dirty.insert(channel);
+    }
+}
+
+/// Search every word this machine holds.
+///
+/// **Nothing here asks the exchange anything.** The words are on the disc --
+/// they have to be, since opening an epoch key spends the prekey it was
+/// sealed against -- so this is answered whether or not there is a
+/// connection, and it is one of the two things served while one is still
+/// being made (see the `Cmd::Show` arm in `connect_as`). A reader who opens
+/// the window and types into the search box before DNS has answered gets
+/// their answer.
+fn search_local(
+    chat: &impl Local,
+    desk: &mut Desk,
+    state: &watch::Sender<ChatState>,
+    me: PubKey,
+    query: &str,
+) {
+    let needle = query.trim().to_lowercase();
+    let mut hits = Vec::new();
+    if !needle.is_empty() {
+        // **Everything this machine holds, not everything it has
+        // looked at.** A conversation nobody has opened this session
+        // holds a preview line and not its words, and a search that
+        // skipped it would answer "nothing" about something sitting
+        // on the disc. The sweep folds them all within a few ticks of
+        // the link coming up; this is what makes that true for a
+        // client that never connects.
+        let unfolded: Vec<[u8; 32]> = desk
+            .channels
+            .iter()
+            .filter(|(_, k)| !k.folded)
+            .map(|(c, _)| *c)
+            .collect();
+        for channel in unfolded {
+            ensure_folded(chat, desk, &channel);
+        }
+        // A hit names the conversation it was found in, and a direct
+        // message's name is a person's -- so it is resolved the same
+        // way the list resolves it, or a search would be the one place
+        // still showing a whole key.
+        let people = people_of(chat, desk);
+        for (channel, known) in &desk.channels {
+            for m in known.timeline.messages() {
+                if m.redacted {
+                    continue;
+                }
+                let text = m.post.body_text().unwrap_or_default();
+                let Some(found) = find_ignoring_case(text, &needle) else {
+                    continue;
+                };
+                hits.push(Hit {
+                    channel: *channel,
+                    seq: m.seq,
+                    label: match known.peer {
+                        Some(peer) => name_for(&people, &peer, &known.label),
+                        None => known.label.clone(),
+                    },
+                    // Named as the transcript names them, and ours
+                    // as the reader's own: "You" is what a bubble on
+                    // the right-hand side says without a name.
+                    who: if m.account == me {
+                        "You".to_string()
+                    } else {
+                        people
+                            .get(&m.account)
+                            .and_then(|p| p.name.clone())
+                            .unwrap_or_else(|| short(&m.account))
+                    },
+                    text: text.to_string(),
+                    found,
+                    at: m.posted,
+                });
+            }
+        }
+        // Newest first: a search for a word said often wants the last
+        // time, not the first.
+        hits.sort_by_key(|h| std::cmp::Reverse(h.at));
+    }
+    state.send_modify(|s| {
+        s.hits = hits;
+        s.searched_messages = true;
+    });
+}
+
 fn people_of(chat: &impl Local, desk: &Desk) -> HashMap<PubKey, Person> {
     let mut out = HashMap::new();
     let look = |account: PubKey, out: &mut HashMap<PubKey, Person>| {
@@ -6080,6 +6349,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(i_am_admin, i_am_admin);
         set!(reports_pending, desk.reports_pending);
         set!(prekeys, desk.prekeys);
+        set!(folds, desk.folds);
         set!(topic, topic);
         set!(home, home);
         set!(ringing, ringing);
@@ -6557,6 +6827,10 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     members: Vec::new(),
                     marks: Vec::new(),
                     timeline: Timeline::default(),
+                    // Brand new here, and folded by the `open` below in the
+                    // ordinary way -- a direct message opened a second time
+                    // (SIP-60) has rows on the disc, and they are its own.
+                    folded: false,
                     seen: 0,
                     wanted: PAGE,
                     last_at: 0,
@@ -6573,12 +6847,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 if let Some(k) = desk.channels.get_mut(&channel) {
                     k.waiting = waiting;
                 }
-                open(desk, state, channel);
+                open(&*chat, desk, state, channel);
             }
             Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
         },
         Cmd::Show(channel) => {
-            open(desk, state, channel);
+            open(&*chat, desk, state, channel);
 
             // **At once, from the disc.** `open` clears the transcript and
             // marks the channel for the next poll, and the poll is a round
@@ -6591,8 +6865,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
         Cmd::ShowAt { channel, seq } => {
             if desk.open != Some(channel) {
-                open(desk, state, channel);
+                open(&*chat, desk, state, channel);
             }
+            // Opened already, and so folded already -- but a jump into a
+            // conversation that is on screen because somebody left it there
+            // still needs the whole of it to find a sequence number in.
+            ensure_folded(&*chat, desk, &channel);
             if let Some(known) = desk.channels.get_mut(&channel) {
                 let place = known.timeline.messages().position(|m| m.seq == seq);
                 // Not in the fold -- redacted since, or a hit from before a
@@ -6627,14 +6905,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 desk.unfetchable.remove(&blob);
             }
         }
-        Cmd::Earlier => {
-            if let Some(channel) = desk.open
-                && let Some(known) = desk.channels.get_mut(&channel)
-            {
-                known.wanted += PAGE;
-                desk.dirty.insert(channel);
-            }
-        }
+        Cmd::Earlier => reach_earlier(&*chat, desk),
         Cmd::PeerHome(peer) => {
             // **A failure here is said, not swallowed.** Where a peer lives
             // decides whether a call is placed at this exchange or bridged
@@ -7154,55 +7425,8 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
         Cmd::Search(query) => {
-            let needle = query.trim().to_lowercase();
-            let mut hits = Vec::new();
-            if !needle.is_empty() {
-                // A hit names the conversation it was found in, and a direct
-                // message's name is a person's -- so it is resolved the same
-                // way the list resolves it, or a search would be the one place
-                // still showing a whole key.
-                let people = people_of(chat, desk);
-                for (channel, known) in &desk.channels {
-                    for m in known.timeline.messages() {
-                        if m.redacted {
-                            continue;
-                        }
-                        let text = m.post.body_text().unwrap_or_default();
-                        let Some(found) = find_ignoring_case(text, &needle) else {
-                            continue;
-                        };
-                        hits.push(Hit {
-                            channel: *channel,
-                            seq: m.seq,
-                            label: match known.peer {
-                                Some(peer) => name_for(&people, &peer, &known.label),
-                                None => known.label.clone(),
-                            },
-                            // Named as the transcript names them, and ours
-                            // as the reader's own: "You" is what a bubble on
-                            // the right-hand side says without a name.
-                            who: if m.account == chat.me {
-                                "You".to_string()
-                            } else {
-                                people
-                                    .get(&m.account)
-                                    .and_then(|p| p.name.clone())
-                                    .unwrap_or_else(|| short(&m.account))
-                            },
-                            text: text.to_string(),
-                            found,
-                            at: m.posted,
-                        });
-                    }
-                }
-                // Newest first: a search for a word said often wants the last
-                // time, not the first.
-                hits.sort_by_key(|h| std::cmp::Reverse(h.at));
-            }
-            state.send_modify(|s| {
-                s.hits = hits;
-                s.searched_messages = true;
-            });
+            let me = chat.me;
+            search_local(&*chat, desk, state, me, &query);
         }
         Cmd::Replicate { exchange, on } => {
             let Some(channel) = desk.open else { return };
@@ -7696,7 +7920,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::NewGroup(name) => match chat.create_group(&name, &[]).await {
             Ok(channel) => {
                 desk.restructure = true;
-                open(desk, state, channel);
+                open(&*chat, desk, state, channel);
                 note(state, format!("Created {name}. Invite somebody to it."));
             }
             Err(e) => trouble(state, e),
@@ -7704,7 +7928,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::NewPublic { name, topic } => match chat.create_public(&name, &topic).await {
             Ok(channel) => {
                 desk.restructure = true;
-                open(desk, state, channel);
+                open(&*chat, desk, state, channel);
                 note(
                     state,
                     format!(
@@ -7760,7 +7984,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             Ok(()) => {
                 desk.restructure = true;
                 state.send_modify(|s| s.join_trouble = None);
-                open(desk, state, channel);
+                open(&*chat, desk, state, channel);
             }
             // Said in the general place as well, which is where somebody
             // looking at a conversation would see it -- and in the pane's
@@ -8097,7 +8321,13 @@ fn close(desk: &mut Desk, state: &watch::Sender<ChatState>) {
 }
 
 /// Put a conversation on screen, taking the unread divider as it goes.
-fn open(desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
+///
+/// Takes the client because a conversation being looked at is folded whole:
+/// what the list held of it was the last few rows. Here rather than at each
+/// of the seven call sites, so that opening one and forgetting to fold it is
+/// not a thing that can be written.
+fn open(chat: &impl Local, desk: &mut Desk, state: &watch::Sender<ChatState>, channel: [u8; 32]) {
+    ensure_folded(chat, desk, &channel);
     desk.open = Some(channel);
     desk.dirty.insert(channel);
     // Where everybody else has got to, once, on arriving.
@@ -8270,6 +8500,7 @@ mod naming_tests {
             members: Vec::new(),
             marks: Vec::new(),
             timeline: Default::default(),
+            folded: true,
             seen: 0,
             wanted: 0,
             last_at: 0,

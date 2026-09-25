@@ -53,6 +53,7 @@ fn a_conversation() -> ChatState {
     ChatState {
         me: Some(me()),
         prekeys: None,
+        folds: 0,
         devices_known: true,
         join_trouble: None,
         not_admitted: None,
