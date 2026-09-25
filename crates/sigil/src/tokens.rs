@@ -40,6 +40,13 @@ pub const AVATAR_MD: f32 = 38.0;
 pub const AVATAR_LG: f32 = 48.0;
 pub const AVATAR_XL: f32 = 80.0;
 
+/// How wide a card of its own gets to be, whatever the window is.
+///
+/// A call card on a desktop is the same card as on a phone and wants the
+/// same shape: three controls stretched across a thousand points are a row
+/// of buttons in a desert. Centred in the pane, capped here.
+pub const CARD_MAX_WIDTH: f32 = 480.0;
+
 /// A text field's height.
 ///
 /// Bigger than a line of text on purpose: a field the height of its own

@@ -4,6 +4,7 @@
 //! data, so this does not become a second place the wire format is understood.
 
 pub mod attachment;
+pub mod call_card;
 pub mod clock;
 pub mod conversation_row;
 pub mod dot;
@@ -411,6 +412,7 @@ pub fn menu_width(ui: &mut egui::Ui) {
     ui.set_max_width(sigil::tokens::MENU_MAX);
 }
 
+pub use call_card::{Call, CallPress, call_card, call_control};
 pub use qr::qr;
 pub use roster::{Row, roster};
 pub use search_hit::{SearchHit, search_hit};

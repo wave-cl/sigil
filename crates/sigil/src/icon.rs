@@ -116,6 +116,13 @@ icons! {
     Switch => "Switch identity",
     /// Record a voice note.
     Mic => "Record a voice note",
+    /// A microphone that is not sending: on a call, press to unmute.
+    ///
+    /// Its own icon rather than a tinted [`Icon::Mic`], because
+    /// [`Icon::word`] is fixed per icon and the word is what somebody who
+    /// cannot see the shape is given — the same reason [`Icon::Sound`] and
+    /// [`Icon::Muted`] are two.
+    MicOff => "Unmute your microphone",
     /// Play a video, or carry on with one.
     Play => "Play",
     /// Hold a video where it is.
@@ -468,7 +475,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 );
             }
         }
-        Icon::Mic => {
+        Icon::Mic | Icon::MicOff => {
             // A capsule on a stand: the barrel, the arc that cradles it,
             // and the stem down to a foot.
             let barrel = egui::Rect::from_min_max(p(0.40, 0.16), p(0.60, 0.56));
@@ -482,6 +489,13 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             path(cradle);
             line(p(0.50, 0.68), p(0.50, 0.82));
             line(p(0.36, 0.82), p(0.64, 0.82));
+            // Struck through, corner to corner, so the two read apart at a
+            // glance and at a thumbnail. `Icon::Muted` strikes only its cone
+            // because the box beside it still says "speaker"; a microphone
+            // has no such second half, so the stroke crosses the whole mark.
+            if icon == Icon::MicOff {
+                line(p(0.20, 0.84), p(0.80, 0.16));
+            }
         }
         Icon::Sound | Icon::Muted => {
             // A speaker: a small box and the cone out of it. With sound, a
