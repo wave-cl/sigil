@@ -5481,13 +5481,18 @@ impl ChatApp {
         // past the bottom edge of a phone lying down, with no way to reach it.
         //
         // Scrolling is not the way out of that, and it is worth saying so here
-        // rather than leaving it to be rediscovered: in egui 0.36 a
-        // `ScrollArea` inside a `Modal` makes **every press inside the dialog
-        // dismiss it**. Tried again, with `auto_shrink([false, true])`, and
+        // rather than leaving it to be rediscovered: a `ScrollArea` inside a
+        // `Modal` makes **every press inside the dialog dismiss it**. Tried
+        // again, with `auto_shrink([false, true])`, and
         // `an_exchange_that_cannot_be_added_says_why` caught it at once --
         // "adding the same exchange twice did nothing at all", the press
         // swallowed. `a_dialog_too_tall_for_the_screen_can_still_be_left`
         // records the earlier attempts.
+        //
+        // **Checked against the newest egui there is, not just the pinned
+        // one**: 0.36.2 (we are on 0.36.1) behaves identically, so this is not
+        // a bump away and there is no point trying one. Worth re-testing when
+        // 0.37 lands -- the test above is the whole experiment.
         //
         // Upright there are 804 points and the dialog comes to about 420, so it
         // fits with room over. Lying down it stays a tooltip: a phone cannot
