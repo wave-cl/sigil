@@ -3909,7 +3909,11 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
     );
 
     // Bob joins at the origin -- a join is not forwarded -- and leaves.
+    // His search there is also where the room's instance is learned, because
+    // the replica's directory will not offer it (SIP-35 §A copy is not in the
+    // directory) and Carol joins by identifier below.
     let bob_store = origin_dir.path().join("bob.db");
+    let instance;
     {
         let bob = start_at(at_origin, signer(48).0, &bob_store);
         assert!(until(|| bob.state().me == Some(bob_key), 15).await);
@@ -3927,6 +3931,7 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
             .into_iter()
             .find(|f| f.name == "the square")
             .unwrap();
+        instance = found.instance;
         bob.send(Cmd::Join {
             channel: found.channel,
             instance: found.instance,
@@ -4086,9 +4091,18 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
     );
     assert_eq!(via_of(&bob, "welcome"), Some(None));
 
-    // Carol has never been to the origin. She finds the square in the
-    // replica's directory, joins it *there* -- the join is carried to the
-    // origin as a post is -- reads it, and speaks.
+    // **A copy is not in the replica's directory** (SIP-35 §A copy is not in
+    // the directory). A replica takes the origin's shape, visibility
+    // included, so a copy of a public channel has a public row locally and
+    // used to be listed -- two exchanges that copied each other's `general`
+    // each showed two rooms of that name, and a join on the copy was refused,
+    // because a join is a write and writes go to the origin.
+    //
+    // Carol has never been to the origin. She asks the replica's directory,
+    // is told nothing, and joins by identifier instead -- which is carried to
+    // the origin as a post is. Finding somebody else's public channel is
+    // `/channel/search`'s federated half, and that wants a peering this test
+    // does not set up.
     let (_, carol_key) = signer(49);
     let carol = start_at(
         at_replica,
@@ -4096,30 +4110,32 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
         &replica_dir.path().join("carol.db"),
     );
     assert!(until(|| carol.state().me == Some(carol_key), 15).await);
-    carol.send(Cmd::Find("square".into()));
+    // Bob is at the replica and reading the copy, so the copy is certainly
+    // here -- without that the absence below would prove nothing.
     assert!(
-        until(
-            || carol
-                .state()
-                .found
-                .iter()
-                .any(|f| f.name.starts_with("the square")),
-            20
-        )
-        .await,
-        "the replica's directory does not list the square: {:?}",
+        bob.state()
+            .conversations
+            .iter()
+            .any(|c| c.channel == channel),
+        "the replica is not carrying the copy at all, so its directory is \
+         empty for the wrong reason"
+    );
+    carol.send(Cmd::Find("square".into()));
+    // Given time to answer, and the answer is nothing. `until` returning
+    // false here is the assertion: a listing that arrived late would still
+    // have arrived.
+    assert!(
+        !until(|| !carol.state().found.is_empty(), 10).await,
+        "the replica's directory offered a room nobody there can enter: {:?}",
         carol.state().found
     );
-    let found = carol
-        .state()
-        .found
-        .into_iter()
-        .find(|f| f.name == "the square@origin.example")
-        .expect("the directory at a copy names the room with where it lives");
-    carol.send(Cmd::Join {
-        channel: found.channel,
-        instance: found.instance,
-    });
+    carol.send(Cmd::Join { channel, instance });
+    // **A minute, because this is two hops.** The join goes to the replica,
+    // the replica forwards it to the origin, and the copy catches up before
+    // Carol's conversation list has it. Thirty seconds was enough alone and
+    // not under a `--workspace` run: it failed once in three at 51 s and
+    // passed at 21 s, with no refusal recorded at either end -- which is what
+    // `join_trouble` below is printed for.
     assert!(
         until(
             || carol
@@ -4127,10 +4143,11 @@ async fn a_member_posts_from_an_exchange_that_only_holds_a_copy() {
                 .conversations
                 .iter()
                 .any(|c| c.channel == channel),
-            30
+            60
         )
         .await,
-        "the join was not carried to the origin: {:?}",
+        "the join was not carried to the origin: join_trouble {:?} / trouble {:?}",
+        carol.state().join_trouble,
         carol.state().trouble
     );
     carol.send(Cmd::Show(channel));
