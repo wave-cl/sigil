@@ -667,6 +667,10 @@ pub struct ChatState {
     /// as an alias while living somewhere else, which is exactly the case
     /// that decides whether a call needs SIP-39's bridge.
     pub peer_home: Option<(PubKey, String)>,
+    /// SIP-5: what is waiting in the mailbox, newest first. Empty until
+    /// something asks, and empty is also "nothing waiting" -- which is the
+    /// ordinary case and draws nothing at all.
+    pub mail: Vec<MailItem>,
     /// SIP-53 §Posting again: this client's own posts that a move stranded
     /// in the open conversation, oldest first. Offered above the composer,
     /// one at a time.
@@ -1158,6 +1162,64 @@ impl Face {
     }
 }
 
+/// Whether this device may complete collection of `id`.
+///
+/// **SIP-5 §Collection by a device: deleting completes collection for every
+/// device of the account.** So a device may only say an item is collected if
+/// it could read it — an item sealed to a sibling's key would otherwise be
+/// destroyed here for a device that had never seen it.
+///
+/// Unopened is also "no": this device has not established that it *can* read
+/// it, and `Chat::mail_delete` would fetch and open it to find out. Asking
+/// first and refusing here keeps the rule where somebody can read it.
+pub(crate) fn may_delete(mail: &[MailItem], id: u64) -> bool {
+    matches!(
+        mail.iter().find(|m| m.id == id).map(|m| &m.opened),
+        Some(Some(MailBody::Text(_) | MailBody::Opaque(_)))
+    )
+}
+
+/// One item waiting in the SIP-5 mailbox.
+///
+/// **The sender is the exchange's observation, not a cryptographic fact.** A
+/// mailbox item is sealed to the recipient and signed by nobody — SIP-5 says
+/// both ends are authenticated by their connection, so the exchange reports
+/// who it saw connect and that is all anyone can say. Drawn as such: never
+/// beside a verification mark, and never as though the sender had signed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailItem {
+    pub id: u64,
+    /// Who the exchange saw send it.
+    pub from: PubKey,
+    /// When the exchange took it, in seconds.
+    pub at: u64,
+    /// The sealed size, before opening.
+    pub bytes: u32,
+    /// What opening it produced, once somebody has. `None` is unopened;
+    /// opening is a round trip and is never done for a whole list at once.
+    pub opened: Option<MailBody>,
+}
+
+/// What an opened item turned out to be.
+///
+/// Not every payload is a message for a person to read: SIP-5 carries
+/// whatever any client cares to seal, and `sqex-voice` leaves a one-byte ring
+/// in it. So the interface says what it found rather than rendering bytes as
+/// though they were words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailBody {
+    /// Text, which is what `sqex mail send` leaves.
+    Text(String),
+    /// Opened, and not text. The length is all there is to say about it.
+    Opaque(usize),
+    /// Sealed to a key this device does not hold — another device of this
+    /// account. **It must not be deleted here**: deleting completes
+    /// collection for every device, and this one cannot read it.
+    Elsewhere,
+    /// The exchange no longer has it: collected by another device, or expired.
+    Gone,
+}
+
 /// A profile that is **withheld, absent, or blocked answers identically** by
 /// design (SIP-4's rule, and SIP-21 keeps it). So `None` here means "we cannot
 /// name them", never "they have nothing" and never "they blocked you" — the
@@ -1459,6 +1521,18 @@ pub enum Cmd {
     /// conversation does not need. Whether a call to them wants SIP-39's
     /// bridge is not urgent; the chat list is.
     PeerHome(PubKey),
+    /// SIP-5: what is waiting in the mailbox. A round trip, asked for rather
+    /// than polled -- sigil rings in-channel (SIP-24), so nothing here is
+    /// time-critical and a poll would spend a per-caller limit on a store
+    /// that is usually empty.
+    Mail,
+    /// SIP-5 §Collection by a device: open one item.
+    MailRead(u64),
+    /// SIP-5 §Collection by a device: complete collection of an item this
+    /// device has opened. **Deleting completes collection for every device
+    /// of the account**, so an item this one could not open is never offered
+    /// for deletion.
+    MailDelete(u64),
     /// SIP-17: ask for an epoch key this device was not sent.
     ///
     /// Asks the exchange for an envelope sealed to this device, and where
@@ -3149,6 +3223,8 @@ struct Desk {
     /// SIP-59: where each peer's account lives, asked once. A round trip,
     /// and the answer only changes when somebody moves home.
     peer_homes: HashMap<PubKey, (PubKey, String)>,
+    /// SIP-5: the mailbox as last listed, with whatever has been opened.
+    mail: Vec<MailItem>,
 }
 
 impl Default for Desk {
@@ -3156,6 +3232,7 @@ impl Default for Desk {
         Desk {
             channels: HashMap::new(),
             peer_homes: HashMap::new(),
+            mail: Vec::new(),
             open: None,
             dirty: HashSet::new(),
             reports_pending: 0,
@@ -6337,6 +6414,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(copies, copies);
         set!(stranded, stranded);
         set!(peer_home, peer_home);
+        set!(mail, desk.mail.clone());
         set!(events, events);
         set!(earlier, earlier);
         set!(loading, loading);
@@ -6583,6 +6661,57 @@ fn name_for(people: &HashMap<PubKey, Person>, peer: &PubKey, local: &str) -> Str
 /// What to call somebody. [`naming_tests`] below is the neighbouring
 /// question -- *whose* names are worth asking the exchange for -- and
 /// `crate::label_tests` is a third, about naming exchanges.
+#[cfg(test)]
+mod mail_tests {
+    use super::{MailBody, MailItem, may_delete};
+    use sqnr_core::PubKey;
+
+    fn item(id: u64, opened: Option<MailBody>) -> MailItem {
+        MailItem {
+            id,
+            from: PubKey::new([9u8; 32]),
+            at: 1,
+            bytes: 32,
+            opened,
+        }
+    }
+
+    /// **The rule deleting exists to protect.** Completing collection drops
+    /// the item for every device of the account, so a device that cannot read
+    /// one must not be able to destroy it for a device that can.
+    #[test]
+    fn an_item_sealed_to_a_sibling_is_not_deletable_here() {
+        let mail = vec![item(1, Some(MailBody::Elsewhere))];
+        assert!(!may_delete(&mail, 1));
+    }
+
+    /// And the control: one this device *has* read is deletable, or the case
+    /// above passes for a rule that refuses everything.
+    #[test]
+    fn an_item_this_device_read_is_deletable() {
+        assert!(may_delete(
+            &[item(1, Some(MailBody::Text("hello".into())))],
+            1
+        ));
+        // Opened and not text is still opened: a ring left by another client
+        // is this device's to clear.
+        assert!(may_delete(&[item(2, Some(MailBody::Opaque(1)))], 2));
+    }
+
+    /// Unopened is not deletable: this device has not shown it can read it.
+    #[test]
+    fn an_unopened_item_is_not_deletable() {
+        assert!(!may_delete(&[item(1, None)], 1));
+    }
+
+    /// Nor one that is no longer there, or was never listed.
+    #[test]
+    fn an_absent_item_is_not_deletable() {
+        assert!(!may_delete(&[item(1, Some(MailBody::Gone))], 1));
+        assert!(!may_delete(&[], 7));
+    }
+}
+
 #[cfg(test)]
 mod face_tests {
     use super::Face;
@@ -6906,6 +7035,90 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
         Cmd::Earlier => reach_earlier(&*chat, desk),
+        // SIP-5. Listing costs a round trip and says only what is waiting;
+        // opening each item is a second one, so a list is never opened whole.
+        Cmd::Mail => match chat.mail_list().await {
+            Ok(listing) => {
+                // Newest first: an inbox is read from the top, and the
+                // exchange hands them back oldest first.
+                let mut items: Vec<MailItem> = listing
+                    .entries
+                    .iter()
+                    .map(|e| MailItem {
+                        id: e.id,
+                        from: e.sender,
+                        at: e.received,
+                        bytes: e.len,
+                        // What was already opened stays opened: a refresh
+                        // must not shut everything the reader has opened.
+                        opened: desk
+                            .mail
+                            .iter()
+                            .find(|held| held.id == e.id)
+                            .and_then(|held| held.opened.clone()),
+                    })
+                    .collect();
+                items.sort_by(|a, b| b.at.cmp(&a.at).then(b.id.cmp(&a.id)));
+                desk.mail = items;
+                desk.restructure = true;
+            }
+            // Said, not swallowed: an inbox that silently stays empty is
+            // indistinguishable from one with nothing in it.
+            Err(why) => {
+                tracing::warn!(%why, "could not list the mailbox");
+                note(state, format!("The mailbox could not be read: {why}"));
+            }
+        },
+        Cmd::MailRead(id) => {
+            let opened = match chat.mail_read(id).await {
+                Ok(Some((_, plain))) => match String::from_utf8(plain) {
+                    Ok(text) => MailBody::Text(text),
+                    // Whatever any client cared to seal -- a ring is one
+                    // byte. Said as what it is rather than rendered as words.
+                    Err(e) => MailBody::Opaque(e.into_bytes().len()),
+                },
+                // Collected by another device, or past its TTL.
+                Ok(None) => MailBody::Gone,
+                Err(sqex_chat::ChatError::MailSealedElsewhere(_)) => MailBody::Elsewhere,
+                Err(why) => {
+                    tracing::warn!(%id, %why, "could not open a mailbox item");
+                    note(state, format!("That message could not be opened: {why}"));
+                    return;
+                }
+            };
+            if let Some(held) = desk.mail.iter_mut().find(|m| m.id == id) {
+                held.opened = Some(opened);
+                desk.restructure = true;
+            }
+        }
+        Cmd::MailDelete(id) => {
+            // **Refused here as well as at the client.** `mail_delete` opens
+            // an item it has not seen before deleting, so asking it to delete
+            // one this device cannot read would fetch it again to be told the
+            // same thing. The rule is SIP-5's: completing collection is for
+            // every device of the account, so only a device that has read it
+            // may say it is collected.
+            if !may_delete(&desk.mail, id) {
+                note(
+                    state,
+                    "That message is sealed to another of your devices. \
+                     Deleting it here would complete collection for all of \
+                     them, so it is left where it is."
+                        .to_string(),
+                );
+                return;
+            }
+            match chat.mail_delete(id).await {
+                Ok(_) => {
+                    desk.mail.retain(|m| m.id != id);
+                    desk.restructure = true;
+                }
+                Err(why) => {
+                    tracing::warn!(%id, %why, "could not delete a mailbox item");
+                    note(state, format!("That message could not be deleted: {why}"));
+                }
+            }
+        }
         Cmd::PeerHome(peer) => {
             // **A failure here is said, not swallowed.** Where a peer lives
             // decides whether a call is placed at this exchange or bridged

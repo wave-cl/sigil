@@ -302,6 +302,7 @@ fn a_conversation() -> ChatState {
         // everything else here. `a_paged_conversation` is what covers it.
         earlier: 0,
         locked_out: None,
+        mail: Vec::new(),
     }
 }
 

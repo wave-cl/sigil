@@ -824,6 +824,8 @@ enum Dialog {
     /// SIP-56: report a message (`target` is its seq) or the room (0) to the
     /// admins.
     Report { target: u64 },
+    /// SIP-5: what is waiting in the mailbox here.
+    Mail,
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -5088,6 +5090,7 @@ impl ChatApp {
                     Dialog::Profile => self.profile_dialog(at, ui, theme),
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
+                    Dialog::Mail => self.mail_dialog(at, state, ui, theme),
                     Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
                     Dialog::Report { target } => self.report_dialog(at, state, target, ui, theme),
                 }
@@ -5319,6 +5322,132 @@ impl ChatApp {
     /// to exactly one account, and is what lets anybody write to you as
     /// `name@domain`. They are two different things that both get called a
     /// name, so they get two dialogs and each says which it is.
+    /// SIP-5: what is waiting at the exchange.
+    ///
+    /// **Nothing here is a conversation.** A mailbox item is sealed to the
+    /// recipient and signed by nobody — both ends are authenticated by their
+    /// connection, so who sent it is the exchange's observation and not a
+    /// cryptographic fact. It is drawn as such: the key, never a verification
+    /// mark, and never in the voice a signed message gets.
+    fn mail_dialog(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        ui.heading("Messages left for you");
+        ui.add_space(tokens::SPACING_XS);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Sealed to you and held at this exchange. Who sent it is what the exchange \
+                 saw, not something they signed.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        if state.mail.is_empty() {
+            // The ordinary case, and it must not read as a failure: a
+            // mailbox is empty far more often than not.
+            ui.colored_label(theme.text_muted, "Nothing is waiting.");
+            ui.add_space(tokens::SPACING_SM);
+            if ui.button("Check again").clicked() {
+                self.send_as(Some(at), Cmd::Mail);
+            }
+            return;
+        }
+
+        let mut read = None;
+        let mut delete = None;
+        let now = self.now();
+        for item in &state.mail {
+            let key = item.from.to_string();
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.vertical(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(sigil_ui::short(&key)).monospace(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&key);
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new(format!(
+                                "{} · {} bytes",
+                                sigil_ui::brief(item.at, now),
+                                item.bytes
+                            ))
+                            .small(),
+                        );
+                    });
+                });
+                match &item.opened {
+                    None => {
+                        if ui.button("Open").clicked() {
+                            read = Some(item.id);
+                        }
+                    }
+                    Some(session::MailBody::Text(text)) => {
+                        ui.add_space(tokens::SPACING_XS);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(text).color(theme.text_primary))
+                                .wrap(),
+                        );
+                        ui.add_space(tokens::SPACING_XS);
+                        // **Only once it has been read.** Deleting completes
+                        // collection for every device of the account, so it
+                        // is offered where this one can say what it is
+                        // deleting.
+                        if ui
+                            .button("Delete")
+                            .on_hover_text(
+                                "Completes collection: the exchange drops it for all your \
+                                 devices.",
+                            )
+                            .clicked()
+                        {
+                            delete = Some(item.id);
+                        }
+                    }
+                    Some(session::MailBody::Opaque(len)) => {
+                        ui.colored_label(
+                            theme.text_muted,
+                            format!("Opened: {len} bytes, not text. Left by another client."),
+                        );
+                        if ui.button("Delete").clicked() {
+                            delete = Some(item.id);
+                        }
+                    }
+                    Some(session::MailBody::Elsewhere) => {
+                        // Not an error, and not deletable here.
+                        ui.colored_label(
+                            theme.text_muted,
+                            "Sealed to another of your devices. Open it there.",
+                        );
+                    }
+                    Some(session::MailBody::Gone) => {
+                        ui.colored_label(
+                            theme.text_muted,
+                            "No longer at the exchange — collected elsewhere, or expired.",
+                        );
+                    }
+                }
+            });
+            ui.add_space(tokens::SPACING_XS);
+        }
+
+        if let Some(id) = read {
+            self.send_as(Some(at), Cmd::MailRead(id));
+        }
+        if let Some(id) = delete {
+            self.send_as(Some(at), Cmd::MailDelete(id));
+        }
+        ui.add_space(tokens::SPACING_SM);
+        if ui.button("Check again").clicked() {
+            self.send_as(Some(at), Cmd::Mail);
+        }
+    }
+
     fn name_dialog(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
         // What is held now, if anything: the dialog is reached both from an
         // unclaimed domain line and from the name itself, and it had only
@@ -11583,6 +11712,27 @@ impl ChatApp {
             .clicked()
         {
             self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Exchange);
+        }
+        // **SIP-5, asked for rather than polled.** Nothing here is
+        // time-critical: sigil rings in-channel (SIP-24), so the mailbox
+        // carries only what another client left, and polling would spend a
+        // per-caller limit on a store that is almost always empty. The row
+        // is the ask; the count beside it is from the last one.
+        if sigil_ui::icon_item_counted(
+            ui,
+            sigil_ui::Icon::Mail,
+            "Messages left for you",
+            false,
+            state.mail.len() as u32,
+        )
+        .on_hover_text(
+            "SIP-5: something sealed to you and left at the exchange to collect when you \
+             next connect. Held there, not in a conversation, and deleted once you take it.",
+        )
+        .clicked()
+        {
+            self.send_as(Some(at), Cmd::Mail);
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Mail);
         }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Switch, "Switch identity")
             .on_hover_text(

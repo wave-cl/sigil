@@ -19,7 +19,7 @@ const ALL: &[Icon] = Icon::ALL;
 
 /// How tall the sheet is allowed to be. The harness is built at this, and
 /// `every_icon_is_on_the_sheet` checks what was actually drawn fits inside it.
-const SHEET: f32 = 360.0;
+const SHEET: f32 = 420.0;
 
 fn harness(dark: bool) -> Harness<'static> {
     harness_measured(dark).0

@@ -150,6 +150,8 @@ icons! {
     Flag => "Report",
     /// Keep a file somewhere of your own.
     Save => "Save",
+    /// SIP-5: something sealed to you and left at the exchange.
+    Mail => "Messages left for you",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -326,6 +328,18 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
             // this", and nothing else here is triangular.
             line(p(0.30, 0.18), p(0.30, 0.84));
             path(vec![p(0.30, 0.22), p(0.74, 0.36), p(0.30, 0.52)]);
+        }
+        Icon::Mail => {
+            // An envelope: the body, then the flap folded into it. Drawn as
+            // an outline like every other icon here rather than filled, so
+            // it carries the same weight beside them.
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.16, 0.26), p(0.84, 0.74)),
+                s * 0.06,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            path(vec![p(0.16, 0.30), p(0.50, 0.55), p(0.84, 0.30)]);
         }
         Icon::Save => {
             // A stroke down into a tray: what a download is everywhere,
