@@ -9,6 +9,14 @@
 
 use std::path::PathBuf;
 
+/// How many times a refused lock is asked for again, and how long apart.
+///
+/// A tenth of a second in total: long enough for the window measured above,
+/// short enough that somebody with a second sigil genuinely running does not
+/// wait for the answer.
+const RETRIES: u32 = 5;
+const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Held for the life of the process. Dropping it releases the claim.
 pub struct Instance {
     _file: std::fs::File,
@@ -37,8 +45,34 @@ pub fn claim(dir: &std::path::Path) -> Result<Instance, String> {
     {
         use std::io::{Read, Seek, Write};
         use std::os::unix::io::AsRawFd;
-        // SAFETY: `file` owns the descriptor and outlives the call.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // **A refused lock is not believed the first time.** `flock` returns
+        // `EWOULDBLOCK` for a short window after the previous holder closed
+        // its descriptor, even when that holder was this process and nothing
+        // holds the file at all: measured with `lsof` at the moment of
+        // failure, the only descriptor open on it was the one this call had
+        // just opened, and it still failed. Under load it failed ten times in
+        // thirty attempts.
+        //
+        // That window is the difference between starting and refusing to
+        // start. `claim` runs once, at startup, so a transient refusal tells
+        // somebody "sigil is already running" when nothing is -- worst on a
+        // loaded machine at login, which is exactly when a launch agent
+        // starts it. A real second instance holds its lock for as long as it
+        // runs and is still refused, a tenth of a second later.
+        //
+        // SAFETY: `file` owns the descriptor and outlives each call.
+        let mut held_by_somebody = false;
+        for attempt in 0..RETRIES {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                held_by_somebody = false;
+                break;
+            }
+            held_by_somebody = true;
+            if attempt + 1 < RETRIES {
+                std::thread::sleep(RETRY_PAUSE);
+            }
+        }
+        if held_by_somebody {
             let mut held = String::new();
             let mut probe = &file;
             let _ = probe.read_to_string(&mut held);
