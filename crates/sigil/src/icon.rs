@@ -742,6 +742,32 @@ pub fn apply_button(ui: &mut egui::Ui, word: &str) -> egui::Response {
     }
 }
 
+/// A control whose shape is not its meaning, named where a name can be read.
+///
+/// **A cross is worse than a glyph with no convention, because it has one and
+/// it is wrong here.** Seven of these said six different things — "Give it up",
+/// "Throw it away", "Remove" twice, "Hide" twice — and on a phone all of them
+/// are the same ✕ with no word, because `icon_button_named` gives a glyph a
+/// tooltip for a pointer and a name for a screen reader, and a phone has
+/// neither. Four of the six remove or destroy something. The reading a cross
+/// invites is "dismiss this", which is the safe-sounding one, and it is the
+/// wrong one exactly where being wrong costs most.
+///
+/// So the word is drawn on a phone and hovered on a desktop, the rule the rest
+/// of this app follows. Here rather than at each call site, as
+/// [`apply_button`] is, so the next one is right without anybody remembering.
+///
+/// Not for a glyph that is genuinely universal — back, forward, search, menu —
+/// nor for a cross inside a pill that cancels the draft it sits on, where the
+/// convention *is* the meaning and there is no room for a word.
+pub fn named_control(ui: &mut egui::Ui, icon: Icon, word: &str) -> egui::Response {
+    if crate::Form::of(ui.ctx()).is_phone() {
+        ui.button(word)
+    } else {
+        icon_button_named(ui, icon, word)
+    }
+}
+
 /// The same, in a colour of its own — for anything destructive.
 pub fn icon_button_tinted(
     ui: &mut egui::Ui,

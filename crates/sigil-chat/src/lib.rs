@@ -4015,7 +4015,7 @@ impl ChatApp {
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(egui::RichText::new(handle).monospace().small()).wrap());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Give it up")
+                    if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Give it up")
                         .on_hover_text(
                             "Stop being reachable at this name. Nothing is deleted — your \
                              conversations, keys and counters are untouched — and somebody \
@@ -7801,7 +7801,7 @@ impl ChatApp {
         let mut send = false;
         ui.horizontal(|ui| {
             ui.set_min_height(tokens::FIELD_LG);
-            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Throw it away").clicked() {
+            if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Throw it away").clicked() {
                 throw_away = true;
             }
             if deaf {
@@ -11684,7 +11684,7 @@ impl ChatApp {
                 self.send_as(Some(at), Cmd::BackupKey);
             }
             if backup.words.is_some()
-                && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Hide").clicked()
+                && sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Hide").clicked()
             {
                 self.send_as(Some(at), Cmd::HideBackupKey);
             }
@@ -11948,8 +11948,7 @@ impl ChatApp {
                 let mut drop: Option<PubKey> = None;
                 for g in &named {
                     ui.horizontal(|ui| {
-                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Remove")
-                            .clicked()
+                        if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Remove").clicked()
                         {
                             drop = Some(*g);
                         }
@@ -12114,19 +12113,25 @@ impl ChatApp {
                         .wrap()
                         .selectable(true),
                 );
+                // **The two controls together, and the instruction under
+                // them.** A labelled button beside a bare glyph reads as two
+                // unrelated things, and with the sentence on the same row
+                // there was no width left for any of the three. On a phone
+                // both are spelled and the sentence has a line of its own; a
+                // pointer keeps the glyphs and their tooltips.
                 ui.horizontal(|ui| {
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy").clicked() {
+                    if sigil::icon::named_control(ui, sigil_ui::Icon::Copy, "Copy").clicked() {
                         ui.ctx().copy_text(text.to_string());
                     }
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Close, "Hide").clicked() {
+                    if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Hide").clicked() {
                         self.send_as(Some(at), Cmd::HideSuccession);
                     }
-                    ui.colored_label(
-                        theme.text_muted,
-                        egui::RichText::new(format!("Give {what} to the person it is for."))
-                            .small(),
-                    );
                 });
+                ui.add_space(tokens::SPACING_XS);
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(format!("Give {what} to the person it is for.")).small(),
+                );
             });
     }
 }
