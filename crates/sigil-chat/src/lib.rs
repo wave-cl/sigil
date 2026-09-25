@@ -9292,11 +9292,18 @@ impl ChatApp {
                                     );
                                     ctx.navigator.back();
                                 }
-                                if sigil_ui::icon_button_named(
+                                // Beside a labelled Show, and a moderation
+                                // act: on a phone a bare ✕ here reads as
+                                // "close this", not "discard the report".
+                                // A tile's corner and a search box keep
+                                // their crosses — there the convention is
+                                // the meaning — and this is neither.
+                                if sigil::icon::named_control(
                                     ui,
                                     sigil_ui::Icon::Close,
-                                    "Dismiss this report",
+                                    "Dismiss",
                                 )
+                                .on_hover_text("Dismiss this report")
                                 .clicked()
                                 {
                                     self.send_as(Some(at), Cmd::Dismiss(report.id));
