@@ -7935,7 +7935,19 @@ impl ChatApp {
                     n => format!("{n} files"),
                 }
             };
-            ui.horizontal_wrapped(|ui| {
+            // **The words are words and the buttons are buttons.** In one
+            // `horizontal_wrapped` every wrapped line is at least
+            // `interact_size.y`, which the phone form raises to a thumb's
+            // worth — so two lines of small text stood 44 apart and read as
+            // loose leading. The same thing `centred` fixes in the
+            // transcript, and it cannot be fixed the same way here because
+            // this row has real buttons in it, which *should* be that tall.
+            // So the sentence gets a scope of its own and they get a row.
+            const STRANDED: &str = "This conversation moved while these were being posted, and \
+                                    the copy that won does not have them. Sending one again \
+                                    posts it afresh, saying when you first said it.";
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
                 ui.colored_label(
                     theme.warning,
                     egui::RichText::new(match state.stranded.len() {
@@ -7947,11 +7959,15 @@ impl ChatApp {
                     })
                     .small(),
                 )
-                .on_hover_text(
-                    "This conversation moved while these were being posted, and the copy that \
-                     won does not have them. Sending one again posts it afresh, saying when \
-                     you first said it.",
-                );
+                .on_hover_text(STRANDED);
+                // Why it happened and what Send again does, where a phone
+                // can read it: this is a state somebody has never seen
+                // before and the buttons alone do not explain it.
+                if sigil::Form::of(ui.ctx()).is_phone() {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(STRANDED).small());
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
                 if ui.small_button("Send again").clicked() {
                     self.send_as(Some(at), Cmd::PostAgain(first.seq));
                 }
@@ -12088,7 +12104,7 @@ impl ChatApp {
             "",
             &mut self.panes.entry(at.clone()).or_default().vouch_successor,
             "the key that succeeds it, in base58",
-            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Check, "Vouch")),
+            Some(sigil_ui::Action::Word("Vouch")),
         );
         if vouch {
             let (a, s) = {

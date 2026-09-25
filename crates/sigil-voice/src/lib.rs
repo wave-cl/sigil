@@ -434,12 +434,20 @@ impl VoiceApp {
             // key at: at body size forty-four monospace characters do not fit
             // a phone's width even on a line of their own, and a key broken
             // across two lines is a key somebody reads out wrong.
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(theme.text_secondary, "You are");
-                ui.add(
-                    egui::Label::new(egui::RichText::new(me.to_string()).monospace().small())
-                        .selectable(true),
-                );
+            // A key is 44 characters and wraps on a phone, and every
+            // wrapped line of a `horizontal_wrapped` is at least
+            // `interact_size.y` — a thumb's worth, around small text that
+            // nobody taps. Zeroed on the ui the row is made from, as
+            // `sigil_ui::message::centred` does it.
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(theme.text_secondary, "You are");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(me.to_string()).monospace().small())
+                            .selectable(true),
+                    );
+                });
             });
         }
         ui.add_space(tokens::SPACING_MD);
@@ -490,7 +498,7 @@ impl VoiceApp {
             "",
             &mut self.room_input,
             "room secret, base58",
-            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Check, "Join")),
+            Some(sigil_ui::Action::Word("Join")),
         );
         if join {
             let held = borrowable(ctx);
@@ -573,12 +581,17 @@ impl VoiceApp {
         }
 
         if let Some(peer) = state.peer {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(theme.text_secondary, "with");
-                ui.add(
-                    egui::Label::new(egui::RichText::new(peer.to_string()).monospace())
-                        .selectable(true),
-                );
+            // The same: the peer's key wraps, and a wrapped line of text
+            // nobody taps should not be a thumb tall.
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(theme.text_secondary, "with");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(peer.to_string()).monospace())
+                            .selectable(true),
+                    );
+                });
             });
         }
         if state.phase == Phase::Waiting {
