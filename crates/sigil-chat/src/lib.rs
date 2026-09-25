@@ -5203,6 +5203,13 @@ impl ChatApp {
             .small(),
         );
         ui.add_space(tokens::SPACING_SM);
+        // **What giving it up costs, where a phone can read it.** The act is
+        // legible from the word; what is not is that the name goes back to
+        // the pool and is somebody else's to take, and that nothing of yours
+        // goes with it. A pointer gets the same sentence as a tooltip.
+        const GIVING_UP: &str = "Stop being reachable at this name. Nothing is deleted — your \
+                                 conversations, keys and counters are untouched — and somebody \
+                                 else may take it afterwards.";
         let mut release = None;
         ui.horizontal(|ui| {
             if ui.button("Claim").clicked() || entered {
@@ -5218,14 +5225,7 @@ impl ChatApp {
             // the pool and somebody else may take it. Beside the sentence
             // that says so.
             if let Some(handle) = &held
-                && ui
-                    .button("Give it up")
-                    .on_hover_text(
-                        "Stop being reachable at this name. Nothing is deleted — your \
-                         conversations, keys and counters are untouched — and somebody \
-                         else may take it afterwards.",
-                    )
-                    .clicked()
+                && ui.button("Give it up").on_hover_text(GIVING_UP).clicked()
             {
                 // The bare local part: a release names it, and the exchange
                 // it is released at is the one being talked to.
@@ -5237,6 +5237,12 @@ impl ChatApp {
                 pane.dialog = None;
             }
         });
+        // Only where there is a name to give up, so the warning is never
+        // about a button that is not there.
+        if held.is_some() && sigil::Form::of(ui.ctx()).is_phone() {
+            ui.add_space(tokens::SPACING_XS);
+            ui.colored_label(theme.text_muted, egui::RichText::new(GIVING_UP).small());
+        }
         if let Some(local) = release {
             let pane = self.pane(at);
             pane.naming.clear();

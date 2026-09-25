@@ -10123,6 +10123,37 @@ fn a_linked_devices_row_fits_a_phone_with_revoke_off_the_key() {
 
 /// The Devices pane with a second device linked, on a phone. A picture,
 /// because no render had ever drawn the row.
+/// **A phone reads what giving up a name costs.**
+///
+/// The word says the act; what it does not say is that the name goes back to
+/// the pool and is somebody else's to take, and that nothing of yours goes
+/// with it. That was a tooltip, and a phone has no hover.
+///
+/// Drawn only where there is a name to give up, so the warning is never about
+/// a button that is not on the screen — which is the other half of what this
+/// holds.
+#[test]
+fn a_phone_reads_what_giving_up_a_name_costs() {
+    let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "name", them());
+    h.run();
+    h.run();
+
+    let said = text_of(&h);
+    assert!(
+        said.contains("Give it up"),
+        "the fixture holds no name, so this says nothing about the warning \
+         beside giving one up: {said}"
+    );
+    assert!(
+        said.contains("somebody else may take it afterwards"),
+        "a phone cannot hover, so what giving up a name costs has to be drawn \
+         and is not on the pane: {said}"
+    );
+}
+
 /// **A phone can tell Revoke from Sign out.**
 ///
 /// They are different acts with different costs: revoking is for a device you
