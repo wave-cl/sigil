@@ -11315,12 +11315,11 @@ impl ChatApp {
                 ui.add_space(tokens::SPACING_SM);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !device.is_this_one {
-                        revoke = sigil_ui::icon_button_as_named(
+                        revoke = sigil::icon::named_control_as(
                             ui,
                             sigil_ui::Icon::Close,
                             "Revoke",
-                            Some(theme.destructive),
-                            false,
+                            theme.destructive,
                         )
                         .on_hover_text(
                             "It stops acting for you. It keeps every key it was already \
@@ -11335,12 +11334,11 @@ impl ChatApp {
                     // you have lost -- it keeps the keys it was given --
                     // and is the wrong shape for the one in your hand.
                     if device.is_this_one {
-                        sign_out = sigil_ui::icon_button_as_named(
+                        sign_out = sigil::icon::named_control_as(
                             ui,
                             sigil_ui::Icon::Switch,
                             "Sign out",
-                            Some(theme.destructive),
-                            false,
+                            theme.destructive,
                         )
                         .on_hover_text(
                             "This device stops acting for the account. What is on this \

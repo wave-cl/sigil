@@ -742,6 +742,27 @@ pub fn apply_button(ui: &mut egui::Ui, word: &str) -> egui::Response {
     }
 }
 
+/// The same, in a colour of its own — for a control that takes something away.
+///
+/// **Two red glyphs side by side are not two controls, they are one shape
+/// twice.** The Devices list drew a ✕ to revoke a device you have lost and a
+/// ⇄ to sign this one out: different actions, different consequences, one
+/// keeping every key it was ever given and the other keeping nothing — and on
+/// a phone both arrived as a red mark with no word and a tooltip nobody can
+/// reach. The tint says "this takes something away" and nothing about which.
+pub fn named_control_as(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    word: &str,
+    tint: egui::Color32,
+) -> egui::Response {
+    if crate::Form::of(ui.ctx()).is_phone() {
+        ui.add(egui::Button::new(egui::RichText::new(word).color(tint)))
+    } else {
+        icon_button_as_named(ui, icon, word, Some(tint), false)
+    }
+}
+
 /// A control whose shape is not its meaning, named where a name can be read.
 ///
 /// **A cross is worse than a glyph with no convention, because it has one and

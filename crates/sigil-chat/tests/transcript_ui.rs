@@ -10123,6 +10123,63 @@ fn a_linked_devices_row_fits_a_phone_with_revoke_off_the_key() {
 
 /// The Devices pane with a second device linked, on a phone. A picture,
 /// because no render had ever drawn the row.
+/// **A phone can tell Revoke from Sign out.**
+///
+/// They are different acts with different costs: revoking is for a device you
+/// have lost and it *keeps every key that device was already given*, so
+/// anything it could read has to be rotated; signing out keeps nothing. Both
+/// were drawn as a red glyph with the word in a tooltip, and a phone has no
+/// hover — so the tint said "this takes something away" and nothing about
+/// which one.
+///
+/// A line-based sweep of `on_hover_text` missed these: rustfmt puts the call
+/// on one line and the string on the next, so matching the call's own line
+/// matched an empty argument list. Read a window, not a line.
+#[test]
+fn a_phone_can_tell_revoke_from_sign_out() {
+    let mut state = a_conversation();
+    state.devices = vec![
+        sigil_chat::Linked {
+            device: me(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: true,
+        },
+        sigil_chat::Linked {
+            device: them(),
+            added: NOW - DAY,
+            not_after: NOW + 90 * DAY,
+            is_this_one: false,
+        },
+    ];
+    let mut h = harness_phone(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+
+    // **Measured, not read off the tree.** `icon_button_as_named` puts the
+    // word in the accessibility tree *and* draws only a glyph — which is the
+    // whole defect — so `query_by_label` finds "Revoke" either way and an
+    // assertion on the tree passes with nothing drawn. Caught by reverting
+    // the fix and watching this test stay green.
+    //
+    // A glyph button is square; a button with a word in it is wider than it
+    // is tall. That is the difference a phone can see.
+    for word in ["Sign out", "Revoke"] {
+        let r = h
+            .get_all_by_label(word)
+            .map(|n| n.rect())
+            .max_by(|a, b| a.width().total_cmp(&b.width()))
+            .unwrap_or_else(|| panic!("no control for {word:?}: {}", text_of(&h)));
+        assert!(
+            r.width() > r.height() * 1.5,
+            "{word:?} is drawn {:.0}x{:.0}, which is a glyph and not a word — \
+             a phone cannot hover to find out which act it is",
+            r.width(),
+            r.height()
+        );
+    }
+}
+
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn phone_devices_linked() {
