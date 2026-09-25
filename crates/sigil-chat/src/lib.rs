@@ -826,6 +826,8 @@ enum Dialog {
     Report { target: u64 },
     /// SIP-5: what is waiting in the mailbox here.
     Mail,
+    /// SIP-53: move where this conversation is ordered.
+    Rehome,
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -1457,6 +1459,12 @@ struct Pane {
     search_focus: bool,
     /// The exchange being added.
     exchange: String,
+    /// SIP-53: the exchange a conversation is being moved to, as typed. A
+    /// key, and optionally a domain after a space -- **not a picker**,
+    /// because nothing tells a client which exchanges hold a replica of a
+    /// channel, and offering a list sigil cannot know would be offering
+    /// choices that fail.
+    rehome_to: String,
     /// SIP-85: the "through my home" box on Add an exchange.
     exchange_via: bool,
     /// SIP-56: the report dialog's reason and note.
@@ -1697,6 +1705,7 @@ impl Default for Pane {
             listed: false,
             linking: String::new(),
             presenting: String::new(),
+            rehome_to: String::new(),
             searching: String::new(),
             search_focus: false,
             exchange: String::new(),
@@ -3309,6 +3318,22 @@ impl App for ChatApp {
     fn icon(&self) -> sigil::Icon {
         sigil::Icon::Compose
     }
+}
+
+/// What was typed into the rehome field: an exchange key, and a domain after
+/// it if one was given.
+///
+/// **The whole guard against a mistyped move.** A key that does not parse
+/// cannot be moved to, and this is what greys the button — so a slip produces
+/// nothing rather than a signed action naming an exchange nobody meant.
+/// `PubKey`'s own `FromStr` does the parsing, so what this accepts and what
+/// the exchange accepts cannot drift apart.
+fn rehome_target(typed: &str) -> Option<(PubKey, String)> {
+    let mut parts = typed.split_whitespace();
+    let key: PubKey = parts.next()?.parse().ok()?;
+    // Anything after the key is how the exchange is reached. Empty is
+    // allowed: the key identifies it, a domain only says where to find it.
+    Some((key, parts.next().unwrap_or_default().to_string()))
 }
 
 impl ChatApp {
@@ -5096,6 +5121,7 @@ impl ChatApp {
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
                     Dialog::Mail => self.mail_dialog(at, state, ui, theme),
+                    Dialog::Rehome => self.rehome_dialog(at, state, ui, theme),
                     Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
                     Dialog::Report { target } => self.report_dialog(at, state, target, ui, theme),
                 }
@@ -5327,6 +5353,95 @@ impl ChatApp {
     /// to exactly one account, and is what lets anybody write to you as
     /// `name@domain`. They are two different things that both get called a
     /// name, so they get two dialogs and each says which it is.
+    /// SIP-53: move where this conversation is ordered.
+    ///
+    /// **A typed key, not a picker.** Nothing tells a client which exchanges
+    /// hold a replica of a channel — `ChannelInfo` carries no such list — so
+    /// a list would be a list of guesses, and choosing a guess would be a
+    /// refusal at best. The CLI asks for the key for the same reason.
+    ///
+    /// The consequence is stated above the control that causes it, because it
+    /// is not obvious and cannot be undone from here.
+    fn rehome_dialog(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        let Some(channel) = state.open else { return };
+        ui.heading("Move where this conversation lives");
+        ui.add_space(tokens::SPACING_XS);
+
+        // Where it is now, so the move has a "from" as well as a "to".
+        let now = match &state.home {
+            Some((origin, domain)) if !domain.is_empty() => domain.clone(),
+            Some((origin, _)) => sigil_ui::short(&origin.to_string()),
+            None => self.exchange_label(at.0, &at.1),
+        };
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(format!("Ordered now by {now}.")).small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        ui.label("Exchange");
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().rehome_to,
+            "the exchange's key, and a domain after a space",
+            width,
+        );
+        ui.add_space(tokens::SPACING_XS);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "It must already hold a copy of this conversation. Everyone in it reads the \
+                 move, and what was said before stays where it was said.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_XS);
+        // **The one that costs messages, in the colour that means so.** A
+        // rehome at a replica whose origin is gone strands everything above
+        // that replica's last position, the mover's own posts included.
+        ui.colored_label(
+            theme.warning,
+            egui::RichText::new(
+                "If that exchange is behind this one, anything it has not seen is stranded \
+                 there — including posts of your own.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        let typed = self.pane(at).rehome_to.clone();
+        let domain = rehome_target(&typed).map(|(_, d)| d).unwrap_or_default();
+        let parsed = rehome_target(&typed).map(|(to, _)| to);
+        ui.horizontal(|ui| {
+            // Dark until it could work: a key that does not parse cannot be
+            // moved to, and letting it be pressed would spend a round trip to
+            // be told what this already knows.
+            let ready = parsed.is_some();
+            if ui
+                .add_enabled(ready, egui::Button::new("Move it"))
+                .on_disabled_hover_text("An exchange's key, base58.")
+                .clicked()
+                && let Some(to) = parsed
+            {
+                self.send_as(
+                    Some(at),
+                    Cmd::Rehome {
+                        channel,
+                        to,
+                        domain,
+                    },
+                );
+                self.pane(at).rehome_to.clear();
+                self.pane(at).dialog = None;
+            }
+            if ui.button("Cancel").clicked() {
+                self.pane(at).rehome_to.clear();
+                self.pane(at).dialog = None;
+            }
+        });
+    }
+
     /// SIP-5: what is waiting at the exchange.
     ///
     /// **Nothing here is a conversation.** A mailbox item is sealed to the
@@ -10049,6 +10164,26 @@ impl ChatApp {
                     )
                     .small(),
                 );
+
+                // **SIP-53, next to the replicas it needs one of.** A rehome
+                // target must already hold a copy, and this is where copies
+                // are authorised — so the two sit together rather than the
+                // move being somewhere that never mentions the requirement.
+                //
+                // Its own screen, not a field here: it is the one control on
+                // this page that can strand messages, and it has a
+                // consequence to read before it is pressed.
+                ui.add_space(tokens::SPACING_MD);
+                if ui
+                    .button("Move where this conversation lives…")
+                    .on_hover_text(
+                        "SIP-53: hand ordering to an exchange that holds a copy. Everyone in \
+                         the conversation reads the move.",
+                    )
+                    .clicked()
+                {
+                    self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Rehome);
+                }
             }
 
             ui.add_space(tokens::SPACING_MD);
@@ -12959,6 +13094,50 @@ impl ChatApp {
                     egui::RichText::new(format!("Give {what} to the person it is for.")).small(),
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod rehome_target_tests {
+    use super::rehome_target;
+    use sqnr_core::PubKey;
+
+    fn key() -> PubKey {
+        PubKey::new([3u8; 32])
+    }
+
+    /// **Nothing typed is no target**, so the button stays dark and a slip
+    /// cannot sign a move naming an exchange nobody meant.
+    #[test]
+    fn nothing_usable_is_no_target() {
+        assert!(rehome_target("").is_none());
+        assert!(rehome_target("   ").is_none());
+        assert!(rehome_target("not-a-key").is_none());
+        // A key one character short is the mistake a paste actually makes.
+        let short = &key().to_string()[1..];
+        assert!(rehome_target(short).is_none(), "{short} parsed");
+    }
+
+    /// The control: a real key *is* a target, or the refusals above would
+    /// pass for a parser that refuses everything.
+    #[test]
+    fn a_key_is_a_target() {
+        let typed = key().to_string();
+        let (to, domain) = rehome_target(&typed).expect("a real key parses");
+        assert_eq!(to, key());
+        assert!(
+            domain.is_empty(),
+            "no domain was given, so none is invented"
+        );
+    }
+
+    /// A domain after the key is how it is reached; the key is what it is.
+    #[test]
+    fn a_domain_after_the_key_is_kept() {
+        let typed = format!("  {}   trunk.exchange  ", key());
+        let (to, domain) = rehome_target(&typed).expect("parses around the spaces");
+        assert_eq!(to, key());
+        assert_eq!(domain, "trunk.exchange");
     }
 }
 

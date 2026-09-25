@@ -2222,6 +2222,43 @@ fn the_foot_of_the_devices_pane_can_be_reached_on_a_phone() {
 /// scroll area. Measured against everything showing rather than the ordinary
 /// case, because the ordinary case has a hundred points of slack and would
 /// go quiet long before somebody with a long topic noticed.
+/// The same tripwire, for a **room**.
+///
+/// `a_conversation()` is a direct message, so the whole `!dm` half of the
+/// settings pane — the name, the topic, authorising a replica, and moving
+/// where the conversation lives — was drawn by no test at all. That half is
+/// the taller one, and the move is the newest thing in it.
+#[test]
+fn the_settings_pane_fits_a_phone_for_a_room_too() {
+    let mut state = a_long_conversation();
+    state.i_am_admin = true;
+    // A room: no peer, so the admin half draws.
+    if let Some(open) = state.open
+        && let Some(s) = state.conversations.iter_mut().find(|c| c.channel == open)
+    {
+        s.peer = None;
+        s.group = true;
+        s.label = "the square".into();
+    }
+    let mut h = harness_phone(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    // The control this exists for: it is the newest row on the pane and the
+    // one that can strand messages, so it must be on the screen to be read.
+    let moved = h
+        .get_all_by_label_contains("Move where this conversation lives")
+        .next()
+        .map(|b| b.rect());
+    let moved = moved.expect("an admin in a room is offered the move");
+    assert!(
+        moved.bottom() <= PHONE_HEIGHT + 1.0 && moved.top() >= -1.0,
+        "the move sits at y {:.0}..{:.0} of {PHONE_HEIGHT} — off the screen it \
+         cannot be read before it is pressed",
+        moved.top(),
+        moved.bottom()
+    );
+}
+
 #[test]
 fn the_settings_pane_still_fits_a_phone_or_needs_what_devices_needed() {
     let mut state = a_long_conversation();

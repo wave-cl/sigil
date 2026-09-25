@@ -1530,6 +1530,22 @@ pub enum Cmd {
     /// conversation does not need. Whether a call to them wants SIP-39's
     /// bridge is not urgent; the chat list is.
     PeerHome(PubKey),
+    /// SIP-53: move where a channel is ordered, to an exchange that holds a
+    /// replica of it.
+    ///
+    /// **Consequential and not undoable from here.** The rehome is a signed
+    /// admin action every member reads; afterwards the conversation is
+    /// ordered by `to`, and what was said stays where it was said. Rehoming
+    /// at a replica whose origin is gone strands everything above that
+    /// replica's last position, this client's own posts included — which is
+    /// why the screen that sends this says so before it does.
+    Rehome {
+        channel: [u8; 32],
+        to: PubKey,
+        /// How the new home is reached, where anybody recorded one. Empty is
+        /// allowed: the key is what identifies it.
+        domain: String,
+    },
     /// SIP-59: ask where this account lives. Read-only — **not**
     /// `ensure_home`, which claims a home when there is none and so would
     /// change the thing it was asked to report.
@@ -7052,6 +7068,31 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
         Cmd::Earlier => reach_earlier(&*chat, desk),
+        Cmd::Rehome {
+            channel,
+            to,
+            domain,
+        } => match chat.rehome(&channel, &to, &domain).await {
+            Ok(()) => {
+                desk.restructure = true;
+                note(
+                    state,
+                    format!(
+                        "This conversation is now ordered by {}. What was said before \
+                         stays where it was said.",
+                        if domain.is_empty() {
+                            to.to_string()
+                        } else {
+                            domain.clone()
+                        }
+                    ),
+                );
+            }
+            // **Said, never swallowed.** A refused rehome leaves the
+            // conversation where it was, and somebody who pressed it needs to
+            // know that rather than wonder which exchange they are talking to.
+            Err(why) => trouble(state, format!("that move was refused: {why}")),
+        },
         // SIP-59, read-only: `account_home` asks, where `ensure_home` would
         // claim one if there were none. A screen that reports where you live
         // must not be the thing that decides it.
