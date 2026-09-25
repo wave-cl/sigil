@@ -30,6 +30,8 @@ fn harness(clicked: std::rc::Rc<std::cell::Cell<usize>>) -> Harness<'static> {
                     let hits = [
                         (
                             SearchHit {
+                                id: "SearchHitFixture1",
+                                picture: None,
                                 label: "release check",
                                 who: "Ada",
                                 text: "the release is Thursday",
@@ -40,6 +42,8 @@ fn harness(clicked: std::rc::Rc<std::cell::Cell<usize>>) -> Harness<'static> {
                         ),
                         (
                             SearchHit {
+                                id: "SearchHitFixture2",
+                                picture: None,
                                 label: "a very long conversation name that truncates",
                                 who: "You",
                                 text: &long,
@@ -50,6 +54,8 @@ fn harness(clicked: std::rc::Rc<std::cell::Cell<usize>>) -> Harness<'static> {
                         ),
                         (
                             SearchHit {
+                                id: "SearchHitFixture3",
+                                picture: None,
                                 label: "Grace",
                                 who: "Grace",
                                 text: "no release without the notes\nand the notes are late",

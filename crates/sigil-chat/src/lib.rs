@@ -6064,7 +6064,28 @@ impl ChatApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for hit in &state.hits {
+                    // The same mark the chats list draws for this
+                    // conversation: a room's own picture, and failing that --
+                    // which is every direct message -- the other party's.
+                    // Found here and found there has to look like one thing.
+                    let convo = state
+                        .conversations
+                        .iter()
+                        .find(|c| c.channel == hit.channel);
+                    let picture = convo.and_then(|c| {
+                        c.avatar
+                            .as_ref()
+                            .and_then(|bytes| self.channel_picture(at, ui.ctx(), c.channel, bytes))
+                            .or_else(|| {
+                                let peer = c.peer?;
+                                let face = state.people.get(&peer).and_then(|p| p.picture.clone());
+                                self.person_picture(at, ui.ctx(), peer, face.as_ref())
+                            })
+                    });
+                    let id = bs58::encode(hit.channel).into_string();
                     let row = sigil_ui::SearchHit {
+                        id: &id,
+                        picture: picture.as_ref(),
                         label: &hit.label,
                         who: &hit.who,
                         text: &hit.text,

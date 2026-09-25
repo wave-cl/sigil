@@ -112,6 +112,8 @@ fn a_search_hit_with_a_long_name_fits() {
             sigil_ui::search_hit(
                 ui,
                 &sigil_ui::SearchHit {
+                    id: "SearchHitOnAPhone",
+                    picture: None,
                     label: LONG_NAME,
                     who: LONG_NAME,
                     text: URL,

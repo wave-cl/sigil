@@ -1,8 +1,9 @@
 //! One result of searching what this client holds.
 //!
-//! A conversation row's cousin: the same shape of row, so the two lists read
-//! as one family, but what it shows is the *message* -- who said it, and the
-//! part of it the word was found in, with the word marked. A result that
+//! A conversation row's cousin: the same shape of row -- the same mark, in the
+//! same place, at the same size -- so the two lists read as one family. What
+//! it shows is the *message*: who said it, and the part of it the word was
+//! found in, with the word marked. A result that
 //! shows the first sixty characters of a long message hides the one thing
 //! the reader searched for, and has to be opened to be rejected.
 
@@ -12,6 +13,15 @@ use sigil::{ColorTheme, tokens};
 
 /// A hit, as a list needs it. Plain data; the caller decides what matched.
 pub struct SearchHit<'a> {
+    /// The conversation's identifier, for the mark. **The conversation's and
+    /// not the speaker's**: a result is a place to go back to, and the mark
+    /// beside it is the one the chats list draws for that same conversation,
+    /// so finding something here and then finding it there is one gesture
+    /// rather than a second search.
+    pub id: &'a str,
+    /// That conversation's picture, where it has one. `None` draws the
+    /// identicon, as everywhere else.
+    pub picture: Option<&'a egui::TextureHandle>,
     /// What the conversation it was found in is called.
     pub label: &'a str,
     /// Who said it, as the transcript names them.
@@ -69,50 +79,65 @@ fn body(ui: &mut egui::Ui, hit: &SearchHit<'_>, theme: &ColorTheme) -> egui::Rec
             tokens::SPACING_XS as i8,
         ))
         .show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(ui.available_width());
-                // The time first, from the right, and the name in what is
-                // left -- the conversation row's arrangement, and for its
-                // reason: a label given the row first takes all of it.
-                //
-                // Inside a row one line tall -- allocated, not a
-                // `horizontal`: that is at least `interact_size` high, a
-                // finger on a phone, with the name centred in it and the
-                // words a line's height under the name they belong to. A
-                // right-to-left layout put straight into a vertical ui is
-                // worse still: given all the height there is, it put the
-                // first result two hundred pixels down an empty column.
-                let line = ui.text_style_height(&egui::TextStyle::Body);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), line),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.colored_label(theme.text_muted, egui::RichText::new(hit.at).small());
+            ui.horizontal(|ui| {
+                // Left of both lines, as the chats list has it: a mark beside
+                // only the first line would sit against the conversation's
+                // name and read as belonging to it rather than to the row.
+                crate::avatar(ui, hit.id, hit.picture, tokens::AVATAR_MD);
+                ui.add_space(tokens::SPACING_SM);
+                ui.vertical(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    // The time first, from the right, and the name in what is
+                    // left -- the conversation row's arrangement, and for its
+                    // reason: a label given the row first takes all of it.
+                    //
+                    // Inside a row one line tall -- allocated, not a
+                    // `horizontal`: that is at least `interact_size` high, a
+                    // finger on a phone, with the name centred in it and the
+                    // words a line's height under the name they belong to. A
+                    // right-to-left layout put straight into a vertical ui is
+                    // worse still: given all the height there is, it put the
+                    // first result two hundred pixels down an empty column.
+                    let line = ui.text_style_height(&egui::TextStyle::Body);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), line),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
                             ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
+                                egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.add(
-                                        egui::Label::new(egui::RichText::new(hit.label).strong())
-                                            .truncate(),
+                                    ui.colored_label(
+                                        theme.text_muted,
+                                        egui::RichText::new(hit.at).small(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(hit.label).strong(),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
                                     );
                                 },
                             );
-                        });
-                    },
-                );
-                let (shown, marked) = excerpt(hit.text, hit.found.clone(), BEFORE);
-                let job = excerpt_job(
-                    ui,
-                    hit.who,
-                    &shown,
-                    marked,
-                    ui.available_width(),
-                    theme.text_secondary,
-                    theme.text_primary,
-                    theme.accent,
-                );
-                ui.add(egui::Label::new(job));
+                        },
+                    );
+                    let (shown, marked) = excerpt(hit.text, hit.found.clone(), BEFORE);
+                    let job = excerpt_job(
+                        ui,
+                        hit.who,
+                        &shown,
+                        marked,
+                        ui.available_width(),
+                        theme.text_secondary,
+                        theme.text_primary,
+                        theme.accent,
+                    );
+                    ui.add(egui::Label::new(job));
+                });
             });
         });
     inner.response.rect
