@@ -1025,7 +1025,8 @@ fn _every_route_is_measured(r: sigil_chat::Route) {
         | sigil_chat::Route::Settings
         | sigil_chat::Route::Devices
         | sigil_chat::Route::Search
-        | sigil_chat::Route::Me => {}
+        | sigil_chat::Route::Me
+        | sigil_chat::Route::Call(_) => {}
     }
 }
 
@@ -1095,6 +1096,14 @@ fn no_phone_pane_is_wider_than_the_phone() {
             sigil_chat::Route::Devices,
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
+            // **The fallback, not the card.** `Route::Call` draws a card
+            // only while a call is held, and `CallHandle::for_test` wants a
+            // tokio runtime these three do not have. With no call it
+            // replaces itself with the conversations route, so what is
+            // measured here is that the fallback fits and does not panic.
+            // The card's own width is held by `call_card_ui` in sigil-ui and
+            // by `tests/call_card.rs`, which has a runtime and a call.
+            sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
             // A hit to find, a report to show: a pane that draws nothing cannot
@@ -1160,6 +1169,14 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             sigil_chat::Route::Devices,
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
+            // **The fallback, not the card.** `Route::Call` draws a card
+            // only while a call is held, and `CallHandle::for_test` wants a
+            // tokio runtime these three do not have. With no call it
+            // replaces itself with the conversations route, so what is
+            // measured here is that the fallback fits and does not panic.
+            // The card's own width is held by `call_card_ui` in sigil-ui and
+            // by `tests/call_card.rs`, which has a runtime and a call.
+            sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
             state.found = vec![sigil_chat::Found {
@@ -9226,6 +9243,14 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             sigil_chat::Route::Devices,
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
+            // **The fallback, not the card.** `Route::Call` draws a card
+            // only while a call is held, and `CallHandle::for_test` wants a
+            // tokio runtime these three do not have. With no call it
+            // replaces itself with the conversations route, so what is
+            // measured here is that the fallback fits and does not panic.
+            // The card's own width is held by `call_card_ui` in sigil-ui and
+            // by `tests/call_card.rs`, which has a runtime and a call.
+            sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
             state.reports = vec![sigil_chat::Report {

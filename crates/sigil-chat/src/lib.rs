@@ -68,6 +68,17 @@ pub enum Route {
     /// a *second* popup behind the title. Two menus, neither of them a
     /// place. This is the place.
     Me,
+    /// A call in progress, on a screen of its own: who, how long, how it
+    /// travels, and the controls.
+    ///
+    /// **Keyed by whose call it is**, because the bar walks every live call
+    /// and two identities can each be in one. `at.0` is the identity being
+    /// looked at, which is not necessarily the one talking.
+    ///
+    /// The bar is the minimised state and this is the same call opened up;
+    /// Back leaves the call running, because the route is on the history and
+    /// nothing about leaving a screen ends a call.
+    Call(PubKey),
 }
 
 /// What a search here can and cannot reach. Said every time, in the count
@@ -2656,6 +2667,25 @@ impl App for ChatApp {
                 }
             }
         }
+        // **A live call is drawn wherever the eye is**, for the same reason
+        // the ring above it is: it was drawn inside `render`, which only the
+        // conversations route reaches, so opening Members or Devices or
+        // Settings made a call in progress vanish off the screen. On a phone
+        // that is most of where somebody is. The bar is also the way back to
+        // the card now, and a way back that six of seven routes do not draw
+        // is not a way back.
+        if let Some(at) = self.showing_at(ctx) {
+            let theme = ColorTheme::current(ui.ctx());
+            // Not over its own card: the same call twice, once minimised.
+            let except = match route {
+                Route::Call(me) => Some(me),
+                _ => None,
+            };
+            if let Some(open) = self.in_call_ui(&at, ui, &theme, except) {
+                ctx.navigator.push_here(Route::Call(open));
+            }
+            ui.add_space(tokens::SPACING_SM);
+        }
         let response = match route {
             Route::Conversations => self.render(ctx, ui),
             Route::Directory => self.directory_view(ctx, ui),
@@ -2664,6 +2694,18 @@ impl App for ChatApp {
             Route::Devices => self.devices_view(ctx, ui),
             Route::Search => self.search_view(ctx, ui),
             Route::Me => self.me_view(ctx, ui),
+            // **The call is gone and the card is still on screen.** It pops
+            // itself rather than drawing a frame of nothing. `replace_here`
+            // and not `back`: `Nav::replace` drops the forward branch, where
+            // `go_back` would push a dead card onto it for Alt+Right to find.
+            Route::Call(me) if self.calls.contains_key(&me) => {
+                self.call_card_ui(ctx, me, ui);
+                AppResponse::default()
+            }
+            Route::Call(_) => {
+                ctx.navigator.replace_here(Route::Conversations);
+                self.render(ctx, ui)
+            }
         };
         // A dialog opened from a view -- verifying somebody from Members --
         // is drawn over that view. `render` draws its own.
@@ -2687,6 +2729,10 @@ impl App for ChatApp {
                 Route::Devices => "Devices",
                 Route::Search => "Search",
                 Route::Me => "Settings",
+                // The name the notification uses, so the shade and the screen
+                // agree about who this call is with. `None` when the call has
+                // ended under the card, which is the same pass that pops it.
+                Route::Call(me) => return self.call_label(me),
             }
             .to_string(),
         )
@@ -2883,7 +2929,6 @@ impl App for ChatApp {
         // vanished whenever the reader went anywhere else -- the list, another
         // identity, a narrow window showing the other pane -- taking the only
         // control that ends a call with it.
-        self.in_call_ui(at, ui, &theme);
 
         // Two panes when there is room, one when there is not -- decided at
         // **runtime** from the width actually available, never from the
@@ -3079,6 +3124,9 @@ impl App for ChatApp {
                     }
                     return;
                 }
+                // A call has no exchange to choose: it is already connected,
+                // and switching one underneath it would mean nothing.
+                Route::Call(_) => return,
                 Route::Directory | Route::Members | Route::Settings | Route::Search | Route::Me => {
                     return;
                 }
@@ -6441,6 +6489,131 @@ impl ChatApp {
                         });
                     });
             });
+    }
+
+    /// **A call, on a screen of its own.** The bar is the same call minimised;
+    /// this is it opened up.
+    ///
+    /// Takes the whole pane on a desktop rather than sitting beside the list,
+    /// as Members, Settings, Devices and Me all do -- `sigil::layout`'s split
+    /// is a property of the conversations route and not of the app. Capped at
+    /// `CARD_MAX_WIDTH` and centred, because three controls stretched across a
+    /// thousand points are a row of buttons in a desert.
+    fn call_card_ui(&mut self, ctx: &mut AppContext<'_>, me: PubKey, ui: &mut egui::Ui) {
+        let theme = ColorTheme::current(ui.ctx());
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading(self.call_label(me).unwrap_or_else(|| "Call".into()));
+            });
+        }
+        let Some(at) = self.at_for(me) else { return };
+        let Some(live) = self.calls.get(&me) else {
+            return;
+        };
+        let call = live.handle.state();
+        let seconds = live.since.elapsed().as_secs();
+        let (channel, cross, detail) = (live.channel, live.cross, live.detail);
+        let up = call.phase == sigil_net::Phase::Live;
+
+        // Who this is with, named as the conversation is.
+        let named = self
+            .call_label(me)
+            .unwrap_or_else(|| sigil_ui::short(&me.to_string()));
+        let two_party = call.room.is_none();
+        // The key the mark is drawn from: theirs on a two-party call, the
+        // channel's in a room, so a room's mark is the room's.
+        let key = call
+            .peer
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| bs58::encode(channel).into_string());
+
+        // Whose call it is, when it is not the identity being looked at -- the
+        // same derivation the bar uses, and for the same reason: a hang-up
+        // that ends somebody else's call has to say whose.
+        let whose = (me != at.0).then(|| {
+            self.sessions
+                .iter()
+                .find(|(k, _)| k.0 == me)
+                .map(|(k, s)| s.state().mine.label(&k.0))
+                .unwrap_or_else(|| sigil_ui::short(&me.to_string()))
+        });
+
+        let travel = Self::travel_of(up, call.path, cross, call.why.clone());
+        let rows: Vec<sigil_ui::Row> = call
+            .present
+            .iter()
+            .map(|p| sigil_ui::Row {
+                key: p.identity.to_string(),
+                speaking: p.speaking,
+                level: p.level,
+                detail: format!(
+                    "loss {:.0}% · conceal {} · buf {}",
+                    p.loss_pct, p.concealed, p.buffered
+                ),
+            })
+            .collect();
+
+        let stats = call.stats.clone().or_else(|| call.final_stats.clone());
+        let card = sigil_ui::Call {
+            key: &key,
+            named: &named,
+            picture: None,
+            whose: whose.as_deref(),
+            up,
+            deaf: call.deaf,
+            seconds,
+            travel: travel.as_ref().map(|(w, why)| (*w, why.as_str())),
+            muted: false,
+            // Routing is the platform's to offer, and only a phone has two
+            // places for the sound to come out. `None` draws no control.
+            speaker: None,
+            stats: stats.as_deref(),
+            detail,
+            present: &rows,
+            connecting: call.connecting,
+            two_party,
+        };
+
+        let pane = ui.available_width().min(tokens::CARD_MAX_WIDTH);
+        let mut pressed = None;
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(pane);
+            pressed = sigil_ui::call_card(ui, &card);
+        });
+        let _ = theme;
+
+        match pressed {
+            Some(sigil_ui::CallPress::HangUp) => {
+                // `leave_call` is the one that ends it, and it answers with
+                // what the entry needs -- including `None` for a cross-exchange
+                // call, which has no channel here to write one into.
+                if let Some((channel, seq, seconds)) = self.leave_call(me) {
+                    self.send_as(
+                        self.at_for(me).as_ref(),
+                        Cmd::Hangup {
+                            channel,
+                            seq,
+                            seconds,
+                        },
+                    );
+                }
+                // The card is about a call that is now over; the dispatch
+                // would pop it on the next pass anyway, and going back now
+                // means the press and the screen change together.
+                ctx.navigator.back();
+            }
+            Some(sigil_ui::CallPress::Detail) => {
+                if let Some(held) = self.calls.get_mut(&me) {
+                    held.detail = !held.detail;
+                }
+            }
+            // Mute and routing are wired when the engine and the platform can
+            // carry them; the card draws neither until then.
+            _ => {}
+        }
     }
 
     /// Whatever was just done, where it was done.
@@ -10178,18 +10351,96 @@ impl ChatApp {
     /// Said only when it differs from what was last said, because on Android
     /// this starts a foreground service with a notification and doing that
     /// sixty times a second is not a call, it is a fault.
+    /// What to call the call `me` is in -- the conversation's own name.
+    ///
+    /// **One derivation, two readers.** The notification on the shade and the
+    /// heading over the card are the same call and have to say the same thing;
+    /// deriving it twice is how they come to disagree.
+    fn call_label(&self, me: PubKey) -> Option<String> {
+        let live = self.calls.get(&me)?;
+        let at = self.at_for(me)?;
+        let state = self.state_of(Some(&at));
+        state
+            .conversations
+            .iter()
+            .find(|c| c.channel == live.channel)
+            .map(|c| c.label.clone())
+            .or_else(|| {
+                // A call with no conversation this window can name -- a
+                // cross-exchange ring answered before anything was synced --
+                // is still a call, and still wants a heading.
+                Some(sigil_ui::short(&me.to_string()))
+            })
+    }
+
+    /// Which way the sound is going, and why -- the word, then the sentence.
+    ///
+    /// **One derivation, two readers.** The bar says the word and the card says
+    /// both, and a call that reads "direct" in one place and "via exchange" in
+    /// the other would be worse than either.
+    fn travel_of(
+        up: bool,
+        path: Option<sigil_net::Path>,
+        cross: bool,
+        why: Option<String>,
+    ) -> Option<(&'static str, String)> {
+        match (up, path, cross) {
+            (true, Some(sigil_net::Path::Direct), _) => Some((
+                "direct",
+                "Connected straight to them: the exchange introduced you \
+             and is not carrying the call."
+                    .to_string(),
+            )),
+            // **And that the setting was not ignored.** A
+            // call to somebody at another exchange is relayed
+            // by both of them whatever "Calls connect
+            // directly" says -- SIP-39 §Rationale, "always
+            // relay; no direct-connect attempt first" -- and
+            // somebody who has just turned that setting on and
+            // reads "via both exchanges" is owed the reason
+            // rather than left to conclude the switch does
+            // nothing. Which is the same defect as the switch
+            // that toggled without looking like it had.
+            (true, _, true) => Some((
+                "via both exchanges",
+                "Each of you is connected only to your own exchange, and \
+             the two carry the call between them. A call to somebody at \
+             another exchange is always carried this way, whatever \
+             \"Calls connect directly\" says."
+                    .to_string(),
+            )),
+            (true, _, false) => Some((
+                "via exchange",
+                // Not *why*: this side cannot tell whether the
+                // other never asked, the punch failed, or its
+                // own connection is carried and may not ask
+                // (SIP-85). `why` would have said, and nothing
+                // ever sets it, so saying what is true is
+                // better than picking one of four guesses --
+                // which is what the old fallback text did.
+                why.map(|w| format!("Relayed by the exchange: {w}."))
+                    .unwrap_or_else(|| {
+                        "The exchange is carrying this call: \
+                     no direct connection was made."
+                            .to_string()
+                    }),
+            )),
+            // Nothing is settled while it is still connecting,
+            // and guessing early would be a label that changes
+            // under somebody reading it.
+            (false, _, _) => None,
+        }
+    }
+
     fn announce_calling(&mut self, ctx: &mut AppContext<'_>) {
         // Whoever the call is with, as the conversation is named -- the same
         // label the transcript uses, so the notification and the screen agree.
-        let now = self.calls.iter().next().and_then(|(me, live)| {
-            let at = self.at_for(*me)?;
-            let state = self.state_of(Some(&at));
-            state
-                .conversations
-                .iter()
-                .find(|c| c.channel == live.channel)
-                .map(|c| c.label.clone())
-        });
+        let now = self
+            .calls
+            .keys()
+            .next()
+            .copied()
+            .and_then(|me| self.call_label(me));
         // A call whose conversation this window cannot name is still a call:
         // the service exists to keep the process alive, and a missing label
         // must not be the reason it is not started.
@@ -10489,16 +10740,39 @@ impl ChatApp {
     /// admitting it. See `end_calls_nobody_is_in`, which is the other half of
     /// that: this makes a call visible, and that one stops it being possible
     /// to leave one running by accident.
-    fn in_call_ui(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
+    /// Every live call's bar. `except` is the one whose card is on screen --
+    /// drawing its bar over its own card would be the same call twice.
+    ///
+    /// Returns the call a bar was pressed on, so the caller can open it.
+    fn in_call_ui(
+        &mut self,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+        except: Option<PubKey>,
+    ) -> Option<PubKey> {
+        let mut open = None;
         for me in self.calls.keys().copied().collect::<Vec<_>>() {
-            self.one_call_ui(me, at, ui, theme);
+            if Some(me) == except {
+                continue;
+            }
+            if self.one_call_ui(me, at, ui, theme) {
+                open = Some(me);
+            }
         }
+        open
     }
 
     /// One call's bar, wherever the reader happens to be.
-    fn one_call_ui(&mut self, me: PubKey, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
+    ///
+    /// **The bar is the call minimised, and pressing it opens the card.**
+    /// Returns whether it was pressed. The hang-up inside it is a control of
+    /// its own and egui gives a press to the innermost widget that sensed it,
+    /// so ending a call does not also open a screen for the call that just
+    /// ended -- which `hanging_up_from_the_bar_does_not_open_the_card` holds.
+    fn one_call_ui(&mut self, me: PubKey, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) -> bool {
         let Some(live) = self.calls.get(&me) else {
-            return;
+            return false;
         };
         let call = live.handle.state();
         let cross = live.cross;
@@ -10518,244 +10792,209 @@ impl ChatApp {
                 // forty-four character key still turned up.
                 .unwrap_or_else(|| sigil_ui::short(&me.to_string()))
         });
-        egui::Frame::NONE
-            .fill(theme.surface_elevated)
-            .corner_radius(tokens::RADIUS_LG)
-            .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
-            .show(ui, |ui| {
-                // Decided in the row and said again under it on a phone, so
-                // it is worked out once.
-                let mut travel: Option<(&str, String)> = None;
-                ui.horizontal(|ui| {
-                    let up = matches!(call.phase, sigil_net::Phase::Live);
-                    // **A call that is up and hears nothing is not a working
-                    // call.** The engine raises `deaf` once frames have gone
-                    // out and not one has come back -- with no discontinuous
-                    // transmission a peer in a call sends fifty a second, so
-                    // silence is a fault and never a quiet room. A green dot
-                    // and a running clock hid exactly that for five minutes
-                    // of a field test that looked perfect and carried no
-                    // sound, which is the one thing a call must never do.
-                    let silent = up && call.deaf;
-                    sigil_ui::dot(
-                        ui,
-                        up && !silent,
-                        theme.success,
-                        theme.warning,
-                        if silent {
-                            "connected, but nothing is arriving"
-                        } else if up {
-                            "connected"
-                        } else {
-                            "connecting"
-                        },
-                    );
-                    ui.colored_label(
-                        if up && !silent {
-                            theme.success
-                        } else {
-                            theme.warning
-                        },
-                        match (&elsewhere, up) {
-                            (Some(who), true) => format!("In a call as {who}"),
-                            (Some(who), false) => format!("Connecting… as {who}"),
-                            (None, true) => "In a call".to_string(),
-                            (None, false) => "Connecting…".to_string(),
-                        },
-                    );
-                    // The clock is the way in to the numbers. A call's
-                    // elapsed time is the one thing on this row somebody
-                    // already looks at, so it is where the detail hangs
-                    // from -- no second control, and nothing drawn until
-                    // it is asked for.
-                    // A frameless button, not a label that happens to take
-                    // clicks: it reads as a control to a keyboard and to
-                    // anything speaking the screen, and looks like the
-                    // quiet clock it replaces.
-                    let clock = ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(format!(
-                                    "{:02}:{:02}",
-                                    seconds / 60,
-                                    seconds % 60
-                                ))
-                                .color(if detail {
-                                    theme.accent
-                                } else {
-                                    theme.text_muted
-                                }),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if !sigil::Form::of(ui.ctx()).is_phone() {
-                        clock.clone().on_hover_text(if detail {
-                            "Hide what the call is carrying"
-                        } else {
-                            "Show what the call is carrying"
-                        });
-                    }
-                    if clock.clicked()
-                        && let Some(held) = self.calls.get_mut(&me)
-                    {
-                        held.detail = !held.detail;
-                    }
-                    // Which way the audio is going, once that is settled.
-                    // Said in a word because it is the one fact about a
-                    // call a person can do something about -- and, for a
-                    // while, the one the field test needs to read.
-                    // **Which way the sound is going, always.**
-                    //
-                    // This used to read `call.path` alone and say nothing
-                    // when it was unset. A DM call always settles it --
-                    // `spawn_dm_call` reports `Relayed` with a `why` on
-                    // each of its three fallbacks -- but `spawn_room` and
-                    // `spawn_cross_call` report neither, so a group call
-                    // and a call across two exchanges both left the row
-                    // blank, looking exactly like one that had not decided
-                    // yet. (An earlier draft of this comment said no
-                    // library path ever set it, which is wrong in the one
-                    // case that is most of them; grep `Event::Relayed` in
-                    // sigil-net before believing it again.)
-                    //
-                    // So the decision is made here, and it is sound: the
-                    // only route to a direct call is the introduction
-                    // (SIP-25), and that reports itself. A call that is up
-                    // and has not reported one is being carried. Whether by
-                    // one exchange or two is the one thing `path` could not
-                    // have told us anyway, and `cross` does.
-                    travel = match (up, call.path, cross) {
-                        (true, Some(sigil_net::Path::Direct), _) => Some((
-                            "direct",
-                            "Connected straight to them: the exchange introduced you \
-                             and is not carrying the call."
-                                .to_string(),
-                        )),
-                        // **And that the setting was not ignored.** A
-                        // call to somebody at another exchange is relayed
-                        // by both of them whatever "Calls connect
-                        // directly" says -- SIP-39 §Rationale, "always
-                        // relay; no direct-connect attempt first" -- and
-                        // somebody who has just turned that setting on and
-                        // reads "via both exchanges" is owed the reason
-                        // rather than left to conclude the switch does
-                        // nothing. Which is the same defect as the switch
-                        // that toggled without looking like it had.
-                        (true, _, true) => Some((
-                            "via both exchanges",
-                            "Each of you is connected only to your own exchange, and \
-                             the two carry the call between them. A call to somebody at \
-                             another exchange is always carried this way, whatever \
-                             \"Calls connect directly\" says."
-                                .to_string(),
-                        )),
-                        (true, _, false) => Some((
-                            "via exchange",
-                            // Not *why*: this side cannot tell whether the
-                            // other never asked, the punch failed, or its
-                            // own connection is carried and may not ask
-                            // (SIP-85). `why` would have said, and nothing
-                            // ever sets it, so saying what is true is
-                            // better than picking one of four guesses --
-                            // which is what the old fallback text did.
-                            call.why
-                                .clone()
-                                .map(|w| format!("Relayed by the exchange: {w}."))
-                                .unwrap_or_else(|| {
-                                    "The exchange is carrying this call: \
-                                     no direct connection was made."
-                                        .to_string()
-                                }),
-                        )),
-                        // Nothing is settled while it is still connecting,
-                        // and guessing early would be a label that changes
-                        // under somebody reading it.
-                        (false, _, _) => None,
-                    };
-                    if let Some((word, _)) = &travel {
-                        let said =
-                            ui.colored_label(theme.text_muted, egui::RichText::new(*word).small());
-                        // **On a phone the reason is drawn, not hovered.**
-                        // There is no pointer, so `on_hover_text` is a place
-                        // nothing can reach; the line under the row carries
-                        // it there instead.
-                        if !sigil::Form::of(ui.ctx()).is_phone()
-                            && let Some((_, why)) = &travel
-                        {
-                            said.on_hover_text(why.clone());
-                        }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // The struck-through handset, in the destructive
-                        // colour. It carries the word "Hang up" for anything
-                        // that cannot see a shape.
-                        if sigil_ui::icon_button_tinted(
+        // Sensed on the ui the frame is built from, as `me_head_ui` senses its
+        // mark: a frame is a painter and not a control, so the click has to be
+        // asked for around it.
+        let opened = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+            // **A selectable label eats the press.** egui gives it to the
+            // topmost widget that senses, and a label that can be selected
+            // senses clicks -- so every word in this bar was a small hole
+            // the tap fell through, and the bar itself never heard it.
+            // `me_head_ui` turns them off inside its own sensing scope for
+            // the same reason; nothing in here is text somebody selects.
+            ui.style_mut().interaction.selectable_labels = false;
+            egui::Frame::NONE
+                .fill(theme.surface_elevated)
+                .corner_radius(tokens::RADIUS_LG)
+                .inner_margin(egui::Margin::same(tokens::SPACING_SM as i8))
+                .show(ui, |ui| {
+                    // Decided in the row and said again under it on a phone, so
+                    // it is worked out once.
+                    let mut travel: Option<(&str, String)> = None;
+                    ui.horizontal(|ui| {
+                        let up = matches!(call.phase, sigil_net::Phase::Live);
+                        // **A call that is up and hears nothing is not a working
+                        // call.** The engine raises `deaf` once frames have gone
+                        // out and not one has come back -- with no discontinuous
+                        // transmission a peer in a call sends fifty a second, so
+                        // silence is a fault and never a quiet room. A green dot
+                        // and a running clock hid exactly that for five minutes
+                        // of a field test that looked perfect and carried no
+                        // sound, which is the one thing a call must never do.
+                        let silent = up && call.deaf;
+                        sigil_ui::dot(
                             ui,
-                            sigil_ui::Icon::HangUp,
-                            Some(theme.destructive),
-                        )
-                        .clicked()
-                            && let Some((channel, seq, seconds)) = self.leave_call(me)
-                        {
-                            // To the session whose call it is, which is not
-                            // necessarily the one on screen.
-                            let whose = self.at_for(me);
-                            self.send_as(
-                                whose.as_ref(),
-                                Cmd::Hangup {
-                                    channel,
-                                    seq,
-                                    seconds,
-                                },
+                            up && !silent,
+                            theme.success,
+                            theme.warning,
+                            if silent {
+                                "connected, but nothing is arriving"
+                            } else if up {
+                                "connected"
+                            } else {
+                                "connecting"
+                            },
+                        );
+                        ui.colored_label(
+                            if up && !silent {
+                                theme.success
+                            } else {
+                                theme.warning
+                            },
+                            match (&elsewhere, up) {
+                                (Some(who), true) => format!("In a call as {who}"),
+                                (Some(who), false) => format!("Connecting… as {who}"),
+                                (None, true) => "In a call".to_string(),
+                                (None, false) => "Connecting…".to_string(),
+                            },
+                        );
+                        // The clock is the way in to the numbers. A call's
+                        // elapsed time is the one thing on this row somebody
+                        // already looks at, so it is where the detail hangs
+                        // from -- no second control, and nothing drawn until
+                        // it is asked for.
+                        // **A label now, not a control.** It was a frameless
+                        // button because there was nowhere else on a handset to
+                        // look, so the clock had to double as the way to the
+                        // numbers. There is somewhere now: the bar itself opens
+                        // the call, and the card's clock carries the toggle.
+                        //
+                        // Leaving it a button made the middle of the bar do
+                        // something other than what the bar does -- and egui
+                        // gives a press to the innermost widget that sensed it,
+                        // so a tap aimed at the bar opened the numbers instead of
+                        // the call. One gesture on the bar, one meaning.
+                        ui.colored_label(
+                            if detail {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            },
+                            format!("{:02}:{:02}", seconds / 60, seconds % 60),
+                        );
+                        // Which way the audio is going, once that is settled.
+                        // Said in a word because it is the one fact about a
+                        // call a person can do something about -- and, for a
+                        // while, the one the field test needs to read.
+                        // **Which way the sound is going, always.**
+                        //
+                        // This used to read `call.path` alone and say nothing
+                        // when it was unset. A DM call always settles it --
+                        // `spawn_dm_call` reports `Relayed` with a `why` on
+                        // each of its three fallbacks -- but `spawn_room` and
+                        // `spawn_cross_call` report neither, so a group call
+                        // and a call across two exchanges both left the row
+                        // blank, looking exactly like one that had not decided
+                        // yet. (An earlier draft of this comment said no
+                        // library path ever set it, which is wrong in the one
+                        // case that is most of them; grep `Event::Relayed` in
+                        // sigil-net before believing it again.)
+                        //
+                        // So the decision is made here, and it is sound: the
+                        // only route to a direct call is the introduction
+                        // (SIP-25), and that reports itself. A call that is up
+                        // and has not reported one is being carried. Whether by
+                        // one exchange or two is the one thing `path` could not
+                        // have told us anyway, and `cross` does.
+                        travel = Self::travel_of(up, call.path, cross, call.why.clone());
+                        if let Some((word, _)) = &travel {
+                            let said = ui.colored_label(
+                                theme.text_muted,
+                                egui::RichText::new(*word).small(),
                             );
+                            // **On a phone the reason is drawn, not hovered.**
+                            // There is no pointer, so `on_hover_text` is a place
+                            // nothing can reach; the line under the row carries
+                            // it there instead.
+                            if !sigil::Form::of(ui.ctx()).is_phone()
+                                && let Some((_, why)) = &travel
+                            {
+                                said.on_hover_text(why.clone());
+                            }
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // The struck-through handset, in the destructive
+                            // colour. It carries the word "Hang up" for anything
+                            // that cannot see a shape.
+                            if sigil_ui::icon_button_tinted(
+                                ui,
+                                sigil_ui::Icon::HangUp,
+                                Some(theme.destructive),
+                            )
+                            .clicked()
+                                && let Some((channel, seq, seconds)) = self.leave_call(me)
+                            {
+                                // To the session whose call it is, which is not
+                                // necessarily the one on screen.
+                                let whose = self.at_for(me);
+                                self.send_as(
+                                    whose.as_ref(),
+                                    Cmd::Hangup {
+                                        channel,
+                                        seq,
+                                        seconds,
+                                    },
+                                );
+                            }
+                        });
                     });
+                    // Nothing at all has arrived from the other side. Under the
+                    // row, in words, on every form: the dot says something is
+                    // wrong and this says what it is, which is the difference
+                    // between a call worth waiting out and one to hang up and
+                    // place again.
+                    if matches!(call.phase, sigil_net::Phase::Live) && call.deaf {
+                        ui.colored_label(
+                            theme.warning,
+                            egui::RichText::new("Nothing is coming through from the other side.")
+                                .small(),
+                        );
+                    }
+                    // What the call is actually carrying, when it has been
+                    // asked for. The engine's own line, unedited: every field
+                    // in it is a fact somebody debugging a silent call needs,
+                    // and rewording them would only lose the ones I failed to
+                    // anticipate. `final_stats` survives the call ending, so
+                    // the numbers are still there to read afterwards.
+                    // Asked for, **or** a call that hears nothing -- which is
+                    // the one moment the numbers are the point rather than a
+                    // curiosity. `sent 12000 · recv 0` under "nothing is coming
+                    // through" turns the claim into its own evidence, and it
+                    // reaches a phone, which cannot hover the clock to ask.
+                    let wanted =
+                        detail || (matches!(call.phase, sigil_net::Phase::Live) && call.deaf);
+                    if wanted && let Some(line) = call.stats.as_ref().or(call.final_stats.as_ref())
+                    {
+                        ui.colored_label(theme.text_muted, egui::RichText::new(line).small());
+                    }
+                    // The reason a call is relayed, under the row, where a
+                    // phone can read it: there is no pointer to hover with, and
+                    // this is the one fact about a call somebody can act on.
+                    // **Only when there is something to act on.** A phone
+                    // cannot hover, so the reason a call is *carried* is drawn
+                    // here -- but a direct call has no reason to give, and
+                    // saying "connected straight to them" under every working
+                    // call is a line nobody needs twice. Unifying the decision
+                    // above accidentally extended this to the happy path; the
+                    // render said so.
+                    if sigil::Form::of(ui.ctx()).is_phone()
+                        && call.path != Some(sigil_net::Path::Direct)
+                        && let Some((_, why)) = &travel
+                    {
+                        ui.colored_label(theme.text_muted, egui::RichText::new(why).small());
+                    }
                 });
-                // Nothing at all has arrived from the other side. Under the
-                // row, in words, on every form: the dot says something is
-                // wrong and this says what it is, which is the difference
-                // between a call worth waiting out and one to hang up and
-                // place again.
-                if matches!(call.phase, sigil_net::Phase::Live) && call.deaf {
-                    ui.colored_label(
-                        theme.warning,
-                        egui::RichText::new("Nothing is coming through from the other side.")
-                            .small(),
-                    );
-                }
-                // What the call is actually carrying, when it has been
-                // asked for. The engine's own line, unedited: every field
-                // in it is a fact somebody debugging a silent call needs,
-                // and rewording them would only lose the ones I failed to
-                // anticipate. `final_stats` survives the call ending, so
-                // the numbers are still there to read afterwards.
-                // Asked for, **or** a call that hears nothing -- which is
-                // the one moment the numbers are the point rather than a
-                // curiosity. `sent 12000 · recv 0` under "nothing is coming
-                // through" turns the claim into its own evidence, and it
-                // reaches a phone, which cannot hover the clock to ask.
-                let wanted = detail || (matches!(call.phase, sigil_net::Phase::Live) && call.deaf);
-                if wanted && let Some(line) = call.stats.as_ref().or(call.final_stats.as_ref()) {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(line).small());
-                }
-                // The reason a call is relayed, under the row, where a
-                // phone can read it: there is no pointer to hover with, and
-                // this is the one fact about a call somebody can act on.
-                // **Only when there is something to act on.** A phone
-                // cannot hover, so the reason a call is *carried* is drawn
-                // here -- but a direct call has no reason to give, and
-                // saying "connected straight to them" under every working
-                // call is a line nobody needs twice. Unifying the decision
-                // above accidentally extended this to the happy path; the
-                // render said so.
-                if sigil::Form::of(ui.ctx()).is_phone()
-                    && call.path != Some(sigil_net::Path::Direct)
-                    && let Some((_, why)) = &travel
-                {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(why).small());
-                }
-            });
+        });
+        // Said so a screen reader has something to press, and so a test can
+        // find the bar by name rather than by where it happens to be.
+        let bar = opened.response;
+        bar.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open the call")
+        });
+        if bar.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        bar.clicked()
     }
 }
 

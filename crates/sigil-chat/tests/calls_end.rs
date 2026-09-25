@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
-use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::{NodeT, Queryable};
 use sigil::accounts::Accounts;
 use sigil::app::{App, AppContext};
 use sigil::navigator::Navigator;
@@ -183,7 +183,14 @@ async fn a_call_is_shown_even_while_looking_at_another_identity() {
                     notify: &Silent,
                     connections: &Default::default(),
                 };
-                let _ = app.render(&mut app_ctx, ui);
+                // **Through `render_nav`, as the shell does.** The call bar is drawn
+                // there and not in `render`, so that it survives every route: a
+                // call was invisible the moment somebody opened Members or
+                // Settings. Driving `render` directly here would be testing an
+                // entry the application never takes on its own.
+                let token: std::rc::Rc<dyn std::any::Any> =
+                    std::rc::Rc::new(sigil_chat::Route::Conversations);
+                let _ = app.render_nav(&mut app_ctx, ui, &token);
             });
         });
     // `run` and not `run_steps` would never settle: the conversation list is
@@ -298,7 +305,14 @@ async fn the_call_bar_says_which_way_the_audio_goes() {
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let _ = app.render(&mut app_ctx, ui);
+                    // **Through `render_nav`, as the shell does.** The call bar is drawn
+                    // there and not in `render`, so that it survives every route: a
+                    // call was invisible the moment somebody opened Members or
+                    // Settings. Driving `render` directly here would be testing an
+                    // entry the application never takes on its own.
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
             });
         harness.run_steps(3);
@@ -521,7 +535,14 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
             };
             let mut app = shared.borrow_mut();
             app.update(&mut app_ctx, &ctx);
-            let _ = app.render(&mut app_ctx, ui);
+            // **Through `render_nav`, as the shell does.** The call bar is drawn
+            // there and not in `render`, so that it survives every route: a
+            // call was invisible the moment somebody opened Members or
+            // Settings. Driving `render` directly here would be testing an
+            // entry the application never takes on its own.
+            let token: std::rc::Rc<dyn std::any::Any> =
+                std::rc::Rc::new(sigil_chat::Route::Conversations);
+            let _ = app.render_nav(&mut app_ctx, ui, &token);
             noted.borrow_mut().extend(telling.told());
         });
     harness.run_steps(3);
@@ -546,6 +567,166 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
         seen.borrow().clone(),
         vec![None],
         "a call that has ended is announced again on later passes"
+    );
+}
+
+/// A call in progress on a phone, keeping every route the app asked for.
+///
+/// `phone_call` builds a fresh `Navigator` each pass and drops what it was
+/// asked, which is fine for a test about what is *drawn*. These are about what
+/// pressing something *does*, so the requests are drained and kept.
+/// What the app asked the shell for, pass by pass.
+type Routes = std::rc::Rc<std::cell::RefCell<Vec<sigil_chat::Route>>>;
+/// Which calls the window still holds, read after each pass.
+type Held = std::rc::Rc<std::cell::RefCell<Vec<PubKey>>>;
+
+fn phone_call_routes() -> (egui_kittest::Harness<'static>, Routes, Held, tempfile::TempDir) {
+    use egui_kittest::Harness;
+
+    let dir = tempfile::tempdir().unwrap();
+    let egui_ctx = egui::Context::default();
+    let mut app = app_at(dir.path().to_path_buf());
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = one.unlocked().expect("an open account").me();
+    let mut accounts = Accounts::of(vec![one]);
+    pass(&mut app, &mut accounts, &egui_ctx);
+
+    let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
+        phase: sigil_net::Phase::Live,
+        path: Some(sigil_net::Path::Direct),
+        me: Some(me),
+        ..Default::default()
+    });
+    app.hold_call_for_test(me, [3u8; 32], 9, handle);
+
+    let routes: Routes = Default::default();
+    let asked = routes.clone();
+    // Which calls the app still holds, read after each pass: a hang-up has to
+    // end the call, and a test that only watched the routes could not tell a
+    // press that did nothing from one that did the right thing.
+    let held: Held = Default::default();
+    let living = held.clone();
+    let margin = sigil::Form::Phone.body_margin();
+    let h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            sigil::theme::install(&ctx, sigil::theme::light(), sigil::theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(margin as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &Silent,
+                        connections: &Default::default(),
+                    };
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
+                    for request in nav.take() {
+                        let token = match request {
+                            sigil::navigator::NavRequest::PushActive(e)
+                            | sigil::navigator::NavRequest::ReplaceActive(e) => e.token,
+                            sigil::navigator::NavRequest::Push(e)
+                            | sigil::navigator::NavRequest::Replace(e) => e.token,
+                            _ => continue,
+                        };
+                        if let Some(route) = token.downcast_ref::<sigil_chat::Route>() {
+                            asked.borrow_mut().push(route.clone());
+                        }
+                    }
+                    *living.borrow_mut() = app.calls_for_test();
+                });
+        });
+    (h, routes, held, dir)
+}
+
+/// **Pressing the bar opens the call.** The bar is the call minimised, and
+/// before this there was nowhere for it to lead.
+// `CallHandle::for_test` spawns, so this wants a runtime like every
+// other call test here.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bar_opens_the_card() {
+    let (mut h, routes, held, _dir) = phone_call_routes();
+    h.run_steps(3);
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "no call is held, so this says nothing"
+    );
+    routes.borrow_mut().clear();
+
+    // What the bar actually offers, before pressing it: if "Open the call" is
+    // not a node, the press below lands on nothing and the assertion would
+    // fail for a reason that has nothing to do with the route.
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Open the call"),
+        "the bar is not a control at all: {said:?}"
+    );
+    h.get_by_label("Open the call").click();
+    h.run_steps(3);
+    h.run_steps(3);
+
+    let asked = routes.borrow().clone();
+    assert!(
+        asked
+            .iter()
+            .any(|r| matches!(r, sigil_chat::Route::Call(_))),
+        "pressing the bar asked for no call screen: {asked:?}"
+    );
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "and opening the card must not end the call"
+    );
+}
+
+/// **Hanging up from the bar does not also open the card.**
+///
+/// The hang-up is a control inside a frame that is itself a control now, and
+/// egui gives a press to the innermost widget that sensed it. If that did not
+/// hold, every hang-up would throw somebody onto a screen for the call they
+/// just ended -- which pops itself on the next pass, so it would read as a
+/// flicker in the navigation rather than as a fault in the bar.
+// `CallHandle::for_test` spawns, so this wants a runtime like every
+// other call test here.
+#[tokio::test(flavor = "multi_thread")]
+async fn hanging_up_from_the_bar_does_not_open_the_card() {
+    let (mut h, routes, held, _dir) = phone_call_routes();
+    h.run_steps(3);
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "no call is held, so this says nothing"
+    );
+    routes.borrow_mut().clear();
+
+    h.get_by_label("Hang up").click();
+    h.run_steps(3);
+    h.run_steps(3);
+
+    assert!(
+        held.borrow().is_empty(),
+        "the hang-up did not end the call, so what follows says nothing"
+    );
+    let asked = routes.borrow().clone();
+    assert!(
+        !asked
+            .iter()
+            .any(|r| matches!(r, sigil_chat::Route::Call(_))),
+        "hanging up also opened the call screen: {asked:?}"
     );
 }
 
@@ -609,7 +790,14 @@ fn phone_call(
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let _ = app.render(&mut app_ctx, ui);
+                    // **Through `render_nav`, as the shell does.** The call bar is drawn
+                    // there and not in `render`, so that it survives every route: a
+                    // call was invisible the moment somebody opened Members or
+                    // Settings. Driving `render` directly here would be testing an
+                    // entry the application never takes on its own.
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
                     width.set(ui.min_rect().width() + 2.0 * margin);
                 });
         });
@@ -695,7 +883,14 @@ async fn on_a_phone_the_reason_a_call_is_relayed_is_on_the_screen() {
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let _ = app.render(&mut app_ctx, ui);
+                    // **Through `render_nav`, as the shell does.** The call bar is drawn
+                    // there and not in `render`, so that it survives every route: a
+                    // call was invisible the moment somebody opened Members or
+                    // Settings. Driving `render` directly here would be testing an
+                    // entry the application never takes on its own.
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
             });
         harness.run_steps(3);
@@ -762,7 +957,14 @@ async fn a_call_that_hears_nothing_says_so() {
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let _ = app.render(&mut app_ctx, ui);
+                    // **Through `render_nav`, as the shell does.** The call bar is drawn
+                    // there and not in `render`, so that it survives every route: a
+                    // call was invisible the moment somebody opened Members or
+                    // Settings. Driving `render` directly here would be testing an
+                    // entry the application never takes on its own.
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
             });
         harness.run_steps(3);
@@ -845,7 +1047,14 @@ async fn a_call_across_two_exchanges_says_so() {
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let _ = app.render(&mut app_ctx, ui);
+                    // **Through `render_nav`, as the shell does.** The call bar is drawn
+                    // there and not in `render`, so that it survives every route: a
+                    // call was invisible the moment somebody opened Members or
+                    // Settings. Driving `render` directly here would be testing an
+                    // entry the application never takes on its own.
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
             });
         harness.run_steps(3);
@@ -928,7 +1137,14 @@ async fn a_cross_exchange_call_says_the_setting_could_not_apply() {
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let _ = app.render(&mut app_ctx, ui);
+                    // **Through `render_nav`, as the shell does.** The call bar is drawn
+                    // there and not in `render`, so that it survives every route: a
+                    // call was invisible the moment somebody opened Members or
+                    // Settings. Driving `render` directly here would be testing an
+                    // entry the application never takes on its own.
+                    let token: std::rc::Rc<dyn std::any::Any> =
+                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let _ = app.render_nav(&mut app_ctx, ui, &token);
                 });
             });
         harness.run_steps(3);
@@ -991,7 +1207,14 @@ async fn the_clock_opens_what_a_call_is_carrying() {
                     notify: &Silent,
                     connections: &Default::default(),
                 };
-                let _ = app.render(&mut app_ctx, ui);
+                // **Through `render_nav`, as the shell does.** The call bar is drawn
+                // there and not in `render`, so that it survives every route: a
+                // call was invisible the moment somebody opened Members or
+                // Settings. Driving `render` directly here would be testing an
+                // entry the application never takes on its own.
+                let token: std::rc::Rc<dyn std::any::Any> =
+                    std::rc::Rc::new(sigil_chat::Route::Conversations);
+                let _ = app.render_nav(&mut app_ctx, ui, &token);
             });
         });
     harness.run_steps(3);
@@ -1002,21 +1225,56 @@ async fn the_clock_opens_what_a_call_is_carrying() {
         !said.iter().any(|l| l.contains("sent 120")),
         "the numbers are on screen before anybody asked: {said:?}"
     );
-    // The clock is the way in, and it is a control -- findable and
-    // clickable, not a label that happens to take a press.
+    // **The way in is the bar, and the clock inside the card.**
+    //
+    // The bar's clock used to be the toggle, because on a handset there was
+    // nowhere else to look. There is now: the bar opens the call, and the
+    // card carries the numbers. Leaving the clock a control as well made the
+    // middle of the bar do something other than what the bar does -- egui
+    // gives a press to the innermost widget that senses it -- so a tap aimed
+    // at the call opened the numbers instead.
     let clock = said
         .iter()
         .find(|l| l.len() == 5 && l.as_bytes()[2] == b':')
         .cloned()
         .unwrap_or_else(|| panic!("no clock on the call bar: {said:?}"));
-    harness.get_by_label(&clock).click();
-    harness.run_steps(3);
-
-    let said = labels(&harness);
+    // **Its role, not its presence.** The clock is still drawn and still in
+    // the tree -- `query_by_label` finds a label as readily as a button, which
+    // is exactly the confusion that makes "is it there" the wrong question.
+    // What must have changed is that it is no longer something to press.
+    fn role_of(h: &egui_kittest::Harness<'static>, label: &str) -> Option<String> {
+        fn walk(node: egui_kittest::Node<'_>, label: &str, out: &mut Option<String>) {
+            let n = node.accesskit_node();
+            // Both, as `labels` does: a plain label carries its text as a
+            // `value` where a button carries it as a `label`, which is itself
+            // the difference being asserted here.
+            let says = n
+                .label()
+                .map(|l| l.to_string())
+                .or_else(|| n.value().map(|v| v.to_string()));
+            if says.as_deref() == Some(label) && out.is_none() {
+                *out = Some(format!("{:?}", n.role()));
+            }
+            for c in node.children() {
+                walk(c, label, out);
+            }
+        }
+        let mut found = None;
+        walk(h.root(), label, &mut found);
+        found
+    }
+    let role = role_of(&harness, &clock).expect("the clock is still drawn");
     assert!(
-        said.iter().any(|l| l.contains("sent 120")),
-        "the clock was pressed and the numbers did not open: {said:?}"
+        !role.contains("Button"),
+        "the bar's clock is a {role}, so a tap on the bar has two meanings"
     );
+
+    harness.get_by_label("Open the call").click();
+    harness.run_steps(3);
+    // The card is a route, and this harness holds one pane rather than a
+    // navigator, so what it can say is that the press asked for the call --
+    // `the_bar_opens_the_card` holds that, and `call_card_ui` draws the
+    // numbers from the same `Live::detail` this used to toggle.
 }
 
 /// **While it is still connecting, nothing is claimed.**
@@ -1060,7 +1318,14 @@ async fn a_call_still_connecting_says_nothing_about_the_path() {
                     notify: &Silent,
                     connections: &Default::default(),
                 };
-                let _ = app.render(&mut app_ctx, ui);
+                // **Through `render_nav`, as the shell does.** The call bar is drawn
+                // there and not in `render`, so that it survives every route: a
+                // call was invisible the moment somebody opened Members or
+                // Settings. Driving `render` directly here would be testing an
+                // entry the application never takes on its own.
+                let token: std::rc::Rc<dyn std::any::Any> =
+                    std::rc::Rc::new(sigil_chat::Route::Conversations);
+                let _ = app.render_nav(&mut app_ctx, ui, &token);
             });
         });
     harness.run_steps(3);
