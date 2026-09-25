@@ -11,7 +11,7 @@ pub mod siblings;
 
 use session::RING_WINDOW;
 pub use session::{
-    Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Found, Happened,
+    Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Face, Found, Happened,
     HeldBackup, Hit, Line, LinkState, Linked, Member, Note, Person, Posted, Quoted, Receipt,
     Report, Ring, Standing, Stranded, Succession, Summary, Thumb, Trouble,
 };
@@ -1352,6 +1352,11 @@ struct Pane {
     /// has already paid for twice. Keyed by channel so a picture that
     /// changes is a new decode and not a stale one.
     pictures: HashMap<[u8; 32], egui::TextureHandle>,
+    /// People's published pictures, decoded, keyed by the account and the
+    /// hash of the bytes they were decoded from. `None` is a picture that
+    /// would not decode -- remembered, so a malformed one is not decoded
+    /// again on every pass.
+    faces: HashMap<PubKey, (u64, Option<egui::TextureHandle>)>,
     /// Why a video will not play, by blob id.
     unplayable: HashMap<String, String>,
     /// What is in the box. Taken out to be sent, and held in `in_flight`
@@ -1690,6 +1695,7 @@ impl Default for Pane {
             channel_topic: String::new(),
             replica_key: String::new(),
             pictures: HashMap::new(),
+            faces: HashMap::new(),
             settings_for: None,
             asking: false,
             saw: (None, 0),
@@ -1739,6 +1745,9 @@ pub struct ChatApp {
     /// What the platform was last told about a call being up, so it is told
     /// on change rather than on every pass. See [`ChatApp::announce_calling`].
     told_calling: Option<String>,
+    /// The route last given to the platform, so it is told on change rather
+    /// than on every frame. `None` when no call is up.
+    told_route: Option<bool>,
     /// Sessions told to stop that still hold their store lock. One of these
     /// must not be reopened yet; see [`Closing`].
     closing: Vec<(At, Closing)>,
@@ -1898,6 +1907,16 @@ struct Live {
     /// needs them immediately and there is nowhere else on a handset to
     /// look.
     detail: bool,
+    /// Where this call's sound is coming out: true the loudspeaker, false the
+    /// earpiece.
+    ///
+    /// **What happened, not what was asked.** `announce_route` writes back
+    /// what the platform answered, because a device with no earpiece, a
+    /// headset in the way, or a refused request all mean the button must not
+    /// claim the sound moved when it did not.
+    ///
+    /// False to begin with, which is what a phone call does.
+    speaker: bool,
 }
 
 impl Default for ChatApp {
@@ -1917,6 +1936,7 @@ impl ChatApp {
             identity_paths: HashMap::new(),
             starts: 0,
             told_calling: None,
+            told_route: None,
             closing: Vec::new(),
             panes: HashMap::new(),
             switching: false,
@@ -2069,6 +2089,8 @@ impl ChatApp {
                 saw_peer: false,
                 detail: false,
                 cross: false,
+                // A call starts at the ear, as a phone call does.
+                speaker: false,
             },
         );
     }
@@ -2088,6 +2110,8 @@ impl ChatApp {
                 saw_peer: false,
                 detail: false,
                 cross: true,
+                // A call starts at the ear, as a phone call does.
+                speaker: false,
             },
         );
     }
@@ -2120,6 +2144,49 @@ impl ChatApp {
         );
         self.pane(at).pictures.insert(channel, texture.clone());
         Some(texture)
+    }
+
+    /// A person's published picture (SIP-21), decoded once and kept.
+    ///
+    /// **Keyed by the account and the hash of its bytes.** Keyed by the
+    /// account alone, a picture somebody changes stays stale for as long as
+    /// the window is open; keyed by nothing, a list of twenty people is
+    /// twenty PNG decodes a frame. A picture that will not decode is
+    /// remembered as `None` rather than attempted again every pass -- the
+    /// sender chooses these bytes and nothing on the way here checks them.
+    ///
+    /// SIP-21: a picture is chosen by its subject. It is drawn, never trusted.
+    fn person_picture(
+        &mut self,
+        at: &At,
+        egui_ctx: &egui::Context,
+        who: PubKey,
+        face: Option<&Face>,
+    ) -> Option<egui::TextureHandle> {
+        let face = face?;
+        if let Some((hash, held)) = self.pane(at).faces.get(&who)
+            && *hash == face.hash
+        {
+            return held.clone();
+        }
+        let texture = image::load_from_memory(&face.bytes)
+            .inspect_err(|why| {
+                tracing::debug!(%who, %why, "this account's picture would not decode");
+            })
+            .ok()
+            .map(|decoded| {
+                let decoded = decoded.to_rgba8();
+                let size = [decoded.width() as usize, decoded.height() as usize];
+                egui_ctx.load_texture(
+                    format!("face-{who}-{:016x}", face.hash),
+                    egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw()),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+        self.pane(at)
+            .faces
+            .insert(who, (face.hash, texture.clone()));
+        texture
     }
 
     /// Which identities this window is carrying audio for.
@@ -2859,6 +2926,7 @@ impl App for ChatApp {
         self.call_when_open(ctx);
         self.end_calls_nobody_is_in();
         self.announce_calling(ctx);
+        self.announce_route(ctx);
         // **A window carrying audio is not idle.** Everything else here sleeps
         // until something happens, which is what makes a quiet sigil cost
         // nothing -- but a call that nobody is in produces no events at all,
@@ -3911,12 +3979,24 @@ impl ChatApp {
         } else {
             format!("{word}\n{key}")
         };
+        // Your own picture, where you have published one: the mark in the bar
+        // is the one place somebody sees themselves as others see them.
+        let my_face = state.mine.picture.clone();
+        let mine = self.person_picture(at, ui.ctx(), at.0, my_face.as_ref());
         let mark = if compact {
             // A size down from the desktop's: it heads a phone's app bar,
             // beside a word, and the bar is a finger tall.
             let mark = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-                    sigil_ui::presence(ui, &key, None, tokens::ICON_LG, seen, word, &hover);
+                    sigil_ui::presence(
+                        ui,
+                        &key,
+                        mine.as_ref(),
+                        tokens::ICON_LG,
+                        seen,
+                        word,
+                        &hover,
+                    );
                 })
                 .response;
             mark.widget_info(|| {
@@ -3924,7 +4004,15 @@ impl ChatApp {
             });
             Some(mark)
         } else {
-            sigil_ui::presence(ui, &key, None, tokens::AVATAR_MD, seen, word, &hover);
+            sigil_ui::presence(
+                ui,
+                &key,
+                mine.as_ref(),
+                tokens::AVATAR_MD,
+                seen,
+                word,
+                &hover,
+            );
             None
         };
         // Not on a phone: the dot on the mark says the link is down, the
@@ -6105,10 +6193,18 @@ impl ChatApp {
                     // Decoded on the first frame that draws it and kept, so
                     // a list of rooms with pictures costs one decode each
                     // and not one a frame.
+                    // A room's own picture, and failing that -- which is
+                    // every direct message, since a DM has no metadata to
+                    // carry one -- the other party's (SIP-21).
                     let picture = convo
                         .avatar
                         .as_ref()
-                        .and_then(|bytes| self.channel_picture(at, ui.ctx(), convo.channel, bytes));
+                        .and_then(|bytes| self.channel_picture(at, ui.ctx(), convo.channel, bytes))
+                        .or_else(|| {
+                            let peer = convo.peer?;
+                            let face = state.people.get(&peer)?.picture.clone();
+                            self.person_picture(at, ui.ctx(), peer, face.as_ref())
+                        });
                     let row = sigil_ui::ConversationRow {
                         id: &id,
                         label: &convo.label,
@@ -6515,7 +6611,8 @@ impl ChatApp {
         };
         let call = live.handle.state();
         let seconds = live.since.elapsed().as_secs();
-        let (channel, cross, detail) = (live.channel, live.cross, live.detail);
+        let (channel, cross, detail, speaker) =
+            (live.channel, live.cross, live.detail, live.speaker);
         let up = call.phase == sigil_net::Phase::Live;
 
         // Who this is with, named as the conversation is.
@@ -6556,20 +6653,44 @@ impl ChatApp {
             })
             .collect();
 
+        // Their face on a two-party call, the room's on a room -- the same
+        // rule as `key` above, so the picture and the mark under it are of the
+        // same thing rather than a face beside a room's name.
+        let picture = match call.peer {
+            Some(peer) => {
+                let face = self
+                    .state_of(Some(&at))
+                    .people
+                    .get(&peer)
+                    .and_then(|p| p.picture.clone());
+                self.person_picture(&at, ui.ctx(), peer, face.as_ref())
+            }
+            None => {
+                let bytes = self
+                    .state_of(Some(&at))
+                    .conversations
+                    .iter()
+                    .find(|c| c.channel == channel)
+                    .and_then(|c| c.avatar.clone());
+                bytes.and_then(|b| self.channel_picture(&at, ui.ctx(), channel, &b))
+            }
+        };
+
         let stats = call.stats.clone().or_else(|| call.final_stats.clone());
         let card = sigil_ui::Call {
             key: &key,
             named: &named,
-            picture: None,
+            picture: picture.as_ref(),
             whose: whose.as_deref(),
             up,
             deaf: call.deaf,
             seconds,
             travel: travel.as_ref().map(|(w, why)| (*w, why.as_str())),
-            muted: false,
-            // Routing is the platform's to offer, and only a phone has two
-            // places for the sound to come out. `None` draws no control.
-            speaker: None,
+            muted: call.muted,
+            // Only where there is somewhere else to put the sound. `None`
+            // draws no control at all, rather than a disabled one that says
+            // the app could do something it cannot.
+            speaker: ctx.notify.routable().then_some(speaker),
             stats: stats.as_deref(),
             detail,
             present: &rows,
@@ -6610,9 +6731,20 @@ impl ChatApp {
                     held.detail = !held.detail;
                 }
             }
-            // Mute and routing are wired when the engine and the platform can
-            // carry them; the card draws neither until then.
-            _ => {}
+            // Asked for here, told to the platform in `announce_route` on the
+            // next pass -- a paint is no place to call out to a phone, and
+            // what comes back is what the control then shows.
+            Some(sigil_ui::CallPress::Speaker | sigil_ui::CallPress::Earpiece) => {
+                if let Some(held) = self.calls.get_mut(&me) {
+                    held.speaker = !held.speaker;
+                }
+            }
+            // Straight to the handle, which writes the snapshot itself: the
+            // icon flips on this paint, and the engine stops sending on its
+            // next frame. No round trip to the exchange is involved.
+            Some(sigil_ui::CallPress::Mute) => self.set_muted(me, true),
+            Some(sigil_ui::CallPress::Unmute) => self.set_muted(me, false),
+            None => {}
         }
     }
 
@@ -9169,10 +9301,21 @@ impl ChatApp {
                         } else {
                             self.presence_of(&state, &member.account)
                         };
+                        let face = state
+                            .people
+                            .get(&member.account)
+                            .and_then(|p| p.picture.clone())
+                            .or_else(|| {
+                                (member.account == me)
+                                    .then(|| state.mine.picture.clone())
+                                    .flatten()
+                            });
+                        let picture =
+                            self.person_picture(at, ui.ctx(), member.account, face.as_ref());
                         sigil_ui::presence(
                             ui,
                             &key,
-                            None,
+                            picture.as_ref(),
                             tokens::AVATAR_SM,
                             seen,
                             seen.word(),
@@ -9936,6 +10079,8 @@ impl ChatApp {
                 saw_peer: false,
                 detail: false,
                 cross: false,
+                // A call starts at the ear, as a phone call does.
+                speaker: false,
             },
         );
     }
@@ -10142,6 +10287,18 @@ impl ChatApp {
     }
 
     /// Stop carrying audio, and say how long it lasted.
+    /// Send silence, or stop, on `me`'s call.
+    ///
+    /// Nothing is told to the exchange or to the peer: the far side reads
+    /// comfort noise describing digital silence, which is what SIP-15 has for
+    /// "this end is quiet on purpose". A mute the exchange knew about would be
+    /// a mute the exchange could lift.
+    fn set_muted(&mut self, me: PubKey, muted: bool) {
+        if let Some(live) = self.calls.get(&me) {
+            live.handle.set_muted(muted);
+        }
+    }
+
     fn leave_call(&mut self, me: PubKey) -> Option<([u8; 32], u64, u32)> {
         let live = self.calls.remove(&me)?;
         let seconds = live.since.elapsed().as_secs().min(u32::MAX as u64) as u32;
@@ -10253,6 +10410,8 @@ impl ChatApp {
                 saw_peer: false,
                 detail: false,
                 cross: true,
+                // A call starts at the ear, as a phone call does.
+                speaker: false,
             },
         );
     }
@@ -10309,6 +10468,8 @@ impl ChatApp {
                 saw_peer: false,
                 detail: false,
                 cross: true,
+                // A call starts at the ear, as a phone call does.
+                speaker: false,
             },
         );
         self.send_as(Some(at), Cmd::CrossRingHandled);
@@ -10452,6 +10613,38 @@ impl ChatApp {
         if now != self.told_calling {
             ctx.notify.calling(now.as_deref());
             self.told_calling = now;
+        }
+    }
+
+    /// Where the call's sound comes out, told to the platform on change.
+    ///
+    /// **Not from the button.** `one_call_ui` and the card are drawn inside a
+    /// paint pass and have no `ctx` to reach the platform with; a control that
+    /// called out from there would also call out sixty times a second. The
+    /// button sets `Live::speaker` and this says it once, the same shape as
+    /// [`ChatApp::announce_calling`] above.
+    ///
+    /// What the platform answers is written back, so the control shows where
+    /// the sound actually is.
+    fn announce_route(&mut self, ctx: &mut AppContext<'_>) {
+        let want = self
+            .calls
+            .iter()
+            .next()
+            .map(|(me, live)| (*me, live.speaker));
+        match want {
+            Some((me, speaker)) => {
+                if self.told_route != Some(speaker) {
+                    let got = ctx.notify.route(speaker);
+                    self.told_route = Some(got);
+                    if let Some(live) = self.calls.get_mut(&me) {
+                        live.speaker = got;
+                    }
+                }
+            }
+            // No call: nothing to route, and the next one starts again from
+            // the earpiece rather than from whatever the last one chose.
+            None => self.told_route = None,
         }
     }
 

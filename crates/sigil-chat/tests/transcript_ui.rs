@@ -233,6 +233,7 @@ fn a_conversation() -> ChatState {
                 // beside the name in the transcript.
                 title: Some("Exchange Administrator".into()),
                 handle: Some("ada@squic.org".into()),
+                picture: None,
             },
         )]
         .into_iter()
@@ -241,6 +242,7 @@ fn a_conversation() -> ChatState {
             name: Some("me".into()),
             title: None,
             handle: Some("me@squic.org".into()),
+            picture: None,
         },
         found: Vec::new(),
         searched: false,
@@ -12747,6 +12749,7 @@ fn a_peer_at_another_exchange_is_called_across_the_bridge() {
                 name: Some("Ada".into()),
                 title: None,
                 handle: Some(format!("ada@{bound}")),
+                picture: None,
             },
         );
         let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));

@@ -266,6 +266,32 @@ pub trait Notify {
     /// notification does not repost one every frame. A desktop, where a
     /// process stays alive because nobody is killing it, does nothing.
     fn calling(&self, _with: Option<&str>) {}
+
+    /// Whether this platform has somewhere else to put a call's sound.
+    ///
+    /// A phone has an earpiece and a loudspeaker and no other way to choose
+    /// between them; a desktop has neither, because the person chooses their
+    /// output in the operating system and the application has no business
+    /// overriding it. False here means **no control is drawn**, rather than a
+    /// disabled one: a greyed button says the app could do something it
+    /// cannot.
+    fn routable(&self) -> bool {
+        false
+    }
+
+    /// Put a call on the loudspeaker, or back on the earpiece.
+    ///
+    /// **Returns where the sound actually goes**, which is not always what was
+    /// asked. A tablet has no earpiece, a headset takes precedence over both,
+    /// and the platform can refuse outright -- so a control drawn from the
+    /// request rather than from the answer would tell somebody their call was
+    /// private when it was not.
+    ///
+    /// Told on change, as `calling` is: a route is a setting and not a thing
+    /// to reassert every frame.
+    fn route(&self, speaker: bool) -> bool {
+        speaker
+    }
 }
 
 /// Says nothing, for tests and for a session with no desktop at all.

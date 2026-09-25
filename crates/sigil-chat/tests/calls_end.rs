@@ -580,7 +580,29 @@ type Routes = std::rc::Rc<std::cell::RefCell<Vec<sigil_chat::Route>>>;
 /// Which calls the window still holds, read after each pass.
 type Held = std::rc::Rc<std::cell::RefCell<Vec<PubKey>>>;
 
-fn phone_call_routes() -> (egui_kittest::Harness<'static>, Routes, Held, tempfile::TempDir) {
+/// A call that is up, direct, and not muted.
+fn live() -> sigil_net::CallState {
+    sigil_net::CallState {
+        phase: sigil_net::Phase::Live,
+        path: Some(sigil_net::Path::Direct),
+        ..Default::default()
+    }
+}
+
+/// A phone with one live call, drawing `route`.
+///
+/// `Route::Conversations` gets the bar; `Route::Call(me)` gets the card. The
+/// harness records what the app asked to navigate to rather than following it,
+/// so a case says which screen it is on rather than inferring it.
+fn phone_call_routes(
+    route: sigil_chat::Route,
+    state: sigil_net::CallState,
+) -> (
+    egui_kittest::Harness<'static>,
+    Routes,
+    Held,
+    tempfile::TempDir,
+) {
     use egui_kittest::Harness;
 
     let dir = tempfile::tempdir().unwrap();
@@ -592,12 +614,15 @@ fn phone_call_routes() -> (egui_kittest::Harness<'static>, Routes, Held, tempfil
     pass(&mut app, &mut accounts, &egui_ctx);
 
     let handle = sigil_net::CallHandle::for_test(sigil_net::CallState {
-        phase: sigil_net::Phase::Live,
-        path: Some(sigil_net::Path::Direct),
         me: Some(me),
-        ..Default::default()
+        ..state
     });
     app.hold_call_for_test(me, [3u8; 32], 9, handle);
+    // `Route::Call` is keyed by identity, and only this harness knows the key.
+    let route = match route {
+        sigil_chat::Route::Call(_) => sigil_chat::Route::Call(me),
+        other => other,
+    };
 
     let routes: Routes = Default::default();
     let asked = routes.clone();
@@ -631,8 +656,7 @@ fn phone_call_routes() -> (egui_kittest::Harness<'static>, Routes, Held, tempfil
                         notify: &Silent,
                         connections: &Default::default(),
                     };
-                    let token: std::rc::Rc<dyn std::any::Any> =
-                        std::rc::Rc::new(sigil_chat::Route::Conversations);
+                    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route.clone());
                     let _ = app.render_nav(&mut app_ctx, ui, &token);
                     for request in nav.take() {
                         let token = match request {
@@ -658,7 +682,7 @@ fn phone_call_routes() -> (egui_kittest::Harness<'static>, Routes, Held, tempfil
 // other call test here.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bar_opens_the_card() {
-    let (mut h, routes, held, _dir) = phone_call_routes();
+    let (mut h, routes, held, _dir) = phone_call_routes(sigil_chat::Route::Conversations, live());
     h.run_steps(3);
     assert_eq!(
         held.borrow().len(),
@@ -704,7 +728,7 @@ async fn the_bar_opens_the_card() {
 // other call test here.
 #[tokio::test(flavor = "multi_thread")]
 async fn hanging_up_from_the_bar_does_not_open_the_card() {
-    let (mut h, routes, held, _dir) = phone_call_routes();
+    let (mut h, routes, held, _dir) = phone_call_routes(sigil_chat::Route::Conversations, live());
     h.run_steps(3);
     assert_eq!(
         held.borrow().len(),
@@ -1340,4 +1364,103 @@ async fn a_call_still_connecting_says_nothing_about_the_path() {
             "it claimed {word:?} before the call was up: {said:?}"
         );
     }
+}
+
+/// **The card's mute reaches the call, and the call is what the card reads.**
+///
+/// The button does not remember its own state: it draws `CallState::muted`,
+/// which `CallHandle::set_muted` writes. So a press that flips the icon proves
+/// the whole path -- control, handle, snapshot, paint -- and a press that only
+/// flipped a `bool` in the widget would pass a test that watched the widget.
+#[tokio::test(flavor = "multi_thread")]
+async fn muting_from_the_card_reaches_the_call() {
+    let (mut h, _routes, held, _dir) =
+        phone_call_routes(sigil_chat::Route::Call(PubKey::new([0u8; 32])), live());
+    h.run_steps(3);
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "no call is held, so the card drew nothing and this says nothing"
+    );
+
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Mute your microphone"),
+        "the card offers no mute at all: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l == "Unmute your microphone"),
+        "it is already muted before anybody pressed anything: {said:?}"
+    );
+
+    h.get_by_label("Mute your microphone").click();
+    h.run_steps(3);
+
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Unmute your microphone"),
+        "pressing mute changed nothing the card can see: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l == "Mute your microphone"),
+        "both are offered at once: {said:?}"
+    );
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "muting ended the call — a mute is not a hang-up"
+    );
+
+    // And back, because a mute nobody can undo is a call nobody can speak on.
+    h.get_by_label("Unmute your microphone").click();
+    h.run_steps(3);
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Mute your microphone"),
+        "unmuting did not take: {said:?}"
+    );
+}
+
+/// A call that is already muted when the card opens says so.
+///
+/// The control is drawn from the snapshot rather than from anything the card
+/// has watched happen, and this is the only case where those differ.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_muted_before_the_card_opened_says_so() {
+    let (mut h, _routes, held, _dir) = phone_call_routes(
+        sigil_chat::Route::Call(PubKey::new([0u8; 32])),
+        sigil_net::CallState {
+            muted: true,
+            ..live()
+        },
+    );
+    h.run_steps(3);
+    assert_eq!(held.borrow().len(), 1, "no call is held");
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Unmute your microphone"),
+        "a muted call drew the mute button as though it were open: {said:?}"
+    );
+}
+
+/// **A phone that cannot route draws no routing control**, rather than a
+/// disabled one. `Silent` -- the harness's notifier -- is not routable, which
+/// is what every test here runs with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_on_a_device_that_cannot_route_draws_no_routing_control() {
+    let (mut h, _routes, held, _dir) =
+        phone_call_routes(sigil_chat::Route::Call(PubKey::new([0u8; 32])), live());
+    h.run_steps(3);
+    assert_eq!(held.borrow().len(), 1, "no call is held");
+    let said = labels(&h);
+    for word in ["Play through the loudspeaker", "Play through the earpiece"] {
+        assert!(
+            !said.iter().any(|l| l == word),
+            "{word:?} is offered where the platform cannot do it: {said:?}"
+        );
+    }
+    assert!(
+        said.iter().any(|l| l == "Mute your microphone"),
+        "and the card drew no controls at all, so this proves nothing: {said:?}"
+    );
 }

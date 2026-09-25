@@ -96,6 +96,15 @@ pub struct CallState {
     /// Members whose session is not up yet. They are in the room and cannot be
     /// heard, which is a different thing from not being there.
     pub connecting: usize,
+    /// Whether this end is sending silence. Not SIP-56's mute, which is a
+    /// channel admin stopping somebody *posting*; this is the microphone, and
+    /// it is nobody else's to set. On the wire it is SIP-15 comfort noise
+    /// describing digital silence, so the far side reads deliberate quiet
+    /// rather than a sender that has gone. Written here by
+    /// [`CallHandle::set_muted`] the moment it is asked for rather than when
+    /// the engine acknowledges, because a mute button that waits for a round
+    /// trip is one people press twice.
+    pub muted: bool,
     /// The room this is, if it is a room. Held so the interface can offer the
     /// secret again — it is the only way anyone else gets in.
     pub room: Option<RoomId>,
@@ -225,6 +234,9 @@ pub struct CallHandle {
     /// still streaming 24 minutes after the desktop hung up, its frames
     /// counted and discarded as `stale` at the next call.
     stop: watch::Sender<bool>,
+    /// What the caller may change without ending the call. One struct on one
+    /// watch, so the next control costs a field rather than a channel.
+    controls: watch::Sender<sqex_voice::engine::Controls>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -241,6 +253,34 @@ impl CallHandle {
             out.push(event);
         }
         out
+    }
+
+    /// Whether this end is sending silence.
+    pub fn muted(&self) -> bool {
+        self.controls.borrow().muted
+    }
+
+    /// Send silence, or stop.
+    ///
+    /// The snapshot is written **here**, synchronously, through the same
+    /// sender hanging up uses -- so the button flips on the next paint with no
+    /// round trip to the engine and none to the exchange. There is no race
+    /// with the task: `Bridge::event` only ever writes the fields its own
+    /// event owns, and none of them is this one.
+    pub fn set_muted(&self, muted: bool) {
+        if self.controls.send_if_modified(|c| {
+            let changed = c.muted != muted;
+            c.muted = muted;
+            changed
+        }) {
+            tracing::info!(muted, "microphone");
+        }
+        self.ending.send_modify(|s| s.muted = muted);
+        (self.wake)();
+    }
+
+    pub fn toggle_muted(&self) {
+        self.set_muted(!self.muted());
     }
 
     /// End the call.
@@ -436,8 +476,11 @@ pub fn spawn_call(
     // Asked-to-stop, so hanging up drains and closes rather than dropping
     // the task at its next await; see `CallHandle::stop`.
     let (stop_tx, stop_rx) = watch::channel(false);
+    // Mute and whatever joins it: held by this end, read by the engine loop.
+    let (controls_tx, controls_rx) = watch::channel(sqex_voice::engine::Controls::default());
     let opts = CallOpts {
         stop: Some(stop_rx),
+        controls: Some(controls_rx),
         ..opts
     };
     let wake = Arc::new(wake);
@@ -504,6 +547,7 @@ pub fn spawn_call(
 
     CallHandle {
         stop: stop_tx,
+        controls: controls_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -544,8 +588,11 @@ pub fn spawn_cross_call(
     // Asked-to-stop, so hanging up drains and closes rather than dropping
     // the task at its next await; see `CallHandle::stop`.
     let (stop_tx, stop_rx) = watch::channel(false);
+    // Mute and whatever joins it: held by this end, read by the engine loop.
+    let (controls_tx, controls_rx) = watch::channel(sqex_voice::engine::Controls::default());
     let opts = CallOpts {
         stop: Some(stop_rx),
+        controls: Some(controls_rx),
         ..opts
     };
     let wake = Arc::new(wake);
@@ -599,6 +646,7 @@ pub fn spawn_cross_call(
 
     CallHandle {
         stop: stop_tx,
+        controls: controls_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -635,8 +683,11 @@ pub fn spawn_cross_answer(
     // Asked-to-stop, so hanging up drains and closes rather than dropping
     // the task at its next await; see `CallHandle::stop`.
     let (stop_tx, stop_rx) = watch::channel(false);
+    // Mute and whatever joins it: held by this end, read by the engine loop.
+    let (controls_tx, controls_rx) = watch::channel(sqex_voice::engine::Controls::default());
     let opts = CallOpts {
         stop: Some(stop_rx),
+        controls: Some(controls_rx),
         ..opts
     };
     let wake = Arc::new(wake);
@@ -686,6 +737,7 @@ pub fn spawn_cross_answer(
 
     CallHandle {
         stop: stop_tx,
+        controls: controls_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -743,8 +795,11 @@ pub fn spawn_room(
     // Asked-to-stop, so hanging up drains and closes rather than dropping
     // the task at its next await; see `CallHandle::stop`.
     let (stop_tx, stop_rx) = watch::channel(false);
+    // Mute and whatever joins it: held by this end, read by the engine loop.
+    let (controls_tx, controls_rx) = watch::channel(sqex_voice::engine::Controls::default());
     let opts = CallOpts {
         stop: Some(stop_rx),
+        controls: Some(controls_rx),
         ..opts
     };
     let wake = Arc::new(wake);
@@ -793,6 +848,7 @@ pub fn spawn_room(
 
     CallHandle {
         stop: stop_tx,
+        controls: controls_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -833,8 +889,11 @@ pub fn spawn_dm_call(
     // Asked-to-stop, so hanging up drains and closes rather than dropping
     // the task at its next await; see `CallHandle::stop`.
     let (stop_tx, stop_rx) = watch::channel(false);
+    // Mute and whatever joins it: held by this end, read by the engine loop.
+    let (controls_tx, controls_rx) = watch::channel(sqex_voice::engine::Controls::default());
     let opts = CallOpts {
         stop: Some(stop_rx),
+        controls: Some(controls_rx),
         ..opts
     };
     let wake = Arc::new(wake);
@@ -908,6 +967,7 @@ pub fn spawn_dm_call(
 
     CallHandle {
         stop: stop_tx,
+        controls: controls_tx,
         state: state_rx,
         events: events_rx,
         task,
@@ -921,13 +981,18 @@ impl CallHandle {
     /// without placing one. The task behind it does nothing and ends when
     /// hung up.
     pub fn for_test(state: CallState) -> CallHandle {
+        let muted = state.muted;
         let (state_tx, state_rx) = watch::channel(state);
         let (_events_tx, events_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(std::future::pending());
         // Nothing is listening; the handle only has to be whole.
         let (stop_tx, _stop_rx) = watch::channel(false);
+        // Seeded from the state, so a test that asks for a muted call gets a
+        // handle that agrees with the snapshot it drew.
+        let (controls_tx, _controls_rx) = watch::channel(sqex_voice::engine::Controls { muted });
         CallHandle {
             stop: stop_tx,
+            controls: controls_tx,
             state: state_rx,
             events: events_rx,
             task,

@@ -142,6 +142,7 @@ mod tests {
                 name: Some("Ada".into()),
                 title: None,
                 handle: Some("ada@squic.org".into()),
+                picture: None,
             },
         );
         p.insert(
@@ -150,6 +151,7 @@ mod tests {
                 name: None,
                 title: None,
                 handle: Some("bram@squic.org".into()),
+                picture: None,
             },
         );
         p

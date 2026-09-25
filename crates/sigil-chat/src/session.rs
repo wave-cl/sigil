@@ -1115,6 +1115,41 @@ fn reason_word(reason: u8) -> &'static str {
 /// only thing that identifies somebody, which is why every view that shows a
 /// name keeps the key one gesture away.
 ///
+/// A picture somebody published, and a hash of it (SIP-21).
+///
+/// **Bytes, but shared and hashed**, because of where this rides: `Person`
+/// lives in `ChatState`, and `ChatApp::state_of` clones the whole state
+/// several times per render pass. An `Arc` makes that clone a refcount bump
+/// instead of every avatar in the account memcpy'd at 60 Hz.
+///
+/// The hash is what a texture cache compares, so a picture that *changed*
+/// is redecoded and the same picture never is -- keyed by account alone, a
+/// cache shows the old face for as long as the window is open, and keyed by
+/// the bytes it compares kilobytes every frame.
+///
+/// Carries SIP-21's warning: a picture is chosen by its subject and is
+/// evidence of nothing. Two accounts may publish the same face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Face {
+    pub hash: u64,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+
+impl Face {
+    fn of(bytes: Vec<u8>) -> Option<Face> {
+        if bytes.is_empty() {
+            return None;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        Some(Face {
+            hash: h.finish(),
+            bytes: std::sync::Arc::new(bytes),
+        })
+    }
+}
+
 /// A profile that is **withheld, absent, or blocked answers identically** by
 /// design (SIP-4's rule, and SIP-21 keeps it). So `None` here means "we cannot
 /// name them", never "they have nothing" and never "they blocked you" — the
@@ -1130,6 +1165,9 @@ pub struct Person {
     pub title: Option<String>,
     /// `name@domain`, bound at the exchange (SIP-38).
     pub handle: Option<String>,
+    /// The picture they published, undecoded. `None` is "no picture" and
+    /// "no profile yet", which draw the same thing: the identicon.
+    pub picture: Option<Face>,
 }
 
 impl Person {
@@ -3505,6 +3543,11 @@ pub(crate) trait Local {
     fn store(&self) -> &Store;
     fn display_name(&self, account: &PubKey) -> Option<String>;
     fn title_of(&self, account: &PubKey) -> Option<String>;
+    /// The picture an account published, as published (SIP-21 sends it
+    /// inline with the profile, so this is a store read and not a round
+    /// trip). Read once per state rebuild, never per frame: the accessor's
+    /// own comment says it reads the database every time it is asked.
+    fn avatar_of(&self, account: &PubKey) -> Option<Vec<u8>>;
     fn handle(&self, account: &PubKey) -> Option<String>;
     fn history(&self, channel: &[u8; 32], admins: &[PubKey]) -> Option<Timeline>;
     /// SIP-60 §The client keeps what it read: earlier incarnations of this
@@ -3527,6 +3570,9 @@ impl Local for Chat {
     }
     fn title_of(&self, account: &PubKey) -> Option<String> {
         Chat::title_of(self, account)
+    }
+    fn avatar_of(&self, account: &PubKey) -> Option<Vec<u8>> {
+        Chat::avatar_of(self, account)
     }
     fn handle(&self, account: &PubKey) -> Option<String> {
         Chat::handle(self, account)
@@ -3578,6 +3624,9 @@ impl Local for Offline<'_> {
     fn title_of(&self, account: &PubKey) -> Option<String> {
         let (_, title, _) = self.store.profile(account).ok().flatten()?;
         (!title.is_empty()).then_some(title)
+    }
+    fn avatar_of(&self, account: &PubKey) -> Option<Vec<u8>> {
+        self.store.avatar(account).ok().flatten()
     }
     fn handle(&self, account: &PubKey) -> Option<String> {
         let (name, _) = self.store.handle(account).ok().flatten()?;
@@ -5154,6 +5203,7 @@ fn people_of(chat: &impl Local, desk: &Desk) -> HashMap<PubKey, Person> {
             name: chat.display_name(&account),
             title: chat.title_of(&account),
             handle: chat.handle(&account),
+            picture: chat.avatar_of(&account).and_then(Face::of),
         });
     };
     for known in desk.channels.values() {
@@ -5528,6 +5578,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         name: chat.display_name(&me),
         title: chat.title_of(&me),
         handle: chat.handle(&me),
+        picture: chat.avatar_of(&me).and_then(Face::of),
     };
     // Most recent first, the way every chat client orders a conversation list.
     // `mine()` hands them back in join order, which says nothing about where
@@ -6263,6 +6314,39 @@ fn name_for(people: &HashMap<PubKey, Person>, peer: &PubKey, local: &str) -> Str
 /// question -- *whose* names are worth asking the exchange for -- and
 /// `crate::label_tests` is a third, about naming exchanges.
 #[cfg(test)]
+mod face_tests {
+    use super::Face;
+
+    /// **A picture nobody published is not a picture.** An empty avatar column
+    /// is what the store holds for an account with no picture, and `Some` of
+    /// nothing would make every such row try to decode zero bytes on the first
+    /// frame that drew it.
+    #[test]
+    fn no_bytes_is_no_face() {
+        assert!(Face::of(Vec::new()).is_none());
+    }
+
+    /// The hash is what a texture cache compares, so these two rules are the
+    /// cache's correctness: the same picture must not be redecoded, and a
+    /// changed one must not go on being drawn.
+    #[test]
+    fn the_hash_follows_the_bytes() {
+        let a = Face::of(vec![1, 2, 3]).expect("three bytes is a picture here");
+        let same = Face::of(vec![1, 2, 3]).expect("and so is the same three");
+        let other = Face::of(vec![1, 2, 4]).expect("and so is a different three");
+        assert_eq!(
+            a.hash, same.hash,
+            "the same bytes hashed differently, so every pass redecodes"
+        );
+        assert_ne!(
+            a.hash, other.hash,
+            "different bytes hashed the same, so a changed picture stays stale"
+        );
+        assert_eq!(&*a.bytes, &[1, 2, 3], "and the bytes themselves are kept");
+    }
+}
+
+#[cfg(test)]
 mod display_name_tests {
     use super::*;
 
@@ -6275,6 +6359,7 @@ mod display_name_tests {
             name: name.map(str::to_string),
             title: None,
             handle: handle.map(str::to_string),
+            picture: None,
         }
     }
 

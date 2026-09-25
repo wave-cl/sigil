@@ -298,3 +298,83 @@ fn a_call_without_routing_draws_no_routing_control() {
 fn the_card_fits_a_desktop_pane() {
     holds("a call on a desktop", &plain(), egui::vec2(1000.0, 700.0));
 }
+
+/// Every texture the card painted with, other than the font atlas.
+///
+/// **Walked from the paint list rather than asked of the tree**, because a
+/// picture has no label: what is being checked is that the bytes reached a
+/// texture and the texture reached the screen, and nothing in the
+/// accessibility tree can say either.
+fn textures(picture: bool) -> Vec<egui::TextureId> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<egui::TextureId>) {
+        match shape {
+            egui::Shape::Mesh(mesh) => out.push(mesh.texture_id),
+            egui::Shape::Rect(rect) => {
+                if let Some(brush) = &rect.brush {
+                    out.push(brush.fill_texture_id);
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for s in shapes {
+                    walk(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(PHONE, TALL))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            // A picture is a picture: four red pixels is a published avatar as
+            // far as everything between the store and the screen is concerned.
+            let face = picture.then(|| {
+                ctx.load_texture(
+                    "a-face",
+                    egui::ColorImage::from_rgba_unmultiplied([2, 2], &[255u8; 16]),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            let call = Call {
+                picture: face.as_ref(),
+                ..plain()
+            };
+            call_card(ui, &call);
+        });
+    h.run();
+    h.run();
+
+    let mut found = Vec::new();
+    for shape in &h.output().shapes {
+        walk(&shape.shape, &mut found);
+    }
+    // `TextureId::default()` is the font atlas, which every glyph on the card
+    // is drawn from and which says nothing about a picture.
+    found.retain(|id| *id != egui::TextureId::default());
+    found
+}
+
+/// **A published picture is drawn, and the identicon is only the fallback.**
+///
+/// Both halves matter. Without the second, a card that ignored `picture`
+/// entirely and always drew the mark would pass the first; without the first,
+/// so would one that drew a blank square.
+#[test]
+fn a_picture_is_drawn_rather_than_the_identicon() {
+    let without = textures(false);
+    assert!(
+        without.is_empty(),
+        "a card given no picture painted with {without:?} anyway, so the case \
+         below cannot tell a picture from the mark"
+    );
+    let with = textures(true);
+    assert!(
+        !with.is_empty(),
+        "a card given a picture drew the identicon instead: the bytes reach a \
+         texture and the texture reaches nothing"
+    );
+}
