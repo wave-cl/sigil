@@ -11839,6 +11839,18 @@ fn me_card_phone() {
     let mut state = a_conversation();
     state.mine.name = Some("Ada Lovelace".into());
     state.mine.handle = Some("ada@squic.org".into());
+    // A peer whose key sorts **above** this account's, so one direct message
+    // is ordered here and the line that says so has a picture. The fixture's
+    // own peer sorts below, so without this the count is zero and the row
+    // draws nothing -- UI that no snapshot shows.
+    if let Some(first) = state.conversations.first().cloned() {
+        state.conversations.push(Summary {
+            peer: Some(PubKey::new([0xffu8; 32])),
+            label: "Zoë".into(),
+            channel: [9u8; 32],
+            ..first
+        });
+    }
     let (mut h, _) = me_card(state, three_apps());
     h.run();
     h.remove_cursor();

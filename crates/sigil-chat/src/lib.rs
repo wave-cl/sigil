@@ -3320,6 +3320,24 @@ impl App for ChatApp {
     }
 }
 
+/// Which direct messages are ordered at **this** account's home, and so would
+/// move with it.
+///
+/// **A direct message lives at the home of whichever of the two keys sorts
+/// lower.** So roughly half are ordered here and half at the other party's
+/// home, and an account that moves takes the first half with it. Nothing on
+/// screen said which, and not knowing is how somebody ends up separated from
+/// their own messages -- which has happened here, to 156 of them.
+///
+/// Rooms are not counted: a room lives where it was made, and an account
+/// moving does not carry it.
+fn dms_ordered_here(me: PubKey, conversations: &[session::Summary]) -> Vec<&session::Summary> {
+    conversations
+        .iter()
+        .filter(|c| c.peer.is_some_and(|peer| me < peer))
+        .collect()
+}
+
 /// What was typed into the rehome field: an exchange key, and a domain after
 /// it if one was given.
 ///
@@ -11868,10 +11886,36 @@ impl ChatApp {
                 .truncate(),
             )
             .on_hover_text(format!(
-                "{home}
-
-The exchange that orders this account's direct messages and                  carries what it starts elsewhere. A direct message lives at the home of                  whichever of the two keys sorts lower, so it is not always this one.",
+                "{home}\n\nThe exchange that orders this account's direct messages and \
+                 carries what it starts elsewhere. A direct message lives at the home of \
+                 whichever of the two keys sorts lower, so it is not always this one."
             ));
+            // **What a move would cost, before anybody considers one.** These
+            // are the conversations ordered here, and an account that moved
+            // would take them with it. A count, with the names behind it: a
+            // list of forty would bury the page and the number is what
+            // somebody needs first.
+            let moving = dms_ordered_here(at.0, &state.conversations);
+            if !moving.is_empty() {
+                let named: Vec<&str> = moving.iter().map(|c| c.label.as_str()).collect();
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(match moving.len() {
+                            1 => "1 direct message is ordered here".to_string(),
+                            n => format!("{n} direct messages are ordered here"),
+                        })
+                        .small()
+                        .color(theme.text_muted),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(format!(
+                    "Ordered here because your key sorts lower than theirs, and a direct \
+                     message lives at the home of the lower key. If this account moves, \
+                     these move with it:\n\n{}",
+                    named.join("\n")
+                ));
+            }
             ui.add_space(tokens::SPACING_SM);
         }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
@@ -13094,6 +13138,65 @@ impl ChatApp {
                     egui::RichText::new(format!("Give {what} to the person it is for.")).small(),
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod dms_ordered_here_tests {
+    use super::{dms_ordered_here, session::Summary};
+    use sqnr_core::PubKey;
+
+    fn dm(peer: Option<PubKey>, label: &str) -> Summary {
+        Summary {
+            channel: [0u8; 32],
+            peer,
+            label: label.into(),
+            unread: 0,
+            mentioned: 0,
+            avatar: None,
+            waiting: false,
+            preview: None,
+            at: None,
+            public: Some(false),
+            group: peer.is_none(),
+            typing: false,
+        }
+    }
+
+    /// **The rule, and getting it backwards is the whole hazard.** A direct
+    /// message lives at the home of the *lower* key, so it is ordered here
+    /// only when this account's key sorts lower than the other party's.
+    #[test]
+    fn only_the_ones_where_my_key_sorts_lower() {
+        let me = PubKey::new([5u8; 32]);
+        let lower = PubKey::new([1u8; 32]);
+        let higher = PubKey::new([9u8; 32]);
+        let all = vec![
+            dm(Some(higher), "ordered here"),
+            dm(Some(lower), "ordered at theirs"),
+        ];
+        let here = dms_ordered_here(me, &all);
+        assert_eq!(
+            here.len(),
+            1,
+            "{:?}",
+            here.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+        assert_eq!(here[0].label, "ordered here");
+    }
+
+    /// A room lives where it was made; an account moving does not carry it.
+    #[test]
+    fn rooms_are_not_counted() {
+        let me = PubKey::new([1u8; 32]);
+        let all = vec![dm(None, "a room")];
+        assert!(dms_ordered_here(me, &all).is_empty());
+    }
+
+    /// And the degenerate one: nothing to move is not an error.
+    #[test]
+    fn nothing_is_nothing() {
+        assert!(dms_ordered_here(PubKey::new([1u8; 32]), &[]).is_empty());
     }
 }
 
