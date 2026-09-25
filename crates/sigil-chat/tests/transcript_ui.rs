@@ -303,6 +303,10 @@ fn a_conversation() -> ChatState {
         earlier: 0,
         locked_out: None,
         mail: Vec::new(),
+        // SIP-59: the fixture lives somewhere, so `me_card_phone` shows the
+        // line that says where. With `None` it draws nothing and the screen
+        // has no picture of it at all.
+        my_home: Some((PubKey::new([7u8; 32]), "trunk.exchange".into())),
     }
 }
 
@@ -12627,6 +12631,15 @@ fn what_was_just_done_is_said_on_the_page_it_was_done_on() {
 /// never be set.
 #[test]
 fn the_card_can_choose_whether_calls_connect_directly() {
+    // **Tall enough to hold the whole page.** The Me page scrolls, and this
+    // switch sits near its foot -- so on a 804-point viewport it fell below
+    // the fold as the page grew, and a kittest click on a node that is not on
+    // screen silently does nothing: the node is found, the press lands
+    // nowhere, and the assertion fails as though the preference were not
+    // wired. What is under test here is the switch reaching the preference,
+    // not where the fold happens to fall; `phone_width.rs` and the snapshots
+    // are what hold the layout.
+    const TALL_ENOUGH: f32 = 1600.0;
     // A harness that keeps the accounts, since the switch is the person's
     // and not the conversation's.
     let accounts = std::rc::Rc::new(std::cell::RefCell::new(sigil::accounts::Accounts::of(
@@ -12638,7 +12651,7 @@ fn the_card_can_choose_whether_calls_connect_directly() {
     app.show_state_for_test(a_conversation());
     let siblings = three_apps();
     let mut h = Harness::builder()
-        .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
+        .with_size(egui::vec2(PHONE_WIDTH, TALL_ENOUGH))
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             sigil::Form::install(&ctx, sigil::Form::Phone);

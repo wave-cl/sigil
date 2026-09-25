@@ -667,6 +667,15 @@ pub struct ChatState {
     /// as an alias while living somewhere else, which is exactly the case
     /// that decides whether a call needs SIP-39's bridge.
     pub peer_home: Option<(PubKey, String)>,
+    /// SIP-59: where **this account** lives — the exchange that orders its
+    /// direct messages and carries what it starts elsewhere.
+    ///
+    /// **Asked for, and said plainly.** It was reachable only as an error
+    /// ("this identity lives at X") when opening a cross-exchange
+    /// conversation went wrong, so the one fact that explains where a
+    /// conversation ends up was told only to somebody already confused by it.
+    /// `None` is "not asked yet or not answered", which draws nothing.
+    pub my_home: Option<(PubKey, String)>,
     /// SIP-5: what is waiting in the mailbox, newest first. Empty until
     /// something asks, and empty is also "nothing waiting" -- which is the
     /// ordinary case and draws nothing at all.
@@ -1521,6 +1530,10 @@ pub enum Cmd {
     /// conversation does not need. Whether a call to them wants SIP-39's
     /// bridge is not urgent; the chat list is.
     PeerHome(PubKey),
+    /// SIP-59: ask where this account lives. Read-only — **not**
+    /// `ensure_home`, which claims a home when there is none and so would
+    /// change the thing it was asked to report.
+    MyHome,
     /// SIP-5: what is waiting in the mailbox. A round trip, asked for rather
     /// than polled -- sigil rings in-channel (SIP-24), so nothing here is
     /// time-critical and a poll would spend a per-caller limit on a store
@@ -3223,6 +3236,8 @@ struct Desk {
     /// SIP-59: where each peer's account lives, asked once. A round trip,
     /// and the answer only changes when somebody moves home.
     peer_homes: HashMap<PubKey, (PubKey, String)>,
+    /// SIP-59: where this account lives, once asked.
+    my_home: Option<(PubKey, String)>,
     /// SIP-5: the mailbox as last listed, with whatever has been opened.
     mail: Vec<MailItem>,
 }
@@ -3232,6 +3247,7 @@ impl Default for Desk {
         Desk {
             channels: HashMap::new(),
             peer_homes: HashMap::new(),
+            my_home: None,
             mail: Vec::new(),
             open: None,
             dirty: HashSet::new(),
@@ -6415,6 +6431,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(stranded, stranded);
         set!(peer_home, peer_home);
         set!(mail, desk.mail.clone());
+        set!(my_home, desk.my_home.clone());
         set!(events, events);
         set!(earlier, earlier);
         set!(loading, loading);
@@ -7035,6 +7052,23 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
         Cmd::Earlier => reach_earlier(&*chat, desk),
+        // SIP-59, read-only: `account_home` asks, where `ensure_home` would
+        // claim one if there were none. A screen that reports where you live
+        // must not be the thing that decides it.
+        Cmd::MyHome => {
+            // Copied out first: `account_home` takes `&mut self`, and the key
+            // is `Copy`.
+            let me = chat.me;
+            match chat.account_home(&me).await {
+                Ok(homed) => {
+                    desk.my_home = Some((homed.home, homed.domain));
+                    desk.restructure = true;
+                }
+                // Quiet: an exchange that will not say is not an error to put
+                // in front of somebody, and the line simply does not appear.
+                Err(why) => tracing::debug!(%why, "could not ask where this account lives"),
+            }
+        }
         // SIP-5. Listing costs a round trip and says only what is waiting;
         // opening each item is a second one, so a list is never opened whole.
         Cmd::Mail => match chat.mail_list().await {

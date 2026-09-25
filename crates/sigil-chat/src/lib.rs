@@ -1367,6 +1367,10 @@ struct Pane {
     /// would not decode -- remembered, so a malformed one is not decoded
     /// again on every pass.
     faces: HashMap<PubKey, (u64, Option<egui::TextureHandle>)>,
+    /// SIP-59: whether this pane has asked where its account lives. Once per
+    /// pane, not per frame: it is a round trip and the answer only changes
+    /// when somebody moves home.
+    asked_my_home: bool,
     /// Why a video will not play, by blob id.
     unplayable: HashMap<String, String>,
     /// What is in the box. Taken out to be sent, and held in `in_flight`
@@ -1706,6 +1710,7 @@ impl Default for Pane {
             replica_key: String::new(),
             pictures: HashMap::new(),
             faces: HashMap::new(),
+            asked_my_home: false,
             settings_for: None,
             asking: false,
             saw: (None, 0),
@@ -11704,6 +11709,36 @@ impl ChatApp {
             theme.text_muted,
             egui::RichText::new("This identity").small(),
         );
+        // **SIP-59: where this account lives, said plainly.** It was reachable
+        // only as an error when opening a cross-exchange conversation failed,
+        // so the one fact that explains where a conversation is ordered -- and
+        // which direct messages move if the account ever does -- was told only
+        // to somebody already lost. Asked once per pane, read-only.
+        if state.my_home.is_none() && !self.pane(at).asked_my_home {
+            self.pane(at).asked_my_home = true;
+            self.send_as(Some(at), Cmd::MyHome);
+        }
+        if let Some((home, domain)) = &state.my_home {
+            let where_ = if domain.is_empty() {
+                sigil_ui::short(&home.to_string())
+            } else {
+                domain.clone()
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("This account lives at {where_}"))
+                        .small()
+                        .color(theme.text_muted),
+                )
+                .truncate(),
+            )
+            .on_hover_text(format!(
+                "{home}
+
+The exchange that orders this account's direct messages and                  carries what it starts elsewhere. A direct message lives at the home of                  whichever of the two keys sorts lower, so it is not always this one.",
+            ));
+            ui.add_space(tokens::SPACING_SM);
+        }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
             .on_hover_text("Your name and title, as others see them")
             .clicked()
