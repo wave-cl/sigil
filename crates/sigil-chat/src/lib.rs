@@ -11757,17 +11757,31 @@ impl ChatApp {
             let gap = tokens::SPACING_MD;
             let columns =
                 (((ui.available_width() + gap) / (cell + gap)).floor() as usize).clamp(1, 6);
-            egui::Grid::new("backup-words")
-                .num_columns(columns)
-                .spacing([gap, tokens::SPACING_XS])
-                .show(ui, |ui| {
-                    for (i, word) in words.iter().enumerate() {
-                        ui.label(egui::RichText::new(format!("{:>2}. {word}", i + 1)).monospace());
-                        if (i + 1) % columns == 0 {
-                            ui.end_row();
+            // **And the rows are as tall as the words, not as a thumb.**
+            // The spacing here was already `SPACING_XS`; what stood the rows
+            // 44 apart is that every cell is at least `interact_size.y`,
+            // which the phone form raises to a finger's worth for things
+            // that are tapped. Nothing in this grid is tapped. Eight rows
+            // paid it, which is most of a phone screen of nothing — on the
+            // one screen somebody is copying twenty-four words off, where
+            // making them scroll for it is the opposite of the intent two
+            // paragraphs up.
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
+                egui::Grid::new("backup-words")
+                    .num_columns(columns)
+                    .spacing([gap, tokens::SPACING_XS])
+                    .show(ui, |ui| {
+                        for (i, word) in words.iter().enumerate() {
+                            ui.label(
+                                egui::RichText::new(format!("{:>2}. {word}", i + 1)).monospace(),
+                            );
+                            if (i + 1) % columns == 0 {
+                                ui.end_row();
+                            }
                         }
-                    }
-                });
+                    });
+            });
         }
 
         ui.add_space(tokens::SPACING_MD);
