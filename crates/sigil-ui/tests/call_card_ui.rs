@@ -19,7 +19,7 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::NodeT;
 use sigil::theme;
-use sigil_ui::{Call, call_card, roster::Row};
+use sigil_ui::{Call, Mic, call_card, roster::Row};
 
 /// The phone the app is checked on: a OnePlus NE2213, 360 points across.
 const PHONE: f32 = 360.0;
@@ -41,6 +41,7 @@ fn plain<'a>() -> Call<'a> {
         travel: Some(("direct", "")),
         muted: false,
         speaker: Some(false),
+        microphones: &[],
         stats: None,
         detail: false,
         present: &[],
@@ -65,14 +66,34 @@ fn rows(n: usize) -> Vec<Row> {
 /// Returns the width the card took and every control's rect by name, so a case
 /// can ask both "does it fit" and "is the way out reachable".
 fn shown(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>) {
+    let (width, controls, _) = drawn(call, size);
+    (width, controls)
+}
+
+/// The width, the control rects by name, and **every label in the tree**.
+///
+/// The two lists are separate on purpose. The controls are matched to a short
+/// list of words so that `holds` can assert they do not overlap each other --
+/// a list of every label would include each one's parent containers, which
+/// overlap their children by construction and would fail that instantly. The
+/// labels are for asking whether something was drawn at all, which the
+/// control list cannot answer: it only ever contained the five words it looks
+/// for, so a question about anything else was answered "no" without looking.
+fn drawn(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>, Vec<String>) {
     let (mut h, width) = built(call, size, egui::Theme::Dark);
     h.run();
     h.run();
 
     // Walked rather than queried: this harness has no `get_all_by_label`, and
     // walking is what the other widget tests here do.
-    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<(String, egui::Rect)>) {
-        if let Some(label) = node.accesskit_node().label() {
+    fn walk(
+        node: egui_kittest::Node<'_>,
+        out: &mut Vec<(String, egui::Rect)>,
+        said: &mut Vec<String>,
+    ) {
+        let n = node.accesskit_node();
+        if let Some(label) = n.label() {
+            said.push(label.to_string());
             // The controls say a sentence -- "Mute your microphone" -- and are
             // found by the word the card draws under them.
             for word in ["Unmute", "Mute", "Hang up", "Speaker", "Earpiece"] {
@@ -82,13 +103,18 @@ fn shown(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>) 
                 }
             }
         }
+        // A combo box says its selection as a value rather than a label.
+        if let Some(value) = n.value() {
+            said.push(value.to_string());
+        }
         for c in node.children() {
-            walk(c, out);
+            walk(c, out, said);
         }
     }
     let mut found = Vec::new();
-    walk(h.root(), &mut found);
-    (width.get(), found)
+    let mut said = Vec::new();
+    walk(h.root(), &mut found, &mut said);
+    (width.get(), found, said)
 }
 
 /// The card in a pane of `size`, and a cell holding the width it took.
@@ -112,6 +138,17 @@ fn built(
         call.stats.map(str::to_string),
         rows(call.present.len()),
     );
+    // Owned, because `Mic` borrows and the closure outlives this scope.
+    let devices: Vec<String> = call
+        .microphones
+        .iter()
+        .map(|m| m.name.to_string())
+        .collect();
+    let marks: Vec<(bool, bool)> = call
+        .microphones
+        .iter()
+        .map(|m| (m.live, m.fallback))
+        .collect();
     let flags = (
         call.up,
         call.deaf,
@@ -142,6 +179,15 @@ fn built(
             )
             .show(ui, |ui| {
                 let (up, deaf, seconds, muted, speaker, detail, connecting, two_party) = flags;
+                let mics: Vec<sigil_ui::Mic<'_>> = devices
+                    .iter()
+                    .zip(&marks)
+                    .map(|(name, (live, fallback))| sigil_ui::Mic {
+                        name,
+                        live: *live,
+                        fallback: *fallback,
+                    })
+                    .collect();
                 let call = Call {
                     key: &owned.0,
                     named: &owned.1,
@@ -153,6 +199,7 @@ fn built(
                     travel: owned.3.as_ref().map(|(w, r)| (w.as_str(), r.as_str())),
                     muted,
                     speaker,
+                    microphones: &mics,
                     stats: owned.4.as_deref(),
                     detail,
                     present: &owned.5,
@@ -393,6 +440,124 @@ fn a_picture_is_drawn_rather_than_the_identicon() {
     );
 }
 
+/// Two microphones, one of them live and one the fallback.
+fn two_mics() -> Vec<(String, bool, bool)> {
+    vec![
+        ("MacBook Pro Microphone".to_string(), true, false),
+        ("ACCENTUM Plus".to_string(), false, true),
+    ]
+}
+
+/// **A machine with one microphone is offered no choice.**
+///
+/// The same rule the routing control follows: a chooser with a single row is
+/// not a choice, it is a control that cannot do anything, and one that says
+/// the app could.
+#[test]
+fn one_microphone_draws_no_chooser() {
+    let only = [Mic {
+        name: "MacBook Pro Microphone",
+        live: true,
+        fallback: true,
+    }];
+    let (_, controls, said) = drawn(
+        &Call {
+            microphones: &only,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+    );
+    assert!(
+        !said.iter().any(|l| l.contains("MacBook")),
+        "a single microphone was offered as a choice: {said:?}"
+    );
+    assert!(
+        controls.iter().any(|(w, _)| w == "Hang up"),
+        "and the card drew nothing at all, so this proves nothing"
+    );
+
+    // **The control: two microphones *are* offered.** Without this the case
+    // above passes for a card that never draws a chooser under any
+    // circumstances, which is exactly what it did before -- the walker
+    // collected five control words and nothing else, so it could not have
+    // seen a chooser if one had been there.
+    let pair = [
+        Mic {
+            name: "MacBook Pro Microphone",
+            live: true,
+            fallback: false,
+        },
+        Mic {
+            name: "ACCENTUM Plus",
+            live: false,
+            fallback: true,
+        },
+    ];
+    let (_, _, said) = drawn(
+        &Call {
+            microphones: &pair,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+    );
+    assert!(
+        said.iter().any(|l| l.contains("MacBook")),
+        "two microphones drew no chooser: {said:?}"
+    );
+}
+
+/// **The chooser does not push the way out off the screen.**
+///
+/// It is drawn in the same bottom panel as the controls, so it competes with
+/// them for a phone's last forty points — and a room of twelve is the case
+/// where the body has already taken everything else.
+#[test]
+fn a_chooser_over_a_full_room_keeps_the_way_out() {
+    let names = two_mics();
+    let mics: Vec<Mic<'_>> = names
+        .iter()
+        .map(|(n, live, fallback)| Mic {
+            name: n,
+            live: *live,
+            fallback: *fallback,
+        })
+        .collect();
+    let present = rows(12);
+    holds(
+        "a room of twelve with a microphone chooser",
+        &Call {
+            microphones: &mics,
+            present: &present,
+            connecting: 2,
+            two_party: false,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+    );
+}
+
+/// And lying down, where the bottom panel has the least room of all.
+#[test]
+fn a_chooser_fits_a_phone_lying_down() {
+    let names = two_mics();
+    let mics: Vec<Mic<'_>> = names
+        .iter()
+        .map(|(n, live, fallback)| Mic {
+            name: n,
+            live: *live,
+            fallback: *fallback,
+        })
+        .collect();
+    holds(
+        "a chooser on a phone lying down",
+        &Call {
+            microphones: &mics,
+            ..plain()
+        },
+        egui::vec2(TALL, PHONE),
+    );
+}
+
 // --- Snapshots ---------------------------------------------------------
 //
 // What the cases above cannot say: whether it looks like anything. They
@@ -488,6 +653,33 @@ fn phone_call_card_light() {
 
 /// The desktop takes the whole pane as a centred column, so the picture is
 /// mostly about what `CARD_MAX_WIDTH` does to it.
+/// The chooser, which only exists where there is more than one microphone.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_microphones() {
+    let mics = [
+        Mic {
+            name: "MacBook Pro Microphone",
+            live: true,
+            fallback: false,
+        },
+        Mic {
+            name: "ACCENTUM Plus",
+            live: false,
+            fallback: true,
+        },
+    ];
+    snap(
+        "phone_call_card_microphones",
+        &Call {
+            microphones: &mics,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn call_card_desktop() {

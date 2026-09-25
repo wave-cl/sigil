@@ -39,6 +39,10 @@ pub struct Call<'a> {
     /// control is drawn — a disabled one says the app could do something it
     /// cannot.
     pub speaker: Option<bool>,
+    /// The microphones that could be chosen, and which is live. Empty draws
+    /// no chooser at all: a device list with one entry is not a choice, and a
+    /// machine with no microphone has nothing to offer.
+    pub microphones: &'a [Mic<'a>],
     /// The engine's own line, when the numbers are open.
     pub stats: Option<&'a str>,
     /// Whether the numbers are open. The clock is the toggle.
@@ -51,8 +55,20 @@ pub struct Call<'a> {
     pub two_party: bool,
 }
 
+/// One microphone a call could capture from.
+pub struct Mic<'a> {
+    /// The name, spelled as the engine matches it.
+    pub name: &'a str,
+    /// The one this call is capturing from now.
+    pub live: bool,
+    /// The one a call that chose nothing would open. Marked, because the
+    /// system default and the device a call really uses are often different
+    /// -- a connected headset is stepped around deliberately.
+    pub fallback: bool,
+}
+
 /// What was pressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallPress {
     Mute,
     Unmute,
@@ -63,6 +79,9 @@ pub enum CallPress {
     HangUp,
     /// Open or close the numbers.
     Detail,
+    /// Capture from this microphone instead. `None` is whichever one a call
+    /// that chose nothing would open.
+    Microphone(Option<String>),
 }
 
 /// A call's own control: a round target with the mark in it, the word under it,
@@ -161,6 +180,53 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
     egui::Panel::bottom("call_controls")
         .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(tokens::SPACING_MD as i8)))
         .show(ui, |ui| {
+            // **Above the discs, and only where there is a choice.** One
+            // microphone is not a choice and a machine with none has nothing
+            // to offer, so the row is absent rather than empty -- the same
+            // rule the routing control follows. Here rather than in the body
+            // because a room's roster would scroll it off, and this is a
+            // control, not a thing to read.
+            if call.microphones.len() > 1 {
+                let live = call.microphones.iter().find(|m| m.live);
+                let shown = live
+                    .map(|m| m.name)
+                    .or_else(|| call.microphones.iter().find(|m| m.fallback).map(|m| m.name))
+                    .unwrap_or("Default microphone");
+                ui.horizontal(|ui| {
+                    sigil::icon::draw(
+                        ui.painter(),
+                        egui::Rect::from_min_size(
+                            ui.cursor().min + egui::vec2(0.0, 2.0),
+                            egui::vec2(14.0, 14.0),
+                        ),
+                        Icon::Mic,
+                        theme.text_muted,
+                    );
+                    ui.add_space(18.0);
+                    egui::ComboBox::from_id_salt("call_microphone")
+                        .width((ui.available_width() - tokens::SPACING_SM).max(0.0))
+                        .height(240.0f32.min(ui.available_height().max(120.0) * 0.6))
+                        .selected_text(egui::RichText::new(shown).small())
+                        .show_ui(ui, |ui| {
+                            for mic in call.microphones {
+                                // The one a call would open if nobody chose is
+                                // marked, because it is often *not* the system
+                                // default -- a connected headset is stepped
+                                // around on purpose.
+                                let label = if mic.fallback {
+                                    format!("{} — used by default", mic.name)
+                                } else {
+                                    mic.name.to_string()
+                                };
+                                if ui.selectable_label(mic.live, label).clicked() && !mic.live {
+                                    pressed =
+                                        Some(CallPress::Microphone(Some(mic.name.to_string())));
+                                }
+                            }
+                        });
+                });
+                ui.add_space(tokens::SPACING_SM);
+            }
             ui.vertical_centered(|ui| {
                 ui.horizontal(|ui| {
                     let controls = 1 + usize::from(call.speaker.is_some()) + 1;

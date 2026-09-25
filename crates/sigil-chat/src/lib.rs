@@ -24,6 +24,14 @@ use sigil_net::discovery;
 use sqnr::config::Config;
 use sqnr_core::PubKey;
 
+/// How often the microphone list is re-read while a call card is open.
+///
+/// Enumerating devices walks the host's list, so it is not a per-frame call;
+/// but a headset plugged in mid-call has to appear without hanging up, and
+/// two seconds is faster than somebody can plug one in and wonder why it is
+/// not offered.
+const MICS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// What the bar over a pane is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bar {
@@ -1748,6 +1756,11 @@ pub struct ChatApp {
     /// The route last given to the platform, so it is told on change rather
     /// than on every frame. `None` when no call is up.
     told_route: Option<bool>,
+    /// The microphones a call could use, and when they were last read.
+    /// Cached because enumerating them walks the host's device list; re-read
+    /// on a timer so a headset plugged in mid-call still appears.
+    mics: Vec<sqex_voice::audio::Device>,
+    mics_read: Option<std::time::Instant>,
     /// Sessions told to stop that still hold their store lock. One of these
     /// must not be reopened yet; see [`Closing`].
     closing: Vec<(At, Closing)>,
@@ -1937,6 +1950,8 @@ impl ChatApp {
             starts: 0,
             told_calling: None,
             told_route: None,
+            mics: Vec::new(),
+            mics_read: None,
             closing: Vec::new(),
             panes: HashMap::new(),
             switching: false,
@@ -6685,6 +6700,35 @@ impl ChatApp {
             }
         };
 
+        // **Read on a timer, not every frame.** Enumerating devices walks the
+        // host's list, which is far too much to do at 60 Hz -- but it has to
+        // be re-read at all, because a headset plugged in mid-call should
+        // appear without hanging up. Two seconds is faster than anybody can
+        // plug something in and notice it is missing.
+        let now = std::time::Instant::now();
+        let stale = self
+            .mics_read
+            .is_none_or(|read| now.duration_since(read) >= MICS_EVERY);
+        if stale {
+            self.mics = sigil_net::CallHandle::microphones();
+            self.mics_read = Some(now);
+        }
+        let chosen = call.input.clone();
+        let mics: Vec<sigil_ui::Mic<'_>> = self
+            .mics
+            .iter()
+            .map(|d| sigil_ui::Mic {
+                name: &d.name,
+                // What the call is actually capturing from: the chosen one, or
+                // the fallback when nothing was chosen.
+                live: match &chosen {
+                    Some(name) => *name == d.name,
+                    None => d.default,
+                },
+                fallback: d.default,
+            })
+            .collect();
+
         let stats = call.stats.clone().or_else(|| call.final_stats.clone());
         let card = sigil_ui::Call {
             key: &key,
@@ -6700,6 +6744,7 @@ impl ChatApp {
             // draws no control at all, rather than a disabled one that says
             // the app could do something it cannot.
             speaker: ctx.notify.routable().then_some(speaker),
+            microphones: &mics,
             stats: stats.as_deref(),
             detail,
             present: &rows,
@@ -6753,6 +6798,14 @@ impl ChatApp {
             // next frame. No round trip to the exchange is involved.
             Some(sigil_ui::CallPress::Mute) => self.set_muted(me, true),
             Some(sigil_ui::CallPress::Unmute) => self.set_muted(me, false),
+            // Straight to the handle, which reopens the device in place. A
+            // name that resolves to nothing keeps the microphone already open
+            // rather than ending the call.
+            Some(sigil_ui::CallPress::Microphone(which)) => {
+                if let Some(live) = self.calls.get(&me) {
+                    live.handle.set_input(which);
+                }
+            }
             None => {}
         }
     }

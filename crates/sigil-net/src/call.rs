@@ -96,6 +96,13 @@ pub struct CallState {
     /// Members whose session is not up yet. They are in the room and cannot be
     /// heard, which is a different thing from not being there.
     pub connecting: usize,
+    /// Which microphone this end is capturing from, by name, or `None` for
+    /// whichever one a call with no choice would open. Written the moment it
+    /// is asked for, like `muted`, so the chooser shows the ask rather than
+    /// waiting on the engine -- and the engine keeps the device already open
+    /// if the name resolves to nothing, so a failure leaves the call running
+    /// and this field optimistic.
+    pub input: Option<String>,
     /// Whether this end is sending silence. Not SIP-56's mute, which is a
     /// channel admin stopping somebody *posting*; this is the microphone, and
     /// it is nobody else's to set. On the wire it is SIP-15 comfort noise
@@ -281,6 +288,43 @@ impl CallHandle {
 
     pub fn toggle_muted(&self) {
         self.set_muted(!self.muted());
+    }
+
+    /// Which microphone this call is capturing from, or `None` for the
+    /// default one.
+    pub fn input(&self) -> Option<String> {
+        self.controls.borrow().input.clone()
+    }
+
+    /// Capture from another microphone, without ending the call.
+    ///
+    /// `None` returns to whichever device a call with no choice would open.
+    /// The engine reopens it in place; a name that matches nothing keeps the
+    /// microphone already open and says so, because ending a call over a
+    /// stale choice would be far worse.
+    pub fn set_input(&self, input: Option<String>) {
+        // **Cloned out of the `Ref`, never held across the send.** A `watch`
+        // borrow held while the sender sends is a deadlock.
+        let now = self.controls.borrow().input.clone();
+        if now == input {
+            return;
+        }
+        tracing::info!(device = ?input, "capturing from another microphone");
+        self.controls.send_modify(|c| c.input = input.clone());
+        self.ending.send_modify(|s| s.input = input);
+        (self.wake)();
+    }
+
+    /// Every microphone that could be chosen, and which one a call would use
+    /// if nobody chose.
+    ///
+    /// Reads the devices each time, so a headset plugged in mid-call appears.
+    /// Not for calling every frame: it walks the host's device list.
+    pub fn microphones() -> Vec<sqex_voice::audio::Device> {
+        sqex_voice::audio::inputs().unwrap_or_else(|why| {
+            tracing::warn!(%why, "could not list the microphones");
+            Vec::new()
+        })
     }
 
     /// End the call.
@@ -982,6 +1026,7 @@ impl CallHandle {
     /// hung up.
     pub fn for_test(state: CallState) -> CallHandle {
         let muted = state.muted;
+        let input = state.input.clone();
         let (state_tx, state_rx) = watch::channel(state);
         let (_events_tx, events_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(std::future::pending());
@@ -989,7 +1034,8 @@ impl CallHandle {
         let (stop_tx, _stop_rx) = watch::channel(false);
         // Seeded from the state, so a test that asks for a muted call gets a
         // handle that agrees with the snapshot it drew.
-        let (controls_tx, _controls_rx) = watch::channel(sqex_voice::engine::Controls { muted });
+        let (controls_tx, _controls_rx) =
+            watch::channel(sqex_voice::engine::Controls { muted, input });
         CallHandle {
             stop: stop_tx,
             controls: controls_tx,
