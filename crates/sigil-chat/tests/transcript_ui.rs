@@ -9683,6 +9683,93 @@ fn a_call_from_another_exchange_rings_on_screen_with_a_way_to_answer_or_refuse()
 /// with guardians lodged and a will just written, it fits the width, every
 /// control can be reached, and it says what it has to -- and for a linked
 /// device it says why the first two are not offered.
+/// **The handover is asked for twice, and says what it costs in between.**
+///
+/// SIP-44 §The handover changes the key this account *still holds* — not
+/// undoable, and the most consequential control in the app. So it follows
+/// Destroy's shape: a button, then the consequence, then two answers. A phone
+/// cannot hover, so the consequence is drawn.
+///
+/// What this holds is the guard itself. One press must not hand the account
+/// over, Cancel must put it back, and the sentence between them has to name
+/// the case nobody thinks of — that anything still holding the old key is a
+/// stranger to the account afterwards.
+#[test]
+fn a_handover_is_asked_for_twice() {
+    let mut state = a_conversation();
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        lodged: None,
+        will: None,
+        vouch: None,
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+
+    // The instrument has to be pointed at the section, or the rest is noise.
+    assert!(
+        text_of(&h).contains("Change your key now"),
+        "the handover section is not on the pane: {}",
+        text_of(&h)
+    );
+    assert!(
+        !text_of(&h).contains("cannot be undone"),
+        "the consequence is showing before anything was pressed"
+    );
+
+    // **Scrolled to it first.** The Devices pane is long and this section is
+    // at its foot: a kittest click on a widget that is scrolled out of view
+    // does nothing at all, and the assertion below then fails for a reason
+    // that has nothing to do with the guard. Measured the hard way.
+    for y in [100.0f32, 300.0, 500.0, 700.0] {
+        for _ in 0..40 {
+            h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, y));
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -400.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            h.run_steps(2);
+        }
+    }
+
+    // One press asks, it does not act.
+    h.get_by_label("Change this account's key").click();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("cannot be undone"),
+        "pressing it did not say what it costs: {said}"
+    );
+    assert!(
+        said.contains("is a stranger to this account"),
+        "the consequence does not name what happens to anything still holding \
+         the old key: {said}"
+    );
+    assert!(
+        h.query_by_label("Yes, change it").is_some(),
+        "no way to go on: {said}"
+    );
+
+    // And Cancel puts it back.
+    h.get_by_label("Cancel").click();
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("cannot be undone"),
+        "Cancel left the confirmation up: {}",
+        text_of(&h)
+    );
+    assert!(
+        h.query_by_label("Change this account's key").is_some(),
+        "Cancel lost the control entirely: {}",
+        text_of(&h)
+    );
+}
+
 #[test]
 fn the_succession_section_fits_a_phone_and_says_what_is_arranged() {
     let mut state = a_conversation();

@@ -4716,6 +4716,85 @@ async fn a_revoked_device_comes_back_up_as_itself_again() {
 /// What is asserted is what the CLI test already asserts of the exchange's
 /// side -- the room line and the old key's notice -- reached through
 /// `Cmd`s alone, plus the words each pane shows for what it just wrote.
+/// **SIP-44 §The handover: an account changes the key it still holds.**
+///
+/// The other half of SIP-44, and the half that is not about losing anything:
+/// a will and guardians arrange for a key that is gone, this replaces one
+/// that is not. `/account/handover` was the last route in `route_coverage`
+/// marked `NotYet` — the CLI has had it since SIP-44 landed and sigil never
+/// reached it.
+///
+/// Nothing is pasted and no file is kept: `Chat::handover` makes the new key
+/// itself, signs the will under the old one and issues a credential from the
+/// new key for every device, so the whole of the interface's part is asking.
+/// What this asserts is that the account really moved — a new key, said in
+/// the pane — and that the conversation came with it, which is the promise
+/// the screen makes.
+#[tokio::test]
+async fn an_account_changes_the_key_it_still_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (alice_signer, alice_key) = signer(81);
+    let (bob_signer, bob_key) = signer(82);
+    let alice = start_at(endpoint, alice_signer, &dir.path().join("alice.db"));
+    let bob = start_at(endpoint, bob_signer, &dir.path().join("bob.db"));
+    for (h, k) in [(&alice, alice_key), (&bob, bob_key)] {
+        assert!(
+            until(|| h.state().me == Some(k), 15).await,
+            "should come up"
+        );
+    }
+
+    // Something to carry across, or the promise the screen makes is untested.
+    alice.send(Cmd::NewPublic {
+        name: "the room".into(),
+        topic: String::new(),
+    });
+    assert!(until(|| alice.state().open.is_some(), 15).await);
+    let channel = alice.state().open.unwrap();
+
+    // The pane has to know this is the account and not one of its devices,
+    // which is the condition the route itself imposes.
+    alice.send(Cmd::SuccessionStatus);
+    assert!(until(|| alice.state().succession.is_some(), 15).await);
+    assert!(
+        alice.state().succession.unwrap().is_account,
+        "not the account, so the handover would be refused and this would \
+         say nothing about the route"
+    );
+
+    // The whole of it.
+    alice.send(Cmd::HandOver);
+    assert!(
+        until(|| alice.state().me.is_some_and(|k| k != alice_key), 15).await,
+        "the account still answers to the old key: {:?}",
+        alice.state().trouble
+    );
+    let moved = alice.state().me.unwrap();
+    assert_ne!(moved, alice_key, "a handover that changed nothing");
+
+    // Said in the pane, in the words somebody has to act on.
+    let said = alice.state().note.map(|n| n.said).unwrap_or_default();
+    assert!(
+        said.contains(&moved.to_string()),
+        "the pane does not name the new key: {said}"
+    );
+    assert!(
+        said.contains("old key is not the account"),
+        "the pane does not say what became of the old key: {said}"
+    );
+
+    // And the conversation came with it.
+    assert!(
+        until(|| alice.state().open == Some(channel), 15).await,
+        "the conversation did not survive the handover"
+    );
+}
+
 #[tokio::test]
 async fn an_account_arranges_its_succession_from_the_pane_and_the_successor_takes_it() {
     let dir = tempfile::tempdir().unwrap();

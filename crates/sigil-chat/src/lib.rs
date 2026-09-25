@@ -1467,6 +1467,9 @@ struct Pane {
     retention_days: u32,
     /// Destroying a channel is asked twice, because it cannot be undone.
     confirming_destroy: bool,
+    /// SIP-44 §The handover: the account's key is changed while the old
+    /// one is still held, which is not undoable — so it is asked twice.
+    confirming_handover: bool,
     /// Signing *this* device out is not undone from this device, so it is
     /// asked twice like the destruction is.
     confirming_sign_out: bool,
@@ -1690,6 +1693,7 @@ impl Default for Pane {
             // refuse, and the refusal would read as sigil's fault.
             retention_days: 30,
             confirming_destroy: false,
+            confirming_handover: false,
             confirming_sign_out: false,
             asked_devices: false,
             name: String::new(),
@@ -11989,6 +11993,62 @@ impl ChatApp {
                     }
                 });
                 self.pane(at).threshold = threshold;
+            }
+
+            // -- changing the key now ----------------------------------------
+            //
+            // **The other half of SIP-44, and the one that is not about
+            // losing anything.** A will and guardians arrange for a key that
+            // is gone; this changes a key that is still held, which is what
+            // somebody does when they think it may have been seen. The CLI
+            // has had it since SIP-44 landed and sigil never reached the
+            // route: `/account/handover` was the last one in
+            // `route_coverage` marked `NotYet`.
+            //
+            // Nothing is asked for. `Chat::handover` makes the new key
+            // itself, signs the will under the old one, issues a credential
+            // from the new key for every device this account has, and
+            // presents them together — so there is no key to paste and no
+            // file to keep, and the exchange carries the names, the
+            // conversations and the devices across in the one step.
+            ui.add_space(tokens::SPACING_MD);
+            ui.label(egui::RichText::new("Change your key now").strong());
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(
+                    "For a key you still hold and no longer trust. A new one is made here and \
+                     the exchange carries everything across: your names, your conversations, \
+                     your devices. The people you talk to follow it by themselves.",
+                )
+                .small(),
+            );
+            if !self.pane(at).confirming_handover {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Change this account's key").color(theme.destructive),
+                    ))
+                    .clicked()
+                {
+                    self.pane(at).confirming_handover = true;
+                }
+            } else {
+                // Drawn, not hovered: this is the most consequential control
+                // in the app and a phone cannot hover.
+                ui.colored_label(
+                    theme.destructive,
+                    "The old key stops being this account, and that cannot be undone. Anything \
+                     holding the old key — another device you have not linked, a backup you \
+                     restore later — is a stranger to this account afterwards.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Yes, change it").clicked() {
+                        self.pane(at).confirming_handover = false;
+                        self.send_as(Some(at), Cmd::HandOver);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pane(at).confirming_handover = false;
+                    }
+                });
             }
         } else {
             ui.colored_label(

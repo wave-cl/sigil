@@ -1580,6 +1580,14 @@ pub enum Cmd {
     /// a will, base58; or an account's key and then the guardians' vouches,
     /// base58, one per line. Which it is is decided by shape.
     Succeed(String),
+    /// SIP-44 §The handover: change this account's key while the old one is
+    /// still held. A new key is made here, the will is signed under the old
+    /// one, and a credential is issued from the new key for every device
+    /// this account has — presented together, so the exchange carries the
+    /// names, the conversations and the devices across in one step.
+    ///
+    /// Not undoable: after it, the old key is not the account.
+    HandOver,
     /// Put away a will or a vouch that was shown.
     HideSuccession,
     /// SIP-39: the cross-exchange ring was answered or refused. Both happen
@@ -7275,6 +7283,24 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     }
                     Err(e) => trouble(state, e),
                 }
+            }
+            Err(e) => trouble(state, e),
+        },
+        // SIP-44 §The handover. `handover(None)` makes the new key itself,
+        // signs the will under the old one, issues a credential from the new
+        // key for each device, posts them together, and keeps the new seed
+        // sealed in the store — so there is nothing for the interface to
+        // carry and nothing for anybody to paste.
+        Cmd::HandOver => match chat.handover(None).await {
+            Ok(new) => {
+                note(
+                    state,
+                    format!(
+                        "This account's key is now {new}. Your names, conversations and \
+                         devices came across; the old key is not the account any more."
+                    ),
+                );
+                succession_status(chat, state).await;
             }
             Err(e) => trouble(state, e),
         },

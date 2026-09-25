@@ -237,9 +237,10 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/channel/report", Chat),
     ("POST", "/channel/reports", Chat),
     ("POST", "/channel/dismiss", Chat),
-    // SIP-59, 60, 62: moving home, reaching somebody at another exchange
-    // and rotating the account key are `sqex-chat move`, `^N name@domain`
-    // and `sqex-chat handover`; sigil has none of the three yet.
+    // SIP-59, 60, 62: moving home, reaching somebody at another exchange and
+    // rotating the account key. All three are reached now -- the last was the
+    // handover, from the Devices pane, and this comment said "sigil has none
+    // of the three yet" for long enough to be believed.
     // SIP-60, since v0.1.35: writing to somebody at another exchange from
     // the home session -- `ensure_home` (move/home), `locate`, and the
     // conversation created at the lower key's home.
@@ -247,11 +248,15 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/account/home", Chat),
     ("POST", "/account/locate", Chat),
     ("POST", "/channel/create_at", Chat),
-    (
-        "POST",
-        "/account/handover",
-        NotYet("SIP-44 §The handover, from sqex-chat"),
-    ),
+    // SIP-44 §The handover: `Cmd::HandOver` from the Devices pane, behind a
+    // two-step confirm. Nothing is pasted -- `Chat::handover` makes the new
+    // key, signs the will under the old one and issues a credential from the
+    // new key for each device. Driven end to end by
+    // `an_account_changes_the_key_it_still_holds`, which asserts the account
+    // answers to a different key afterwards and the conversation came with
+    // it; with the handler disabled it fails, so the verdict below is earned
+    // rather than declared.
+    ("POST", "/account/handover", Chat),
     // SIP-60 §A device hints its home. Not sigil's to call: `sqex-chat`
     // posts it itself, from `open_dm` where a direct message is created at
     // the other party's home, and from `home` whenever it learns a channel's
@@ -526,7 +531,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 90,
+        reached, 91,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );
