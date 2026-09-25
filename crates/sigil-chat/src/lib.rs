@@ -6374,8 +6374,25 @@ impl ChatApp {
         // the composer is below, and a control over the composer is one
         // that takes a press meant for the box.
         let side = tokens::BUTTON_LG + tokens::SPACING_SM;
+        // **The count sits beside the chevron, so the pill has to be wider
+        // than the chevron.** It was drawn after the button in the frame's
+        // own top-down layout, which put it *under* the button and outside
+        // an area only `side` tall — a number orphaned below the circle,
+        // clipped by the edge. Measured rather than guessed, so a hundred
+        // new messages widens the pill instead of overflowing it.
+        let counted = if unread > 0 {
+            let font = egui::TextStyle::Small.resolve(ui.style());
+            ui.ctx().fonts_mut(|f| {
+                f.layout_no_wrap(unread.to_string(), font, egui::Color32::PLACEHOLDER)
+                    .rect
+                    .width()
+            }) + tokens::SPACING_SM
+        } else {
+            0.0
+        };
+        let wide = side + counted;
         let spot = egui::Rect::from_min_max(
-            out.inner_rect.right_bottom() - egui::vec2(side + tokens::SPACING_MD, side),
+            out.inner_rect.right_bottom() - egui::vec2(wide + tokens::SPACING_MD, side),
             out.inner_rect.right_bottom() - egui::vec2(tokens::SPACING_MD, 0.0),
         );
         // **A layer of its own, not a scope in the transcript's ui.** A
@@ -6400,25 +6417,28 @@ impl ChatApp {
                     .corner_radius(side / 2.0)
                     .inner_margin(egui::Margin::symmetric(tokens::SPACING_XS as i8, 0))
                     .show(ui, |ui| {
-                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, &word).clicked()
-                        {
-                            // The offset put where the content ends -- the
-                            // same way a page arriving above the reader is
-                            // corrected. Scrolling from inside the content
-                            // is the other way round and a pass late: the
-                            // content is drawn before this is pressed.
-                            let mut moved = out.state;
-                            moved.offset.y =
-                                (out.content_size.y - out.inner_rect.height()).max(0.0);
-                            moved.store(ui.ctx(), out.id);
-                            ui.ctx().request_repaint();
-                        }
-                        if unread > 0 {
-                            ui.colored_label(
-                                theme.accent,
-                                egui::RichText::new(unread.to_string()).small().strong(),
-                            );
-                        }
+                        ui.horizontal_centered(|ui| {
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Chevron, &word)
+                                .clicked()
+                            {
+                                // The offset put where the content ends -- the
+                                // same way a page arriving above the reader is
+                                // corrected. Scrolling from inside the content
+                                // is the other way round and a pass late: the
+                                // content is drawn before this is pressed.
+                                let mut moved = out.state;
+                                moved.offset.y =
+                                    (out.content_size.y - out.inner_rect.height()).max(0.0);
+                                moved.store(ui.ctx(), out.id);
+                                ui.ctx().request_repaint();
+                            }
+                            if unread > 0 {
+                                ui.colored_label(
+                                    theme.accent,
+                                    egui::RichText::new(unread.to_string()).small().strong(),
+                                );
+                            }
+                        });
                     });
             });
     }
