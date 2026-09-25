@@ -324,9 +324,11 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ),
     // SIP-44, from the Devices pane since sqex 0.104.3 gave `Chat` the
     // methods: a will and guardians written by the account, a vouch as a
-    // guardian, and the successor's claim -- `WriteWill`, `NameGuardians`,
-    // `Vouch`, `Succeed`. The lodged policy is read for the pane and for a
-    // successor's claim.
+    // guardian, the successor's claim, and the account changing the key it
+    // still holds -- `WriteWill`, `NameGuardians`, `Vouch`, `Succeed`,
+    // `HandOver`. The lodged policy is read for the pane and for a
+    // successor's claim. **Every SIP-44 route is reached**; the one below
+    // that is not is SIP-28's, and says so.
     ("POST", "/account/succeed", Chat),
     ("POST", "/account/lodge", Chat),
     ("POST", "/account/lodged", Chat),
