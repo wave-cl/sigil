@@ -5474,19 +5474,29 @@ impl ChatApp {
             "Say at the exchange that we compared them",
         )
         .on_hover_text(ATTESTING);
-        // **Not drawn here, and that is a finding rather than a choice.**
-        // Every other consequence in this app is drawn on a phone, because
-        // a phone cannot hover. This one is not, because the verify dialog
-        // already stands at 360 points on a phone held sideways and *any*
-        // addition puts its way out off the screen -- the full sentence by
-        // twelve points, five words by five. The dialog cannot scroll
-        // either, which is what `a_dialog_too_tall_for_the_screen_can_
-        // still_be_left` exists to catch.
+        // **Drawn on a phone held upright, where there is room for it.**
         //
-        // So the tooltip stays the only home for it until this dialog can
-        // scroll or gives up some room. Leaving it undrawn is worse than
-        // the rest of the app and better than a dialog somebody cannot
-        // dismiss.
+        // A phone cannot hover, so every other consequence in this app is
+        // drawn, and this was the one exception -- the sentence put `Not yet`
+        // past the bottom edge of a phone lying down, with no way to reach it.
+        //
+        // Scrolling is not the way out of that, and it is worth saying so here
+        // rather than leaving it to be rediscovered: in egui 0.36 a
+        // `ScrollArea` inside a `Modal` makes **every press inside the dialog
+        // dismiss it**. Tried again, with `auto_shrink([false, true])`, and
+        // `an_exchange_that_cannot_be_added_says_why` caught it at once --
+        // "adding the same exchange twice did nothing at all", the press
+        // swallowed. `a_dialog_too_tall_for_the_screen_can_still_be_left`
+        // records the earlier attempts.
+        //
+        // Upright there are 804 points and the dialog comes to about 420, so it
+        // fits with room over. Lying down it stays a tooltip: a phone cannot
+        // read it there, which is worse than the desktop and better than a way
+        // out nobody can press. `a_phone_reads_what_attesting_does` holds both
+        // halves.
+        if sigil::Form::of(ui.ctx()).is_phone() && ui.ctx().content_rect().height() >= SHORT {
+            ui.colored_label(theme.text_muted, egui::RichText::new(ATTESTING).small());
+        }
         ui.add_space(tokens::SPACING_SM);
         ui.horizontal(|ui| {
             if verified_at.is_none() {

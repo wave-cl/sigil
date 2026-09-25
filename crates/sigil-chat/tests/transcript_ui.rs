@@ -9441,6 +9441,67 @@ fn every_box(h: &Harness<'static>) -> Vec<(String, egui::Rect)> {
 /// hand (`a_dialogs_controls_stay_on_a_phones_screen`, for the Exchange
 /// dialog, which is the tall one); the other five were not, and the one that
 /// grows next is whichever somebody adds a paragraph to.
+/// **A phone reads what attesting does, and never loses the way out.**
+///
+/// SIP-85's consequence was the one in this app that only a hover could reach,
+/// and a phone cannot hover. It was left undrawn because the sentence pushed
+/// `Not yet` past the bottom edge of a phone lying down.
+///
+/// Scrolling would have been the general answer and is not available: in egui
+/// 0.36 a `ScrollArea` inside a `Modal` makes every press inside dismiss it
+/// (`a_dialog_too_tall_for_the_screen_can_still_be_left` records the attempts;
+/// `an_exchange_that_cannot_be_added_says_why` is what catches it). So the
+/// sentence is drawn where there is room and withheld where there is not, and
+/// both halves are asserted here -- the second is the one that stops this being
+/// a fix that trades a tooltip for a dialog nobody can finish.
+#[test]
+fn a_phone_reads_what_attesting_does() {
+    // Upright: the sentence is on the pane.
+    let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "verify", them());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Verify"),
+        "the verify dialog did not open, so this says nothing about it: {said}"
+    );
+    assert!(
+        said.contains("A signed statement others may read"),
+        "a phone cannot hover, so the consequence of attesting has to be drawn \
+         and is not on the pane upright: {said}"
+    );
+
+    // Lying down: it is withheld, and the way out is reachable.
+    let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    h.set_size(egui::vec2(PHONE_HEIGHT, PHONE_WIDTH));
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "verify", them());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Verify"),
+        "the verify dialog did not open lying down, so the rest says nothing: {said}"
+    );
+    let out = h
+        .get_all_by_label("Not yet")
+        .map(|n| n.rect().bottom())
+        .fold(f32::MIN, f32::max);
+    assert!(
+        out > f32::MIN,
+        "the way out is not drawn at all, so this says nothing about reaching it"
+    );
+    assert!(
+        out <= PHONE_WIDTH,
+        "the way out is at {out:.0} of {PHONE_WIDTH} lying down: the dialog \
+         cannot scroll, so anything added here has to fit or be withheld"
+    );
+}
+
 #[test]
 fn every_dialog_fits_a_phones_screen() {
     let mut over = Vec::new();
