@@ -404,6 +404,9 @@ fn centred(
     ui: &mut egui::Ui,
     label: egui::WidgetText,
     rule: Option<egui::Color32>,
+    // A glyph before the words, in the words' own colour. Its width is part
+    // of the centring below, or the line sits off to one side by half a mark.
+    mark: Option<(sigil::Icon, egui::Color32)>,
 ) -> egui::Response {
     // Measured, not guessed. The rules used to be `available_width() * 0.5 -
     // 40.0`, which centres only a label that happens to be 80px wide and puts
@@ -417,7 +420,11 @@ fn centred(
         egui::TextStyle::Body,
     );
     let gap = ui.spacing().item_spacing.x;
-    let width = ((ui.available_width() - text.size().x) * 0.5 - gap).max(0.0);
+    // Square, and the height of the words it sits beside: a mark that is
+    // taller than its line is what re-lays every row after it.
+    let mark_side = text.size().y;
+    let marked = if mark.is_some() { mark_side + gap } else { 0.0 };
+    let width = ((ui.available_width() - text.size().x - marked) * 0.5 - gap).max(0.0);
     // **Nothing here is tappable, so nothing here is finger-sized.** A
     // row is at least `interact_size.y` tall, which the phone form raises
     // to a thumb's worth -- so every centred marker stood 44 high around
@@ -441,6 +448,15 @@ fn centred(
                     }
                 };
                 line(ui);
+                if let Some((icon, colour)) = mark {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(mark_side, mark_side),
+                        egui::Sense::hover(),
+                    );
+                    if ui.is_rect_visible(rect) {
+                        sigil::icon::draw(ui.painter(), rect, icon, colour);
+                    }
+                }
                 ui.add(egui::Label::new(text).selectable(false));
                 line(ui);
             })
@@ -460,6 +476,7 @@ pub fn day_separator(ui: &mut egui::Ui, label: &str) {
         ui,
         egui::RichText::new(label).color(theme.text_muted).into(),
         Some(theme.border_default),
+        None,
     );
     ui.add_space(tokens::SPACING_XS);
 }
@@ -481,6 +498,7 @@ pub fn copy_separator(ui: &mut egui::Ui, label: &str) {
             .color(theme.text_secondary)
             .into(),
         Some(theme.border_default),
+        None,
     );
     ui.add_space(tokens::SPACING_XS);
 }
@@ -512,16 +530,30 @@ pub fn call_line(ui: &mut egui::Ui, said: &str, at: u64, missed: bool) -> egui::
     } else {
         theme.text_muted
     };
-    marker(ui, &format!("{said} · {}", crate::clock(at)), colour)
+    // **A call is marked, not merely worded.** Three outcomes -- rang out,
+    // missed, answered -- read as prose in a wall of prose, and at a glance a
+    // call was indistinguishable from "Ada added Bram". The glyph says it was
+    // a call; the colour goes on saying whether it is still somebody's move.
+    marker(
+        ui,
+        &format!("{said} · {}", crate::clock(at)),
+        colour,
+        Some((sigil::Icon::Call, colour)),
+    )
 }
 
 pub fn system_line(ui: &mut egui::Ui, said: &str) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
-    marker(ui, said, theme.text_muted)
+    marker(ui, said, theme.text_muted, None)
 }
 
 /// One centred line of small text, and the room around it.
-fn marker(ui: &mut egui::Ui, said: &str, colour: egui::Color32) -> egui::Response {
+fn marker(
+    ui: &mut egui::Ui,
+    said: &str,
+    colour: egui::Color32,
+    mark: Option<(sigil::Icon, egui::Color32)>,
+) -> egui::Response {
     // **One line's worth of room, not four gaps' worth.** This is three
     // items in a vertical layout -- a space, a row, a space -- and egui
     // puts `item_spacing.y` between each of them *and* around the lot, so
@@ -542,6 +574,7 @@ fn marker(ui: &mut egui::Ui, said: &str, colour: egui::Color32) -> egui::Respons
             // a third thing wearing the same clothes reads as one of those two --
             // this one is a sentence, and should look like one.
             None,
+            mark,
         );
         ui.add_space(tokens::SPACING_XS);
         row
@@ -566,6 +599,7 @@ pub fn unread_divider(ui: &mut egui::Ui, count: usize) {
         .color(theme.accent)
         .into(),
         Some(theme.accent),
+        None,
     );
     ui.add_space(tokens::SPACING_XS);
 }
