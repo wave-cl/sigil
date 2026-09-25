@@ -2748,10 +2748,19 @@ impl App for ChatApp {
                 Route::Call(me) => Some(me),
                 _ => None,
             };
+            // **Only where a bar was actually drawn.** This space was
+            // unconditional, so every route with an account open gained a gap
+            // at the top whether or not anybody was in a call -- which is to
+            // say every screen in the app moved down a few points, and 35
+            // snapshots said so. `in_call_ui` answers "was one pressed", not
+            // "was one drawn", so the question is asked here instead.
+            let drew = self.calls.keys().any(|me| Some(*me) != except);
             if let Some(open) = self.in_call_ui(&at, ui, &theme, except) {
                 ctx.navigator.push_here(Route::Call(open));
             }
-            ui.add_space(tokens::SPACING_SM);
+            if drew {
+                ui.add_space(tokens::SPACING_SM);
+            }
         }
         let response = match route {
             Route::Conversations => self.render(ctx, ui),

@@ -65,6 +65,42 @@ fn rows(n: usize) -> Vec<Row> {
 /// Returns the width the card took and every control's rect by name, so a case
 /// can ask both "does it fit" and "is the way out reachable".
 fn shown(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>) {
+    let (mut h, width) = built(call, size, egui::Theme::Dark);
+    h.run();
+    h.run();
+
+    // Walked rather than queried: this harness has no `get_all_by_label`, and
+    // walking is what the other widget tests here do.
+    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<(String, egui::Rect)>) {
+        if let Some(label) = node.accesskit_node().label() {
+            // The controls say a sentence -- "Mute your microphone" -- and are
+            // found by the word the card draws under them.
+            for word in ["Unmute", "Mute", "Hang up", "Speaker", "Earpiece"] {
+                if label.contains(word) {
+                    out.push((word.to_string(), node.rect()));
+                    break;
+                }
+            }
+        }
+        for c in node.children() {
+            walk(c, out);
+        }
+    }
+    let mut found = Vec::new();
+    walk(h.root(), &mut found);
+    (width.get(), found)
+}
+
+/// The card in a pane of `size`, and a cell holding the width it took.
+///
+/// Separate from [`shown`] because a snapshot needs the harness itself, and a
+/// snapshot rendered through a different setup than the geometry cases is a
+/// picture of something no case measured.
+fn built(
+    call: &Call<'_>,
+    size: egui::Vec2,
+    theme: egui::Theme,
+) -> (Harness<'static>, std::rc::Rc<std::cell::Cell<f32>>) {
     let width = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
     let out = width.clone();
     // `Call` borrows, so the closure gets owned copies of what it needs.
@@ -86,7 +122,7 @@ fn shown(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>) 
         call.connecting,
         call.two_party,
     );
-    let mut h = Harness::builder().with_size(size).build_ui(move |ui| {
+    let h = Harness::builder().with_size(size).build_ui(move |ui| {
         let ctx = ui.ctx().clone();
         let form = if size.x <= PHONE + 1.0 {
             sigil::Form::Phone
@@ -95,7 +131,7 @@ fn shown(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>) 
         };
         sigil::Form::install(&ctx, form);
         theme::install(&ctx, theme::light(), theme::dark());
-        ctx.set_theme(egui::Theme::Dark);
+        ctx.set_theme(theme);
         let t = sigil::ColorTheme::current(&ctx);
         let margin = form.body_margin();
         egui::CentralPanel::default()
@@ -127,29 +163,7 @@ fn shown(call: &Call<'_>, size: egui::Vec2) -> (f32, Vec<(String, egui::Rect)>) 
                 out.set(ui.min_rect().width() + 2.0 * margin);
             });
     });
-    h.run();
-    h.run();
-
-    // Walked rather than queried: this harness has no `get_all_by_label`, and
-    // walking is what the other widget tests here do.
-    fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<(String, egui::Rect)>) {
-        if let Some(label) = node.accesskit_node().label() {
-            // The controls say a sentence -- "Mute your microphone" -- and are
-            // found by the word the card draws under them.
-            for word in ["Unmute", "Mute", "Hang up", "Speaker", "Earpiece"] {
-                if label.contains(word) {
-                    out.push((word.to_string(), node.rect()));
-                    break;
-                }
-            }
-        }
-        for c in node.children() {
-            walk(c, out);
-        }
-    }
-    let mut found = Vec::new();
-    walk(h.root(), &mut found);
-    (width.get(), found)
+    (h, width)
 }
 
 /// What every case asserts: it fits across, and the way out is on the screen.
@@ -376,5 +390,134 @@ fn a_picture_is_drawn_rather_than_the_identicon() {
         !with.is_empty(),
         "a card given a picture drew the identicon instead: the bytes reach a \
          texture and the texture reaches nothing"
+    );
+}
+
+// --- Snapshots ---------------------------------------------------------
+//
+// What the cases above cannot say: whether it looks like anything. They
+// measure width, reach and overlap, all of which a card can satisfy while
+// being ugly, mis-weighted or unreadable. These are for a human to look at.
+
+/// A card, rendered and compared.
+fn snap(name: &str, call: &Call<'_>, size: egui::Vec2, theme: egui::Theme) {
+    let (mut h, _) = built(call, size, theme);
+    h.run();
+    h.run();
+    h.snapshot(name);
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card() {
+    snap(
+        "phone_call_card",
+        &plain(),
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_muted() {
+    snap(
+        "phone_call_card_muted",
+        &Call {
+            muted: true,
+            speaker: Some(true),
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
+/// The case the bottom panel exists for, as a picture: twelve people and the
+/// way out still on the screen.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_room() {
+    let present = rows(12);
+    snap(
+        "phone_call_card_room",
+        &Call {
+            present: &present,
+            connecting: 2,
+            two_party: false,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
+/// Nothing has arrived from the other end. The warning is the point of the
+/// picture: it has to read as a problem without reading as a failure.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_deaf() {
+    snap(
+        "phone_call_card_deaf",
+        &Call {
+            deaf: true,
+            stats: Some("sent 854 · recv 0 · loss 0.0% · concealed 0 · underruns 1"),
+            detail: true,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
+/// **Light, because the destructive disc and the selected routing control are
+/// the two things a dark-only palette flatters.**
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_light() {
+    snap(
+        "phone_call_card_light",
+        &Call {
+            speaker: Some(true),
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Light,
+    );
+}
+
+/// The desktop takes the whole pane as a centred column, so the picture is
+/// mostly about what `CARD_MAX_WIDTH` does to it.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn call_card_desktop() {
+    snap(
+        "call_card_desktop",
+        &Call {
+            // No routing control: a desktop has nowhere else to put the sound,
+            // and `Notify::routable` is false there.
+            speaker: None,
+            ..plain()
+        },
+        egui::vec2(1000.0, 700.0),
+        egui::Theme::Dark,
+    );
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn call_card_desktop_room() {
+    let present = rows(6);
+    snap(
+        "call_card_desktop_room",
+        &Call {
+            speaker: None,
+            present: &present,
+            two_party: false,
+            named: LONG_NAME,
+            ..plain()
+        },
+        egui::vec2(1000.0, 700.0),
+        egui::Theme::Dark,
     );
 }

@@ -65,8 +65,8 @@ pub enum CallPress {
     Detail,
 }
 
-/// A call's own control: a round target with the mark in it, the word under it
-/// on a phone and hovered on a desktop, filled when it is on.
+/// A call's own control: a round target with the mark in it, the word under it,
+/// and filled when it is on.
 ///
 /// **Both the mark and the word, which is stricter than the rule.**
 /// `sigil::icon::named_control_as` would give a plain text button on a phone,
@@ -89,8 +89,11 @@ pub fn call_control(
     let phone = sigil::Form::of(ui.ctx()).is_phone();
     let colour = tint.unwrap_or(theme.text_primary);
 
-    let width = CONTROL.max(if phone { 64.0 } else { 0.0 });
-    let height = CONTROL + if phone { 20.0 } else { 0.0 };
+    // Room for the disc and the word under it, everywhere: the word is drawn
+    // on every platform, and a rect that did not allow for it would let the
+    // next thing below overlap it.
+    let width = CONTROL.max(64.0);
+    let height = CONTROL + 20.0;
     let (rect, mut response) =
         ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
 
@@ -128,15 +131,17 @@ pub fn call_control(
             icon,
             colour,
         );
-        if phone {
-            ui.painter().text(
-                egui::pos2(rect.center().x, disc.bottom() + 4.0),
-                egui::Align2::CENTER_TOP,
-                drawn,
-                egui::TextStyle::Small.resolve(ui.style()),
-                theme.text_muted,
-            );
-        }
+        // **The word under the disc on every platform.** It was a phone-only
+        // affordance with a hover in its place on a desktop, and a hover is
+        // no use for the control somebody reaches for in a hurry: you have to
+        // already know which disc to point at to be told what it is.
+        ui.painter().text(
+            egui::pos2(rect.center().x, disc.bottom() + 4.0),
+            egui::Align2::CENTER_TOP,
+            drawn,
+            egui::TextStyle::Small.resolve(ui.style()),
+            theme.text_muted,
+        );
     }
     if !phone {
         response = response.on_hover_text(said);
@@ -211,119 +216,140 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
     // Everything above is read, not tapped — and a phone raises every row to a
     // thumb's height, which would space these lines out like a menu. Zeroed on
     // the ui they are built from, as `message::centred` does it.
-    ui.scope(|ui| {
-        ui.spacing_mut().interact_size.y = 0.0;
-        ui.vertical_centered(|ui| {
-            ui.add_space(tokens::SPACING_XL);
-            crate::avatar(ui, call.key, call.picture, tokens::AVATAR_XL);
-            ui.add_space(tokens::SPACING_MD);
-            ui.add(egui::Label::new(egui::RichText::new(call.named).heading()).truncate());
+    // **A two-party call has nothing to fill the middle with**, and drawn from
+    // the top it left a third of a phone and half a desktop empty below the
+    // face. Centred against the height it measured last pass: the first frame
+    // draws it high and the second puts it where it belongs, which no repaint
+    // ever shows and is why the snapshots run two passes. A room is left at
+    // the top, because its roster is what fills the space.
+    let plain = call.present.is_empty() && call.connecting == 0;
+    let measured = ui.id().with("call_body_height");
+    let free = ui.available_height();
+    if plain && let Some(was) = ui.data(|d| d.get_temp::<f32>(measured)) {
+        ui.add_space(((free - was) / 2.0).max(0.0));
+    }
+    let body = ui
+        .scope(|ui| {
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.vertical_centered(|ui| {
+                ui.add_space(tokens::SPACING_XL);
+                crate::avatar(ui, call.key, call.picture, tokens::AVATAR_XL);
+                ui.add_space(tokens::SPACING_MD);
+                ui.add(egui::Label::new(egui::RichText::new(call.named).heading()).truncate());
 
-            if call.two_party {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(call.key).monospace().small())
-                        .wrap()
-                        .selectable(true),
-                );
-            }
-            ui.add_space(tokens::SPACING_SM);
+                if call.two_party {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(call.key).monospace().small())
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+                ui.add_space(tokens::SPACING_SM);
 
-            ui.horizontal(|ui| {
-                let gap = (ui.available_width() - 120.0).max(0.0) / 2.0;
-                ui.add_space(gap);
-                crate::dot(
-                    ui,
-                    call.up && !call.deaf,
-                    theme.success,
-                    theme.warning,
-                    if call.deaf {
-                        "connected, but nothing is arriving"
-                    } else if call.up {
-                        "connected"
-                    } else {
-                        "connecting"
-                    },
-                );
-                let said = match (call.up, call.whose) {
-                    (true, None) => "In a call".to_string(),
-                    (true, Some(who)) => format!("In a call as {who}"),
-                    (false, None) => "Connecting…".to_string(),
-                    (false, Some(who)) => format!("Connecting… as {who}"),
-                };
-                ui.colored_label(
-                    if call.up {
-                        theme.success
-                    } else {
-                        theme.warning
-                    },
-                    egui::RichText::new(said).small(),
-                );
-            });
-
-            // Monospace so the digits do not shuffle the row every second.
-            let clock = format!("{:02}:{:02}", call.seconds / 60, call.seconds % 60);
-            if ui
-                .add(
-                    egui::Button::new(egui::RichText::new(clock).monospace().heading().color(
-                        if call.detail {
-                            theme.accent
+                ui.horizontal(|ui| {
+                    let gap = (ui.available_width() - 120.0).max(0.0) / 2.0;
+                    ui.add_space(gap);
+                    crate::dot(
+                        ui,
+                        call.up && !call.deaf,
+                        theme.success,
+                        theme.warning,
+                        if call.deaf {
+                            "connected, but nothing is arriving"
+                        } else if call.up {
+                            "connected"
                         } else {
-                            theme.text_muted
+                            "connecting"
                         },
-                    ))
-                    .frame(false),
-                )
-                .clicked()
-            {
-                pressed = Some(CallPress::Detail);
-            }
+                    );
+                    let said = match (call.up, call.whose) {
+                        (true, None) => "In a call".to_string(),
+                        (true, Some(who)) => format!("In a call as {who}"),
+                        (false, None) => "Connecting…".to_string(),
+                        (false, Some(who)) => format!("Connecting… as {who}"),
+                    };
+                    ui.colored_label(
+                        if call.up {
+                            theme.success
+                        } else {
+                            theme.warning
+                        },
+                        egui::RichText::new(said).small(),
+                    );
+                });
 
-            if let Some((word, why)) = call.travel {
-                ui.colored_label(theme.text_muted, egui::RichText::new(word).small());
-                // Drawn on a phone, hovered on a desktop: the rule the rest of
-                // this app follows, because a phone cannot hover.
-                if !why.is_empty() {
-                    if sigil::Form::of(ui.ctx()).is_phone() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(why).small().color(theme.text_muted),
-                            )
-                            .wrap(),
-                        );
-                    } else {
-                        ui.label("").on_hover_text(why);
+                // Monospace so the digits do not shuffle the row every second.
+                let clock = format!("{:02}:{:02}", call.seconds / 60, call.seconds % 60);
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(clock).monospace().heading().color(
+                            if call.detail {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            },
+                        ))
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    pressed = Some(CallPress::Detail);
+                }
+
+                if let Some((word, why)) = call.travel {
+                    ui.colored_label(theme.text_muted, egui::RichText::new(word).small());
+                    // Drawn on a phone, hovered on a desktop: the rule the rest of
+                    // this app follows, because a phone cannot hover.
+                    if !why.is_empty() {
+                        if sigil::Form::of(ui.ctx()).is_phone() {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(why).small().color(theme.text_muted),
+                                )
+                                .wrap(),
+                            );
+                        } else {
+                            ui.label("").on_hover_text(why);
+                        }
                     }
                 }
-            }
 
-            if call.deaf {
-                ui.add_space(tokens::SPACING_SM);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new("Nothing is coming through from the other side.")
-                            .small()
-                            .color(theme.warning),
-                    )
-                    .wrap(),
-                );
-            }
-
-            if let Some(stats) = call.stats.filter(|_| call.detail || call.deaf) {
-                ui.add_space(tokens::SPACING_SM);
-                ui.add(
-                    egui::Label::new(egui::RichText::new(stats).small().color(theme.text_muted))
+                if call.deaf {
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Nothing is coming through from the other side.")
+                                .small()
+                                .color(theme.warning),
+                        )
                         .wrap(),
-                );
-            }
-        });
+                    );
+                }
 
-        if !call.present.is_empty() || call.connecting > 0 {
-            ui.add_space(tokens::SPACING_MD);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                crate::roster(ui, call.present, call.connecting);
+                if let Some(stats) = call.stats.filter(|_| call.detail || call.deaf) {
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(stats).small().color(theme.text_muted),
+                        )
+                        .wrap(),
+                    );
+                }
             });
-        }
-    });
+
+            if !call.present.is_empty() || call.connecting > 0 {
+                ui.add_space(tokens::SPACING_MD);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    crate::roster(ui, call.present, call.connecting);
+                });
+            }
+        })
+        .response
+        .rect
+        .height();
+    if plain {
+        ui.data_mut(|d| d.insert_temp(measured, body));
+    }
 
     pressed
 }
