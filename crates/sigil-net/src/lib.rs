@@ -14,6 +14,12 @@ pub use call::{
 };
 pub use held::{Connections, Held};
 pub use sqex_voice::engine::{CallOpts, Endpoint, Event, PeerStatus};
+// **The types `CallOpts`' own fields are.** It was re-exported and they were
+// not, so a caller outside this workspace could hold a `CallOpts` and had no
+// way to name what to put in it -- which is the whole of the API for a call
+// that reads a tone instead of a microphone and writes nowhere instead of to
+// a speaker, the only shape a test peer can take.
+pub use sqex_voice::audio::{Sink, Source};
 
 /// A room is named by a secret, and holding it is what membership consists of.
 pub use sqex_proto::room::RoomId;
