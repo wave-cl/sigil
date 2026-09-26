@@ -653,6 +653,14 @@ pub struct ChatState {
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
+    /// The last thing that went wrong, until the link comes back.
+    ///
+    /// **Not republished like everything else here**, because nothing
+    /// computes it: it is raised where a failure happens and would otherwise
+    /// stay for the session. `publish` clears it when the link returns, so a
+    /// blip does not leave a red sentence under a conversation that is
+    /// working again; a standing refusal is raised where the link never
+    /// comes up, and stays.
     pub trouble: Option<String>,
     /// What became of the last message sent from the composer; see
     /// [`Posted`].
@@ -6169,6 +6177,15 @@ fn call_length(secs: u32) -> String {
     }
 }
 
+/// Whether the last thing that went wrong has stopped being true.
+///
+/// A rule of its own so it can be read and tested without a session: the
+/// three-way condition inside `publish`'s field comparison is exactly the
+/// kind that is easy to get backwards and impossible to see.
+fn trouble_is_over(was: LinkState, now: LinkState, held: bool) -> bool {
+    held && now == LinkState::Up && was != LinkState::Up
+}
+
 fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
     let verified: HashMap<PubKey, u64> = chat
         .store()
@@ -6673,6 +6690,24 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                     moved = true;
                 }
             };
+        }
+        // **A failure that is over stops being said.**
+        //
+        // `trouble` is the only field on this state that `publish` does not
+        // republish, and nothing else anywhere sets it back to `None` — so
+        // one refused command or one dropped connection left a red sentence
+        // under the conversation for the rest of the session, sitting a line
+        // below a `link` that had gone back to saying *connected*. Two
+        // answers to "is anything wrong", and the stale one was the louder.
+        //
+        // Cleared on the link *coming back*, not on every pass: a trouble
+        // raised a moment before a publish has to survive long enough to be
+        // read, and the ones that are about a standing condition rather than
+        // a blip — "this exchange does not admit this account" — are raised
+        // where the link never comes up at all, so they stay.
+        if trouble_is_over(s.link, link, s.trouble.is_some()) {
+            s.trouble = None;
+            moved = true;
         }
         set!(link, link);
         set!(conversations, summaries);
@@ -9530,5 +9565,44 @@ mod call_length_tests {
         // and one second past the hour is still "1h": a stopwatch counts
         // seconds, and this sits beside a time of day.
         assert_eq!(call_length(3601), "1h");
+    }
+}
+
+#[cfg(test)]
+mod trouble_tests {
+    use super::{LinkState, trouble_is_over};
+
+    /// **A failure that is over stops being said, and one that is not does
+    /// not.**
+    ///
+    /// `trouble` is the only field `publish` does not republish and nothing
+    /// anywhere set it back to `None`, so one refused command or one dropped
+    /// connection left a red sentence under the conversation for the rest of
+    /// the session — a line below a `link` that had gone back to saying
+    /// *connected*. Two answers to "is anything wrong", and the stale one
+    /// was the louder.
+    #[test]
+    fn a_trouble_goes_when_the_link_comes_back() {
+        // The case this exists for: it broke, it was said, it came back.
+        assert!(trouble_is_over(LinkState::Retrying, LinkState::Up, true));
+        assert!(trouble_is_over(LinkState::Connecting, LinkState::Up, true));
+
+        // **Not on every pass while it is up**, or a trouble raised a moment
+        // before a publish would be cleared before anybody could read it.
+        assert!(!trouble_is_over(LinkState::Up, LinkState::Up, true));
+
+        // **And not while it is still broken.** A standing refusal — "this
+        // exchange does not admit this account" — is raised where the link
+        // never comes up, and has to stay there.
+        assert!(!trouble_is_over(
+            LinkState::Connecting,
+            LinkState::Retrying,
+            true
+        ));
+        assert!(!trouble_is_over(LinkState::Up, LinkState::Retrying, true));
+
+        // Nothing to forget is not a change: `publish` reports whether
+        // anything moved, and a pass that says it did repaints the window.
+        assert!(!trouble_is_over(LinkState::Retrying, LinkState::Up, false));
     }
 }
