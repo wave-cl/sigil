@@ -79,6 +79,36 @@ pub fn brief(at: u64, now: u64) -> String {
     }
 }
 
+/// A moment that has not happened yet: when something expires.
+///
+/// **[`brief`] is for the past and silently lies about the future.** It asks
+/// whether a moment is within the last six days, and *any* future moment is —
+/// so a credential expiring in three months rendered as a bare weekday,
+/// indistinguishable from one expiring this week. On a date that decides when
+/// a device stops working, that is not a formatting preference.
+///
+/// So: already gone says so; today says the time; this week is the weekday,
+/// which is unambiguous *forwards* because it is within seven days; and
+/// anything further is a date, with the year once it is another one.
+pub fn deadline(at: u64, now: u64) -> String {
+    let (Some(z), Some(n)) = (local(at), local(now)) else {
+        return String::new();
+    };
+    if at <= now {
+        return "expired".to_string();
+    }
+    let day = |z: &jiff::Zoned| z.strftime("%Y-%m-%d").to_string();
+    if day(&z) == day(&n) {
+        return format!("today at {}", z.strftime("%H:%M"));
+    }
+    let week_ahead = n.checked_add(jiff::Span::new().days(6)).ok();
+    match week_ahead {
+        Some(w) if z.timestamp() <= w.timestamp() => z.strftime("%a").to_string(),
+        _ if z.year() == n.year() => z.strftime("%-d %b").to_string(),
+        _ => z.strftime("%-d %b %Y").to_string(),
+    }
+}
+
 /// A moment as a file name's stamp: `2026-09-22-18-32-05`, local.
 ///
 /// **Sortable, and the same shape wherever it is read**: dashes only, so it
@@ -115,6 +145,57 @@ mod tests {
     /// 2026-09-08 12:00:00 UTC.
     const NOW: u64 = 1_788_004_800;
     const DAY: u64 = 86_400;
+
+    /// **The bug this exists for.** `brief` asks whether a moment is within
+    /// the last six days, and every future moment is — so an expiry months
+    /// away printed as a bare weekday, reading exactly like one this week.
+    #[test]
+    fn a_distant_expiry_is_not_a_weekday() {
+        let far = NOW + 90 * DAY;
+        let said = deadline(far, NOW);
+        assert!(
+            said.len() > 3 && !said.chars().all(|c| c.is_alphabetic()),
+            "an expiry 90 days out reads as {said:?}, which says nothing about when"
+        );
+        // And the control: `brief` really does get it wrong, so this is a
+        // fix rather than a second way of saying the same thing.
+        let wrong = brief(far, NOW);
+        assert_ne!(
+            said, wrong,
+            "deadline and brief agree, so nothing was fixed: {said:?}"
+        );
+    }
+
+    /// Something already gone says so, rather than naming a day in the past
+    /// as though it were still to come.
+    #[test]
+    fn a_passed_expiry_says_it_has_passed() {
+        assert_eq!(deadline(NOW - DAY, NOW), "expired");
+        assert_eq!(deadline(NOW, NOW), "expired");
+    }
+
+    /// Within the week a weekday is unambiguous *forwards*, which is the one
+    /// direction it is unambiguous in.
+    #[test]
+    fn this_week_is_a_weekday() {
+        let said = deadline(NOW + 2 * DAY, NOW);
+        assert_eq!(said.len(), 3, "expected a weekday, got {said:?}");
+    }
+
+    /// Today carries the time, because "today" alone does not say whether
+    /// there is an hour left or eight.
+    #[test]
+    fn today_says_when_today() {
+        let said = deadline(NOW + 3600, NOW);
+        assert!(said.starts_with("today at"), "{said:?}");
+    }
+
+    /// Another year takes the year, or a date is a trap.
+    #[test]
+    fn another_year_carries_the_year() {
+        let said = deadline(NOW + 400 * DAY, NOW);
+        assert!(said.contains("2027"), "{said:?}");
+    }
 
     #[test]
     fn today_and_yesterday_are_named_rather_than_dated() {

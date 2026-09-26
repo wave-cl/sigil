@@ -12474,7 +12474,9 @@ impl ChatApp {
                     egui::RichText::new(format!(
                         "linked {} · credential expires {}{}",
                         sigil_ui::brief(device.added, self.now()),
-                        sigil_ui::brief(device.not_after, self.now()),
+                        // Forward-looking: `brief` reads any future moment as
+                        // "within the last six days" and prints a bare weekday.
+                        sigil_ui::deadline(device.not_after, self.now()),
                         // **SIP-23, and only for this device.** The
                         // exchange counts one-time prekeys per device and
                         // tells each one its own number on every catch-up;
