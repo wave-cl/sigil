@@ -698,12 +698,44 @@ pub fn icon_item_counted(
     selected: bool,
     count: u32,
 ) -> egui::Response {
+    item(ui, icon, text, selected, count, None)
+}
+
+/// The same row, in a colour that says what kind of thing it is.
+///
+/// **For the row that cannot be undone and is not only yours.** A menu of
+/// rows drawn alike is read as a menu of alike things, and sigil's message
+/// menu had Delete — which redacts a message for everybody in the
+/// conversation, for good — sitting between Reply and Copy key in exactly
+/// the same grey. `named_control_as` has tinted destructive *controls* since
+/// Revoke and Sign out; this is the same convention in the one place that
+/// had no way to say it.
+///
+/// Sparingly: a tint means nothing when everything has one. Reversible is
+/// not destructive — taking a channel's picture off is a `Close` row too,
+/// and it is not one of these.
+pub fn icon_item_tinted(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &str,
+    tint: egui::Color32,
+) -> egui::Response {
+    item(ui, icon, text, false, 0, Some(tint))
+}
+
+fn item(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &str,
+    selected: bool,
+    count: u32,
+    tint: Option<egui::Color32>,
+) -> egui::Response {
     let theme = ColorTheme::current(ui.ctx());
+    let ink = tint.unwrap_or(theme.text_primary);
     let gap = tokens::SPACING_SM;
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), font, theme.text_primary);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, ink);
     // "99+" rather than a number that widens the row without adding a fact.
     let badge = (count > 0).then(|| {
         let said = if count > 99 {
@@ -754,17 +786,12 @@ pub fn icon_item_counted(
             rect.left_top(),
             egui::vec2(tokens::BUTTON_MD, rect.height()),
         );
-        draw(
-            ui.painter(),
-            square.shrink(tokens::SPACING_XS),
-            icon,
-            theme.text_primary,
-        );
+        draw(ui.painter(), square.shrink(tokens::SPACING_XS), icon, ink);
         let at = egui::pos2(
             square.right() + gap,
             rect.center().y - galley.size().y / 2.0,
         );
-        ui.painter().galley(at, galley, theme.text_primary);
+        ui.painter().galley(at, galley, ink);
         if let Some(badge) = badge {
             let box_ = egui::Rect::from_min_size(
                 egui::pos2(rect.right() - gap - pill.x, rect.center().y - pill.y / 2.0),

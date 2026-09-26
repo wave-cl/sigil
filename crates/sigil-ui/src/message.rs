@@ -1026,7 +1026,21 @@ fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
                 action.edit = true;
                 ui.close();
             }
-            if b.deletable && crate::icon_item(ui, crate::Icon::Close, "Delete").clicked() {
+            // **Tinted, alone among these rows.** Everything else in this
+            // menu is yours to undo or is only about your own copy; this
+            // redacts the message for everybody in the conversation and
+            // there is no putting it back. It sat between Reply and Copy
+            // key in the same grey, which is a menu telling you they are
+            // the same kind of thing.
+            if b.deletable
+                && crate::icon_item_tinted(
+                    ui,
+                    crate::Icon::Close,
+                    "Delete",
+                    sigil::ColorTheme::current(ui.ctx()).destructive,
+                )
+                .clicked()
+            {
                 action.redact = true;
                 ui.close();
             }
