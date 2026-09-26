@@ -4790,6 +4790,182 @@ fn a_ring_shows_the_callers_key_in_full() {
     );
 }
 
+/// Every texture a screen painted with, other than the font atlas.
+///
+/// **Walked from the paint list rather than asked of the tree**, because a
+/// picture has no label: what is being checked is that the bytes reached a
+/// texture and the texture reached the screen, and the accessibility tree
+/// can say neither.
+fn painted_with(h: &mut Harness<'static>) -> Vec<egui::TextureId> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<egui::TextureId>) {
+        match shape {
+            egui::Shape::Mesh(mesh) => out.push(mesh.texture_id),
+            egui::Shape::Rect(rect) => {
+                if let Some(brush) = &rect.brush {
+                    out.push(brush.fill_texture_id);
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for s in shapes {
+                    walk(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Twice: a picture is decoded on the pass that first wants it and painted
+    // on the next, which is the whole point of caching it.
+    h.run();
+    h.run();
+    let mut found = Vec::new();
+    for shape in &h.output().shapes {
+        walk(&shape.shape, &mut found);
+    }
+    // The font atlas is what every glyph on the screen is drawn from and says
+    // nothing about a picture.
+    found.retain(|id| *id != egui::TextureId::default());
+    found
+}
+
+/// A picture for somebody, as the store hands one over.
+fn a_published_face() -> sigil_chat::Face {
+    sigil_chat::Face {
+        hash: 7,
+        bytes: std::sync::Arc::new(a_png().to_vec()),
+    }
+}
+
+/// **The people in the transcript have faces.**
+///
+/// Every bubble drew the identicon, so the main screen of a messenger was the
+/// one place nobody had one -- while the conversation list beside it, the
+/// call roster, the call card and the ring all showed published pictures.
+/// SIP-21 pictures were reaching the screen everywhere except the screen
+/// people read.
+///
+/// Both halves, because either alone proves nothing: a transcript that
+/// ignored the picture and always drew the mark would pass the first, and one
+/// that drew a blank square would pass the second.
+#[test]
+fn the_transcript_draws_the_faces_of_the_people_in_it() {
+    let bare = {
+        let mut h = harness_with(a_conversation(), true);
+        painted_with(&mut h)
+    };
+    assert!(
+        bare.is_empty(),
+        "a transcript where nobody published a picture painted with {bare:?} \
+         anyway, so the other half of this case would pass whatever the code did"
+    );
+
+    let mut state = a_conversation();
+    let who = state.lines.iter().find(|l| !l.mine).map(|l| l.who);
+    let who = who.expect("the fixture has a message from somebody else");
+    state.people.entry(who).or_insert(sigil_chat::Person {
+        name: Some("Ada".into()),
+        title: None,
+        handle: None,
+        picture: None,
+    });
+    state.people.get_mut(&who).expect("just inserted").picture = Some(a_published_face());
+    let mut h = harness_with(state, true);
+    let drawn = painted_with(&mut h);
+    assert!(
+        !drawn.is_empty(),
+        "somebody in the conversation published a picture and every bubble \
+         still drew the identicon"
+    );
+}
+
+/// **The caller's own face on the ring, where there is one.**
+///
+/// This screen drew the identicon outright rather than `avatar`, which
+/// prefers a published picture and falls back to the mark -- so the one
+/// screen in sigil where knowing who is calling matters most was the only
+/// one that could not show it, while reading the caller's *name* out of the
+/// very same `Person` two lines further down.
+///
+/// Walked from the paint list rather than asked of the tree, because a
+/// picture has no label: what is being checked is that the bytes reached a
+/// texture and the texture reached the screen, and the accessibility tree
+/// can say neither.
+///
+/// Both halves, because either alone proves nothing: a ring that ignored the
+/// picture and always drew the mark would pass the first, and one that drew
+/// a blank square would pass the second.
+#[test]
+fn a_ring_draws_the_callers_picture_when_there_is_one() {
+    fn ringing(with_a_face: bool) -> Vec<egui::TextureId> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::TextureId>) {
+            match shape {
+                egui::Shape::Mesh(mesh) => out.push(mesh.texture_id),
+                egui::Shape::Rect(rect) => {
+                    if let Some(brush) = &rect.brush {
+                        out.push(brush.fill_texture_id);
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut state = a_conversation();
+        state.ringing = vec![sigil_chat::Ring {
+            channel: [9u8; 32],
+            seq: 7,
+            from: them(),
+            mine: false,
+            secret: [3u8; 32],
+            answered: false,
+            label: "Ada".into(),
+            direct: false,
+            peer: None,
+        }];
+        if with_a_face {
+            let person = state.people.entry(them()).or_insert(sigil_chat::Person {
+                name: Some("Ada".into()),
+                title: None,
+                handle: None,
+                picture: None,
+            });
+            person.picture = Some(sigil_chat::Face {
+                hash: 7,
+                bytes: std::sync::Arc::new(a_png().to_vec()),
+            });
+        }
+        let mut h = harness_with(state, true);
+        // Twice: the picture is decoded on the pass that first wants it and
+        // painted on the next, which is the whole point of caching it.
+        h.run();
+        h.run();
+
+        let mut found = Vec::new();
+        for shape in &h.output().shapes {
+            walk(&shape.shape, &mut found);
+        }
+        // The font atlas is what every glyph on the screen is drawn from and
+        // says nothing about a picture.
+        found.retain(|id| *id != egui::TextureId::default());
+        found
+    }
+
+    let without = ringing(false);
+    assert!(
+        without.is_empty(),
+        "a ring from somebody with no picture painted with {without:?} anyway, \
+         so the other half of this case would pass whatever the code did"
+    );
+    let with = ringing(true);
+    assert!(
+        !with.is_empty(),
+        "the caller published a picture and the ring drew the identicon"
+    );
+}
+
 /// A call we placed is not a ring, and is not offered an Answer button.
 #[test]
 fn our_own_call_is_shown_as_ringing_out_not_as_an_incoming_ring() {

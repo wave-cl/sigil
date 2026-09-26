@@ -452,6 +452,7 @@ fn ring_card(
     caller: &PubKey,
     named: &str,
     under: &str,
+    picture: Option<&egui::TextureHandle>,
 ) -> Option<RingPress> {
     let key = caller.to_string();
     let mut pressed = None;
@@ -461,7 +462,17 @@ fn ring_card(
         .inner_margin(egui::Margin::same(tokens::SPACING_MD as i8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                sigil_ui::identicon(ui, &key, tokens::AVATAR_MD);
+                // **Their face, where there is one.** This drew the identicon
+                // outright -- not `avatar`, which prefers a picture and falls
+                // back to the identicon -- so the one screen where knowing
+                // who is calling matters most was the only screen in sigil
+                // that could not show it. Both callers read the same `Person`
+                // for the name two lines below and left the picture in it.
+                //
+                // A stranger from another exchange still gets the identicon,
+                // because there is no profile to draw: the fallback is the
+                // same shape, and this is strictly more than it was.
+                sigil_ui::avatar(ui, &key, picture, tokens::AVATAR_MD);
                 ui.add_space(tokens::SPACING_SM);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The handsets: the struck-through one in the destructive
@@ -7733,6 +7744,37 @@ impl ChatApp {
             return;
         }
 
+        // **Everybody's face, decoded once before the loop.**
+        //
+        // The transcript drew the identicon for every message in it, so the
+        // main screen of a messenger was the one place nobody had a face --
+        // the conversation list beside it has shown published pictures all
+        // along, and so does the roster, and so does the call card. SIP-21
+        // pictures were reaching the screen everywhere except the screen
+        // people look at.
+        //
+        // Ahead of the loop because `person_picture` wants `&mut self` and
+        // `state` is borrowed from the same place, and because a conversation
+        // is many messages by few people: one decode per author rather than
+        // one per bubble. The decoding itself is cached by account *and*
+        // content hash, so this is a map lookup on every pass after the first.
+        //
+        // Straight from the lines, with the map itself doing the deduping:
+        // collecting the authors into a `Vec` first to sort and dedup them
+        // would be an allocation the length of the conversation on every
+        // pass, which is the mistake `people_of` already has a comment about.
+        // Somebody with no picture never reaches a decode at all --
+        // `person_picture` answers `None` before it looks at anything.
+        let mut faces: HashMap<PubKey, Option<egui::TextureHandle>> = HashMap::new();
+        for line in &state.lines {
+            if faces.contains_key(&line.who) {
+                continue;
+            }
+            let face = state.people.get(&line.who).and_then(|p| p.picture.clone());
+            let texture = self.person_picture(at, ui.ctx(), line.who, face.as_ref());
+            faces.insert(line.who, texture);
+        }
+
         // What was done to a message, collected rather than acted on inside the
         // loop: acting there would need `&mut self` while `state` is borrowed
         // from it, and a frame-local queue is the shape the rest of the host
@@ -8079,6 +8121,7 @@ impl ChatApp {
             let bubble = sigil_ui::Bubble {
                 id: egui::Id::new(("message", at, copy, line.seq)),
                 key: &key,
+                picture: faces.get(&line.who).and_then(Option::as_ref),
                 name: line.name.as_deref(),
                 title,
                 text: &line.text,
@@ -11516,9 +11559,21 @@ impl ChatApp {
             .get(&cross.caller)
             .map(|p| p.label(&cross.caller))
             .unwrap_or_else(|| cross.caller.to_string());
+        let face = state
+            .people
+            .get(&cross.caller)
+            .and_then(|p| p.picture.clone());
+        let picture = self.person_picture(at, ui.ctx(), cross.caller, face.as_ref());
         // The one thing about it that is different, said in words: a caller
         // from another exchange is one this exchange cannot vouch for.
-        match ring_card(ui, theme, &cross.caller, &named, "from another exchange") {
+        match ring_card(
+            ui,
+            theme,
+            &cross.caller,
+            &named,
+            "from another exchange",
+            picture.as_ref(),
+        ) {
             Some(RingPress::Answer) => self.answer_cross(ctx, at, cross.caller, ui.ctx()),
             Some(RingPress::Decline) => self.decline_cross(at, cross.bridge),
             None => {}
@@ -11607,6 +11662,13 @@ impl ChatApp {
             .find(|c| Some(c.channel) == state.open)
             .and_then(|c| c.peer);
         let me = at.0;
+        // Their face while it rings out, the same as on the ring they see at
+        // the other end -- decoded before the frame, because this borrows
+        // `self` and the frame borrows `ui`.
+        let picture = peer.and_then(|peer| {
+            let face = state.people.get(&peer).and_then(|p| p.picture.clone());
+            self.person_picture(at, ui.ctx(), peer, face.as_ref())
+        });
         egui::Frame::NONE
             .fill(theme.surface_elevated)
             .corner_radius(tokens::RADIUS_LG)
@@ -11614,7 +11676,12 @@ impl ChatApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(peer) = peer {
-                        sigil_ui::identicon(ui, &peer.to_string(), tokens::AVATAR_MD);
+                        sigil_ui::avatar(
+                            ui,
+                            &peer.to_string(),
+                            picture.as_ref(),
+                            tokens::AVATAR_MD,
+                        );
                         ui.add_space(tokens::SPACING_SM);
                     }
                     ui.vertical(|ui| {
@@ -11676,7 +11743,16 @@ impl ChatApp {
             .get(&ring.from)
             .map(|p| p.label(&ring.from))
             .unwrap_or_else(|| ring.from.to_string());
-        match ring_card(ui, theme, &ring.from, &named, &format!("in {}", ring.label)) {
+        let face = state.people.get(&ring.from).and_then(|p| p.picture.clone());
+        let picture = self.person_picture(at, ui.ctx(), ring.from, face.as_ref());
+        match ring_card(
+            ui,
+            theme,
+            &ring.from,
+            &named,
+            &format!("in {}", ring.label),
+            picture.as_ref(),
+        ) {
             Some(RingPress::Decline) => {
                 self.send_as(
                     Some(at),
@@ -12073,15 +12149,22 @@ impl ChatApp {
         let me = at.0;
         let mut edit_profile = false;
         let mut claim_name = false;
+        // **Your own picture, which everybody else has been seeing.** The
+        // comment below says the mark "is not editable -- it is the key
+        // drawn", and that was true before SIP-21 pictures: a published one
+        // reached the roster, the conversation list and every other person's
+        // copy of you, and the one screen it did not reach was your own.
+        let face = state.mine.picture.clone();
+        let picture = self.person_picture(at, ui.ctx(), me, face.as_ref());
         ui.vertical_centered(|ui| {
             ui.add_space(tokens::SPACING_MD);
             // **The mark is a button.** An avatar is where everybody has
-            // learned to press to change what others see of them, and the
-            // mark itself is not editable -- it is the key drawn -- so a
-            // press on it opens the one thing about you that is.
+            // learned to press to change what others see of them, and what
+            // it stands for -- your picture and your name -- is exactly what
+            // a press on it opens.
             let mark = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-                    sigil_ui::identicon(ui, key, tokens::AVATAR_XL);
+                    sigil_ui::avatar(ui, key, picture.as_ref(), tokens::AVATAR_XL);
                 })
                 .response
                 .on_hover_text("Your name and title, as others see them");

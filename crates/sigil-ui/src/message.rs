@@ -206,6 +206,11 @@ pub struct Bubble<'a> {
     pub id: egui::Id,
     /// The author's key, in full.
     pub key: &'a str,
+    /// Their published picture (SIP-21), when the caller has one decoded.
+    /// `None` draws the identicon, which is what a key alone can say -- and
+    /// is what every bubble drew until this field existed, so the one screen
+    /// people actually read was the one place nobody had a face.
+    pub picture: Option<&'a egui::TextureHandle>,
     /// Their display name, if a profile has been seen. Never shown alone.
     pub name: Option<&'a str>,
     /// Their self-declared title.
@@ -726,7 +731,7 @@ pub fn bubble(ui: &mut egui::Ui, b: &Bubble<'_>) -> BubbleAction {
             if b.grouped {
                 ui.add_space(size + ui.spacing().item_spacing.x);
             } else {
-                crate::identicon(ui, b.key, size);
+                crate::avatar(ui, b.key, b.picture, size);
             }
             let Fit { width, one_line } = fit(ui, b, limit);
             let bubble = ui
@@ -2253,6 +2258,7 @@ mod tests {
         Bubble {
             id: egui::Id::new("plain"),
             key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+            picture: None,
             name: None,
             title: None,
             text,
