@@ -14445,11 +14445,16 @@ mod mention_notice_tests {
         RefCell<Vec<(String, String)>>,
         RefCell<Vec<(Option<Target>, Sound)>>,
         RefCell<Vec<Target>>,
+        /// Notices taken down because their conversation was read, kept
+        /// apart from the rings: they are two notifications with two lives,
+        /// and a test that could not tell them apart would pass on either.
+        RefCell<Vec<Target>>,
     );
 
     impl Noted {
         fn new() -> Noted {
             Noted(
+                RefCell::new(Vec::new()),
                 RefCell::new(Vec::new()),
                 RefCell::new(Vec::new()),
                 RefCell::new(Vec::new()),
@@ -14459,6 +14464,11 @@ mod mention_notice_tests {
         /// Rings taken down since the last time this was asked.
         fn withdrawn(&self) -> Vec<Target> {
             std::mem::take(&mut self.2.borrow_mut())
+        }
+
+        /// Notices taken down since the last time this was asked.
+        fn quietened(&self) -> Vec<Target> {
+            std::mem::take(&mut self.3.borrow_mut())
         }
     }
 
@@ -14473,6 +14483,10 @@ mod mention_notice_tests {
 
         fn withdraw(&self, target: &Target) {
             self.2.borrow_mut().push(target.clone());
+        }
+
+        fn withdraw_notice(&self, target: &Target) {
+            self.3.borrow_mut().push(target.clone());
         }
     }
 
@@ -14976,6 +14990,93 @@ mod mention_notice_tests {
         let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
         app.announce_rings_in(&mut c, vec![]);
         assert_eq!(app.asked(), vec![], "no ring, nothing asked");
+    }
+
+    /// **A conversation that has been read loses its notice, once; one with
+    /// something waiting keeps it.**
+    ///
+    /// The platform posts one notice per conversation and only the ring ever
+    /// had a way down — `cancel(tag, 2)` for the ring and nothing at all for
+    /// `cancel(tag, 1)`. So reading a conversation in the window left its
+    /// notification on the shade, and the only ways to be rid of it were to
+    /// tap it, which opens the conversation just finished, or to swipe each
+    /// one away by hand.
+    #[test]
+    fn a_conversation_that_has_been_read_loses_its_notice() {
+        let noted = Noted::new();
+        let read = [3u8; 32];
+        let waiting = [5u8; 32];
+        let mut state = ChatState::default();
+        let summary = |channel, unread| session::Summary {
+            channel,
+            peer: None,
+            label: String::new(),
+            unread,
+            mentioned: 0,
+            preview: None,
+            at: None,
+            public: None,
+            group: false,
+            typing: false,
+            waiting: false,
+            avatar: None,
+        };
+        state.conversations = vec![summary(read, 0), summary(waiting, 2)];
+        let (tx, rx) = tokio::sync::watch::channel(state);
+
+        let announcer = announce::Announcer::new(None);
+        announcer.frame(
+            vec![(at(), rx.clone())],
+            &Default::default(),
+            sigil::prefs::Privacy::default(),
+        );
+        announcer.rings_only(&noted);
+        let taken = noted.quietened();
+        assert_eq!(
+            taken.iter().map(|t| t.channel).collect::<Vec<_>>(),
+            vec![read],
+            "the read one should come down and the waiting one should not"
+        );
+
+        // **Once.** A cancel repeated every pass is a call into the platform
+        // for a notification that is already gone.
+        announcer.frame(
+            vec![(at(), rx.clone())],
+            &Default::default(),
+            sigil::prefs::Privacy::default(),
+        );
+        announcer.rings_only(&noted);
+        assert!(
+            noted.quietened().is_empty(),
+            "the notice was taken down again on a later pass"
+        );
+
+        // **And something new makes it withdrawable again.** Otherwise the
+        // next notice about that conversation would be the one that stays.
+        tx.send_modify(|s| s.conversations[0].unread = 1);
+        announcer.frame(
+            vec![(at(), rx.clone())],
+            &Default::default(),
+            sigil::prefs::Privacy::default(),
+        );
+        announcer.rings_only(&noted);
+        assert!(noted.quietened().is_empty(), "nothing is read now");
+        tx.send_modify(|s| s.conversations[0].unread = 0);
+        announcer.frame(
+            vec![(at(), rx)],
+            &Default::default(),
+            sigil::prefs::Privacy::default(),
+        );
+        announcer.rings_only(&noted);
+        assert_eq!(
+            noted
+                .quietened()
+                .iter()
+                .map(|t| t.channel)
+                .collect::<Vec<_>>(),
+            vec![read],
+            "read again, so its new notice should come down too"
+        );
     }
 
     /// A ring that has stopped ringing is taken down, once, and a ring that

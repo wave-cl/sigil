@@ -282,6 +282,21 @@ pub trait Notify {
     /// Platforms whose notifications expire on their own may do nothing.
     fn withdraw(&self, _target: &Target) {}
 
+    /// Take down the notice about what arrived in a conversation, because
+    /// it has been read.
+    ///
+    /// **A ring could be withdrawn and a message could not.** The platform
+    /// posts one notice per conversation and the only thing that ever came
+    /// down was a ring, so reading a conversation in the window left its
+    /// notification on the shade until somebody tapped or swiped it — and
+    /// tapping it opens the conversation they have just finished reading.
+    ///
+    /// Separate from [`withdraw`](Notify::withdraw) rather than folded into
+    /// it: a ring ending is not a reason to clear what was said about
+    /// messages in the same conversation, and the two are different
+    /// notifications with different lives.
+    fn withdraw_notice(&self, _target: &Target) {}
+
     /// A call is up, with whoever is named; `None` when it is not.
     ///
     /// **For the platforms that have to be told a process is busy.** Android
@@ -368,6 +383,9 @@ impl<T: Notify + ?Sized> Notify for std::sync::Arc<T> {
     }
     fn withdraw(&self, target: &Target) {
         (**self).withdraw(target)
+    }
+    fn withdraw_notice(&self, target: &Target) {
+        (**self).withdraw_notice(target)
     }
     fn calling(&self, live: Option<InCall<'_>>) {
         (**self).calling(live)

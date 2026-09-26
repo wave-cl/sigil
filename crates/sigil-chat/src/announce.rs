@@ -71,6 +71,16 @@ struct Inner {
     announced: HashSet<([u8; 32], u64)>,
     /// Rings announced and not yet withdrawn, each with where it was posted.
     ringing_out: HashMap<([u8; 32], u64), Target>,
+    /// Conversations whose notice has been taken down because they were
+    /// read, so it is taken down **once** and not on every pass for as long
+    /// as they stay read. Forgotten again when something new arrives in one,
+    /// which is what makes the next notice withdrawable in its turn.
+    ///
+    /// A set of channels rather than a record of what was posted, on
+    /// purpose: a notice posted by the *wake window* is in no record this
+    /// process holds, and that is exactly how a ring came to sit on the
+    /// shade for good.
+    quieted: HashSet<[u8; 32]>,
     /// What the shell is asked for -- to come forward, for attention --
     /// which only a frame can hand over.
     wants: Vec<AppAction>,
@@ -303,6 +313,7 @@ impl Inner {
         }
         self.rings_in(notify, fresh);
         self.withdraw_gone(notify);
+        self.withdraw_read(notify);
     }
 
     /// The deciding half: rings nobody has been told about yet are said,
@@ -377,6 +388,34 @@ impl Inner {
         for key in gone {
             if let Some(to) = self.ringing_out.remove(&key) {
                 notify.withdraw(&to);
+            }
+        }
+    }
+
+    /// Take down the notice about a conversation that has been read.
+    ///
+    /// **A ring could be withdrawn and a message could not.** The platform
+    /// posts one notice per conversation, and the only thing that ever came
+    /// down was a ring — so reading a conversation in the window left its
+    /// notification on the shade, and the only way to be rid of it was to
+    /// tap it, which opens the conversation just finished, or to swipe each
+    /// one away by hand.
+    ///
+    /// Swept over what is read rather than over a record of what was
+    /// posted, because a notice posted by the wake window is in no record
+    /// this process holds — the mistake that left rings on the shade for
+    /// good. `quieted` only stops it being said twice.
+    fn withdraw_read(&mut self, notify: &dyn Notify) {
+        for (at, session) in &self.sessions {
+            let state = session.borrow();
+            for convo in &state.conversations {
+                if convo.unread > 0 {
+                    // Something new: the next notice about it is one to take
+                    // down in its turn.
+                    self.quieted.remove(&convo.channel);
+                } else if self.quieted.insert(convo.channel) {
+                    notify.withdraw_notice(&target(at, convo.channel));
+                }
             }
         }
     }
