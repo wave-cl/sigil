@@ -6087,8 +6087,7 @@ impl ChatApp {
                         // collection for every device of the account, so it
                         // is offered where this one can say what it is
                         // deleting.
-                        if ui
-                            .button("Delete")
+                        if sigil_ui::grave(ui, "Delete")
                             .on_hover_text(
                                 "Completes collection: the exchange drops it for all your \
                                  devices.",
@@ -6208,7 +6207,9 @@ impl ChatApp {
             // the pool and somebody else may take it. Beside the sentence
             // that says so.
             if let Some(handle) = &held
-                && ui.button("Give it up").on_hover_text(GIVING_UP).clicked()
+                && sigil_ui::grave(ui, "Give it up")
+                    .on_hover_text(GIVING_UP)
+                    .clicked()
             {
                 // The bare local part: a release names it, and the exchange
                 // it is released at is the one being talked to.
@@ -11098,7 +11099,7 @@ impl ChatApp {
                 "This ends the conversation for everybody in it and cannot be undone.",
             );
             ui.horizontal(|ui| {
-                if ui.button("Yes, destroy it").clicked() {
+                if sigil_ui::grave(ui, "Yes, destroy it").clicked() {
                     self.panes.entry(at.clone()).or_default().confirming_destroy = false;
                     self.send_as(Some(at), Cmd::Destroy);
                     ctx.navigator.back();
@@ -13271,7 +13272,7 @@ impl ChatApp {
                      unreadable.",
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Yes, sign out").clicked() {
+                    if sigil_ui::grave(ui, "Yes, sign out").clicked() {
                         self.pane(at).confirming_sign_out = false;
                         self.send_as(Some(at), Cmd::SignOutDevice(device.device));
                     }
@@ -13693,7 +13694,7 @@ impl ChatApp {
                         theme.destructive,
                         "This releases the copy at the exchange. What is on this machine stays.",
                     );
-                    if ui.button("Yes, drop it").clicked() {
+                    if sigil_ui::grave(ui, "Yes, drop it").clicked() {
                         self.pane(at).confirming_drop = false;
                         self.send_as(Some(at), Cmd::DropBackup);
                     }
@@ -13995,7 +13996,7 @@ impl ChatApp {
                      restore later — is a stranger to this account afterwards.",
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Yes, change it").clicked() {
+                    if sigil_ui::grave(ui, "Yes, change it").clicked() {
                         self.pane(at).confirming_handover = false;
                         self.send_as(Some(at), Cmd::HandOver);
                     }

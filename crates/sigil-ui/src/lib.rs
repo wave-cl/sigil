@@ -413,6 +413,26 @@ pub use message::{
 /// given so the whole row is a hit target; inside a popup the width it is
 /// given is the window's, so a menu of two short phrases spanned a phone
 /// edge to edge. A row longer than the maximum still grows the menu.
+/// A button for the press that cannot be taken back.
+///
+/// **The colour belongs on the thing you press.** Sigil says "this ends the
+/// conversation for everybody in it and cannot be undone" in the destructive
+/// colour, and then drew `Yes, destroy it` in exactly the same grey as the
+/// `Cancel` beside it — so the row where the decision is actually made was
+/// the one row that did not say which of the two was which. Five
+/// confirmations, the mailbox's Delete and Give it up were all like that,
+/// while `Revoke`, `Sign out`, `Destroy this conversation` and the call's
+/// hang-up had been tinted for as long as they had existed.
+///
+/// For what is irreversible, not for what is merely unwelcome: a tint means
+/// nothing when everything has one.
+pub fn grave(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let theme = sigil::ColorTheme::current(ui.ctx());
+    ui.add(egui::Button::new(
+        egui::RichText::new(text).color(theme.destructive),
+    ))
+}
+
 pub fn menu_width(ui: &mut egui::Ui) {
     ui.set_min_width(sigil::tokens::MENU_MIN);
     ui.set_max_width(sigil::tokens::MENU_MAX);

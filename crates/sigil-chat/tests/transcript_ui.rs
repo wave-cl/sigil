@@ -14750,3 +14750,65 @@ fn the_conversation_head_carries_a_mark() {
         "the mark is not before the name: mark {mark:?}, name {name:?}"
     );
 }
+
+/// **The press that cannot be taken back is the one that is coloured.**
+///
+/// Sigil says "this ends the conversation for everybody in it and cannot be
+/// undone" in the destructive colour, and then drew `Yes, destroy it` in
+/// exactly the same grey as the `Cancel` beside it — so the row where the
+/// decision is actually made was the one row that did not say which of the
+/// two was which.
+///
+/// Read off the paint list rather than the tree, because a colour has no
+/// label: the words are laid into a galley with their colour on them, and
+/// that is the only place it exists.
+#[test]
+fn a_confirmation_colours_the_grave_half_and_not_the_other() {
+    fn coloured(h: &mut Harness<'static>, word: &str) -> Option<egui::Color32> {
+        fn walk(shape: &egui::Shape, word: &str, out: &mut Option<egui::Color32>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    if text.galley.job.text.contains(word) {
+                        *out = text
+                            .galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|s| s.format.color)
+                            .or(Some(text.fallback_color));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, word, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        h.run();
+        let mut found = None;
+        for shape in &h.output().shapes {
+            walk(&shape.shape, word, &mut found);
+        }
+        found
+    }
+
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Settings);
+    h.run();
+    h.get_by_label("Destroy this conversation").click();
+    h.run_steps(3);
+
+    let theme = sigil::theme::dark();
+    let grave = coloured(&mut h, "Yes, destroy it").expect("the confirming press is on screen");
+    assert_eq!(
+        grave, theme.destructive,
+        "the press that ends a conversation for everybody is not coloured as one"
+    );
+    let safe = coloured(&mut h, "Cancel").expect("the way out beside it");
+    assert_ne!(
+        safe, theme.destructive,
+        "the way out is coloured as though it were the grave one"
+    );
+}
+
