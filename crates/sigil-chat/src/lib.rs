@@ -8909,6 +8909,21 @@ impl ChatApp {
                 refocus = true;
             }
             self.pane(at).picking = picking;
+            // **A mark beside each candidate**, and the picture where there
+            // is one, as the members list draws these very same people. The
+            // comment below already says why the key is here -- two members
+            // can share a name -- and a mark is how somebody tells them apart
+            // without reading base58 off a popup.
+            let marks: Vec<(String, Option<egui::TextureHandle>)> = rows
+                .iter()
+                .map(|(_, key)| {
+                    let face = state.people.get(key).and_then(|p| p.picture.clone());
+                    (
+                        key.to_string(),
+                        self.person_picture(at, ui.ctx(), *key, face.as_ref()),
+                    )
+                })
+                .collect();
             egui::Frame::NONE
                 .fill(theme.surface_elevated)
                 .corner_radius(tokens::RADIUS_MD)
@@ -8917,6 +8932,13 @@ impl ChatApp {
                     ui.set_width(ui.available_width());
                     for (i, (label, key)) in rows.iter().enumerate() {
                         let row = ui.horizontal(|ui| {
+                            sigil_ui::avatar(
+                                ui,
+                                &marks[i].0,
+                                marks[i].1.as_ref(),
+                                tokens::AVATAR_SM,
+                            );
+                            ui.add_space(tokens::SPACING_XS);
                             let pressed = ui
                                 .selectable_label(i == picking, format!("@{label}"))
                                 .clicked();
@@ -13089,20 +13111,29 @@ impl ChatApp {
             if !named.is_empty() {
                 let mut drop: Option<PubKey> = None;
                 for g in &named {
+                    let key = g.to_string();
                     ui.horizontal(|ui| {
                         if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Remove").clicked()
                         {
                             drop = Some(*g);
                         }
-                        // Wrapped: a label in a horizontal does not, and a
-                        // key beside a button is wider than a phone.
+                        // Marked and shortened, like the lodged list above.
+                        // These are the same people either side of one
+                        // press, and they were drawn two different ways:
+                        // staged, a bare key that had to wrap because a full
+                        // one beside a button is wider than a phone; lodged,
+                        // an avatar and a stem. The full key is on hover.
+                        sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+                        ui.add_space(tokens::SPACING_SM);
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(g.to_string()).monospace().small(),
+                                egui::RichText::new(sigil_ui::short(&key))
+                                    .monospace()
+                                    .small(),
                             )
-                            .wrap()
                             .selectable(true),
-                        );
+                        )
+                        .on_hover_text(&key);
                     });
                 }
                 if let Some(g) = drop {

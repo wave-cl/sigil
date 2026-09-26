@@ -49,11 +49,21 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
     // sake; here there are none, and a finger's height between a key and
     // its detail line reads as two rows. A line tall, as the conversation
     // row does.
+    let line = ui.text_style_height(&egui::TextStyle::Body);
     if narrow {
-        let line = ui.text_style_height(&egui::TextStyle::Body);
         ui.spacing_mut().interact_size.y = line;
         ui.spacing_mut().item_spacing.y = tokens::SPACING_XXS;
     }
+    // **A mark beside each key**, as everywhere else in the app that somebody
+    // appears. A roster is read to find one person in it, and a column of
+    // base58 stems is the hardest thing here to scan; the mark is what a
+    // reader compares at a glance.
+    //
+    // The height of the row, so it costs width and not height: the rule just
+    // above deliberately brings a phone's row down to a single line, and a
+    // mark at `AVATAR_SM` would undo it for every row in the room.
+    let mark = if narrow { line } else { tokens::AVATAR_SM };
+
     for row in rows {
         ui.horizontal(|ui| {
             crate::dot(
@@ -63,6 +73,7 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize) {
                 theme.text_muted,
                 if row.speaking { "speaking" } else { "silent" },
             );
+            crate::avatar(ui, &row.key, None, mark);
             if narrow {
                 ui.add(egui::Label::new(
                     egui::RichText::new(crate::short(&row.key)).monospace(),

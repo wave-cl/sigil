@@ -10306,17 +10306,8 @@ fn phone_devices_linked() {
     h.snapshot("phone_devices_linked");
 }
 
-/// A guardian added but not yet lodged is a key beside a Remove, and on a
-/// phone the key wraps rather than running off the edge.
-#[test]
-fn a_pending_guardians_key_wraps_on_a_phone() {
-    let mut state = a_conversation();
-    state.succession = Some(sigil_chat::Succession {
-        is_account: true,
-        ..Default::default()
-    });
-    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
-    h.run();
+/// Scroll a phone pane to its foot, where the succession section is.
+fn scroll_to_the_foot(h: &mut Harness<'static>) {
     for _ in 0..40 {
         h.hover_at(egui::pos2(PHONE_WIDTH / 2.0, 400.0));
         h.event(egui::Event::MouseWheel {
@@ -10327,7 +10318,11 @@ fn a_pending_guardians_key_wraps_on_a_phone() {
         });
         h.run_steps(2);
     }
-    // The field on the Add-a-guardian row: the text input nearest it.
+}
+
+/// Type a key into the field on the Add-a-guardian row -- the text input
+/// nearest it -- and press Add.
+fn stage_a_guardian(h: &mut Harness<'static>, key: &PubKey) {
     let add = h.get_by_label("Add a guardian").rect();
     let field = h
         .get_all(
@@ -10341,17 +10336,70 @@ fn a_pending_guardians_key_wraps_on_a_phone() {
         })
         .expect("the guardian field");
     field.focus();
-    field.type_text(&them().to_string());
+    field.type_text(&key.to_string());
     h.run();
     h.get_by_label("Add a guardian").click();
     h.run();
     h.run();
+}
+
+/// A guardian added but not yet lodged is a mark, the key's stem and a
+/// Remove, and none of it runs off a phone's edge.
+///
+/// **It was the whole key, wrapped**, which is what this test was named for.
+/// The lodged list two sections up had gained a mark and a stem in the SIP-44
+/// audit, and the staged list -- the same people one press earlier -- was
+/// still a column of base58 that had to wrap to fit. The comment on the
+/// lodged list claimed it was "the only place in sigil where somebody appears
+/// without a mark" while this stood forty lines below it.
+#[test]
+fn a_staged_guardian_is_a_mark_and_a_stem() {
+    let mut state = a_conversation();
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        ..Default::default()
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    scroll_to_the_foot(&mut h);
+    stage_a_guardian(&mut h, &them());
+    let said = text_of(&h);
     assert!(
         h.query_by_label("Remove").is_some(),
-        "the guardian was not added: {}",
-        text_of(&h)
+        "the guardian was not added: {said}"
+    );
+    assert!(
+        said.contains(&short_form(&them())),
+        "the stem is what is drawn: {said}"
     );
     nothing_runs_off_the_edge(&h, "the Devices pane with a pending guardian");
+}
+
+/// **Guardians staged, before they are lodged.** Two, so the marks are there
+/// to compare. `phone_succession` renders the lodged side only, so this list
+/// -- which the audit changed -- had no picture at all; three changes have
+/// shipped that way already.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_guardians_staged() {
+    let mut state = a_conversation();
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        ..Default::default()
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    scroll_to_the_foot(&mut h);
+    stage_a_guardian(&mut h, &them());
+    stage_a_guardian(&mut h, &PubKey::new([5u8; 32]));
+    scroll_to_the_foot(&mut h);
+    h.remove_cursor();
+    // Not `run`: the guardian field still holds focus and its caret blinks,
+    // so the context asks for a repaint for ever and `run`'s four steps are
+    // never enough. `phone_succession` gets away with `run` because nothing
+    // on that pass was focused.
+    h.run_steps(2);
+    h.snapshot("phone_guardians_staged");
 }
 
 // ---------------------------------------------------------------------------
@@ -13928,4 +13976,22 @@ async fn a_call_to_another_exchange_is_bridged_rather_than_rung_here() {
             );
         }
     }
+}
+
+/// **The popup somebody picks a name from**, which nothing rendered until
+/// now: the chip in a line has a snapshot, and the tree carries the name and
+/// the key, so the marks beside the candidates went in against no picture at
+/// all. Three of those have shipped this way. This is the picture.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn mention_picker_dark() {
+    let mut h = harness_with(the_room(), true);
+    h.run();
+    hide_column(&mut h);
+    let field = composer(&h);
+    field.focus();
+    field.type_text("@");
+    h.run();
+    h.run();
+    h.snapshot("mention_picker_dark");
 }

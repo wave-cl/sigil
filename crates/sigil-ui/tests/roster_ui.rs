@@ -7,6 +7,7 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::NodeT;
+use egui_kittest::kittest::Queryable;
 use sigil::theme;
 use sigil_ui::{Row, roster};
 
@@ -164,4 +165,29 @@ fn roster_phone() {
     let mut h = harness_phone(rows, 1);
     h.run();
     h.snapshot("roster_phone");
+}
+
+/// **The mark costs width, not height.** A phone's roster rows are brought
+/// down to a single line on purpose: a room of eight is eight rows on a
+/// 360-point screen, and the rule that does it is two lines above the one
+/// that draws the mark. A mark at `AVATAR_SM` would quietly undo it for every
+/// row in the room, which is the mistake this pins.
+#[test]
+fn a_mark_does_not_make_the_rows_taller() {
+    let rows = rows();
+    let (a, b) = (sigil_ui::short(&rows[0].key), sigil_ui::short(&rows[1].key));
+    let h = harness_phone(rows, 0);
+    let first = h.get_by_label(&a).rect();
+    let second = h.get_by_label(&b).rect();
+    let pitch = second.min.y - first.min.y;
+    // Measured both ways before this number was chosen: 38.4 points apart
+    // with the mark at the line's height, 45.2 with it at `AVATAR_SM`, which
+    // grows the key line from 15 points to 24. The bound sits between them,
+    // and the 45.2 was read from this assertion failing, not predicted.
+    assert!(
+        pitch > 0.0 && pitch < 42.0,
+        "roster rows {pitch} points apart on a phone. A row here is two lines \
+         of text and the spacings around them; a mark taller than the line it \
+         sits beside makes every row in the room taller."
+    );
 }
