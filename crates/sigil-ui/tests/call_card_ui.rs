@@ -716,3 +716,61 @@ fn call_card_desktop_room() {
         egui::Theme::Dark,
     );
 }
+
+/// **A call that has not connected yet**, which is most of the time somebody
+/// looks at this screen and the only state with nothing settled in it: no
+/// clock worth reading, no route decided, and a dot that must not be green.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_connecting() {
+    snap(
+        "phone_call_card_connecting",
+        &Call {
+            up: false,
+            seconds: 0,
+            travel: None,
+            speaker: None,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
+/// **Somebody else's call**, on a window showing another identity. The hang
+/// up on this card ends a call the person looking at it is not in, so the
+/// card has to say whose it is before they press it.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_another_identity() {
+    snap(
+        "phone_call_card_another_identity",
+        &Call {
+            whose: Some("me@squic.org"),
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
+/// **A room on the light theme**, which is where a quiet second thing on a
+/// row goes faint: the key beside each name is `small` monospace, and at
+/// `text_muted` it measured 3.40 against this ground -- under the 4.5 that
+/// text somebody reads character by character has to clear.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_room_light() {
+    let present = rows(6);
+    snap(
+        "phone_call_card_room_light",
+        &Call {
+            present: &present,
+            connecting: 1,
+            two_party: false,
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Light,
+    );
+}

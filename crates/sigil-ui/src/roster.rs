@@ -109,8 +109,23 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize, detail: bool) 
                     row.key.clone()
                 })
                 .monospace();
+                // **Quieter than the name, not de-emphasised.**
+                //
+                // `text_muted` is the obvious choice for a second thing on a
+                // row and is the wrong one here: the palette holds it to the
+                // large-text floor of 3.0 on purpose -- it is for text nobody
+                // has to read -- and at `small` it measures 3.40 on the light
+                // theme and 4.24 on the dark, both under the 4.5 that body
+                // text is held to. A 44-character base58 key is the one
+                // string on this row somebody reads character by character,
+                // and the whole reason it is still here beside the name is
+                // that a name is an assertion and a key is not. A key too
+                // faint to compare does not do that job.
+                //
+                // `text_secondary` is 6.90 light and 8.11 dark, and still
+                // plainly second to the name.
                 let text = match row.named {
-                    Some(_) => text.small().color(theme.text_muted),
+                    Some(_) => text.small().color(theme.text_secondary),
                     None => text,
                 };
                 if narrow {
@@ -150,7 +165,11 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize, detail: bool) 
                     let size = ui.style().text_styles[&egui::TextStyle::Small].size;
                     let text = crate::short(&row.key);
                     ui.ctx().fonts_mut(|f| {
-                        f.layout_no_wrap(text, egui::FontId::monospace(size), theme.text_muted)
+                        // The same colour it is drawn in -- colour does not
+                        // change a galley's width, but a measurement that
+                        // disagrees with the thing measured invites the next
+                        // reader to trust the wrong one.
+                        f.layout_no_wrap(text, egui::FontId::monospace(size), theme.text_secondary)
                             .size()
                             .x
                     })
