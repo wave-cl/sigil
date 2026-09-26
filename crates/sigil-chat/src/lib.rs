@@ -11640,6 +11640,26 @@ impl ChatApp {
                     )
                     .wrap(),
                 );
+                // **And the whole of it, because this is the key to check.**
+                //
+                // The sentence above shortens it, which is right in prose --
+                // but shortened was all there was: no hover, no selection, no
+                // menu, nowhere on this card the whole key existed. Every
+                // other key in sigil is reachable in full, and this is the
+                // one that most needs to be: the card says in its own words
+                // that the exchange holds *their* word for it, so the only
+                // way to know it is the right successor is to compare it with
+                // something the person gave you elsewhere. A phone cannot
+                // hover, so it has to be drawn.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(successor.to_string())
+                            .monospace()
+                            .small(),
+                    )
+                    .wrap()
+                    .selectable(true),
+                );
                 if sigil_ui::icon_item(ui, sigil_ui::Icon::Compose, "Write to them there").clicked()
                 {
                     self.send_as(Some(at), Cmd::AddContact(successor, String::new()));

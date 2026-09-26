@@ -14509,3 +14509,38 @@ fn both_guardian_lists_name_somebody_they_know() {
     );
     nothing_runs_off_the_edge(&h, "the Devices pane with named guardians");
 }
+
+/// **The successor's key, whole, on the card that says to write to it.**
+///
+/// The sentence shortens it, which is right in prose — and shortened was all
+/// there was: no hover, no selection, no menu, nowhere on the card did the
+/// whole key exist. Every other key in sigil is reachable in full, and this
+/// is the one that most needs to be. The card says in its own words that the
+/// exchange holds *their* word for who succeeded this account, so the only
+/// way to know it is the right successor is to compare it against something
+/// the person gave you somewhere else — and you cannot compare eleven
+/// characters of it.
+///
+/// A phone cannot hover, so it has to be drawn rather than hidden behind
+/// one.
+#[test]
+fn a_moved_account_shows_the_whole_successor_key() {
+    let successor = PubKey::new([0x44u8; 32]);
+    let mut state = a_conversation();
+    state.succeeded.insert(them(), Some(successor));
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+
+    let said = text_of(&h);
+    assert!(
+        said.contains("account is now"),
+        "the moved card is not on screen, so this says nothing: {said}"
+    );
+    assert!(
+        said.contains(&successor.to_string()),
+        "the card names a successor to write to and never says which, in \
+         full: {said}"
+    );
+    nothing_runs_off_the_edge(&h, "the conversation with a moved account");
+}
