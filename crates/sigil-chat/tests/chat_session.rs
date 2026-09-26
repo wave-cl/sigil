@@ -5598,3 +5598,88 @@ async fn a_stranded_post_is_offered_and_goes_back_with_the_time_it_was_first_sai
     );
     bob.stop();
 }
+
+/// **SIP-53: an account can move to another exchange.**
+///
+/// The heaviest operation the client has: it re-files the store under the new
+/// home and relocates every direct message this key sorts lower in. `Chat`
+/// carries it; sigil could not send it at all until now.
+///
+/// Two exchanges, neither listing the other as a peer, because that is the
+/// ordinary case and it is the one with something to say: the move still
+/// happens, and the note warns that what stayed behind cannot be pulled
+/// across until an operator peers them. A test that peered them would never
+/// see that sentence.
+#[tokio::test]
+async fn an_account_can_move_to_another_exchange() {
+    let here = tempfile::tempdir().unwrap();
+    let there = tempfile::tempdir().unwrap();
+    let (a_addr, a_key, _a) = server_in(here.path()).await;
+    let (b_addr, b_key, _b) = server_in(there.path()).await;
+    assert_ne!(a_key, b_key, "two exchanges, or this proves nothing");
+
+    let store = here.path().join("mover.db");
+    let (signer, me) = signer(31);
+    let chat = start_at(
+        Endpoint {
+            address: a_addr,
+            server: PubKey::new(a_key),
+        },
+        signer,
+        &store,
+    );
+    assert!(
+        until(|| chat.state().me == Some(me), 20).await,
+        "the session never came up at the first exchange"
+    );
+
+    chat.send(Cmd::MoveHome {
+        addr: b_addr,
+        home: PubKey::new(b_key),
+        domain: String::new(),
+        identity: None,
+    });
+
+    // The note is the readout: `move_home` reports what moved and what could
+    // not, and a move that said nothing would be indistinguishable from one
+    // that never ran.
+    let said = until(
+        || {
+            chat.state()
+                .note
+                .as_ref()
+                .is_some_and(|n| n.said.contains("now lives at"))
+        },
+        30,
+    )
+    .await;
+    assert!(
+        said,
+        "no note about the move: note {:?} / trouble {:?}",
+        chat.state().note,
+        chat.state().trouble
+    );
+
+    // Unpeered exchanges are the ordinary case and the client has to say so.
+    let note = chat.state().note.expect("the note above").said;
+    assert!(
+        note.contains("peers"),
+        "the move did not mention that the exchanges are not peered: {note}"
+    );
+
+    // And the client now believes it lives at the new one, which is what the
+    // Me page reads.
+    assert!(
+        until(
+            || chat
+                .state()
+                .my_home
+                .is_some_and(|(home, _)| home == PubKey::new(b_key)),
+            15
+        )
+        .await,
+        "the client still thinks it lives at the old exchange: {:?}",
+        chat.state().my_home
+    );
+    chat.stop();
+}
