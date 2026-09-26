@@ -5634,9 +5634,12 @@ async fn an_account_can_move_to_another_exchange() {
     );
 
     chat.send(Cmd::MoveHome {
-        addr: b_addr,
-        home: PubKey::new(b_key),
-        domain: String::new(),
+        // The address is in hand here; a person typing a domain takes the
+        // discovered path, which is what the interface sends.
+        to: sigil_chat::session::MoveTo::Known {
+            addr: b_addr,
+            home: PubKey::new(b_key),
+        },
         identity: None,
     });
 

@@ -828,6 +828,8 @@ enum Dialog {
     Mail,
     /// SIP-53: move where this conversation is ordered.
     Rehome,
+    /// SIP-53: move where this **account** lives.
+    MoveHome,
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -1459,6 +1461,8 @@ struct Pane {
     search_focus: bool,
     /// The exchange being added.
     exchange: String,
+    /// SIP-53: the exchange this account is being moved to, as typed.
+    move_to: String,
     /// SIP-53: the exchange a conversation is being moved to, as typed. A
     /// key, and optionally a domain after a space -- **not a picker**,
     /// because nothing tells a client which exchanges hold a replica of a
@@ -1706,6 +1710,7 @@ impl Default for Pane {
             linking: String::new(),
             presenting: String::new(),
             rehome_to: String::new(),
+            move_to: String::new(),
             searching: String::new(),
             search_focus: false,
             exchange: String::new(),
@@ -5172,6 +5177,7 @@ impl ChatApp {
                     Dialog::Name => self.name_dialog(at, ui, theme),
                     Dialog::Mail => self.mail_dialog(at, state, ui, theme),
                     Dialog::Rehome => self.rehome_dialog(at, state, ui, theme),
+                    Dialog::MoveHome => self.move_home_dialog(ctx, at, state, ui, theme),
                     Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
                     Dialog::Report { target } => self.report_dialog(at, state, target, ui, theme),
                 }
@@ -5403,6 +5409,131 @@ impl ChatApp {
     /// to exactly one account, and is what lets anybody write to you as
     /// `name@domain`. They are two different things that both get called a
     /// name, so they get two dialogs and each says which it is.
+    /// SIP-53: move where this **account** lives.
+    ///
+    /// **The cost is computed, not warned about.** A direct message lives at
+    /// the home of whichever key sorts lower, so only some of them move —
+    /// and which ones is knowable, so this names them rather than telling
+    /// somebody to think carefully. That distinction is the whole screen:
+    /// the operation is the same either way, and what separates a move
+    /// somebody meant from one that cost them 156 messages is whether they
+    /// could see what it would do.
+    fn move_home_dialog(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        ui.heading("Move this account");
+        ui.add_space(tokens::SPACING_XS);
+        let now = match &state.my_home {
+            Some((home, domain)) if !domain.is_empty() => domain.clone(),
+            Some((home, _)) => sigil_ui::short(&home.to_string()),
+            None => self.exchange_label(at.0, &at.1),
+        };
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(format!("It lives at {now} now.")).small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        ui.label("New home");
+        let width = ui.available_width();
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(at.clone()).or_default().move_to,
+            "a domain that publishes an exchange",
+            width,
+        );
+        ui.add_space(tokens::SPACING_XS);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "Discovered over DNSSEC, and refused if its key later differs. Your key is \
+                 the same there.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        // What moves, by name. The rule is not obvious and the consequence is
+        // not reversible, so neither is left for somebody to infer.
+        let moving = dms_ordered_here(at.0, &state.conversations);
+        if moving.is_empty() {
+            ui.colored_label(
+                theme.text_muted,
+                "No direct message is ordered here, so none moves with the account.",
+            );
+        } else {
+            ui.colored_label(
+                theme.warning,
+                egui::RichText::new(match moving.len() {
+                    1 => "1 direct message moves with it:".to_string(),
+                    n => format!("{n} direct messages move with it:"),
+                })
+                .small(),
+            );
+            for c in moving.iter().take(6) {
+                ui.colored_label(
+                    theme.text_secondary,
+                    egui::RichText::new(format!("  {}", c.label)).small(),
+                );
+            }
+            if moving.len() > 6 {
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(format!("  and {} more", moving.len() - 6)).small(),
+                );
+            }
+        }
+        ui.add_space(tokens::SPACING_XS);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "The rest are ordered at the other person's home and stay there. Rooms stay \
+                 where they were made. This window reopens at the new home when it is done.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        let typed = self.pane(at).move_to.trim().to_string();
+        ui.horizontal(|ui| {
+            // A domain, or nothing: an address cannot be discovered, and the
+            // key is never typed beside it -- discovery hands it back.
+            let ready = !typed.is_empty() && typed.parse::<std::net::IpAddr>().is_err();
+            if ui
+                .add_enabled(ready, egui::Button::new("Move it"))
+                .on_disabled_hover_text("A domain that publishes an exchange.")
+                .clicked()
+            {
+                // The file the new home is recorded beside, so every later
+                // start reads it. Without it the move lands and the next
+                // start returns to the exchange the store has left.
+                let identity = ctx
+                    .accounts
+                    .paths()
+                    .get(ctx.accounts.active_index())
+                    .cloned();
+                self.send_as(
+                    Some(at),
+                    Cmd::MoveHome {
+                        to: session::MoveTo::Discovered(typed.clone()),
+                        identity,
+                    },
+                );
+                self.pane(at).move_to.clear();
+                self.pane(at).dialog = None;
+            }
+            if ui.button("Cancel").clicked() {
+                self.pane(at).move_to.clear();
+                self.pane(at).dialog = None;
+            }
+        });
+    }
+
     /// SIP-53: move where this conversation is ordered.
     ///
     /// **A typed key, not a picker.** Nothing tells a client which exchanges
@@ -11949,6 +12080,19 @@ impl ChatApp {
                 ));
             }
             ui.add_space(tokens::SPACING_SM);
+        }
+        // **SIP-53, under the two lines that say what it would cost.** Where
+        // the account lives and how many conversations are ordered here are
+        // directly above; this is the control that acts on them, so the fact
+        // and the act are not on different screens.
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Move this account…")
+            .on_hover_text(
+                "SIP-53: hand this account to another exchange. The direct messages ordered \
+                 here go with it; this window reopens at the new home.",
+            )
+            .clicked()
+        {
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::MoveHome);
         }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
             .on_hover_text("Your name and title, as others see them")

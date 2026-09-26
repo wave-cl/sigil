@@ -13,6 +13,9 @@ sigil = { path = "../sigil" }
 sigil-ui = { path = "../sigil-ui" }
 sigil-video = { path = "../sigil-video" }
 sqex-chat = { workspace = true }
+# SIP-53: an account move needs an address, and discovery is what turns the
+# domain somebody types into one -- the same call the CLI makes.
+sqex-discovery = { workspace = true }
 sqnr-core = { workspace = true }
 sqnr = { workspace = true }
 sqex-proto = { workspace = true }

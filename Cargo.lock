@@ -6031,6 +6031,7 @@ dependencies = [
  "sigil-ui",
  "sigil-video",
  "sqex-chat",
+ "sqex-discovery",
  "sqex-proto",
  "sqex-voice",
  "sqexd",

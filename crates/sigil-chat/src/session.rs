@@ -1503,6 +1503,23 @@ impl From<Link> for LinkState {
     }
 }
 
+/// Where an account is being moved to.
+///
+/// Two shapes because there are two callers: somebody typing a domain,
+/// which has to be discovered the way the CLI discovers it, and a test
+/// (or a pasted `host:port key`) that already holds the address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveTo {
+    /// A domain published over DNSSEC. Its key comes with it, and a key
+    /// that later differs is refused.
+    Discovered(String),
+    /// An address and key already in hand.
+    Known {
+        addr: std::net::SocketAddr,
+        home: PubKey,
+    },
+}
+
 /// What the interface asks the task to do.
 #[derive(Debug, Clone)]
 pub enum Cmd {
@@ -1554,11 +1571,7 @@ pub enum Cmd {
     /// start reads the new exchange as this identity's default. Without it the
     /// move succeeds and the next start returns to the old one.
     MoveHome {
-        addr: std::net::SocketAddr,
-        home: PubKey,
-        /// How the new home is reached, where there is a name for it. Empty is
-        /// allowed; the key identifies it.
-        domain: String,
+        to: MoveTo,
         identity: Option<std::path::PathBuf>,
     },
     /// SIP-53: move where a channel is ordered, to an exchange that holds a
@@ -7103,56 +7116,70 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
         Cmd::Earlier => reach_earlier(&*chat, desk),
-        Cmd::MoveHome {
-            addr,
-            home,
-            domain,
-            identity,
-        } => match chat.move_home(addr, &home, &domain, None).await {
-            Ok(moved) => {
-                // **Recorded beside the identity, or the next start undoes
-                // it.** Every later start reads this as the default exchange;
-                // without it the account moves and the client goes back to the
-                // old one to find a store that has left.
-                if let Some(path) = &identity {
-                    record_home(path, chat).await;
-                }
-                desk.my_home = Some((home, domain.clone()));
-                // The window's cue to start this session again at the new
-                // home. Nothing here can do it: the session is what would be
-                // replaced.
-                desk.home_moved = Some((home, domain.clone()));
-                desk.restructure = true;
-                let named = if domain.is_empty() {
-                    home.to_string()
-                } else {
-                    domain.clone()
-                };
-                let mut said = format!(
-                    "This account now lives at {named}. {} row(s) moved with it.",
-                    moved.refiled
-                );
-                // `left` is what could not follow because the new home already
-                // held it -- the one number that means something stayed.
-                if moved.left > 0 {
-                    said.push_str(&format!(
-                        " {} stayed behind: the new home already held them.",
-                        moved.left
-                    ));
-                }
-                // Peering is what makes the move work afterwards: without it
-                // the home's pulls are refused, and no client can mend that.
-                if !moved.peered_here || !moved.peered_at_home {
-                    said.push_str(
-                        " The two exchanges do not list each other as peers, so what is \
-                         left behind cannot be pulled across until an operator says so.",
+        Cmd::MoveHome { to, identity } => {
+            // A name becomes an address the way the CLI does it: discovery
+            // hands back the exchange's own key with its candidates, so the
+            // key is never typed alongside a domain and never guessed.
+            let resolved = match to {
+                MoveTo::Known { addr, home } => Ok((addr, home, String::new())),
+                MoveTo::Discovered(domain) => match sqex_discovery::candidates(&domain).await {
+                    Ok((server, candidates, _)) => match candidates.first() {
+                        Some(first) => Ok((first.addr, server, domain)),
+                        None => Err(format!("no address for {domain}")),
+                    },
+                    Err(why) => Err(format!("could not find {domain}: {why}")),
+                },
+            };
+            let (addr, home, domain) = match resolved {
+                Ok(found) => found,
+                Err(why) => return trouble(state, why),
+            };
+            match chat.move_home(addr, &home, &domain, None).await {
+                Ok(moved) => {
+                    // **Recorded beside the identity, or the next start undoes
+                    // it.** Every later start reads this as the default exchange;
+                    // without it the account moves and the client goes back to the
+                    // old one to find a store that has left.
+                    if let Some(path) = &identity {
+                        record_home(path, chat).await;
+                    }
+                    desk.my_home = Some((home, domain.clone()));
+                    // The window's cue to start this session again at the new
+                    // home. Nothing here can do it: the session is what would be
+                    // replaced.
+                    desk.home_moved = Some((home, domain.clone()));
+                    desk.restructure = true;
+                    let named = if domain.is_empty() {
+                        home.to_string()
+                    } else {
+                        domain.clone()
+                    };
+                    let mut said = format!(
+                        "This account now lives at {named}. {} row(s) moved with it.",
+                        moved.refiled
                     );
+                    // `left` is what could not follow because the new home already
+                    // held it -- the one number that means something stayed.
+                    if moved.left > 0 {
+                        said.push_str(&format!(
+                            " {} stayed behind: the new home already held them.",
+                            moved.left
+                        ));
+                    }
+                    // Peering is what makes the move work afterwards: without it
+                    // the home's pulls are refused, and no client can mend that.
+                    if !moved.peered_here || !moved.peered_at_home {
+                        said.push_str(
+                            " The two exchanges do not list each other as peers, so what is \
+                         left behind cannot be pulled across until an operator says so.",
+                        );
+                    }
+                    said.push_str(" Open the account at its new home to carry on.");
+                    note(state, said);
                 }
-                said.push_str(" Open the account at its new home to carry on.");
-                note(state, said);
+                Err(why) => trouble(state, format!("that move was refused: {why}")),
             }
-            Err(why) => trouble(state, format!("that move was refused: {why}")),
-        },
+        }
         Cmd::Rehome {
             channel,
             to,
