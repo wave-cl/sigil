@@ -13028,13 +13028,28 @@ impl ChatApp {
                             guardians.len()
                         ),
                     );
+                    // **A guardian is a person, drawn as one.** These were
+                    // three raw 44-character keys stacked in a column, one of
+                    // them wrapping mid-key -- unreadable, unrecognisable,
+                    // and the only place in sigil where somebody appears
+                    // without a mark. The mark is what makes a key something
+                    // a reader can compare at a glance; the full one is on
+                    // hover, and still selectable for copying.
                     for g in guardians {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(g.to_string()).monospace().small(),
+                        let key = g.to_string();
+                        ui.horizontal(|ui| {
+                            sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+                            ui.add_space(tokens::SPACING_SM);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(sigil_ui::short(&key))
+                                        .monospace()
+                                        .small(),
+                                )
+                                .selectable(true),
                             )
-                            .selectable(true),
-                        );
+                            .on_hover_text(&key);
+                        });
                     }
                     ui.colored_label(
                         theme.text_muted,
