@@ -140,6 +140,11 @@ pub struct Accounts {
     /// this machine, like the roster does. Loaded with the remembered
     /// roster and empty with a fixed one; written by the shell.
     pub quiet: crate::quiet::Quiet,
+    /// Which conversations are put away. Beside `quiet` because it is the
+    /// same kind of thing -- this machine's own decision about its own list,
+    /// belonging to the person sitting at it rather than to any identity --
+    /// and because everything that draws the list already holds the roster.
+    pub filed: crate::filed::Filed,
     /// What this machine prefers otherwise -- how a call connects. Loaded
     /// and written as `quiet` is.
     pub prefs: crate::prefs::Prefs,
@@ -172,6 +177,7 @@ impl Accounts {
             generation: 0,
             shown: Default::default(),
             quiet: Default::default(),
+            filed: Default::default(),
             prefs: Default::default(),
         }
     }
@@ -552,6 +558,7 @@ impl Accounts {
             generation: 0,
             shown: Default::default(),
             quiet: crate::quiet::Quiet::load(),
+            filed: crate::filed::Filed::load(),
             prefs: crate::prefs::Prefs::load(),
         }
     }

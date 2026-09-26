@@ -785,6 +785,9 @@ impl Shell {
     /// goes through this pass, and one that forgot to write would lose a
     /// mute at the next launch.
     fn remember_quiet(&mut self) {
+        if self.accounts.filed.take_changed() && self.remember {
+            self.accounts.filed.save();
+        }
         if self.accounts.quiet.take_changed() && self.remember {
             self.accounts.quiet.save();
         }

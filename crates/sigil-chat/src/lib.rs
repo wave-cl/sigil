@@ -1041,6 +1041,123 @@ fn member_actions_ui(
 /// still be in the box after switching to another: the next Return would send
 /// it as somebody else, which is a mistake the interface would have made on
 /// your behalf and not mentioned.
+/// What is true of a conversation, for the menu on its row.
+struct Doings {
+    muted: bool,
+    filed: bool,
+    blocked: bool,
+    /// It has one other person in it, so there is somebody to block.
+    peer: bool,
+    /// Anybody may join it, so leaving is not a door that shuts.
+    public: bool,
+}
+
+/// What the menu on a conversation's row was asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RowAct {
+    /// The state to move to, not the action: the row draws which it is.
+    Mute(bool),
+    File(bool),
+    Leave,
+    Block(bool),
+}
+
+/// The menu on a conversation's row: what can be done to it without opening
+/// it.
+///
+/// **Ordered by how hard it is to undo.** Quiet first, then out of the way,
+/// then out of the conversation, then the person. `ui.close()` on each,
+/// because a menu that stays open after its row has gone is a menu about
+/// nothing.
+///
+/// Each row names the *state* it moves to where there is one to name, as the
+/// switches on the settings screens do: "Mute" against "Unmute" says what
+/// pressing does, and that is what a menu is for.
+fn row_menu(ui: &mut egui::Ui, is: &Doings) -> Option<RowAct> {
+    let theme = ColorTheme::current(ui.ctx());
+    let mut act = None;
+    // The width is the popup's, set where it is opened: that is the only
+    // place that knows how much room there is between the press and the
+    // edge of the screen.
+
+    let (bell, said) = if is.muted {
+        (sigil_ui::Icon::BellOff, "Unmute")
+    } else {
+        (sigil_ui::Icon::Bell, "Mute")
+    };
+    if sigil_ui::icon_item(ui, bell, said).clicked() {
+        act = Some(RowAct::Mute(!is.muted));
+        ui.close();
+    }
+
+    // **Away, not gone.** Nobody is told and the other party cannot tell --
+    // which is the whole difference between this and leaving, and why they
+    // are next to each other with the harder one second.
+    let (icon, said) = if is.filed {
+        (sigil_ui::Icon::Compose, "Put back on the list")
+    } else {
+        (sigil_ui::Icon::Save, "Put away")
+    };
+    if sigil_ui::icon_item(ui, icon, said)
+        .on_hover_text(if is.filed {
+            "It goes back among the others."
+        } else {
+            "Off this list, and nowhere else: nothing is sent and nobody is \
+             told. A message brings it back."
+        })
+        .clicked()
+    {
+        act = Some(RowAct::File(!is.filed));
+        ui.close();
+    }
+
+    ui.separator();
+
+    // Not for a public channel: leaving one is a door anybody may walk back
+    // through, so it is an ordinary thing and not a grave one.
+    if sigil_ui::icon_item_tinted(
+        ui,
+        sigil_ui::Icon::Leave,
+        "Leave",
+        if is.public {
+            theme.text_primary
+        } else {
+            theme.destructive
+        },
+    )
+    .on_hover_text(
+        "You stop receiving it. What was said stays where it is, and nobody \
+         else loses it.",
+    )
+    .clicked()
+    {
+        act = Some(RowAct::Leave);
+        ui.close();
+    }
+
+    // Only where there is one person to block. A group has many, and
+    // blocking is about somebody rather than about a room.
+    if is.peer {
+        let (icon, said, tint) = if is.blocked {
+            (sigil_ui::Icon::Bell, "Unblock", theme.text_primary)
+        } else {
+            (sigil_ui::Icon::Muted, "Block", theme.destructive)
+        };
+        if sigil_ui::icon_item_tinted(ui, icon, said, tint)
+            .on_hover_text(if is.blocked {
+                "They can write to you again."
+            } else {
+                "Nothing of theirs reaches you. They are not told."
+            })
+            .clicked()
+        {
+            act = Some(RowAct::Block(!is.blocked));
+            ui.close();
+        }
+    }
+    act
+}
+
 /// What the bubble is told about a voice note.
 ///
 /// `None` until somebody presses play: a note is not fetched for being
@@ -1381,6 +1498,11 @@ struct Pane {
     /// start the moment they do -- in the viewer, which is where a press
     /// on a video in the transcript goes.
     play_when_fetched: HashSet<String>,
+    /// Whether the list is showing what was put away rather than the rest.
+    /// Per pane and not remembered: a list somebody left showing the filed
+    /// ones would open there next time, which is not where a conversation
+    /// list opens.
+    showing_filed: bool,
     /// Which message each of those is on, so the viewer can open on it.
     open_when_fetched: HashMap<String, (u64, usize)>,
     /// The viewer is showing a video on the whole screen; put back when it
@@ -1707,6 +1829,7 @@ impl Default for Pane {
             notes: HashMap::new(),
             recording: None,
             play_when_fetched: HashSet::new(),
+            showing_filed: false,
             open_when_fetched: HashMap::new(),
             whole_screen: false,
             unplayable: HashMap::new(),
@@ -6885,11 +7008,62 @@ impl ChatApp {
         // the pointer arrives: a floating bar takes no width, so nothing
         // moves, and the test written for that could not be made to fail.
         let bar = ui.spacing().scroll.bar_width;
+        // **Collected, then done.** A row's menu is drawn inside the scroll
+        // area's closure, which already holds `self` and the state it is
+        // listing; acting there would want both again. The same shape the
+        // transcript uses for what was done to a message.
+        let mut acts: Vec<([u8; 32], Option<PubKey>, Option<RowAct>)> = Vec::new();
+        // **The way back to what was put away.** Drawn only when there is
+        // something behind it: a row leading to an empty list is furniture,
+        // and one that is never there is a feature nobody can undo.
+        let away = state
+            .conversations
+            .iter()
+            .filter(|c| {
+                ctx.accounts.filed.stays_away(
+                    &at.1,
+                    &c.channel,
+                    c.waiting || c.unread > 0,
+                    ctx.accounts.quiet.is_muted(&at.1, &c.channel),
+                )
+            })
+            .count();
+        let showing_filed = self.pane(at).showing_filed;
+        if away > 0 || showing_filed {
+            let said = if showing_filed {
+                "Back to the list".to_string()
+            } else {
+                format!("Put away ({away})")
+            };
+            let icon = if showing_filed {
+                sigil_ui::Icon::Back
+            } else {
+                sigil_ui::Icon::Save
+            };
+            if sigil_ui::icon_item(ui, icon, &said).clicked() {
+                self.pane(at).showing_filed = !showing_filed;
+            }
+            ui.separator();
+        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_max_width((ui.available_width() - bar).max(0.0));
                 for convo in &state.conversations {
+                    // **Put away, and staying away.** Something waiting
+                    // brings a conversation back: one written in is not one
+                    // somebody is finished with, and a message nobody can
+                    // find is worse than a list one row longer. Muted as
+                    // well as filed means both were meant, and it stays.
+                    if ctx.accounts.filed.stays_away(
+                        &at.1,
+                        &convo.channel,
+                        convo.waiting || convo.unread > 0,
+                        ctx.accounts.quiet.is_muted(&at.1, &convo.channel),
+                    ) && !showing_filed
+                    {
+                        continue;
+                    }
                     let id = bs58::encode(convo.channel).into_string();
                     let selected = state.open == Some(convo.channel);
                     // Decoded on the first frame that draws it and kept, so
@@ -6926,11 +7100,73 @@ impl ChatApp {
                         verified: convo.peer.is_some_and(|p| state.verified.contains_key(&p)),
                         picture: picture.as_ref(),
                     };
-                    if sigil_ui::conversation_row(ui, &row, selected).clicked() {
+                    let pressed = sigil_ui::conversation_row(ui, &row, selected);
+                    if pressed.clicked() {
                         self.send_as(Some(at), Cmd::Show(convo.channel));
                     }
+                    // **What can be done to a conversation without opening
+                    // it.** A long press is where a phone puts this and a
+                    // right-click is where a desktop does; egui's context
+                    // menu is both, because it turns a long touch into a
+                    // secondary click. Everything here was reachable only
+                    // from inside the conversation, which is the wrong place
+                    // for "I do not want to look at this".
+                    // **Fitted to the screen, not to the press.** A context
+                    // menu is anchored where the finger was and grows right
+                    // from there, on a layer no panel's inset reaches -- so a
+                    // press in the middle of a 360-point row put a menu
+                    // thirteen points off the edge, which
+                    // `nothing_runs_off_the_edge` caught over this very list.
+                    // The same fault the message's long-press menu had at the
+                    // *foot* of a phone, and the same answer: measure the room
+                    // and fit it.
+                    let edge = ui.ctx().content_rect().right();
+                    let from = pressed
+                        .interact_pointer_pos()
+                        .map(|p| p.x)
+                        .unwrap_or(pressed.rect.left());
+                    let room = (edge - from - tokens::SPACING_MD).max(tokens::MENU_MIN);
+                    egui::Popup::context_menu(&pressed)
+                        .width(room.min(tokens::MENU_MAX))
+                        .show(|ui| {
+                            acts.push((
+                                convo.channel,
+                                convo.peer,
+                                row_menu(
+                                    ui,
+                                    &Doings {
+                                        muted: row.muted,
+                                        filed: ctx.accounts.filed.is_filed(&at.1, &convo.channel),
+                                        blocked: convo
+                                            .peer
+                                            .is_some_and(|p| state.blocked.contains(&p)),
+                                        peer: convo.peer.is_some(),
+                                        // `None` is a conversation whose visibility this
+                                        // client has not been told; treat it as private,
+                                        // which is the answer that makes leaving read as
+                                        // the graver thing rather than the lighter one.
+                                        public: convo.public.unwrap_or(false),
+                                    },
+                                ),
+                            ));
+                        });
                 }
             });
+        for (channel, peer, act) in acts {
+            match act {
+                Some(RowAct::Mute(muted)) => ctx.accounts.quiet.set_muted(&at.1, &channel, muted),
+                Some(RowAct::File(away)) => {
+                    ctx.accounts.filed.set_filed(&at.1, &channel, away);
+                }
+                Some(RowAct::Leave) => self.send_as(Some(at), Cmd::Leave(Some(channel))),
+                Some(RowAct::Block(blocked)) => {
+                    if let Some(who) = peer {
+                        self.send_as(Some(at), Cmd::SetBlocked { who, blocked });
+                    }
+                }
+                None => {}
+            }
+        }
     }
 
     /// The messages, and the box to write one in.
@@ -10780,7 +11016,7 @@ impl ChatApp {
             .on_hover_text(LEAVING)
             .clicked()
         {
-            self.send_as(Some(at), Cmd::Leave);
+            self.send_as(Some(at), Cmd::Leave(None));
             ctx.navigator.back();
         }
         // The same reason as the row above: leaving and destroying sit next

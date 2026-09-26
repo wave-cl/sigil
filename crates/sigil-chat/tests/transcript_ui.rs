@@ -2615,6 +2615,20 @@ fn text_of(h: &Harness<'static>) -> String {
 /// `text_of` joins them, which is right for "is this sentence anywhere" and
 /// wrong for "is there a control saying exactly `2`" -- a substring search for
 /// a bare number matches a timestamp, an unread pill and half the keys.
+/// A long press, as egui sees one: it turns a long touch into a secondary
+/// click, so the same gesture is a right-click on a desktop and a held
+/// finger on a phone, and a case can send the click it becomes.
+fn long_press(h: &mut Harness<'static>, at: egui::Pos2) {
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+}
+
 fn labels(h: &Harness<'static>) -> Vec<String> {
     fn walk(node: egui_kittest::Node<'_>, out: &mut Vec<String>) {
         let n = node.accesskit_node();
@@ -14595,4 +14609,97 @@ fn a_moved_account_shows_the_whole_successor_key() {
          full: {said}"
     );
     nothing_runs_off_the_edge(&h, "the conversation with a moved account");
+}
+
+/// **A long press on a conversation offers what can be done to it.**
+///
+/// Everything here was reachable only from inside the conversation, which is
+/// the wrong place for "I do not want to look at this". egui turns a long
+/// touch into a secondary click, so the same menu is a right-click on a
+/// desktop and a long press on a phone.
+#[test]
+fn a_conversations_row_offers_a_menu() {
+    // Nothing open: a phone draws the list or the conversation, never both,
+    // and the list is what this is about.
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    let row = h
+        .get_all(egui_kittest::kittest::by().label_contains("Ada"))
+        .map(|n| n.rect())
+        .next()
+        .expect("Ada's row in the list");
+    long_press(&mut h, row.center());
+    h.run_steps(3);
+
+    let said = labels(&h);
+    for want in ["Mute", "Put away", "Leave", "Block"] {
+        assert!(
+            said.iter().any(|l| l == want),
+            "the row's menu does not offer {want:?}: {said:?}"
+        );
+    }
+    nothing_runs_off_the_edge(&h, "the conversation list with a row menu open");
+}
+
+/// **Put away means off the list, with a way back to it.**
+///
+/// Nothing is sent and the other party cannot tell — that is the whole
+/// difference between this and leaving. So the only thing that can go wrong
+/// is a conversation that cannot be found again, which is what the second
+/// half of this is about.
+///
+/// Driven through the menu rather than by seeding the state, because the
+/// press is the part that had never existed.
+#[test]
+fn a_conversation_put_away_leaves_the_list_and_can_be_found() {
+    let mut state = a_conversation();
+    state.open = None;
+    // **Nothing waiting in the one being filed.** Something waiting brings a
+    // conversation back on purpose, which is asserted where that rule lives
+    // (`Filed::stays_away`); a fixture with unread messages would exercise
+    // that rule here instead of this one, and the case would fail for a
+    // reason that has nothing to do with the press.
+    let label = {
+        let c = state
+            .conversations
+            .iter_mut()
+            .find(|c| c.peer.is_some())
+            .expect("a direct message in the fixture");
+        c.unread = 0;
+        c.waiting = false;
+        c.mentioned = 0;
+        c.label.clone()
+    };
+
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    let row = h
+        .get_all(egui_kittest::kittest::by().label_contains(&label))
+        .map(|n| n.rect())
+        .next()
+        .expect("its row in the list");
+    long_press(&mut h, row.center());
+    h.run_steps(3);
+    h.get_by_label("Put away").click();
+    h.run_steps(3);
+
+    let said = labels(&h);
+    assert!(
+        !said.contains(&label),
+        "a conversation put away is still on the list: {said:?}"
+    );
+    // And the way back to it says how many are behind it.
+    assert!(
+        said.iter().any(|l| l.starts_with("Put away (")),
+        "nothing leads to what was put away: {said:?}"
+    );
+    h.get_by_label_contains("Put away (").click();
+    h.run_steps(3);
+    let said = labels(&h);
+    assert!(
+        said.contains(&label),
+        "the way back leads nowhere: {said:?}"
+    );
 }

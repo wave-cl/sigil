@@ -1698,7 +1698,7 @@ pub enum Cmd {
     Rotate,
     /// Leave. For a direct message this removes only us — leaving a
     /// conversation must not delete the other person's copy.
-    Leave,
+    Leave(Option<[u8; 32]>),
     /// **Destroy the channel for everybody.** Not the same as `Close`, which
     /// only puts it away on this screen.
     Destroy,
@@ -8641,8 +8641,15 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Err(e) => trouble(state, e),
             }
         }
-        Cmd::Leave => {
-            let Some(channel) = desk.open else { return };
+        Cmd::Leave(which) => {
+            // **The one named, or the one open.** Leaving used to be reachable
+            // only from inside a conversation, so it took the open one and
+            // needed no argument; the chat list's own menu leaves one without
+            // opening it, and opening it first to leave it would put somebody
+            // in a conversation for the moment before it disappeared.
+            let Some(channel) = which.or(desk.open) else {
+                return;
+            };
             match chat.leave(&channel).await {
                 Ok(()) => {
                     // The same reason as a channel the exchange stops listing:

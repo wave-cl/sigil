@@ -607,7 +607,7 @@ async fn a_conversation_that_was_left_does_not_come_back() {
         "the group should appear: {:?}",
         alice.state().conversations
     );
-    alice.send(Cmd::Leave);
+    alice.send(Cmd::Leave(None));
     assert!(
         until(
             || !alice
