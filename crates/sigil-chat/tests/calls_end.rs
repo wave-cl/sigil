@@ -51,12 +51,22 @@ fn pass_telling(
 /// working notifier looks like from inside a test, and this test is about
 /// something being said.
 #[derive(Default)]
-struct Watching(std::cell::RefCell<Vec<Option<String>>>);
+struct Watching {
+    said: std::cell::RefCell<Vec<Option<String>>>,
+    /// Whose call it was told about, kept separately so the cases about
+    /// *whether* something was said read as they always did.
+    whose: std::cell::RefCell<Vec<Option<PubKey>>>,
+}
 
 impl Watching {
     /// What it was told since it was last asked.
     fn told(&self) -> Vec<Option<String>> {
-        std::mem::take(&mut self.0.borrow_mut())
+        std::mem::take(&mut self.said.borrow_mut())
+    }
+
+    /// And whose call it was told about.
+    fn about(&self) -> Vec<Option<PubKey>> {
+        std::mem::take(&mut self.whose.borrow_mut())
     }
 }
 
@@ -64,8 +74,11 @@ impl sigil::app::Notify for Watching {
     fn notice(&self, _notice: sigil::Notice<'_>) -> bool {
         false
     }
-    fn calling(&self, with: Option<&str>) {
-        self.0.borrow_mut().push(with.map(|s| s.to_string()));
+    fn calling(&self, live: Option<sigil::InCall<'_>>) {
+        self.said
+            .borrow_mut()
+            .push(live.map(|l| l.with.to_string()));
+        self.whose.borrow_mut().push(live.map(|l| l.identity));
     }
 }
 
@@ -495,6 +508,15 @@ async fn the_platform_is_told_a_call_began_and_ended_once_each() {
         told[0].is_some(),
         "a call with no conversation to name is still a call: {told:?}"
     );
+    // **And whose it is.** The notice a call stands behind carries a way back
+    // into the call and a way to end it, and both have to name which call --
+    // a phone can hold one per identity, and a control acting on whichever
+    // came first would hang up the wrong person.
+    assert_eq!(
+        watching.about(),
+        vec![Some(me)],
+        "the platform is told a call is up and not whose"
+    );
 
     // Four more passes with the call still up.
     for _ in 0..4 {
@@ -603,7 +625,7 @@ fn phone_call_routes(
     Held,
     tempfile::TempDir,
 ) {
-    phone_call_routes_showing(route, state, None)
+    phone_call_routes_showing(route, state, None, |_, _| {})
 }
 
 /// The same, with what the window knows about the people in it.
@@ -616,6 +638,7 @@ fn phone_call_routes_showing(
     route: sigil_chat::Route,
     state: sigil_net::CallState,
     shown: Option<sigil_chat::ChatState>,
+    setup: impl FnOnce(&mut ChatApp, &mut Accounts),
 ) -> (
     egui_kittest::Harness<'static>,
     Routes,
@@ -640,6 +663,10 @@ fn phone_call_routes_showing(
     if let Some(shown) = shown {
         app.show_state_for_test(shown);
     }
+    // Anything the case wants done to the window before it is drawn: a press
+    // on a notification, say, whose whole point is what the *next* pass then
+    // does about it.
+    setup(&mut app, &mut accounts);
     // `Route::Call` is keyed by identity, and only this harness knows the key.
     let route = match route {
         sigil_chat::Route::Call(_) => sigil_chat::Route::Call(me),
@@ -1540,6 +1567,7 @@ async fn the_card_names_the_room() {
         sigil_chat::Route::Call(PubKey::new([0u8; 32])),
         state,
         Some(shown),
+        |_, _| {},
     );
     h.run_steps(3);
     assert_eq!(
@@ -1600,5 +1628,148 @@ async fn the_bar_says_when_the_microphone_is_off() {
     assert!(
         !said.iter().any(|l| l == "muted"),
         "an open microphone is reported as a shut one: {said:?}"
+    );
+}
+
+/// **The two controls on a live call's notice, and what they must not do.**
+///
+/// A call's notice is the whole of what is on screen once the person has
+/// left sigil to look something up, so it carries a way back into the call
+/// and a way off it. Both name whose call they mean, because a phone holds
+/// one per identity and a control that acted on whichever came first would
+/// hang up the wrong person -- which is what the third case here is about.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_calls_notice_leads_back_into_it_and_off_it() {
+    use sigil::app::App;
+
+    let hold = |app: &mut ChatApp, me| {
+        app.hold_call_for_test(
+            me,
+            [3u8; 32],
+            9,
+            sigil_net::CallHandle::for_test(sigil_net::CallState {
+                phase: sigil_net::Phase::Live,
+                me: Some(me),
+                ..Default::default()
+            }),
+        );
+    };
+    let press = |app: &mut ChatApp, accounts: &mut Accounts, identity, act| -> (bool, usize) {
+        let mut nav = Navigator::default();
+        let mut ctx = AppContext {
+            navigator: &mut nav,
+            accounts,
+            unfocused: true,
+            away: false,
+            notify: &Silent,
+            connections: &Default::default(),
+        };
+        let took = app.on_call(&mut ctx, &sigil::CallPress { identity, act });
+        (took, nav.take().len())
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let one = Account::unlocked_for_test([1u8; 32]);
+    let me = one.unlocked().expect("an open account").me();
+    let mut accounts = Accounts::of(vec![one]);
+    let mut app = app_at(dir.path().to_path_buf());
+    hold(&mut app, me);
+
+    // Back to the call: taken, and the call is untouched. Where it *leads*
+    // is asserted below, on a pass that draws -- the push is deliberately
+    // deferred to one, because `push_here` lands in whichever app the shell
+    // has in front and this press can arrive while that is another one.
+    let (took, asked) = press(&mut app, &mut accounts, me, sigil::CallAct::Show);
+    assert!(took, "the app disowned a press about a call it is holding");
+    assert_eq!(asked, 0, "the press navigated before anything was drawn");
+    assert_eq!(
+        app.calls_for_test(),
+        vec![me],
+        "going back to a call ended it"
+    );
+
+    // A press about somebody else's call is not this window's to act on --
+    // and, crucially, does not fall through onto the call it *is* holding.
+    let stranger = PubKey::new([42u8; 32]);
+    let (took, asked) = press(&mut app, &mut accounts, stranger, sigil::CallAct::HangUp);
+    assert!(!took, "a press about a call nobody here holds was taken");
+    assert_eq!(asked, 0, "and navigated somewhere");
+    assert_eq!(
+        app.calls_for_test(),
+        vec![me],
+        "a hang up meant for another identity ended this one's call"
+    );
+
+    // And off it. No route: somebody hanging up from the shade did not ask
+    // for the application.
+    let (took, asked) = press(&mut app, &mut accounts, me, sigil::CallAct::HangUp);
+    assert!(took, "the app disowned the hang up");
+    assert_eq!(
+        asked, 0,
+        "hanging up from the notice brought the window somewhere"
+    );
+    assert!(
+        app.calls_for_test().is_empty(),
+        "the call is still up after its notice said to end it"
+    );
+}
+
+/// **And the press leads somewhere**: the pass after it puts the call on
+/// screen.
+///
+/// The other half of the case above, which stops at the window having taken
+/// the press. A press on a call's notice is handed over with no pane around
+/// it -- it can arrive from a broadcast receiver while another tab is in
+/// front -- so the route is asked for on the window's own next pass, and
+/// this is the assertion that the deferral does not simply lose it.
+#[tokio::test(flavor = "multi_thread")]
+async fn back_to_the_call_from_its_notice_lands_on_the_card() {
+    use sigil::app::App;
+
+    let (mut h, routes, held, _dir) = phone_call_routes_showing(
+        sigil_chat::Route::Conversations,
+        live(),
+        None,
+        |app, accounts| {
+            let me = accounts
+                .unlocked()
+                .map(|(k, _)| k)
+                .next()
+                .expect("an open account");
+            let mut nav = Navigator::default();
+            let mut ctx = AppContext {
+                navigator: &mut nav,
+                accounts,
+                unfocused: true,
+                away: false,
+                notify: &Silent,
+                connections: &Default::default(),
+            };
+            assert!(
+                app.on_call(
+                    &mut ctx,
+                    &sigil::CallPress {
+                        identity: me,
+                        act: sigil::CallAct::Show,
+                    },
+                ),
+                "the window did not take a press about the call it holds, so \
+                 the rest of this says nothing"
+            );
+        },
+    );
+    h.run_steps(3);
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "no call is held, so this says nothing"
+    );
+
+    let asked = routes.borrow().clone();
+    assert!(
+        asked
+            .iter()
+            .any(|r| matches!(r, sigil_chat::Route::Call(_))),
+        "the notice was pressed and the window went nowhere: {asked:?}"
     );
 }

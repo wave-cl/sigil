@@ -1791,6 +1791,13 @@ pub struct ChatApp {
     /// What the platform was last told about a call being up, so it is told
     /// on change rather than on every pass. See [`ChatApp::announce_calling`].
     told_calling: Option<String>,
+    /// A call to put on screen on the next pass of this window.
+    ///
+    /// Set where a call becomes live -- answering it, or a press on the notice
+    /// it stands behind -- and read in `render_nav`, because `push_here`
+    /// lands in whichever app the shell has in front and neither of those
+    /// two moments is guaranteed to be this one.
+    show_call: Option<PubKey>,
     /// The route last given to the platform, so it is told on change rather
     /// than on every frame. `None` when no call is up.
     told_route: Option<bool>,
@@ -1987,6 +1994,7 @@ impl ChatApp {
             identity_paths: HashMap::new(),
             starts: 0,
             told_calling: None,
+            show_call: None,
             told_route: None,
             mics: Vec::new(),
             mics_read: None,
@@ -2893,6 +2901,17 @@ impl App for ChatApp {
             if let Some(open) = self.in_call_ui(&at, ui, &theme, except) {
                 ctx.navigator.push_here(Route::Call(open));
             }
+            // A call asked for from somewhere with no pane around it: the
+            // Answer on a ring, or the notice a live call stands behind.
+            // Only while there is still a call to go to -- "back to the call"
+            // is meaningless once it has ended, and a card for a dead call
+            // would be popped on the very next pass anyway.
+            if let Some(me) = self.show_call.take()
+                && self.calls.contains_key(&me)
+                && except != Some(me)
+            {
+                ctx.navigator.push_here(Route::Call(me));
+            }
             if drew {
                 ui.add_space(tokens::SPACING_SM);
             }
@@ -2955,6 +2974,23 @@ impl App for ChatApp {
 
     /// A notification pressed: the identity it came to is shown, at its
     /// exchange, with the conversation open.
+    /// A press on the notice a live call stands behind.
+    ///
+    /// Only for a call this window is actually carrying: a stale notice --
+    /// the service outliving the call it was started for, or a press that
+    /// raced the far end hanging up -- must not take somebody to a screen
+    /// about nothing, and must certainly not end a different call.
+    fn on_call(&mut self, _ctx: &mut AppContext<'_>, press: &sigil::CallPress) -> bool {
+        if !self.calls.contains_key(&press.identity) {
+            return false;
+        }
+        match press.act {
+            sigil::CallAct::Show => self.show_the_call(press.identity),
+            sigil::CallAct::HangUp => self.hang_up(press.identity),
+        }
+        true
+    }
+
     fn open(&mut self, ctx: &mut AppContext<'_>, target: &Target) -> bool {
         let at: At = (target.identity, target.exchange.clone());
         if !self.sessions.contains_key(&at) {
@@ -7356,19 +7392,7 @@ impl ChatApp {
 
         match pressed {
             Some(sigil_ui::CallPress::HangUp) => {
-                // `leave_call` is the one that ends it, and it answers with
-                // what the entry needs -- including `None` for a cross-exchange
-                // call, which has no channel here to write one into.
-                if let Some((channel, seq, seconds)) = self.leave_call(me) {
-                    self.send_as(
-                        self.at_for(me).as_ref(),
-                        Cmd::Hangup {
-                            channel,
-                            seq,
-                            seconds,
-                        },
-                    );
-                }
+                self.hang_up(me);
                 // The card is about a call that is now over; the dispatch
                 // would pop it on the next pass anyway, and going back now
                 // means the press and the screen change together.
@@ -10696,6 +10720,52 @@ impl ChatApp {
     /// **The invitation is a bearer capability**: the secret is the whole of
     /// what joining needs, so anybody who can read the entry can join. That is
     /// SIP-36's design and the reason a call entry wants a short expiry.
+    /// **A call that has just become this window's gets the screen.**
+    ///
+    /// Answering used to leave the reader exactly where they were, with a
+    /// strip at the top of whatever they had been looking at -- so the one
+    /// screen built for a call was reachable only by noticing the strip and
+    /// pressing it. Every phone puts you in the call when you take one.
+    ///
+    /// In one place, at the two moments a call becomes live here, rather than
+    /// at each of the four buttons and notifications that can start one: a
+    /// rule written at one Answer is a rule the next Answer will not have.
+    /// Back leaves the call running and returns to what was underneath, which
+    /// is what makes this safe to do without asking.
+    ///
+    /// **Asked for here, navigated to in `render_nav`.** `push_here` means
+    /// "inside the app that is asking", and the shell reads that as whichever
+    /// app is *in front* -- so a call answered while the Phone tab was open
+    /// would push a chat route onto the Phone tab's stack, which is a token
+    /// it cannot draw. The chat window pushes it on its own next pass, where
+    /// the app that is asking really is this one.
+    fn show_the_call(&mut self, me: PubKey) {
+        self.show_call = Some(me);
+    }
+
+    /// End one identity's call, wherever the asking came from.
+    ///
+    /// **Out of the card's button**, because it is no longer the only way a
+    /// call is ended: the notice a call stands behind carries one too, and
+    /// that press arrives with no `ui` and no pane around it. Ending a call
+    /// two ways is how one of them ends up forgetting to tell the exchange.
+    ///
+    /// `leave_call` is what actually ends it, and answers with what the
+    /// entry needs -- including `None` for a cross-exchange call, which has
+    /// no channel here to write one into.
+    fn hang_up(&mut self, me: PubKey) {
+        if let Some((channel, seq, seconds)) = self.leave_call(me) {
+            self.send_as(
+                self.at_for(me).as_ref(),
+                Cmd::Hangup {
+                    channel,
+                    seq,
+                    seconds,
+                },
+            );
+        }
+    }
+
     fn join_call(
         &mut self,
         ctx: &mut AppContext<'_>,
@@ -10781,6 +10851,7 @@ impl ChatApp {
                 speaker: false,
             },
         );
+        self.show_the_call(me);
     }
 
     /// Join the call we placed, once somebody has picked it up.
@@ -11170,6 +11241,7 @@ impl ChatApp {
                 speaker: false,
             },
         );
+        self.show_the_call(me);
         self.send_as(Some(at), Cmd::CrossRingHandled);
     }
 
@@ -11294,12 +11366,8 @@ impl ChatApp {
     fn announce_calling(&mut self, ctx: &mut AppContext<'_>) {
         // Whoever the call is with, as the conversation is named -- the same
         // label the transcript uses, so the notification and the screen agree.
-        let now = self
-            .calls
-            .keys()
-            .next()
-            .copied()
-            .and_then(|me| self.call_label(me));
+        let whose = self.calls.keys().next().copied();
+        let now = whose.and_then(|me| self.call_label(me));
         // A call whose conversation this window cannot name is still a call:
         // the service exists to keep the process alive, and a missing label
         // must not be the reason it is not started.
@@ -11309,7 +11377,15 @@ impl ChatApp {
             (false, None) => Some(String::new()),
         };
         if now != self.told_calling {
-            ctx.notify.calling(now.as_deref());
+            // The identity goes with the label, because the notice carries a
+            // way back into the call and a way to end it and both have to
+            // name which call. `whose` is `Some` whenever `now` is: they are
+            // read off the same entry.
+            ctx.notify.calling(
+                now.as_deref()
+                    .zip(whose)
+                    .map(|(with, identity)| sigil::InCall { with, identity }),
+            );
             self.told_calling = now;
         }
     }

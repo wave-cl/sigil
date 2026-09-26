@@ -405,6 +405,7 @@ impl Shell {
             self.act(action, egui_ctx);
         }
         self.open_pressed(egui_ctx);
+        self.take_call_presses(egui_ctx);
         self.badge();
         self.remember_quiet();
         self.tray_actions(egui_ctx);
@@ -521,6 +522,38 @@ impl Shell {
                 if app.open(&mut ctx, &target) {
                     self.opened[i] = true;
                     self.navigator.switch_to(AppId(i));
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Presses on a live call's notice since last pass.
+    ///
+    /// **`Show` brings the window up; `HangUp` does not.** Ending a call
+    /// from the shade is precisely what somebody does when they do *not*
+    /// want to open the application -- putting sigil in front of them for it
+    /// would make the quickest way to hang up also the slowest way back to
+    /// what they were doing.
+    fn take_call_presses(&mut self, egui_ctx: &egui::Context) {
+        for press in self.platform.call_presses() {
+            if press.act == sigil::CallAct::Show {
+                self.present(egui_ctx);
+            }
+            for (i, app) in self.apps.iter_mut().enumerate() {
+                let mut ctx = AppContext {
+                    navigator: &mut self.navigator,
+                    accounts: &mut self.accounts,
+                    unfocused: false,
+                    away: self.away,
+                    notify: self.platform.as_ref(),
+                    connections: &self.connections,
+                };
+                if app.on_call(&mut ctx, &press) {
+                    self.opened[i] = true;
+                    if press.act == sigil::CallAct::Show {
+                        self.navigator.switch_to(AppId(i));
+                    }
                     break;
                 }
             }

@@ -188,6 +188,36 @@ pub struct Target {
     pub answer: bool,
 }
 
+/// A call this window is carrying, for the platform that has to be told.
+#[derive(Debug, Clone, Copy)]
+pub struct InCall<'a> {
+    /// Whoever it is with, named as the conversation is -- so the notice and
+    /// the screen agree. Empty where this window cannot name them, which is
+    /// still a call and still has to keep the process alive.
+    pub with: &'a str,
+    /// **Whose call it is.** The notice carries a way back to the call and a
+    /// way to end it, and both have to say *which* -- a phone can hold one
+    /// call per identity, and a control that acted on whichever came first
+    /// would hang up the wrong person.
+    pub identity: sqnr_core::PubKey,
+}
+
+/// What was pressed on a live call's notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallAct {
+    /// Take me back to the call.
+    Show,
+    /// End it, from wherever the person happens to be.
+    HangUp,
+}
+
+/// One press on a live call's notice, and whose call it was about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallPress {
+    pub identity: sqnr_core::PubKey,
+    pub act: CallAct,
+}
+
 /// Whether a notification makes a sound, and which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Sound {
@@ -265,7 +295,23 @@ pub trait Notify {
     /// now against what it last said, so a platform that turns this into a
     /// notification does not repost one every frame. A desktop, where a
     /// process stays alive because nobody is killing it, does nothing.
-    fn calling(&self, _with: Option<&str>) {}
+    fn calling(&self, _live: Option<InCall<'_>>) {}
+
+    /// What was pressed on the notice a live call stands behind, since last
+    /// asked.
+    ///
+    /// **A call's notice is the only thing on screen once the window is
+    /// behind something else**, and a person who has left sigil to look
+    /// something up wants two things from it: back to the call, and off the
+    /// call. Neither can come through [`pressed`](Notify::pressed), which
+    /// names a conversation and is about arriving somewhere; these are about
+    /// a call, which is not a place.
+    ///
+    /// Empty on a platform where a call has no notice to press, which is
+    /// every platform but the phone.
+    fn call_presses(&self) -> Vec<CallPress> {
+        Vec::new()
+    }
 
     /// Whether this platform has somewhere else to put a call's sound.
     ///
@@ -297,6 +343,46 @@ pub trait Notify {
 /// Says nothing, for tests and for a session with no desktop at all.
 pub struct Silent;
 
+/// **A shared notifier is a notifier.**
+///
+/// Written here, immediately under the trait, because the alternative is a
+/// hand-written forwarding wrapper in whichever crate needs one -- and the
+/// phone had exactly that. It forwarded four of the eight methods and
+/// silently took the trait's defaults for the rest, so `routable` answered
+/// "this machine has nowhere else to put a call's sound" on the one machine
+/// that has, and the earpiece-and-loudspeaker control was never drawn on a
+/// phone at all. Nothing failed; the control was simply not there.
+///
+/// **Every method, and no `..` to hide behind.** A method added to the trait
+/// above and not added here does the same thing again, and the only warning
+/// is that this block is the next thing in the file.
+impl<T: Notify + ?Sized> Notify for std::sync::Arc<T> {
+    fn notice(&self, notice: Notice<'_>) -> bool {
+        (**self).notice(notice)
+    }
+    fn post(&self, summary: &str, body: &str) -> bool {
+        (**self).post(summary, body)
+    }
+    fn pressed(&self) -> Vec<Target> {
+        (**self).pressed()
+    }
+    fn withdraw(&self, target: &Target) {
+        (**self).withdraw(target)
+    }
+    fn calling(&self, live: Option<InCall<'_>>) {
+        (**self).calling(live)
+    }
+    fn call_presses(&self) -> Vec<CallPress> {
+        (**self).call_presses()
+    }
+    fn routable(&self) -> bool {
+        (**self).routable()
+    }
+    fn route(&self, speaker: bool) -> bool {
+        (**self).route(speaker)
+    }
+}
+
 impl Notify for Silent {
     fn notice(&self, _notice: Notice<'_>) -> bool {
         false
@@ -324,6 +410,19 @@ pub trait App {
     /// this app's. The shell has already brought the window up, and
     /// switches to the app that says yes.
     fn open(&mut self, _ctx: &mut AppContext<'_>, _target: &Target) -> bool {
+        false
+    }
+
+    /// Somebody pressed something on a live call's notice: go back to the
+    /// call, or end it. Yes if the call was this app's.
+    ///
+    /// Apart from [`open`](App::open) because a press on a call's notice is
+    /// not a `Target`: there is no conversation in it, and "back to the
+    /// call" is a screen rather than a place in a conversation. The shell
+    /// brings the window up for a `Show` and leaves it where it is for a
+    /// `HangUp`, which is a thing somebody does *without* wanting the
+    /// application in front of them.
+    fn on_call(&mut self, _ctx: &mut AppContext<'_>, _press: &CallPress) -> bool {
         false
     }
 
