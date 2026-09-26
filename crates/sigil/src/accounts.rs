@@ -516,7 +516,42 @@ impl Accounts {
     ///
     /// Falls back to the default identity, so a first run and a lost file look
     /// the same and both work.
+    /// The remembered roster, **with what this machine remembers about its
+    /// own behaviour**: the mutes, the conversations put away, and the
+    /// preferences.
+    ///
+    /// **One place, because there were five ways in and only one of them
+    /// did it.** Those three live in files of their own beside the roster,
+    /// and they were read in `of_remembered` — the path taken when
+    /// `accounts.json` parses as the current shape. The other four returned
+    /// defaults: no roster file, an unreadable one, an empty one, and — the
+    /// one that matters — a roster in the **older** format, which is an
+    /// ordinary upgrade and not a fault at all.
+    ///
+    /// So upgrading could silently un-mute every conversation, empty the
+    /// archive, and put "notifications say everything" back on a locked
+    /// screen. That last is the direction `prefs::Privacy` has a comment
+    /// about: somebody who chose less and was quietly given everything back
+    /// would not be told.
+    ///
+    /// Written as a wrapper over `roster` rather than as a line repeated in
+    /// each branch, so there is no branch that can be added without it.
     pub fn load() -> Accounts {
+        Accounts::roster().and_what_this_machine_remembers()
+    }
+
+    /// What this machine remembers about its own behaviour, from the files
+    /// beside the roster. Not in [`of`](Accounts::of): a test builds its
+    /// roster that way and must not pick up whoever is sitting at the
+    /// machine running it.
+    fn and_what_this_machine_remembers(mut self) -> Accounts {
+        self.quiet = crate::quiet::Quiet::load();
+        self.filed = crate::filed::Filed::load();
+        self.prefs = crate::prefs::Prefs::load();
+        self
+    }
+
+    fn roster() -> Accounts {
         let Some(path) = Accounts::remembered_at() else {
             return Accounts::discover(None);
         };
@@ -557,9 +592,11 @@ impl Accounts {
             active: 0,
             generation: 0,
             shown: Default::default(),
-            quiet: crate::quiet::Quiet::load(),
-            filed: crate::filed::Filed::load(),
-            prefs: crate::prefs::Prefs::load(),
+            // Filled by `load`, which is the only caller and the only place
+            // that knows this is a real roster rather than a test's.
+            quiet: Default::default(),
+            filed: Default::default(),
+            prefs: Default::default(),
         }
     }
 
@@ -853,5 +890,65 @@ mod exchanges {
             vec![String::new(), "indra.org".into(), "trunk.exchange".into()]
         );
         assert_eq!(reopened.active_held().via_of("trunk.exchange"), None);
+    }
+}
+
+#[cfg(test)]
+mod remembered_settings_tests {
+    use super::*;
+
+    /// **A roster built for a test does not read the machine it runs on.**
+    ///
+    /// The mutes, the conversations put away and the preferences live in
+    /// files beside the roster. They are read by `load` and by nothing else,
+    /// so a test that builds a roster gets the defaults and not whatever the
+    /// person running it happens to have muted — which would make its result
+    /// depend on their machine.
+    #[test]
+    fn a_built_roster_has_this_machines_settings_at_their_defaults() {
+        for accounts in [
+            Accounts::of(Vec::new()),
+            Accounts::discover(None),
+            Accounts::restore(&[]),
+        ] {
+            assert_eq!(accounts.quiet, Default::default());
+            assert_eq!(accounts.filed, Default::default());
+            assert_eq!(accounts.prefs, crate::prefs::Prefs::default());
+        }
+    }
+
+    /// **And there is one place that fills them.**
+    ///
+    /// `load` used to fill them in `of_remembered`, which is one of five
+    /// ways it can build a roster; the other four returned defaults. The one
+    /// that mattered was a roster in the *older* format — an ordinary
+    /// upgrade, not a fault — so upgrading could silently un-mute every
+    /// conversation, empty the archive and put "notifications say
+    /// everything" back on a locked screen.
+    ///
+    /// This is the property, asserted the only way a property about *where*
+    /// something happens can be: the source is read for the call. It is one
+    /// wrapper over the five branches, so there is no branch that can be
+    /// added without it.
+    #[test]
+    fn every_way_in_goes_through_one_wrapper() {
+        // **The code, not this file.** A scan of the whole source counts the
+        // literals in the assertions below and answers two for every one —
+        // the instrument reading itself. Everything from the first test
+        // module on is cut away first.
+        let whole = include_str!("accounts.rs");
+        let source = &whole[..whole.find("#[cfg(test)]").unwrap_or(whole.len())];
+        assert_eq!(
+            source.matches("Quiet::load()").count(),
+            1,
+            "the machine's own settings are read in more than one place, so \
+             one of them will be forgotten"
+        );
+        assert_eq!(source.matches("Filed::load()").count(), 1);
+        assert_eq!(source.matches("Prefs::load()").count(), 1);
+        assert!(
+            source.contains("Accounts::roster().and_what_this_machine_remembers()"),
+            "load no longer wraps every branch in the one place that fills them"
+        );
     }
 }
