@@ -14440,3 +14440,72 @@ fn two_dialogs_say_which_thing_they_mean() {
         "the bare word, where a place name belongs: {said}"
     );
 }
+
+/// **Both guardian lists name a guardian they know, and both keep the key.**
+///
+/// Written as one case over the two lists on purpose. They are the same
+/// people either side of one press and they have now diverged twice: first a
+/// bare key staged against a mark and a stem lodged, then a face and a name
+/// lodged against a mark drawn from the key alone staged. A case that
+/// checked one of them would have passed both times.
+///
+/// The key stays beside the name. Choosing who may take your account when
+/// your key is gone is the last place to go on somebody's word for who they
+/// are, and a name is a word (SIP-21) while a key is not.
+#[test]
+fn both_guardian_lists_name_somebody_they_know() {
+    let called = "Grace Hopper";
+    let mut state = a_conversation();
+    state.people.insert(
+        them(),
+        sigil_chat::Person {
+            name: Some(called.into()),
+            title: None,
+            handle: None,
+            picture: None,
+        },
+    );
+    state.succession = Some(sigil_chat::Succession {
+        is_account: true,
+        lodged: Some((1, vec![them()])),
+        ..Default::default()
+    });
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Devices);
+    h.run();
+    scroll_to_the_foot(&mut h);
+
+    // Lodged: drawn from `succession.lodged`.
+    let said = text_of(&h);
+    assert!(
+        said.contains(called),
+        "a lodged guardian this window has a profile for is not named: {said}"
+    );
+    assert!(
+        said.contains(&short_form(&them())),
+        "and their key is gone from beside it: {said}"
+    );
+    // **Counted before, not assumed.** The accessibility tree repeats a
+    // label for the widget and again for what contains it, so "appears
+    // twice" is what *one* naming looks like. What the staged list adds is
+    // the difference between this number and the next one.
+    let lodged_only = said.matches(called).count();
+
+    // Staged: the same person, one press earlier, from `pane.guardians`.
+    stage_a_guardian(&mut h, &PubKey::new([5u8; 32]));
+    stage_a_guardian(&mut h, &them());
+    let said = text_of(&h);
+    assert!(
+        said.matches(called).count() > lodged_only,
+        "the staged list does not name the same person the lodged list does \
+         ({lodged_only} before staging, {} after): {said}",
+        said.matches(called).count()
+    );
+    // And the one with no profile is still their key, which is the fallback
+    // that has to keep working: a guardian is often somebody there is no
+    // conversation with.
+    assert!(
+        said.contains(&short_form(&PubKey::new([5u8; 32]))),
+        "a guardian with no profile lost their key too: {said}"
+    );
+    nothing_runs_off_the_edge(&h, "the Devices pane with named guardians");
+}

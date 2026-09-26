@@ -13415,19 +13415,51 @@ impl ChatApp {
                     // three raw 44-character keys stacked in a column, one of
                     // them wrapping mid-key -- unreadable, unrecognisable,
                     // and the only place in sigil where somebody appears
-                    // without a mark. The mark is what makes a key something
-                    // a reader can compare at a glance; the full one is on
-                    // hover, and still selectable for copying.
-                    for g in guardians {
+                    // without a mark.
+                    //
+                    // Then the mark was drawn from the key alone and the
+                    // sentence above stayed half true: a guardian you have a
+                    // profile for has a face and a name, and this asked for
+                    // neither. Both now, with the key still beside the name
+                    // rather than replaced by it -- choosing who may take
+                    // your account when your key is gone is the last place to
+                    // go on somebody's word for who they are.
+                    //
+                    // A guardian is often somebody there is no conversation
+                    // with, and then there is no profile and nothing changes:
+                    // the mark from the key, and the short key. Strictly
+                    // more, never less.
+                    let known: Vec<(PubKey, Option<String>, Option<Face>)> = guardians
+                        .iter()
+                        .map(|g| {
+                            let who = state.people.get(g);
+                            (
+                                *g,
+                                who.and_then(|who| who.named()),
+                                who.and_then(|who| who.picture.clone()),
+                            )
+                        })
+                        .collect();
+                    for (g, named, face) in known {
                         let key = g.to_string();
+                        let picture = self.person_picture(at, ui.ctx(), g, face.as_ref());
                         ui.horizontal(|ui| {
-                            sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+                            sigil_ui::avatar(ui, &key, picture.as_ref(), tokens::AVATAR_SM);
                             ui.add_space(tokens::SPACING_SM);
+                            if let Some(named) = &named {
+                                ui.add(egui::Label::new(named).truncate())
+                                    .on_hover_text(&key);
+                            }
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(sigil_ui::short(&key))
                                         .monospace()
-                                        .small(),
+                                        .small()
+                                        .color(if named.is_some() {
+                                            theme.text_secondary
+                                        } else {
+                                            theme.text_primary
+                                        }),
                                 )
                                 .selectable(true),
                             )
@@ -13469,26 +13501,50 @@ impl ChatApp {
             let named = self.pane(at).guardians.clone();
             if !named.is_empty() {
                 let mut drop: Option<PubKey> = None;
-                for g in &named {
+                // Read before the loop: drawing needs `&mut self` for the
+                // picture and `state` is borrowed from the same place.
+                let staged: Vec<(PubKey, Option<String>, Option<Face>)> = named
+                    .iter()
+                    .map(|g| {
+                        let who = state.people.get(g);
+                        (
+                            *g,
+                            who.and_then(|who| who.named()),
+                            who.and_then(|who| who.picture.clone()),
+                        )
+                    })
+                    .collect();
+                for (g, whose_name, face) in staged {
                     let key = g.to_string();
+                    let picture = self.person_picture(at, ui.ctx(), g, face.as_ref());
                     ui.horizontal(|ui| {
                         if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Remove").clicked()
                         {
-                            drop = Some(*g);
+                            drop = Some(g);
                         }
-                        // Marked and shortened, like the lodged list above.
-                        // These are the same people either side of one
-                        // press, and they were drawn two different ways:
-                        // staged, a bare key that had to wrap because a full
-                        // one beside a button is wider than a phone; lodged,
-                        // an avatar and a stem. The full key is on hover.
-                        sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+                        // Marked, named and shortened, like the lodged list
+                        // above. These are the same people either side of one
+                        // press, and they were drawn two different ways
+                        // twice: first a bare key here against an avatar and
+                        // a stem there, then a face and a name there against
+                        // a mark drawn from the key alone here. Whatever the
+                        // lodged list does, this does.
+                        sigil_ui::avatar(ui, &key, picture.as_ref(), tokens::AVATAR_SM);
                         ui.add_space(tokens::SPACING_SM);
+                        if let Some(whose_name) = &whose_name {
+                            ui.add(egui::Label::new(whose_name).truncate())
+                                .on_hover_text(&key);
+                        }
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(sigil_ui::short(&key))
                                     .monospace()
-                                    .small(),
+                                    .small()
+                                    .color(if whose_name.is_some() {
+                                        theme.text_secondary
+                                    } else {
+                                        theme.text_primary
+                                    }),
                             )
                             .selectable(true),
                         )
