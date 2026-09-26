@@ -10709,7 +10709,7 @@ impl ChatApp {
         // Leaving and destroying are not the same control and must not look
         // like one. One takes you out; the other ends it for everybody.
         const LEAVING: &str = "You stop receiving this conversation. Nobody else loses it.";
-        if sigil_ui::icon_item(ui, sigil_ui::Icon::Back, "Leave")
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Leave, "Leave")
             .on_hover_text(LEAVING)
             .clicked()
         {

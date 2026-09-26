@@ -123,6 +123,17 @@ icons! {
     /// cannot see the shape is given — the same reason [`Icon::Sound`] and
     /// [`Icon::Muted`] are two.
     MicOff => "Unmute your microphone",
+    /// Step out of something you are in: a conversation, a room.
+    ///
+    /// **Not [`Icon::Back`], which is where this began.** Back is the
+    /// navigation arrow — the one in every header, and "Previous" in the
+    /// picture viewer — and "Leave this conversation" was drawn with it, so
+    /// the settings screen offered two left-pointing arrows three hundred
+    /// points apart meaning "go back one screen" and "stop receiving this
+    /// conversation". A glyph that already means something reads as that
+    /// thing. This one points the other way, out of a bracket, which is the
+    /// shape every application uses for leaving.
+    Leave => "Leave",
     /// Play a video, or carry on with one.
     Play => "Play",
     /// Hold a video where it is.
@@ -330,6 +341,20 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
         Icon::Forward => {
             line(p(0.20, 0.50), p(0.76, 0.50));
             path(vec![p(0.56, 0.30), p(0.78, 0.50), p(0.56, 0.70)]);
+        }
+        // Out of an open bracket, rightwards: `Back`'s arrow reversed and
+        // given somewhere to be leaving *from*. The bracket is what stops it
+        // reading as `Forward`, which is the same arrow with nothing around
+        // it.
+        Icon::Leave => {
+            path(vec![
+                p(0.52, 0.20),
+                p(0.22, 0.20),
+                p(0.22, 0.80),
+                p(0.52, 0.80),
+            ]);
+            line(p(0.44, 0.50), p(0.80, 0.50));
+            path(vec![p(0.62, 0.32), p(0.82, 0.50), p(0.62, 0.68)]);
         }
         Icon::Flag => {
             // A pennant on a staff: the mark for "somebody should look at
