@@ -14071,3 +14071,107 @@ fn phone_me_settings() {
     h.run_steps(2);
     h.snapshot("phone_me_settings");
 }
+
+/// Two things waiting, one opened: a stem with a mark, when it arrived, how
+/// big it is, and the way to read or drop it.
+fn a_mailbox() -> ChatState {
+    let mut state = a_conversation();
+    state.mail = vec![
+        sigil_chat::session::MailItem {
+            id: 1,
+            from: them(),
+            at: NOW - 3600,
+            bytes: 4096,
+            opened: None,
+        },
+        sigil_chat::session::MailItem {
+            id: 2,
+            from: PubKey::new([5u8; 32]),
+            at: NOW - 7200,
+            bytes: 99,
+            opened: Some(sigil_chat::session::MailBody::Text(
+                "left for you from the command line".into(),
+            )),
+        },
+    ];
+    state
+}
+
+/// **The mailbox, which nothing had ever rendered.** SIP-5's list was built
+/// and checked by hand on a handset; no test drew it, so the one raw byte
+/// count left in sigil sat there through a release.
+#[test]
+fn the_mailbox_says_a_size_not_a_byte_count() {
+    let (mut h, app, _) = harness_phone_measured(a_mailbox(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "mail", them());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Messages left for you"), "{said}");
+    assert!(
+        said.contains("4 KiB"),
+        "a size the way the rest of sigil writes one: {said}"
+    );
+    assert!(!said.contains("4096"), "and not a raw byte count: {said}");
+    assert!(said.contains("99 B"), "{said}");
+    assert!(
+        said.contains("left for you from the command line"),
+        "the opened one shows what it held: {said}"
+    );
+}
+
+/// The picture of it, for the same reason: this screen had none.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_mailbox() {
+    let (mut h, app, _) = harness_phone_measured(a_mailbox(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "mail", them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run_steps(2);
+    h.snapshot("phone_mailbox");
+}
+
+/// **A size, written the way the rest of sigil writes one.** The quota read
+/// "4096 of 1048576 bytes used" — the only raw byte count left on a screen
+/// here, while a file two panes away says "4 KiB" through the same function.
+///
+/// And nothing at all before the exchange has said what the quota is: both
+/// numbers are zero then, and "0 B of 0 B used" answers nobody.
+#[test]
+fn the_backup_quota_is_a_size_not_a_byte_count() {
+    let mut state = a_conversation();
+    state.backup = Some(sigil_chat::Backup {
+        has_key: true,
+        held: None,
+        used: 4096,
+        quota: 1 << 20,
+        words: None,
+    });
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("4 KiB of 1.0 MiB used."), "{said}");
+    assert!(!said.contains("1048576"), "a raw byte count: {said}");
+
+    let mut state = a_conversation();
+    state.backup = Some(sigil_chat::Backup {
+        has_key: true,
+        held: None,
+        used: 0,
+        quota: 0,
+        words: None,
+    });
+    let mut h = harness_at(state, sigil_chat::Route::Devices);
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("0 B of"),
+        "the quota line before the exchange has answered: {said}"
+    );
+}

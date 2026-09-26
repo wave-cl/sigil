@@ -20,6 +20,12 @@ pub mod video;
 pub mod working;
 
 pub use attachment::{Attachment, AttachmentAction, GalleryAction, attachment, gallery};
+// **A size, written the one way.** `human` lived inside `attachment`, where
+// anything that was not an attachment did not find it -- so the backup quota
+// and the mailbox each printed a raw byte count instead, and the desktop's
+// downloader grew a third one. Named here so the next screen that has bytes
+// to show has somewhere obvious to look.
+pub use attachment::human;
 pub use clock::{brief, clock, day_label, day_of, deadline, stamp};
 pub use conversation_row::{ConversationRow, conversation_row, one_line};
 pub use dot::dot;

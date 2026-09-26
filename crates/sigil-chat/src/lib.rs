@@ -4959,11 +4959,8 @@ impl ChatApp {
             } else if file.held {
                 ui.colored_label(
                     theme.text_muted,
-                    egui::RichText::new(format!(
-                        "preview — {}",
-                        sigil_ui::attachment::human(file.size)
-                    ))
-                    .small(),
+                    egui::RichText::new(format!("preview — {}", sigil_ui::human(file.size)))
+                        .small(),
                 );
                 if ui.small_button("Fetch").clicked() {
                     self.send_as(Some(at), Cmd::Fetch { seq, index });
@@ -5783,9 +5780,9 @@ impl ChatApp {
                         ui.colored_label(
                             theme.text_muted,
                             egui::RichText::new(format!(
-                                "{} · {} bytes",
+                                "{} · {}",
                                 sigil_ui::brief(item.at, now),
-                                item.bytes
+                                sigil_ui::human(item.bytes.into())
                             ))
                             .small(),
                         );
@@ -12929,10 +12926,24 @@ impl ChatApp {
                 .small(),
             );
         }
-        ui.colored_label(
-            theme.text_muted,
-            egui::RichText::new(format!("{} of {} bytes used.", backup.used, backup.quota)).small(),
-        );
+        // **A size the way the rest of sigil writes one.** This read "4096 of
+        // 1048576 bytes used" -- a raw byte count, on a screen where a file
+        // two panes away says "4 KiB" through the `human` this now calls.
+        //
+        // And nothing at all until the exchange has said what the quota is:
+        // before it answers both numbers are zero, and "0 B of 0 B used" is
+        // a line that tells nobody anything.
+        if backup.quota > 0 {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!(
+                    "{} of {} used.",
+                    sigil_ui::human(backup.used),
+                    sigil_ui::human(backup.quota)
+                ))
+                .small(),
+            );
+        }
         ui.add_space(tokens::SPACING_SM);
         ui.horizontal(|ui| {
             if ui
