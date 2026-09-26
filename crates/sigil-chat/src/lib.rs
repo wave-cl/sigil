@@ -11760,6 +11760,25 @@ impl ChatApp {
                         // gives a press to the innermost widget that sensed it,
                         // so a tap aimed at the bar opened the numbers instead of
                         // the call. One gesture on the bar, one meaning.
+                        // **Muted is said here or nowhere.** The card is where
+                        // the microphone is turned off and the bar is what is
+                        // left on screen after pressing Back, so this strip is
+                        // the whole of what somebody who muted five minutes ago
+                        // is looking at. And there is no other cue anywhere:
+                        // sigil's mute does not stop sending, it sends comfort
+                        // noise at digital silence, precisely so the far end
+                        // reads deliberate quiet rather than a dropout -- which
+                        // means the far end will not ask either. Talking into a
+                        // muted microphone with nothing on screen to say so is
+                        // the one failure a call bar can actually prevent.
+                        if call.muted {
+                            sigil_ui::state_icon(
+                                ui,
+                                sigil_ui::Icon::MicOff,
+                                theme.warning,
+                                "muted",
+                            );
+                        }
                         ui.colored_label(
                             if detail {
                                 theme.accent

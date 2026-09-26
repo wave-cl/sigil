@@ -603,6 +603,25 @@ fn phone_call_routes(
     Held,
     tempfile::TempDir,
 ) {
+    phone_call_routes_showing(route, state, None)
+}
+
+/// The same, with what the window knows about the people in it.
+///
+/// `shown` is the `ChatState` the app draws from -- the profiles, the
+/// conversations, the members. The cases above are about pressing things and
+/// do not need one; the roster on the card is read out of exactly this, so
+/// the case that is about names has to supply it.
+fn phone_call_routes_showing(
+    route: sigil_chat::Route,
+    state: sigil_net::CallState,
+    shown: Option<sigil_chat::ChatState>,
+) -> (
+    egui_kittest::Harness<'static>,
+    Routes,
+    Held,
+    tempfile::TempDir,
+) {
     use egui_kittest::Harness;
 
     let dir = tempfile::tempdir().unwrap();
@@ -618,6 +637,9 @@ fn phone_call_routes(
         ..state
     });
     app.hold_call_for_test(me, [3u8; 32], 9, handle);
+    if let Some(shown) = shown {
+        app.show_state_for_test(shown);
+    }
     // `Route::Call` is keyed by identity, and only this harness knows the key.
     let route = match route {
         sigil_chat::Route::Call(_) => sigil_chat::Route::Call(me),
@@ -1462,5 +1484,121 @@ async fn a_card_on_a_device_that_cannot_route_draws_no_routing_control() {
     assert!(
         said.iter().any(|l| l == "Mute your microphone"),
         "and the card drew no controls at all, so this proves nothing: {said:?}"
+    );
+}
+
+/// **The card names the people in the room, on the path the app really
+/// takes.**
+///
+/// `sigil_ui::Row` grew a name because the roster was drawing base58 for
+/// people the window had profiles for. That the widget *can* draw a name is
+/// pinned in `sigil-ui`; what is pinned here is the wiring, because the
+/// lookup can miss for reasons the widget cannot see -- `people` is built
+/// from the open conversation's members, and a `zip` between two lists is a
+/// fencepost away from naming somebody to the wrong face.
+///
+/// Both things at once: the name is drawn, and the key is still drawn beside
+/// it. A name is an assertion and a key is not (SIP-21), and on a phone the
+/// roster is one of the few places a member's own key is written down.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_card_names_the_room() {
+    let grace = PubKey::new([9u8; 32]);
+    let stranger = PubKey::new([11u8; 32]);
+
+    let mut people = std::collections::HashMap::new();
+    people.insert(
+        grace,
+        sigil_chat::Person {
+            name: Some("Grace Hopper".into()),
+            title: None,
+            handle: None,
+            picture: None,
+        },
+    );
+    // And one the window has no profile for: the fallback has to keep working,
+    // because in a public room most of the people in it are strangers.
+    let shown = sigil_chat::ChatState {
+        people,
+        ..Default::default()
+    };
+
+    let in_the_room = |identity| sigil_net::PeerStatus {
+        identity,
+        speaking: false,
+        level: 0.0,
+        loss_pct: 0.0,
+        concealed: 0,
+        buffered: 3,
+    };
+    let state = sigil_net::CallState {
+        room: Some(sigil_net::RoomId::new([3u8; 32])),
+        present: vec![in_the_room(grace), in_the_room(stranger)],
+        ..live()
+    };
+
+    let (mut h, _routes, held, _dir) = phone_call_routes_showing(
+        sigil_chat::Route::Call(PubKey::new([0u8; 32])),
+        state,
+        Some(shown),
+    );
+    h.run_steps(3);
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "no call is held, so this says nothing"
+    );
+
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Grace Hopper"),
+        "the one the window has a profile for is named: {said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|l| *l == sigil_ui::short(&grace.to_string())),
+        "and their key is still beside it: {said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|l| *l == sigil_ui::short(&stranger.to_string())),
+        "the one it has no profile for is still their key: {said:?}"
+    );
+}
+
+/// **A muted call says so on the bar, which is all that is left of it.**
+///
+/// The microphone is turned off on the card, and Back leaves the call running
+/// with only the bar on screen -- so if the bar does not say it, nothing does.
+/// Nor does the other end: the mute sends comfort noise at digital silence
+/// rather than stopping, on purpose, so the far side reads deliberate quiet
+/// and has no reason to ask. Somebody talking into a muted microphone is the
+/// one failure this strip can prevent, and it prevented none of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bar_says_when_the_microphone_is_off() {
+    let quiet = sigil_net::CallState {
+        muted: true,
+        ..live()
+    };
+    let (mut h, _routes, held, _dir) = phone_call_routes(sigil_chat::Route::Conversations, quiet);
+    h.run_steps(3);
+    assert_eq!(
+        held.borrow().len(),
+        1,
+        "no call is held, so this says nothing"
+    );
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "muted"),
+        "the bar of a muted call says nothing about it: {said:?}"
+    );
+
+    // And does not say it about a call that is not muted, which is the half
+    // that makes the half above mean anything.
+    let (mut h, _routes, _held, _dir) = phone_call_routes(sigil_chat::Route::Conversations, live());
+    h.run_steps(3);
+    let said = labels(&h);
+    assert!(
+        !said.iter().any(|l| l == "muted"),
+        "an open microphone is reported as a shut one: {said:?}"
     );
 }

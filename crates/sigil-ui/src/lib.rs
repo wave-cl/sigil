@@ -28,7 +28,7 @@ pub use attachment::{Attachment, AttachmentAction, GalleryAction, attachment, ga
 pub use attachment::human;
 pub use clock::{brief, clock, day_label, day_of, deadline, stamp};
 pub use conversation_row::{ConversationRow, conversation_row, one_line};
-pub use dot::dot;
+pub use dot::{dot, state_icon};
 pub use exchange::{ExchangeAction, ExchangeRow, exchange_control};
 pub use video::{Standing, Video, VideoAction, video};
 pub use working::working;
