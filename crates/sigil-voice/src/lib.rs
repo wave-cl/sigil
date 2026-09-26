@@ -628,13 +628,19 @@ impl VoiceApp {
                 key: p.identity.to_string(),
                 speaking: p.speaking,
                 level: p.level,
+                // Nothing to look a name or a face up in: this client joins a
+                // room by key and keeps no profiles. The chat app fills both.
+                named: None,
+                picture: None,
                 detail: format!(
                     "loss {:.0}% · conceal {} · buf {}",
                     p.loss_pct, p.concealed, p.buffered
                 ),
             })
             .collect();
-        sigil_ui::roster(ui, &rows, state.connecting);
+        // Always: this pane is the place somebody comes to ask how the path
+        // is holding up, and the numbers are what it is for.
+        sigil_ui::roster(ui, &rows, state.connecting, true);
     }
 
     fn log_ui(&self, ui: &mut egui::Ui, theme: &ColorTheme) {

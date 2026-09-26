@@ -54,6 +54,9 @@ fn rows(n: usize) -> Vec<Row> {
     (0..n)
         .map(|i| Row {
             key: format!("{KEY}{i}"),
+            // Most of a room is people whose profile has arrived; some is not.
+            named: (i % 4 != 3).then(|| format!("Person {i}")),
+            picture: None,
             speaking: i % 3 == 0,
             level: 0.4,
             detail: "loss 0% · conceal 0 · buf 3".into(),

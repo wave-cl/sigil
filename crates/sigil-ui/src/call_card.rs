@@ -406,7 +406,11 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
             if !call.present.is_empty() || call.connecting > 0 {
                 ui.add_space(tokens::SPACING_MD);
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    crate::roster(ui, call.present, call.connecting);
+                    // **The same rule as the line above.** `stats` is drawn
+                    // only when the numbers are open or the call is deaf, and
+                    // a per-person copy of the same numbers under every face
+                    // in the room is the same thing said twelve times over.
+                    crate::roster(ui, call.present, call.connecting, call.detail || call.deaf);
                 });
             }
         })

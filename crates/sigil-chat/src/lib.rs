@@ -7232,11 +7232,36 @@ impl ChatApp {
         });
 
         let travel = Self::travel_of(up, call.path, cross, call.why.clone());
+        // **Who these people are, not just which keys they are.** The same
+        // `people` the picture below is read from has a name and a face for
+        // every one of them; the roster was being handed base58 because the
+        // row type it fills is shared with sigil-voice, which has no profile
+        // store and cannot know. A room call named its channel at the top and
+        // spelt its members in base58 underneath.
+        // Read out of `people` first, then decoded: `person_picture` wants
+        // `&mut self` and the lookup holds a borrow of it.
+        let known: Vec<(PubKey, Option<String>, Option<Face>)> = {
+            let people = &self.state_of(Some(&at)).people;
+            call.present
+                .iter()
+                .map(|p| {
+                    let who = people.get(&p.identity);
+                    (
+                        p.identity,
+                        who.and_then(|who| who.named()),
+                        who.and_then(|who| who.picture.clone()),
+                    )
+                })
+                .collect()
+        };
         let rows: Vec<sigil_ui::Row> = call
             .present
             .iter()
-            .map(|p| sigil_ui::Row {
+            .zip(known)
+            .map(|(p, (who, named, face))| sigil_ui::Row {
                 key: p.identity.to_string(),
+                named,
+                picture: self.person_picture(&at, ui.ctx(), who, face.as_ref()),
                 speaking: p.speaking,
                 level: p.level,
                 detail: format!(

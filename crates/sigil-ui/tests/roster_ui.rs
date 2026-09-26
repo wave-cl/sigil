@@ -11,16 +11,24 @@ use egui_kittest::kittest::Queryable;
 use sigil::theme;
 use sigil_ui::{Row, roster};
 
+/// **One with a name and one without**, because both happen in the same room:
+/// the chat app fills a name for everybody it has a profile for and nobody
+/// else, and sigil-voice fills none at all. A fixture where every row is named
+/// would let the unnamed branch rot.
 fn rows() -> Vec<Row> {
     vec![
         Row {
             key: "3yMhjNhZ8kLpQr2vWx7TnBcDfGhJkLmNpQrStUvWxYz1".into(),
+            named: Some("Ada".into()),
+            picture: None,
             speaking: true,
             level: 0.42,
             detail: "loss 0% · conceal 0 · buf 3".into(),
         },
         Row {
             key: "GkpAfVhY4jNmRt6uXz9QwErTyUiOpAsDfGhJkLzXcVbN".into(),
+            named: None,
+            picture: None,
             speaking: false,
             level: 0.01,
             detail: "loss 2% · conceal 4 · buf 3".into(),
@@ -54,6 +62,20 @@ fn sized(
     size: egui::Vec2,
     form: sigil::Form,
 ) -> Harness<'static> {
+    with_detail(rows, connecting, size, form, true)
+}
+
+/// The same, with the per-row numbers open or shut. Every case above wants
+/// them open -- the pane they were written for always shows them, and the
+/// row-height rule below is about a row that is two lines tall -- so `sized`
+/// keeps that and this is here for the one case that is about them being shut.
+fn with_detail(
+    rows: Vec<Row>,
+    connecting: usize,
+    size: egui::Vec2,
+    form: sigil::Form,
+    detail: bool,
+) -> Harness<'static> {
     Harness::builder().with_size(size).build_ui(move |ui| {
         let ctx = ui.ctx().clone();
         sigil::Form::install(&ctx, form);
@@ -66,7 +88,7 @@ fn sized(
                     .fill(t.surface_primary)
                     .inner_margin(egui::Margin::same(form.body_margin() as i8)),
             )
-            .show(ui, |ui| roster(ui, &rows, connecting));
+            .show(ui, |ui| roster(ui, &rows, connecting, detail));
     })
 }
 
@@ -189,5 +211,102 @@ fn a_mark_does_not_make_the_rows_taller() {
         "roster rows {pitch} points apart on a phone. A row here is two lines \
          of text and the spacings around them; a mark taller than the line it \
          sits beside makes every row in the room taller."
+    );
+}
+
+/// **A roster drawn where the numbers are shut does not show them.**
+///
+/// `roster` is drawn in two places. sigil-voice's pane is where somebody goes
+/// to ask how the path is holding up, and there the numbers are the point. A
+/// call card is not that screen: it already draws the call's own engine line
+/// only when the numbers are open or nothing is arriving, and it drew a
+/// per-person copy of the same numbers under every face in the room whatever
+/// that rule said -- twelve people, twelve lines of loss and buffer depth, at
+/// twice the height of the roster itself.
+///
+/// Both halves matter, so both are asserted: the line is gone from the tree,
+/// and the rows it was padding out are shorter for it.
+#[test]
+fn the_numbers_are_the_callers_to_open() {
+    let fixture = rows();
+    let (a, b) = (
+        sigil_ui::short(&fixture[0].key),
+        sigil_ui::short(&fixture[1].key),
+    );
+    let detail = fixture[0].detail.clone();
+
+    let open = harness_phone(fixture, 0);
+    assert!(
+        text_of(&open).contains(&detail),
+        "with the numbers open the row says {detail:?}: {}",
+        text_of(&open)
+    );
+    let open_pitch = open.get_by_label(&b).rect().min.y - open.get_by_label(&a).rect().min.y;
+
+    let shut = with_detail(
+        rows(),
+        0,
+        egui::vec2(360.0, 320.0),
+        sigil::Form::Phone,
+        false,
+    );
+    assert!(
+        !text_of(&shut).contains(&detail),
+        "with them shut it does not: {}",
+        text_of(&shut)
+    );
+    let shut_pitch = shut.get_by_label(&b).rect().min.y - shut.get_by_label(&a).rect().min.y;
+    assert!(
+        shut_pitch > 0.0 && shut_pitch < open_pitch,
+        "rows {shut_pitch} points apart with the numbers shut and {open_pitch} with them \
+         open. Hiding the line has to give the height back, or the room still fits as \
+         few people on a screen as it did."
+    );
+}
+
+/// **A name where there is one, and the key either way.**
+///
+/// The row type is shared with sigil-voice, which joins a room by key and
+/// keeps no profiles, so it carried a key and nothing else -- and the chat
+/// app, which has a name and a face for everybody in the room, filled it the
+/// same way. A room call named its channel at the top of the card and spelt
+/// its members in base58 six rows down.
+///
+/// The key does not go away when a name arrives. A name is an assertion and a
+/// key is not (SIP-21), and on a phone this is one of the few places the
+/// person's own key is written down at all.
+#[test]
+fn a_name_joins_the_key_rather_than_replacing_it() {
+    let fixture = rows();
+    let (named, anonymous) = (fixture[0].key.clone(), fixture[1].key.clone());
+    let h = harness_phone(fixture, 0);
+    let said = text_of(&h);
+
+    assert!(
+        said.contains("Ada"),
+        "the one with a profile is named: {said}"
+    );
+    assert!(
+        said.contains(&sigil_ui::short(&named)),
+        "and still carries their key: {said}"
+    );
+    assert!(
+        said.contains(&sigil_ui::short(&anonymous)),
+        "the one without a profile is still their key: {said}"
+    );
+    // Not the name of somebody else's row: the two are zipped together in the
+    // caller and a fencepost there would name the wrong person to their face.
+    let ada = h.get_by_label("Ada").rect();
+    let theirs = h.get_by_label(&sigil_ui::short(&named)).rect();
+    let other = h.get_by_label(&sigil_ui::short(&anonymous)).rect();
+    assert!(
+        (ada.center().y - theirs.center().y).abs() < 1.0,
+        "the name sits on its own row: name at {}, key at {}",
+        ada.center().y,
+        theirs.center().y
+    );
+    assert!(
+        ada.center().y < other.center().y,
+        "and not on the next one down"
     );
 }

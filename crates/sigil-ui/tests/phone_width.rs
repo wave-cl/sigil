@@ -136,11 +136,18 @@ fn a_roster_row_with_a_long_detail_fits() {
                 ui,
                 &[sigil_ui::Row {
                     key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9".to_string(),
+                    // A name as long as anybody types, beside a key and a
+                    // meter: the row now carries three things, and this is the
+                    // case that says they still fit a phone.
+                    named: Some(LONG_NAME.to_string()),
+                    picture: None,
                     speaking: true,
                     level: 0.7,
                     detail: "2.1% lost, 180 ms of buffer, concealing 3 frames in 100".to_string(),
                 }],
                 2,
+                // Open: the long detail line is the whole point of this case.
+                true,
             );
         }),
     );
