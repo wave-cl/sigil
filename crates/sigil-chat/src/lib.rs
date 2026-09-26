@@ -5821,6 +5821,15 @@ impl ChatApp {
             let key = item.from.to_string();
             ui.group(|ui| {
                 ui.horizontal(|ui| {
+                    // **No picture and no name here, on purpose.** Every
+                    // other place somebody appears draws their published
+                    // face and what they are called; this one draws the mark
+                    // the key itself makes and nothing else, because the
+                    // caption three lines above says who sent it is what the
+                    // exchange saw and not something they signed. A face and
+                    // a name are what a *verified* sender looks like
+                    // everywhere else in the app, and putting them on an
+                    // unsigned claim would make it look like one.
                     sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
                     ui.add_space(tokens::SPACING_SM);
                     ui.vertical(|ui| {
