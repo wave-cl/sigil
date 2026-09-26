@@ -529,7 +529,12 @@ fn ring_card(
 /// conversation as it is called here, `#` before a public one; the identity
 /// it arrived at only when this host holds several. The body carries what
 /// was said, shortened, so the notification is worth reading on its own.
-pub(crate) fn mention_said(m: &session::Mention, called: &str, held: usize) -> (String, String) {
+pub(crate) fn mention_said(
+    m: &session::Mention,
+    called: &str,
+    held: usize,
+    says: sigil::prefs::Privacy,
+) -> (String, String) {
     let room = if m.public {
         format!("#{}", m.conversation)
     } else {
@@ -541,7 +546,10 @@ pub(crate) fn mention_said(m: &session::Mention, called: &str, held: usize) -> (
         format!("{} mentioned you in {room}", m.from_label)
     };
     let who = sigil_ui::message::short(&m.from.to_string());
-    let body = if m.said.is_empty() {
+    // Under `SenderOnly` the key alone -- the branch a mention with nothing
+    // to quote already took. The summary names them; the key is what says it
+    // was them, and not somebody using a name like theirs.
+    let body = if m.said.is_empty() || !says.quotes() {
         who
     } else {
         format!("{who} — {}", m.said)
@@ -556,6 +564,7 @@ pub(crate) fn arrivals_said(
     together: &[session::Arrival],
     called: &str,
     held: usize,
+    says: sigil::prefs::Privacy,
 ) -> (String, String) {
     let last = together.last().expect("at least one arrival");
     let room = if last.public {
@@ -572,7 +581,13 @@ pub(crate) fn arrivals_said(
     if held > 1 {
         summary.push_str(&format!(", as {called}"));
     }
-    let body = if together.len() > 1 && !last.direct {
+    // **Not a word of it under `SenderOnly`**, and the same sentence the
+    // wake window composes there, so the two paths read alike. The summary
+    // above has already said who and where, which is what the setting
+    // allows.
+    let body = if !says.quotes() {
+        format!("{} sent a message", last.from_label)
+    } else if together.len() > 1 && !last.direct {
         format!("{}: {}", last.from_label, last.said)
     } else {
         last.said.clone()
@@ -830,6 +845,8 @@ enum Dialog {
     Rehome,
     /// SIP-53: move where this **account** lives.
     MoveHome,
+    /// SIP-47: how much a notification says.
+    Notices,
 }
 
 /// One identity at one exchange: what a session, a store lock and a
@@ -2384,9 +2401,59 @@ impl ChatApp {
             "name" => Dialog::Name,
             "verify" => Dialog::Verify(who),
             "report" => Dialog::Report { target: 3 },
+            "mail" => Dialog::Mail,
+            "rehome" => Dialog::Rehome,
+            "movehome" => Dialog::MoveHome,
+            "notices" => Dialog::Notices,
             other => panic!("no dialog called {other:?}"),
         };
         self.panes.entry(at).or_default().dialog = Some(dialog);
+    }
+
+    /// Every dialog: the name [`ChatApp::open_dialog_for_test`] opens it by,
+    /// and the words it puts at the top of the screen.
+    ///
+    /// **Exhaustive by construction, because the list it replaces was not.**
+    /// `every_dialog_fits_a_phones_screen` measured six dialogs written out
+    /// as strings; four more were added after it -- the mailbox, both moves,
+    /// and this month's notifications one -- and not one of them was ever
+    /// measured on the screen the test exists for. A dialog cannot scroll,
+    /// so one that outgrows a phone goes off both edges and the way out of
+    /// it with them.
+    ///
+    /// The match below is over `Dialog` itself, so adding a variant stops
+    /// this compiling. That is the point: the next dialog cannot be added
+    /// without an answer here.
+    pub fn dialogs_for_test() -> Vec<(&'static str, &'static str)> {
+        [
+            Dialog::Compose,
+            Dialog::Profile,
+            Dialog::Exchange,
+            Dialog::Name,
+            Dialog::Verify(PubKey::new([2u8; 32])),
+            Dialog::Report { target: 3 },
+            Dialog::Mail,
+            Dialog::Rehome,
+            Dialog::MoveHome,
+            Dialog::Notices,
+        ]
+        .into_iter()
+        .map(|d| match d {
+            Dialog::Compose => ("compose", "New conversation"),
+            Dialog::Profile => ("profile", "Your profile"),
+            Dialog::Exchange => ("exchange", "Add an exchange"),
+            // The fixture holds a name, so this is the dialog that offers
+            // another and offers to give this one up; "Claim a name" is its
+            // other heading, for an identity with none.
+            Dialog::Name => ("name", "Your name here"),
+            Dialog::Verify(_) => ("verify", "Verify"),
+            Dialog::Report { .. } => ("report", "Report this message"),
+            Dialog::Mail => ("mail", "Messages left for you"),
+            Dialog::Rehome => ("rehome", "Move where this conversation lives"),
+            Dialog::MoveHome => ("movehome", "Move this account"),
+            Dialog::Notices => ("notices", "What notifications say"),
+        })
+        .collect()
     }
 
     /// The emoji this person sends most. Tests read it; the picker draws it.
@@ -2995,6 +3062,7 @@ impl App for ChatApp {
                 .map(|(at, s)| (at.clone(), s.watch()))
                 .collect(),
             &ctx.accounts.quiet,
+            ctx.accounts.prefs.privacy,
         );
         self.announcer.run(ctx.notify, ctx.unfocused);
         self.asked.extend(self.announcer.take_wants());
@@ -5178,6 +5246,7 @@ impl ChatApp {
                     Dialog::Mail => self.mail_dialog(at, state, ui, theme),
                     Dialog::Rehome => self.rehome_dialog(at, state, ui, theme),
                     Dialog::MoveHome => self.move_home_dialog(ctx, at, state, ui, theme),
+                    Dialog::Notices => self.notices_dialog(ctx, at, ui, theme),
                     Dialog::Verify(who) => self.verify_dialog(at, state, who, ui, theme),
                     Dialog::Report { target } => self.report_dialog(at, state, target, ui, theme),
                 }
@@ -5543,6 +5612,46 @@ impl ChatApp {
     ///
     /// The consequence is stated above the control that causes it, because it
     /// is not obvious and cannot be undone from here.
+    /// **How much a notification says** (SIP-47 §Notifications).
+    ///
+    /// Three choices and no more, because those are the three the document
+    /// requires: a message is opened on this machine and never leaves it,
+    /// but a notification is handed to the platform, which draws it on a
+    /// screen that does not have to be unlocked to be read. Who that screen
+    /// is in front of is the one thing about a message this client cannot
+    /// know, so it is the person's to say.
+    fn notices_dialog(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        ui.heading("What notifications say");
+        ui.add_space(tokens::SPACING_XS);
+        ui.colored_label(
+            theme.text_muted,
+            egui::RichText::new(
+                "A notification is drawn where anybody near the screen can read it, and a \
+                 locked phone shows one without being unlocked. Whichever of these you \
+                 choose, the message itself was opened here and goes nowhere else.",
+            )
+            .small(),
+        );
+        ui.add_space(tokens::SPACING_SM);
+        let mut chosen = ctx.accounts.prefs.privacy;
+        for choice in sigil::prefs::Privacy::ALL {
+            ui.radio_value(&mut chosen, choice, choice.describe());
+        }
+        // Noticed only when it differs, so the preferences are not written
+        // once a frame for as long as this is open.
+        ctx.accounts.prefs.set_privacy(chosen);
+        ui.add_space(tokens::SPACING_SM);
+        if ui.button("Done").clicked() {
+            self.pane(at).dialog = None;
+        }
+    }
+
     fn rehome_dialog(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         let Some(channel) = state.open else { return };
         ui.heading("Move where this conversation lives");
@@ -11207,7 +11316,8 @@ impl ChatApp {
     /// live in [`announce`].
     #[cfg(test)]
     fn announce_rings_in(&mut self, ctx: &mut AppContext<'_>, fresh: Vec<(String, Target)>) {
-        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .frame(Vec::new(), &ctx.accounts.quiet, ctx.accounts.prefs.privacy);
         self.announcer.rings_in(ctx.notify, fresh);
         self.asked.extend(self.announcer.take_wants());
     }
@@ -11219,7 +11329,8 @@ impl ChatApp {
         held: usize,
         found: Vec<(At, String, Vec<session::Mention>)>,
     ) {
-        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .frame(Vec::new(), &ctx.accounts.quiet, ctx.accounts.prefs.privacy);
         self.announcer
             .mentions_in(ctx.notify, ctx.unfocused, held, found);
         self.asked.extend(self.announcer.take_wants());
@@ -11232,7 +11343,8 @@ impl ChatApp {
         held: usize,
         found: Vec<(At, String, Vec<session::Arrival>)>,
     ) {
-        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .frame(Vec::new(), &ctx.accounts.quiet, ctx.accounts.prefs.privacy);
         self.announcer
             .arrivals_in(ctx.notify, ctx.unfocused, held, found);
         self.asked.extend(self.announcer.take_wants());
@@ -11245,7 +11357,8 @@ impl ChatApp {
         held: usize,
         found: Vec<(At, String, Vec<session::Arrival>)>,
     ) {
-        self.announcer.frame(Vec::new(), &ctx.accounts.quiet);
+        self.announcer
+            .frame(Vec::new(), &ctx.accounts.quiet, ctx.accounts.prefs.privacy);
         self.announcer
             .missed_in(ctx.notify, ctx.unfocused, held, found);
         self.asked.extend(self.announcer.take_wants());
@@ -11260,6 +11373,7 @@ impl ChatApp {
                 .map(|(at, s)| (at.clone(), s.watch()))
                 .collect(),
             &ctx.accounts.quiet,
+            ctx.accounts.prefs.privacy,
         );
         self.announcer.rings_only(ctx.notify);
         self.asked.extend(self.announcer.take_wants());
@@ -12236,6 +12350,25 @@ impl ChatApp {
             .clicked()
         {
             ctx.accounts.prefs.set_direct_calls(!direct);
+        }
+        // **What a notification says** (SIP-47), beside the call switch for
+        // the reason that one is here: the person's, across every identity,
+        // and a disclosure they should be the one to choose -- this one to
+        // whoever is standing where the screen can be seen. The row names
+        // the state rather than the action, as the switch above does.
+        let says = ctx.accounts.prefs.privacy;
+        if sigil_ui::icon_item(
+            ui,
+            sigil_ui::Icon::Lock,
+            &format!("Notifications say {}", says.word()),
+        )
+        .on_hover_text(format!(
+            "{} — and a locked screen shows a notification without being unlocked.",
+            says.describe()
+        ))
+        .clicked()
+        {
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Notices);
         }
         ui.add_space(tokens::SPACING_MD);
         ui.colored_label(
@@ -13605,7 +13738,12 @@ mod ring_tests {
 mod mention_notice_tests {
     use super::*;
     use sigil::app::Sound;
+    use sigil::prefs::Privacy;
     use std::cell::RefCell;
+
+    /// What a notification says when nobody has asked it to say less. The
+    /// tests that predate the setting all mean this one.
+    const EVERYTHING: Privacy = Privacy::SenderAndText;
 
     fn key(b: u8) -> PubKey {
         PubKey::new([b; 32])
@@ -13855,6 +13993,169 @@ mod mention_notice_tests {
         );
     }
 
+    /// **The setting reaches the client that is awake**, and not only the
+    /// wake window.
+    ///
+    /// SIP-47 makes what a notification says the person's choice, because a
+    /// notification is drawn on a screen anybody nearby can read. A phone
+    /// has offered the three choices since its wake window was built -- and
+    /// the running client composed its own notifications and knew nothing
+    /// about it. On a phone the running client is what speaks whenever the
+    /// reachable service is on, which is the whole arrangement for a phone
+    /// with no distributor installed: the setting held for the path that
+    /// needs no app, and was ignored by the path that is usually there.
+    ///
+    /// Set where a person sets it, and carried in by the frame as `Quiet`
+    /// is -- so this goes through `announce_arrivals_in`, which calls
+    /// `frame`, rather than reaching into the announcer.
+    #[test]
+    fn sender_only_says_who_and_not_a_word_of_what() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+        accounts.prefs.set_privacy(Privacy::SenderOnly);
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+
+        let said = noted.0.borrow().clone();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let (summary, body) = said[0].clone();
+        assert!(
+            summary.contains("Ada"),
+            "who wrote is still said: {summary}"
+        );
+        assert!(
+            !format!("{summary} {body}").contains("look at this"),
+            "and not a word of what: {summary} / {body}"
+        );
+    }
+
+    /// The control for the one above. Without it a `SenderOnly` that posted
+    /// nothing at all, or one that never reached the composing, would pass
+    /// every assertion there.
+    #[test]
+    fn by_default_a_notification_quotes_what_was_said() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+        assert_eq!(
+            accounts.prefs.privacy,
+            Privacy::SenderAndText,
+            "the default"
+        );
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(at(), "me".into(), vec![an_arrival(1, false)])],
+        );
+
+        let said = noted.0.borrow().clone();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let (summary, body) = said[0].clone();
+        assert!(
+            body.contains("look at this"),
+            "what was said is there: {summary} / {body}"
+        );
+    }
+
+    /// **Under `FactOnly`, one notice for everything, and nothing named in
+    /// it.**
+    ///
+    /// Four messages across two conversations. One notice per conversation
+    /// saying "a new message" would still tell a locked screen how many
+    /// conversations are busy, which is most of what naming them said -- so
+    /// they are counted and said once, the shape the wake window has
+    /// composed since SIP-47. Nowhere to press either: a press that opened
+    /// the conversation would name it on the way.
+    #[test]
+    fn the_fact_of_a_message_names_nothing_and_is_said_once() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+        accounts.prefs.set_privacy(Privacy::FactOnly);
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, true);
+        app.announce_arrivals_in(
+            &mut c,
+            1,
+            vec![(
+                at(),
+                "me".into(),
+                vec![
+                    an_arrival_in(8, 1),
+                    an_arrival_in(8, 2),
+                    an_arrival_in(9, 3),
+                    an_arrival_in(9, 4),
+                ],
+            )],
+        );
+
+        let said = noted.0.borrow().clone();
+        assert_eq!(said.len(), 1, "one notice for everything: {said:?}");
+        let (summary, body) = said[0].clone();
+        assert_eq!(body, "4 new messages");
+        let whole = format!("{summary} {body}");
+        for named in ["Ada", "look at this", "room-8", "room-9"] {
+            assert!(
+                !whole.contains(named),
+                "{named} said under FactOnly: {whole}"
+            );
+        }
+        assert!(
+            noted.1.borrow()[0].0.is_none(),
+            "and nowhere to press: a press names the conversation it opens"
+        );
+    }
+
+    /// **A ring is exempt from the setting** (SIP-47).
+    ///
+    /// The document says a `Ringing` wake composes from the entry rather
+    /// than from what the person asked notifications to say, and it is
+    /// right: a call that does not name the caller cannot be answered, it
+    /// is on screen for the seconds it rings rather than sitting on a lock
+    /// screen, and answering it is about to put that person's voice in the
+    /// room anyway.
+    #[test]
+    fn a_ring_names_the_caller_however_quiet_the_setting() {
+        let noted = Noted::new();
+        let mut nav = sigil::navigator::Navigator::default();
+        let mut accounts =
+            sigil::accounts::Accounts::of(vec![sigil::Account::unlocked_for_test([4u8; 32])]);
+        let connections = sigil_net::Connections::new();
+        let mut app = ChatApp::new();
+        accounts.prefs.set_privacy(Privacy::FactOnly);
+
+        let mut c = ctx(&mut nav, &mut accounts, &noted, &connections, false);
+        app.announce_rings_in(
+            &mut c,
+            vec![("Ada is calling".into(), target(&at(), [8u8; 32]))],
+        );
+
+        let said = noted.0.borrow().clone();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let (summary, body) = said[0].clone();
+        assert!(
+            format!("{summary} {body}").contains("Ada is calling"),
+            "the quietest setting still says who is calling: {summary} / {body}"
+        );
+    }
+
     fn an_arrival(seq: u64, in_open: bool) -> session::Arrival {
         session::Arrival {
             channel: [8u8; 32],
@@ -14099,14 +14400,14 @@ mod mention_notice_tests {
     /// nothing nobody was in doubt about. A private room has no `#`.
     #[test]
     fn a_mention_names_the_identity_only_when_there_are_several() {
-        let (one, _) = mention_said(&a_mention(1, false), "colin@squic.org", 1);
+        let (one, _) = mention_said(&a_mention(1, false), "colin@squic.org", 1, EVERYTHING);
         assert_eq!(one, "Ada mentioned you in #general");
-        let (several, _) = mention_said(&a_mention(1, false), "colin@squic.org", 3);
+        let (several, _) = mention_said(&a_mention(1, false), "colin@squic.org", 3, EVERYTHING);
         assert!(several.contains("as colin@squic.org"), "{several}");
         let mut private = a_mention(1, false);
         private.public = false;
         private.conversation = "the four of us".into();
-        let (s, _) = mention_said(&private, "x", 1);
+        let (s, _) = mention_said(&private, "x", 1, EVERYTHING);
         assert_eq!(s, "Ada mentioned you in the four of us");
     }
 
@@ -14211,10 +14512,10 @@ mod mention_notice_tests {
         let mut direct = an_arrival(1, false);
         direct.direct = true;
         direct.conversation = "Ada".into();
-        let (summary, body) = arrivals_said(&[direct.clone()], "me", 1);
+        let (summary, body) = arrivals_said(&[direct.clone()], "me", 1, EVERYTHING);
         assert_eq!(summary, "Ada");
         assert_eq!(body, "look at this");
-        let (summary, body) = arrivals_said(&[direct.clone(), direct.clone()], "me", 2);
+        let (summary, body) = arrivals_said(&[direct.clone(), direct.clone()], "me", 2, EVERYTHING);
         assert_eq!(summary, "2 new messages from Ada, as me");
         assert_eq!(body, "look at this");
 

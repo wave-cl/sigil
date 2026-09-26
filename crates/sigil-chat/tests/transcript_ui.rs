@@ -9576,8 +9576,16 @@ fn a_phone_reads_what_attesting_does() {
 #[test]
 fn every_dialog_fits_a_phones_screen() {
     let mut over = Vec::new();
-    for which in ["compose", "profile", "exchange", "name", "verify", "report"] {
-        let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    // **Every dialog, from the enum rather than from a list here.** The six
+    // written out on this line were the six that existed when it was, and
+    // four have been added since -- the mailbox, both SIP-53 moves and the
+    // notifications one -- none of which was ever measured on a phone.
+    // `dialogs_for_test` is a match over `Dialog`, so a new one stops this
+    // compiling rather than slipping quietly past the loop.
+    let dialogs = sigil_chat::ChatApp::dialogs_for_test();
+    assert!(!dialogs.is_empty(), "no dialogs to measure");
+    for (which, named) in dialogs {
+        let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
         h.run();
         app.borrow_mut()
             .open_dialog_for_test((me(), String::new()), which, them());
@@ -9595,18 +9603,6 @@ fn every_dialog_fits_a_phones_screen() {
         // The instrument has to be looking at the dialog and not at the pane
         // behind it: every one of these says something of its own.
         let said = text_of(&h);
-        let named = match which {
-            "compose" => "New conversation",
-            "profile" => "Your profile",
-            "exchange" => "Add an exchange",
-            // The fixture holds a name, so the dialog is the one that offers
-            // to take another and to give this one up -- "Claim a name" is
-            // its other heading, for an identity with none.
-            "name" => "Your name here",
-            "verify" => "Verify",
-            "report" => "Report this message",
-            _ => unreachable!(),
-        };
         assert!(
             said.contains(named),
             "the {which} dialog did not open ({named:?} is not on screen), so \
@@ -9665,8 +9661,10 @@ fn every_dialog_fits_a_phones_screen() {
 #[test]
 fn every_dialog_fits_a_phone_held_sideways() {
     let mut over = Vec::new();
-    for which in ["compose", "profile", "exchange", "name", "verify", "report"] {
-        let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    let dialogs = sigil_chat::ChatApp::dialogs_for_test();
+    assert!(!dialogs.is_empty(), "no dialogs to measure");
+    for (which, named) in dialogs {
+        let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
         // The same phone, turned: 804 across and 360 down.
         h.set_size(egui::vec2(PHONE_HEIGHT, PHONE_WIDTH));
         h.run();
@@ -9674,6 +9672,16 @@ fn every_dialog_fits_a_phone_held_sideways() {
             .open_dialog_for_test((me(), String::new()), which, them());
         h.run();
         h.run();
+        // **What this is pointed at.** There was no check that the dialog
+        // opened at all: `every_box` would have measured the pane behind it
+        // and found nothing above the screen, and the test would have passed
+        // for a dialog that never drew.
+        let said = text_of(&h);
+        assert!(
+            said.contains(named),
+            "the {which} dialog did not open ({named:?} is not on screen), so \
+             what is measured below is the pane behind it: {said}"
+        );
         let top = every_box(&h)
             .into_iter()
             .filter(|(_, r)| r.height() > 0.0)
@@ -13994,4 +14002,72 @@ fn mention_picker_dark() {
     h.run();
     h.run();
     h.snapshot("mention_picker_dark");
+}
+
+/// **The row names what will be said, and changes it** (SIP-47).
+///
+/// The setting is the person's, so it has to be reachable from the one
+/// settings screen a phone has -- the desktop's platform pane is not one,
+/// which is the mistake the call switch beside it was moved here to fix.
+/// The row reads the preference back, so a choice that never reached the
+/// preferences would leave the old words on screen.
+#[test]
+fn the_notifications_row_names_what_it_says_and_changes_it() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Me);
+    h.run();
+    scroll_to_the_foot(&mut h);
+    h.get_by_label_contains("Notifications say everything")
+        .click();
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("What notifications say"),
+        "the dialog did not open: {said}"
+    );
+    h.get_by_label("only that something arrived").click();
+    h.run();
+    h.get_by_label("Done").click();
+    h.run();
+    h.run();
+    let after = text_of(&h);
+    assert!(
+        after.contains("Notifications say that one arrived"),
+        "the row reads the preference back: {after}"
+    );
+}
+
+/// The three choices, looked at: a new dialog is a picture before it ships.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_notices_dialog() {
+    let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "notices", them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_notices_dialog");
+}
+
+/// **The foot of the settings screen**: the two preferences that belong to
+/// the person rather than to an identity, and the version under them.
+///
+/// A picture because the notifications row was added against none.
+/// `me_card_phone` renders the head of this screen -- the mark, the name,
+/// the domain -- and stops well above these.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_me_settings() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Me);
+    h.run();
+    scroll_to_the_foot(&mut h);
+    h.remove_cursor();
+    // Not `run`: this screen is still asking for repaints after the scroll,
+    // and `run` gives up after four steps. The same four steps that caught
+    // `phone_guardians_staged` on the way in.
+    h.run_steps(2);
+    h.snapshot("phone_me_settings");
 }

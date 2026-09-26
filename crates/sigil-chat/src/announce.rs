@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sigil::app::{AppAction, Notice, Notify, Sound, Target};
+use sigil::prefs::Privacy;
 use sigil::quiet::Quiet;
 use tokio::sync::watch;
 
@@ -73,6 +74,15 @@ struct Inner {
     /// What the shell is asked for -- to come forward, for attention --
     /// which only a frame can hand over.
     wants: Vec<AppAction>,
+    /// How much a notification may say (SIP-47), as the last frame left it.
+    /// A frame brings it in beside [`Quiet`], because it is the same kind of
+    /// thing -- the person's, set on a screen -- and because the off-frame
+    /// path has no way to read a preference for itself. The value a phone
+    /// was last drawn with is the value it goes to sleep with.
+    says: Privacy,
+    /// Messages counted rather than named, under [`Privacy::FactOnly`].
+    /// Emptied by [`Inner::say_the_fact`] at the end of a run.
+    counted: usize,
 }
 
 impl Announcer {
@@ -91,10 +101,16 @@ impl Announcer {
     }
 
     /// A frame is being drawn: what it knows, brought in.
-    pub fn frame(&self, sessions: Vec<(At, watch::Receiver<ChatState>)>, quiet: &Quiet) {
+    pub fn frame(
+        &self,
+        sessions: Vec<(At, watch::Receiver<ChatState>)>,
+        quiet: &Quiet,
+        says: Privacy,
+    ) {
         self.frames.fetch_add(1, Ordering::SeqCst);
         let mut inner = self.lock();
         inner.sessions = sessions;
+        inner.says = says;
         if inner.quiet != *quiet {
             inner.quiet = quiet.clone();
         }
@@ -164,6 +180,8 @@ impl Announcer {
         // Last, so that everything said as a ring, a mention or a live
         // arrival is already in `announced` and is not counted twice.
         inner.missed(notify, unfocused);
+        // And then, under `FactOnly`, the one notice all of that came to.
+        inner.say_the_fact(notify);
     }
 
     // The deciding halves, over what a walk of the sessions found. Tests
@@ -183,7 +201,9 @@ impl Announcer {
         held: usize,
         found: Vec<(At, String, Vec<session::Mention>)>,
     ) {
-        self.lock().mentions_in(notify, unfocused, held, found);
+        let mut inner = self.lock();
+        inner.mentions_in(notify, unfocused, held, found);
+        inner.say_the_fact(notify);
     }
 
     #[cfg(test)]
@@ -194,7 +214,9 @@ impl Announcer {
         held: usize,
         found: Vec<(At, String, Vec<session::Arrival>)>,
     ) {
-        self.lock().arrivals_in(notify, unfocused, held, found);
+        let mut inner = self.lock();
+        inner.arrivals_in(notify, unfocused, held, found);
+        inner.say_the_fact(notify);
     }
 
     #[cfg(test)]
@@ -205,7 +227,9 @@ impl Announcer {
         held: usize,
         found: Vec<(At, String, Vec<session::Arrival>)>,
     ) {
-        self.lock().missed_in(notify, unfocused, held, found);
+        let mut inner = self.lock();
+        inner.missed_in(notify, unfocused, held, found);
+        inner.say_the_fact(notify);
     }
 
     /// The rings walk alone, with the withdrawals: for the test that proves
@@ -399,13 +423,21 @@ impl Inner {
                     continue;
                 }
                 if unfocused || !m.in_open {
-                    let (summary, body) = mention_said(&m, &me, held);
-                    notify.notice(Notice {
-                        summary: &summary,
-                        body: &body,
-                        target: Some(target(&at, m.channel)),
-                        sound: Sound::Default,
-                    });
+                    if self.says.names() {
+                        let (summary, body) = mention_said(&m, &me, held, self.says);
+                        notify.notice(Notice {
+                            summary: &summary,
+                            body: &body,
+                            target: Some(target(&at, m.channel)),
+                            sound: Sound::Default,
+                        });
+                    } else {
+                        // Naming nobody means naming nobody here too: a
+                        // mention is a message somebody wrote, and saying
+                        // "you were mentioned" would still say it was you
+                        // they wanted.
+                        self.counted += 1;
+                    }
                 }
                 // Worth noticing, not worth interrupting for: the icon
                 // bounces once while the window is not in front.
@@ -456,8 +488,12 @@ impl Inner {
                     fresh.entry(a.channel).or_default().push(a);
                 }
             }
+            if !self.says.names() {
+                self.counted += fresh.values().map(Vec::len).sum::<usize>();
+                continue;
+            }
             for (channel, together) in fresh {
-                let (summary, body) = arrivals_said(&together, &me, held);
+                let (summary, body) = arrivals_said(&together, &me, held, self.says);
                 notify.notice(Notice {
                     summary: &summary,
                     body: &body,
@@ -579,6 +615,10 @@ impl Inner {
                 };
                 (*channel, room)
             });
+            if !self.says.names() {
+                self.counted += messages;
+                continue;
+            }
             let (summary, body) = crate::missed_said(
                 fresh.len(),
                 messages,
@@ -596,5 +636,34 @@ impl Inner {
                 sound: Sound::None,
             });
         }
+    }
+
+    /// **One notice for everything**, under [`Privacy::FactOnly`].
+    ///
+    /// Not one per conversation saying "a new message": that would still
+    /// tell a locked screen how many conversations are busy, which is most
+    /// of what naming them said. The phone's wake window has collapsed them
+    /// for that reason since SIP-47 was built, and these are the same two
+    /// lines it composes, so a person sees one shape whichever path spoke.
+    ///
+    /// Said at the end of a run, after rings, mentions, arrivals and the
+    /// summary of an absence have each counted what they did not name.
+    fn say_the_fact(&mut self, notify: &dyn Notify) {
+        let counted = std::mem::take(&mut self.counted);
+        if counted == 0 {
+            return;
+        }
+        let body = match counted {
+            1 => "A new message".to_string(),
+            n => format!("{n} new messages"),
+        };
+        notify.notice(Notice {
+            summary: "Sigil",
+            body: &body,
+            // Nowhere to go: a press that opened the conversation would
+            // name it on the way, and there may be several.
+            target: None,
+            sound: Sound::Default,
+        });
     }
 }

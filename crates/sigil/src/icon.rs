@@ -152,6 +152,14 @@ icons! {
     Save => "Save",
     /// SIP-5: something sealed to you and left at the exchange.
     Mail => "Messages left for you",
+    /// A locked screen: what one may show without being unlocked, which is
+    /// the setting for how much a notification says (SIP-47).
+    ///
+    /// **Not [`Icon::Bell`]**, which already means do-not-disturb on the
+    /// row directly above it. Two bells in one block, one saying whether
+    /// notifications happen and one saying how much they say, read as the
+    /// same control drawn twice.
+    Lock => "Locked",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -340,6 +348,25 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 egui::StrokeKind::Middle,
             );
             path(vec![p(0.16, 0.30), p(0.50, 0.55), p(0.84, 0.30)]);
+        }
+        Icon::Lock => {
+            // A padlock: the shackle as an arc over a rounded body. The
+            // shape is understood everywhere and owes nothing to a brand.
+            path(vec![
+                p(0.35, 0.47),
+                p(0.36, 0.36),
+                p(0.43, 0.29),
+                p(0.50, 0.27),
+                p(0.57, 0.29),
+                p(0.64, 0.36),
+                p(0.65, 0.47),
+            ]);
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.26, 0.47), p(0.74, 0.80)),
+                s * 0.06,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
         }
         Icon::Save => {
             // A stroke down into a tray: what a download is everywhere,
