@@ -135,9 +135,30 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize, detail: bool) 
                 }
             };
             let meter = |ui: &mut egui::Ui, width: f32| {
+                // **A height of its own, and a bar rather than a pill.**
+                //
+                // `ProgressBar` falls back to `spacing().interact_size.y`,
+                // which is whatever the surrounding screen has set for its
+                // *controls* -- and the call card zeroes exactly that for its
+                // whole body, because everything above this roster is read
+                // rather than tapped. So on a desktop every meter in the room
+                // was drawn nought points tall and the picture showed a
+                // roster with no meters in it at all. The narrow branch above
+                // sets the spacing back to a line and so never saw it. A
+                // meter is not a control and its height is not the caller's
+                // business either way.
+                //
+                // And at a row's height the default radius is half of that --
+                // fully round -- so a short green fill in a grey track is an
+                // iOS switch, in a list of people, where the affordance it
+                // suggests is muting one of them. There is no such control. A
+                // thin bar with square-ish ends is a meter everywhere and a
+                // switch nowhere.
                 ui.add(
                     egui::ProgressBar::new(row.level.clamp(0.0, 1.0))
                         .desired_width(width)
+                        .desired_height(tokens::SPACING_XS)
+                        .corner_radius(tokens::SPACING_XXS)
                         .fill(if row.speaking {
                             theme.speaking
                         } else {

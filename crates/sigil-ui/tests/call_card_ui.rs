@@ -28,6 +28,14 @@ const TALL: f32 = 804.0;
 const LONG_NAME: &str = "Alexandra Constantinopoulos-Whitmore";
 const KEY: &str = "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9";
 
+/// What a *room* is called. A room call names its channel, never a person in
+/// it -- `call_card_ui` reads the head's name, key and picture from the
+/// channel whenever `call.peer` is unset. Both room pictures inherited "Ada"
+/// and her identicon from [`plain`], so they showed a state the app does not
+/// draw, and a regression that named the peer instead of the room would not
+/// have moved a pixel of either.
+const ROOM: &str = "release check";
+
 /// A two-party call, up, unmuted, on the earpiece.
 fn plain<'a>() -> Call<'a> {
     Call {
@@ -209,8 +217,20 @@ fn built(
                     connecting,
                     two_party,
                 };
-                call_card(ui, &call);
-                out.set(ui.min_rect().width() + 2.0 * margin);
+                // **Capped and centred, as the route that draws it does.**
+                // `ChatApp::call_card_ui` puts the card in a column of at
+                // most `CARD_MAX_WIDTH` before it calls this, so a card
+                // rendered straight into a thousand-point pane is a picture
+                // of something the app never draws -- and it was one: the
+                // desktop room shot had its roster spread across the whole
+                // window while the head sat in a 480-point column down the
+                // middle of it.
+                let pane = ui.available_width().min(sigil::tokens::CARD_MAX_WIDTH);
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(pane);
+                    call_card(ui, &call);
+                    out.set(ui.min_rect().width() + 2.0 * margin);
+                });
             });
     });
     (h, width)
@@ -613,6 +633,7 @@ fn phone_call_card_room() {
             present: &present,
             connecting: 2,
             two_party: false,
+            named: ROOM,
             ..plain()
         },
         egui::vec2(PHONE, TALL),
@@ -654,8 +675,6 @@ fn phone_call_card_light() {
     );
 }
 
-/// The desktop takes the whole pane as a centred column, so the picture is
-/// mostly about what `CARD_MAX_WIDTH` does to it.
 /// The chooser, which only exists where there is more than one microphone.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
@@ -683,6 +702,9 @@ fn phone_call_card_microphones() {
     );
 }
 
+/// The desktop takes the pane as a centred column, so the picture is mostly
+/// about what `CARD_MAX_WIDTH` does to it. (This line used to sit on the
+/// microphone chooser's test, two above, where it described nothing.)
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn call_card_desktop() {
@@ -768,6 +790,7 @@ fn phone_call_card_room_light() {
             present: &present,
             connecting: 1,
             two_party: false,
+            named: ROOM,
             ..plain()
         },
         egui::vec2(PHONE, TALL),

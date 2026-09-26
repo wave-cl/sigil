@@ -310,3 +310,88 @@ fn a_name_joins_the_key_rather_than_replacing_it() {
         "and not on the next one down"
     );
 }
+
+/// **A level meter has a height of its own.**
+///
+/// `ProgressBar` falls back to `spacing().interact_size.y` when it is given
+/// none -- which is whatever the surrounding screen has set for its
+/// *controls*. The call card zeroes exactly that for its whole body, because
+/// everything above the roster there is read rather than tapped, and every
+/// meter in a room was drawn **nought points tall**: a roster with no meters
+/// in it at all. The narrow branch happens to set the spacing back to a line
+/// for its own reasons and so never saw it.
+///
+/// So this sets `interact_size.y` to nothing, as that caller does, at both
+/// widths. **Not through the call card**, which now caps itself to
+/// `CARD_MAX_WIDTH` and therefore takes the narrow branch at every size --
+/// a version of this written there passed for a reason that had nothing to
+/// do with the fault.
+#[test]
+fn a_meter_does_not_take_its_height_from_the_caller() {
+    fn bars(size: egui::Vec2, form: sigil::Form) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, want: egui::Color32, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(r) if r.fill == want => out.push(r.rect),
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, want, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let rows = rows();
+        let mut h = Harness::builder().with_size(size).build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, form);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(t.surface_primary))
+                .show(ui, |ui| {
+                    // What the call card does to the ui it hands the roster.
+                    ui.spacing_mut().interact_size.y = 0.0;
+                    roster(ui, &rows, 0, false);
+                });
+        });
+        h.run();
+        h.run();
+        // Only the speaking row is filled in this colour, and the dot beside
+        // it is a `Shape::Circle` -- so a rectangle here is a meter and
+        // nothing else.
+        let want = theme::dark().speaking;
+        let mut found = Vec::new();
+        for shape in &h.output().shapes {
+            walk(&shape.shape, want, &mut found);
+        }
+        found
+    }
+
+    for (what, size, form) in [
+        ("a phone", egui::vec2(360.0, 320.0), sigil::Form::Phone),
+        (
+            "a wide pane",
+            egui::vec2(900.0, 260.0),
+            sigil::Form::Desktop,
+        ),
+    ] {
+        let drawn = bars(size, form);
+        assert_eq!(
+            drawn.len(),
+            1,
+            "{what}: the speaking row's meter was not painted: {drawn:?}"
+        );
+        let bar = drawn[0];
+        assert!(
+            bar.height() >= 2.0,
+            "{what}: a meter {} points tall is not on the screen: {bar:?}",
+            bar.height()
+        );
+        assert!(
+            bar.width() >= 8.0,
+            "{what}: a meter {} points wide says nothing: {bar:?}",
+            bar.width()
+        );
+    }
+}
