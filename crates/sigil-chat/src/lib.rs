@@ -1158,6 +1158,18 @@ fn row_menu(ui: &mut egui::Ui, is: &Doings) -> Option<RowAct> {
     act
 }
 
+/// Whether a device claim has been answered, either way.
+///
+/// The claim asks every session this identity holds to have this device
+/// listed under an account. It is over the moment any of them answers:
+/// success writes `linked`, failure writes a trouble. A rule of its own so
+/// it can be read and tested without a window, and so the two answers are
+/// named together rather than one of them being remembered and the other
+/// forgotten.
+fn claim_answered(linked: Option<bool>, trouble: bool) -> bool {
+    linked == Some(true) || trouble
+}
+
 /// What the bubble is told about a voice note.
 ///
 /// `None` until somebody presses play: a note is not fetched for being
@@ -13410,6 +13422,19 @@ impl ChatApp {
                 Err(why) => self.pane(at).add_trouble = Some(why),
             }
         }
+        // **"Asking…" is only true while it is being asked.**
+        //
+        // This was set when the claim went out and nothing ever put it back,
+        // so the line sat under the field for the rest of the session — after
+        // the claim had succeeded, after it had failed, and after the
+        // exchange had said nothing at all. A progress message that outlives
+        // the thing in progress is worse than none: it is the interface
+        // saying it is still working when it stopped long ago.
+        if self.pane(at).claim_pending.is_some()
+            && claim_answered(state.linked, state.trouble.is_some())
+        {
+            self.pane(at).claim_pending = None;
+        }
         if let Some(owner) = &self.pane(at).claim_pending {
             ui.colored_label(
                 theme.text_muted,
@@ -15787,6 +15812,34 @@ mod carried_tests {
 }
 
 /// What a saved file is called.
+#[cfg(test)]
+mod claim_tests {
+    use super::claim_answered;
+
+    /// **"Asking…" is only true while it is being asked.**
+    ///
+    /// `claim_pending` was set when the claim went out and nothing ever put
+    /// it back, so the line sat under the field for the rest of the session
+    /// — after it had succeeded, after it had failed, and after the exchange
+    /// had said nothing at all. A progress message that outlives the thing
+    /// in progress is the interface saying it is still working when it
+    /// stopped long ago.
+    #[test]
+    fn the_asking_stops_when_an_answer_arrives() {
+        // Nothing back yet: still asking, which is the only state that line
+        // is true in.
+        assert!(!claim_answered(None, false));
+        // It worked: the device is listed.
+        assert!(claim_answered(Some(true), false));
+        // It did not: the refusal is on screen, so the asking is over too.
+        assert!(claim_answered(None, true));
+        // **`Some(false)` is not an answer to this.** It is what the device
+        // list says before a claim is made, so treating it as one would take
+        // the line down the instant it went up.
+        assert!(!claim_answered(Some(false), false));
+    }
+}
+
 #[cfg(test)]
 mod save_name_tests {
     use super::*;
