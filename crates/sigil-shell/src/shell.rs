@@ -407,7 +407,7 @@ impl Shell {
         self.open_pressed(egui_ctx);
         self.take_call_presses(egui_ctx);
         self.badge();
-        self.remember_quiet();
+        self.remember_this_machine();
         self.tray_actions(egui_ctx);
         self.apply_nav();
     }
@@ -779,12 +779,16 @@ impl Shell {
         }
     }
 
-    /// Write what is not to be said out loud, when it changed. Like the
-    /// roster, and for the same reason it is here: every path that changes
-    /// it -- the tray, the Desktop pane, a conversation's own control --
-    /// goes through this pass, and one that forgot to write would lose a
-    /// mute at the next launch.
-    fn remember_quiet(&mut self) {
+    /// Write what this machine remembers about its own behaviour, when it
+    /// changed: the mutes, the conversations put away, and the preferences.
+    ///
+    /// Like the roster, and for the same reason it is here: every path that
+    /// changes any of them -- the tray, the Desktop pane, a conversation's
+    /// own control, a row's menu -- goes through this pass, and one that
+    /// forgot to write would lose a mute at the next launch.
+    ///
+    /// Named for the mutes when they were all it wrote.
+    fn remember_this_machine(&mut self) {
         if self.accounts.filed.take_changed() && self.remember {
             self.accounts.filed.save();
         }
