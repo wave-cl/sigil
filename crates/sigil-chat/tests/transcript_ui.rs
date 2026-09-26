@@ -12166,14 +12166,66 @@ fn pressing_play_on_a_voice_note_asks_the_exchange_for_it() {
         "a note was fetched for being on screen: {:?}",
         asked.borrow()
     );
-    h.get_by_label("Play").click();
+    // **Tapped as a finger taps it**, not clicked: the bubble's tap
+    // behaviour is reached only once egui has seen a touch, and under a
+    // plain pointer hover reveals the strip instead. A case that clicked
+    // would exercise the desktop path and say nothing about the phone.
+    let play = h.get_by_label("Play").rect().center();
+    finger_down(&mut h, play);
+    h.run();
+    finger_up(&mut h, play);
     // `run_steps` after the press: the row turns into a spinner while the
     // fetch is out, and a spinner asks for the next frame forever.
     h.run_steps(3);
+    // **Settled.** The strip is only drawn for a bubble that held still for
+    // a frame, and pressing play changes the row (a spinner where the button
+    // was), so a case that looked immediately after the press could pass
+    // because the layout had moved rather than because the strip stayed
+    // away. Several more passes with nothing changing.
+    for _ in 0..4 {
+        h.run_steps(2);
+    }
     let said = format!("{:?}", asked.borrow());
     assert!(
         said.contains("Fetch"),
         "the press asked for nothing: {said}"
+    );
+
+    // **And the press was the button's, not the bubble's.**
+    //
+    // The strip is revealed by a tap inside the bubble, and a voice note's
+    // Play button is inside the bubble -- so pressing play put the emoji
+    // strip up, which is what somebody pressing play saw happen instead of
+    // a note playing. Reported from the phone.
+    let labels = labels(&h);
+    assert!(
+        !labels.iter().any(|l| l == "More emoji"),
+        "pressing Play opened the reaction strip: {labels:?}"
+    );
+}
+
+/// **Tapping the bubble itself still opens the strip.** The other half of
+/// the case above: the fix asks egui whether a widget took the press, and a
+/// fix that answered "yes" for every tap would leave a phone with no way to
+/// react at all.
+#[test]
+fn tapping_a_bubble_still_opens_the_reaction_strip() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut state = a_conversation();
+    let n = state.lines.len();
+    state.lines[n - 1].redacted = false;
+    state.lines[n - 1].text = "something to react to".into();
+    let mut h = harness_recording_commands_phone(state, asked.clone());
+    h.run();
+    let words = h.get_by_label("something to react to").rect().center();
+    finger_down(&mut h, words);
+    h.run();
+    finger_up(&mut h, words);
+    h.run_steps(3);
+    let labels = labels(&h);
+    assert!(
+        labels.iter().any(|l| l == "More emoji"),
+        "a tap on the words opened nothing: {labels:?}"
     );
 }
 

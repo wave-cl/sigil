@@ -5790,3 +5790,109 @@ async fn a_profile_edit_keeps_what_it_was_not_given() {
         "setting a picture deleted the account's name"
     );
 }
+
+/// **A pressed voice note is actually fetched.**
+///
+/// `Cmd::Fetch` only records that a blob is wanted; `fetch_files` decides
+/// what is fetched, and it matched on the SIP-18 kind: images unasked, video
+/// when wanted, **and everything else never**. So pressing play on a voice
+/// note sent the command, turned the row into a spinner and then did
+/// nothing at all, for ever. Reported from the phone as "a voice note does
+/// not play, it gets stuck loading".
+///
+/// The filter had already been the wrong shape once — its own comment says
+/// it admitted images alone and a pressed *video* said "fetching" for ever —
+/// so this is the same bug one kind along, and `KIND_FILE` would have been
+/// the third. It asks "was this asked for" now rather than naming kinds.
+///
+/// Both halves: a note is not fetched for being scrolled past (SIP-18 puts
+/// the waveform and the length in the message so it draws without the
+/// audio), and it *is* fetched once asked for.
+#[tokio::test]
+async fn a_voice_note_is_fetched_when_it_is_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(1);
+    let (b_signer, b_id) = signer(2);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+
+    // `.opus`, because the kind comes from the name — and the kind is the
+    // whole of what this is about. The content need not decode; a note that
+    // will not decode simply goes without its waveform.
+    let note = dir.path().join("a-note.opus");
+    std::fs::write(&note, vec![7u8; 24 * 1024]).unwrap();
+    alice.send(Cmd::SendFile(note));
+
+    let has_note = |h: &ChatHandle| {
+        h.state().lines.iter().any(|l| {
+            l.attachments
+                .iter()
+                .any(|a| a.kind == sigil_ui::attachment::VOICE)
+        })
+    };
+    assert!(
+        until(|| has_note(&bob), 30).await,
+        "the note never reached Bob at all: {:?}",
+        bob.state().trouble
+    );
+
+    // Not fetched for being on screen: the message carries what is needed to
+    // draw it.
+    let bytes_here = |h: &ChatHandle| {
+        h.state().lines.iter().any(|l| {
+            l.attachments
+                .iter()
+                .any(|a| a.kind == sigil_ui::attachment::VOICE && a.bytes.is_some())
+        })
+    };
+    assert!(
+        !until(|| bytes_here(&bob), 3).await,
+        "a voice note was fetched for being on screen"
+    );
+
+    // Pressed. `Cmd::Fetch` names it by where it is in the conversation,
+    // which is what the bubble has to hand.
+    let (seq, index) = bob
+        .state()
+        .lines
+        .iter()
+        .find_map(|l| {
+            l.attachments
+                .iter()
+                .position(|a| a.kind == sigil_ui::attachment::VOICE)
+                .map(|i| (l.seq, i))
+        })
+        .expect("the note is in the conversation, asserted above");
+    bob.send(Cmd::Fetch { seq, index });
+    assert!(
+        until(|| bytes_here(&bob), 30).await,
+        "the note was asked for and never arrived — the spinner somebody \
+         reported: {:?}",
+        bob.state().trouble
+    );
+}

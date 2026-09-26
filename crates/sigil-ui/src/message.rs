@@ -835,8 +835,29 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
         // phone: the strip closed and nothing was sent. The strip's own
         // rectangle, as it was drawn last pass, is what says where it is;
         // `layer_id_at` answers about layers built this pass and is not it.
+        // **A tap a control inside the bubble took is that control's.**
+        //
+        // This asked only whether the pointer was inside the bubble, and a
+        // voice note's Play button is inside the bubble -- so pressing play
+        // also revealed the reaction strip, which is what somebody pressing
+        // play sees happen instead of a note playing. egui's rule that the
+        // innermost widget wins does not apply here, because the bubble is
+        // not a widget that senses: it reads the raw pointer against a
+        // layout rectangle, so it has to ask.
+        //
+        // Asked as "did the body produce *any* action this pass", not as a
+        // list of the ones that count: the next attachment control added
+        // would be left out of a list, which is this same bug again.
+        // `strip` runs after `body` and has not written to `action` yet, so
+        // anything in it came from a control inside the bubble.
+        //
+        // `ctx.interaction_snapshot().clicked` was tried first and is the
+        // more direct question -- it names the widget that took the press --
+        // but it reads empty by the time this runs, so it answers "nobody
+        // took it" for a press that a button had just taken.
+        let taken = *action != BubbleAction::default();
         if tap {
-            if inside && !shown {
+            if inside && !shown && !taken {
                 ui.ctx().data_mut(|d| d.insert_temp(revealed, me));
                 shown = true;
             } else if shown {

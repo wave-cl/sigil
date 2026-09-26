@@ -5140,14 +5140,22 @@ async fn fetch_files(
             sqex_proto::blob::KIND_IMAGE => {
                 fetch_unasked(a.size, desk.wanted.contains(&a.blob), *on_disc)
             }
-            // **A video only when play is pressed.** Never for its size, and
-            // not for being on the disc either: forty megabytes read and
-            // opened into memory for a conversation somebody scrolled past
-            // is not a picture on the way, and the press is what starts it.
-            // This filter used to admit images only, and a pressed video
-            // said "fetching" for ever.
-            sqex_proto::blob::KIND_VIDEO => desk.wanted.contains(&a.blob),
-            _ => false,
+            // **Everything else only when it is asked for.** Never for its
+            // size, and not for being on the disc either: forty megabytes
+            // read and opened into memory for a conversation somebody
+            // scrolled past is not a picture on the way, and the press is
+            // what starts it.
+            //
+            // Written as "everything else" rather than as a second named
+            // kind, because it has now been the wrong shape twice. The
+            // filter admitted images alone and a pressed *video* said
+            // "fetching" for ever; video was added beside it and a pressed
+            // *voice note* said "fetching" for ever, which is the same bug
+            // with the same symptom one SIP-18 kind along. `KIND_FILE` is
+            // the fourth and would have been the third time. A kind nobody
+            // has invented yet now behaves correctly by default: asked for,
+            // fetched.
+            _ => desk.wanted.contains(&a.blob),
         })
         .map(|(a, on_disc)| (a.clone(), on_disc))
         .collect();
