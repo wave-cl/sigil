@@ -14811,4 +14811,3 @@ fn a_confirmation_colours_the_grave_half_and_not_the_other() {
         "the way out is coloured as though it were the grave one"
     );
 }
-

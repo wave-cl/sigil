@@ -5114,6 +5114,144 @@ struct Fetching {
     landed: bool,
 }
 
+/// Publish this account's name and title, keeping the rest of the record.
+///
+/// **Its own function, and boxed where it is called.** `handle` is one
+/// `async fn` with a `match` over every command, and the future it compiles
+/// to is a single state machine holding the locals of every arm that can be
+/// live across an `await`. It sits close enough to the limit that adding a
+/// couple of profile records and a `Vec<u8>` to it overflowed the stack of
+/// the heaviest test -- `reaching_session`, which stands up two exchanges --
+/// on CI and nowhere else, as a `SIGABRT` with no panic message.
+///
+/// Measured: with these two arms inline the future overflows a 1 MiB thread
+/// and survives 2 MiB; boxed, it survives 512 KiB. `Box::pin` puts the
+/// child's locals on the heap and leaves the parent holding a pointer.
+async fn set_profile_now(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    name: String,
+    title: String,
+) {
+    // **What is not being edited has to be carried across.**
+    //
+    // `set_profile` signs and posts the *whole* SIP-21 record at a
+    // serial above whatever the exchange holds, so the record that
+    // goes up replaces the one that is there -- it is not a patch.
+    // This built one from `..Default::default()`, which meant an
+    // empty `avatar` and `flags` of zero, so editing a display name
+    // in sigil quietly did two other things:
+    //
+    //   * it deleted the account's picture, for everybody, with no
+    //     way to put it back from here (SIP-21's `avatar` is the
+    //     field every face in this app is drawn from); and
+    //   * it cleared `FLAG_WITHHOLD`, which is to say it *published*
+    //     a profile somebody had chosen to withhold.
+    //
+    // The second is the one that matters: a privacy setting undone
+    // by an unrelated edit, silently, is the worst shape a bug can
+    // take. Read what is held and keep everything this command was
+    // not given.
+    //
+    // A read that fails is not a reason to refuse the edit -- the
+    // name is what the person asked for -- but it *is* a reason not
+    // to overwrite what we could not see, so nothing is published
+    // when the held record cannot be read.
+    let me = chat.me;
+    let held = match chat.profile_of(&me).await {
+        Ok(got) => got.record.map(|r| r.profile),
+        Err(e) => {
+            state.send_modify(|s| {
+                s.trouble = Some(format!(
+                    "Could not read your profile to change it, so nothing was \
+                             published: {e}"
+                ))
+            });
+            return;
+        }
+    };
+    let profile = sqex_proto::profile::Profile {
+        name,
+        title,
+        // Kept exactly as published, because this command is about
+        // the two fields the dialog offers and nothing else.
+        avatar: held.as_ref().map(|p| p.avatar.clone()).unwrap_or_default(),
+        flags: held.as_ref().map(|p| p.flags).unwrap_or_default(),
+    };
+    match chat.set_profile(profile).await {
+        // Read it straight back rather than assuming: the exchange
+        // holds the record and a published profile is what everybody
+        // else will see, not what we asked for.
+        Ok(()) => desk.restale.insert(chat.me),
+        Err(e) => {
+            state.send_modify(|s| s.trouble = Some(e.to_string()));
+            false
+        }
+    };
+}
+
+/// Publish this account's picture, keeping the name and title beside it.
+/// Boxed for the reason `set_profile_now` gives.
+async fn set_profile_picture_now(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    path: Option<std::path::PathBuf>,
+) {
+    // **Inline, and small.** SIP-21 carries the picture in the record
+    // itself, capped at `MAX_AVATAR` — so this is not the blob upload
+    // a channel's picture does, it is a thumbnail small enough to be
+    // part of a signed record everybody fetches.
+    let avatar = match path {
+        None => Vec::new(),
+        Some(path) => {
+            let decoded = match image::open(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    return trouble(state, format!("{}: {e}", path.display()));
+                }
+            };
+            match thumbnail_of(&decoded, MAX_AVATAR) {
+                Some(bytes) => bytes,
+                None => {
+                    return trouble(
+                        state,
+                        "That picture could not be made small enough to publish.".to_string(),
+                    );
+                }
+            }
+        }
+    };
+    // The rest of the record, kept: `set_profile` posts the whole of
+    // it at a higher serial, so a picture published on its own would
+    // otherwise wipe the name and title beside it. The same rule as
+    // `Cmd::SetProfile`, in the other direction.
+    let me = chat.me;
+    let held = match chat.profile_of(&me).await {
+        Ok(got) => got.record.map(|r| r.profile),
+        Err(e) => {
+            return trouble(
+                state,
+                format!("Could not read your profile to change it: {e}"),
+            );
+        }
+    };
+    let profile = sqex_proto::profile::Profile {
+        name: held.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+        title: held.as_ref().map(|p| p.title.clone()).unwrap_or_default(),
+        flags: held.as_ref().map(|p| p.flags).unwrap_or_default(),
+        avatar,
+    };
+    match chat.set_profile(profile).await {
+        Ok(()) => desk.restale.insert(chat.me),
+        Err(e) => {
+            trouble(state, e);
+            false
+        }
+    };
+}
+
 async fn fetch_files(
     chat: &mut Chat,
     state: &watch::Sender<ChatState>,
@@ -7473,61 +7611,9 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             desk.restructure = true;
         }
         Cmd::SetProfile { name, title } => {
-            // **What is not being edited has to be carried across.**
-            //
-            // `set_profile` signs and posts the *whole* SIP-21 record at a
-            // serial above whatever the exchange holds, so the record that
-            // goes up replaces the one that is there -- it is not a patch.
-            // This built one from `..Default::default()`, which meant an
-            // empty `avatar` and `flags` of zero, so editing a display name
-            // in sigil quietly did two other things:
-            //
-            //   * it deleted the account's picture, for everybody, with no
-            //     way to put it back from here (SIP-21's `avatar` is the
-            //     field every face in this app is drawn from); and
-            //   * it cleared `FLAG_WITHHOLD`, which is to say it *published*
-            //     a profile somebody had chosen to withhold.
-            //
-            // The second is the one that matters: a privacy setting undone
-            // by an unrelated edit, silently, is the worst shape a bug can
-            // take. Read what is held and keep everything this command was
-            // not given.
-            //
-            // A read that fails is not a reason to refuse the edit -- the
-            // name is what the person asked for -- but it *is* a reason not
-            // to overwrite what we could not see, so nothing is published
-            // when the held record cannot be read.
-            let me = chat.me;
-            let held = match chat.profile_of(&me).await {
-                Ok(got) => got.record.map(|r| r.profile),
-                Err(e) => {
-                    state.send_modify(|s| {
-                        s.trouble = Some(format!(
-                            "Could not read your profile to change it, so nothing was \
-                             published: {e}"
-                        ))
-                    });
-                    return;
-                }
-            };
-            let profile = sqex_proto::profile::Profile {
-                name,
-                title,
-                // Kept exactly as published, because this command is about
-                // the two fields the dialog offers and nothing else.
-                avatar: held.as_ref().map(|p| p.avatar.clone()).unwrap_or_default(),
-                flags: held.as_ref().map(|p| p.flags).unwrap_or_default(),
-            };
-            match chat.set_profile(profile).await {
-                // Read it straight back rather than assuming: the exchange
-                // holds the record and a published profile is what everybody
-                // else will see, not what we asked for.
-                Ok(()) => desk.restale.insert(chat.me),
-                Err(e) => {
-                    state.send_modify(|s| s.trouble = Some(e.to_string()));
-                    false
-                }
-            };
+            // **Boxed, like every other arm that grew one.** See
+            // `set_profile_now`.
+            Box::pin(set_profile_now(chat, state, desk, name, title)).await;
         }
         Cmd::ClaimName(name) => {
             // The exchange's own outcome, in words. A refusal here is an
@@ -8351,58 +8437,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         }
 
         Cmd::SetProfilePicture(path) => {
-            // **Inline, and small.** SIP-21 carries the picture in the record
-            // itself, capped at `MAX_AVATAR` — so this is not the blob upload
-            // a channel's picture does, it is a thumbnail small enough to be
-            // part of a signed record everybody fetches.
-            let avatar = match path {
-                None => Vec::new(),
-                Some(path) => {
-                    let decoded = match image::open(&path) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            return trouble(state, format!("{}: {e}", path.display()));
-                        }
-                    };
-                    match thumbnail_of(&decoded, MAX_AVATAR) {
-                        Some(bytes) => bytes,
-                        None => {
-                            return trouble(
-                                state,
-                                "That picture could not be made small enough to publish."
-                                    .to_string(),
-                            );
-                        }
-                    }
-                }
-            };
-            // The rest of the record, kept: `set_profile` posts the whole of
-            // it at a higher serial, so a picture published on its own would
-            // otherwise wipe the name and title beside it. The same rule as
-            // `Cmd::SetProfile`, in the other direction.
-            let me = chat.me;
-            let held = match chat.profile_of(&me).await {
-                Ok(got) => got.record.map(|r| r.profile),
-                Err(e) => {
-                    return trouble(
-                        state,
-                        format!("Could not read your profile to change it: {e}"),
-                    );
-                }
-            };
-            let profile = sqex_proto::profile::Profile {
-                name: held.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
-                title: held.as_ref().map(|p| p.title.clone()).unwrap_or_default(),
-                flags: held.as_ref().map(|p| p.flags).unwrap_or_default(),
-                avatar,
-            };
-            match chat.set_profile(profile).await {
-                Ok(()) => desk.restale.insert(chat.me),
-                Err(e) => {
-                    trouble(state, e);
-                    false
-                }
-            };
+            Box::pin(set_profile_picture_now(chat, state, desk, path)).await;
         }
 
         Cmd::Call { direct } => {
