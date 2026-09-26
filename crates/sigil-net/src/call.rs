@@ -157,7 +157,29 @@ impl Report for Bridge {
                 s.me = Some(*me);
                 s.phase = Phase::Live;
             }
-            Event::Stats(line) => s.stats = Some(line.clone()),
+            Event::Stats(line) => {
+                // **Deaf is a thing that stopped being true.**
+                //
+                // The engine raises `Deaf` once, when 150 frames have gone
+                // out and *none* has come back — three seconds. It never
+                // says the opposite, because the condition it tests
+                // (`received == 0`) cannot become true again once a frame
+                // lands. So a call whose first inbound frame is more than
+                // three seconds late — a relayed path, a phone waking its
+                // radio, a far end slower to join — carried "Nothing is
+                // coming through from the other side" in amber for the rest
+                // of its life while the audio flowed perfectly.
+                //
+                // The count is already here: it is in the line this event
+                // carries, once a second. Read out of the words rather than
+                // from a counter because the engine publishes no counter —
+                // the proper fix is an event from it, and this is the
+                // consumer making do until there is one.
+                if heard(line).is_some_and(|n| n > 0) {
+                    s.deaf = false;
+                }
+                s.stats = Some(line.clone());
+            }
             Event::FinalStats(line) => {
                 s.stats = Some(line.clone());
                 s.final_stats = Some(line.clone());
@@ -1095,5 +1117,55 @@ mod reach_tests {
             Dial::borrowed_or(None, configured()),
             Some(Dial::Discover(_))
         ));
+    }
+}
+
+/// How many frames an engine stats line says have arrived, if it says.
+///
+/// **`None` is "cannot tell", and the caller must change nothing on it.**
+/// This reads a number out of a sentence the engine formats for people, so
+/// the one way it can go wrong is the sentence changing shape — and then the
+/// answer has to be "I do not know" rather than a guess in either direction.
+/// Saying zero would put an amber warning on a working call; saying one
+/// would take a true warning off a broken one.
+fn heard(line: &str) -> Option<u64> {
+    line.split('\u{b7}')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("recv "))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+#[cfg(test)]
+mod heard_tests {
+    use super::heard;
+
+    /// **A deaf call that starts hearing stops being deaf.**
+    ///
+    /// The engine raises `Deaf` once, at three seconds of silence, and never
+    /// says the opposite — the condition it tests cannot become true again.
+    /// The count is in the stats line it sends every second, so that is
+    /// where the answer comes from.
+    #[test]
+    fn the_count_is_read_out_of_the_line_or_not_at_all() {
+        let real = "sent 854 · recv 0 · loss 0.0% · late 0 · dup 0 · concealed 0 · \
+                    trimmed 0 · underruns 1 · buffered 3";
+        assert_eq!(heard(real), Some(0), "silent, and it says so");
+
+        let hearing = "sent 854 · recv 812 · loss 0.4% · late 2 · dup 0 · concealed 1 · \
+                       trimmed 0 · underruns 1 · buffered 3";
+        assert_eq!(heard(hearing), Some(812));
+
+        // With the round-trip tail the engine adds once it has one.
+        let with_rtt = "sent 100 · recv 98 · loss 0.0% · late 0 · dup 0 · concealed 0 · \
+                        trimmed 0 · underruns 0 · buffered 2 · rtt p50 31.0 ms p95 44.0 ms";
+        assert_eq!(heard(with_rtt), Some(98));
+
+        // **Cannot tell is not zero.** If the sentence ever changes shape,
+        // the answer has to be "I do not know": saying zero would put an
+        // amber warning on a working call, and saying a number would take a
+        // true warning off a broken one.
+        assert_eq!(heard("sent 10 · loss 0.0%"), None, "no recv at all");
+        assert_eq!(heard("recv lots"), None, "not a number");
+        assert_eq!(heard(""), None);
     }
 }
