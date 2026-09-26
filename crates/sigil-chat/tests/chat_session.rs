@@ -5698,3 +5698,95 @@ async fn an_account_can_move_to_another_exchange() {
     );
     chat.stop();
 }
+
+/// **Publishing a name does not delete your picture.**
+///
+/// `set_profile` signs and posts the *whole* SIP-21 record at a serial above
+/// whatever the exchange holds — it replaces, it does not patch. `SetProfile`
+/// built its record from `..Default::default()`, so every edit of a display
+/// name in sigil also cleared `avatar` (the field every face in this
+/// application is drawn from) and `flags`, which is to say it published a
+/// profile somebody had chosen to withhold.
+///
+/// This goes through a real exchange because the whole defect lives in what
+/// the exchange ends up holding: the client is happy either way.
+///
+/// Both directions, because the same rule has two sides and only one of them
+/// existed before today — setting the picture must not wipe the name either.
+#[tokio::test]
+async fn a_profile_edit_keeps_what_it_was_not_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(1);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| alice.state().me == Some(a_id), 15).await,
+        "the session should come up: {:?}",
+        alice.state().trouble
+    );
+
+    // A picture on disc, as the platform's file picker would hand one over.
+    let face = dir.path().join("face.png");
+    let img = image::RgbaImage::from_fn(64, 64, |x, y| {
+        image::Rgba([(x * 4) as u8, (y * 4) as u8, 0x80, 0xFF])
+    });
+    image::DynamicImage::ImageRgba8(img)
+        .save_with_format(&face, image::ImageFormat::Png)
+        .expect("write the picture");
+
+    alice.send(Cmd::SetProfilePicture(Some(face)));
+    assert!(
+        until(|| alice.state().mine.picture.is_some(), 20).await,
+        "the picture never reached the profile: {:?}",
+        alice.state().trouble
+    );
+
+    // Now the edit that used to wipe it.
+    alice.send(Cmd::SetProfile {
+        name: "Grace".into(),
+        title: "counted on".into(),
+    });
+    assert!(
+        until(|| alice.state().mine.name.as_deref() == Some("Grace"), 20).await,
+        "the name was never published: {:?}",
+        alice.state().trouble
+    );
+    assert!(
+        alice.state().mine.picture.is_some(),
+        "publishing a name deleted the account's picture"
+    );
+
+    // And the other way: setting the picture again keeps the name, because
+    // that publish replaces the whole record too.
+    let other = dir.path().join("other.png");
+    let img = image::RgbaImage::from_fn(48, 48, |x, _| {
+        image::Rgba([0x20, (x * 5) as u8, 0x40, 0xFF])
+    });
+    image::DynamicImage::ImageRgba8(img)
+        .save_with_format(&other, image::ImageFormat::Png)
+        .expect("write the picture");
+    alice.send(Cmd::SetProfilePicture(Some(other)));
+    assert!(
+        until(
+            || alice
+                .state()
+                .mine
+                .picture
+                .as_ref()
+                .is_some_and(|f| f.hash != 0),
+            20
+        )
+        .await,
+        "the second picture never arrived: {:?}",
+        alice.state().trouble
+    );
+    assert_eq!(
+        alice.state().mine.name.as_deref(),
+        Some("Grace"),
+        "setting a picture deleted the account's name"
+    );
+}

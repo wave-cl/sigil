@@ -1932,6 +1932,12 @@ pub struct ChatApp {
     /// the composer, and a picture chosen for a room must not arrive as a
     /// message nobody asked to send.
     picturing: Option<(At, files::Pick)>,
+    /// A picture being chosen for **this account's own** profile (SIP-21),
+    /// as `picturing` is for a channel's. Two fields rather than one with a
+    /// flag: they are answered by the same platform picker and the answers
+    /// go to different commands, and a single slot would let one pick land
+    /// on the other's target.
+    own_picture: Option<(At, files::Pick)>,
     /// Where to save an attachment, and which one: conversation, entry,
     /// index.
     saving: Option<(At, u64, usize, files::Pick)>,
@@ -2032,6 +2038,7 @@ impl ChatApp {
             wake: None,
             picking: None,
             picturing: None,
+            own_picture: None,
             saving: None,
             away: false,
             asked: Vec::new(),
@@ -5284,7 +5291,7 @@ impl ChatApp {
                 );
                 match which {
                     Dialog::Compose => self.compose_dialog(at, ui, theme),
-                    Dialog::Profile => self.profile_dialog(at, ui, theme),
+                    Dialog::Profile => self.profile_dialog(at, state, ui, theme),
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
                     Dialog::Mail => self.mail_dialog(at, state, ui, theme),
@@ -5472,9 +5479,55 @@ impl ChatApp {
     }
 
     /// Your own SIP-21 profile: self-declared, attested by nobody.
-    fn profile_dialog(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
+    fn profile_dialog(
+        &mut self,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         ui.heading("Your profile");
         ui.add_space(tokens::SPACING_SM);
+
+        // **The picture, which had nowhere to be set.**
+        //
+        // SIP-21 carries a picture beside the name and the title, and it is
+        // where every face in this application comes from — the conversation
+        // list, the transcript, the call card, the ring. Sigil could draw
+        // everybody else's and could not publish its own, so the dialog
+        // reached from your own avatar offered two text fields and nothing
+        // to do with the thing that was pressed.
+        let me = at.0;
+        let face = state.mine.picture.clone();
+        let picture = self.person_picture(at, ui.ctx(), me, face.as_ref());
+        let mut choose = false;
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            sigil_ui::avatar(ui, &me.to_string(), picture.as_ref(), tokens::AVATAR_LG);
+            ui.add_space(tokens::SPACING_SM);
+            ui.vertical(|ui| {
+                choose = sigil_ui::icon_item(ui, sigil_ui::Icon::Attach, "Choose a picture")
+                    .on_hover_text(
+                        "Anybody who can see your profile sees it. It is shrunk to fit \
+                         the record, which is a few kilobytes.",
+                    )
+                    .clicked();
+                // Only where there is one: a control that takes away nothing
+                // is a control that does nothing.
+                if state.mine.picture.is_some() {
+                    clear = sigil_ui::icon_item(ui, sigil_ui::Icon::Close, "Remove it").clicked();
+                }
+            });
+        });
+        if choose {
+            self.own_picture = Some((at.clone(), files::pick_files()));
+            ui.ctx().request_repaint();
+        }
+        if clear {
+            self.send_as(Some(at), Cmd::SetProfilePicture(None));
+        }
+        ui.add_space(tokens::SPACING_SM);
+
         ui.label("Name");
         let width = ui.available_width();
         sigil_ui::field(
@@ -8543,6 +8596,20 @@ impl ChatApp {
                 && let Some(path) = paths.drain(..).next()
             {
                 self.send_as(Some(&at), Cmd::SetChannelAvatar(Some(path)));
+            }
+        }
+        if let Some((at, pick)) = &self.own_picture
+            && let Some(answer) = pick.take()
+        {
+            let at = at.clone();
+            self.own_picture = None;
+            // One picture, as for a channel: an account has one, and taking
+            // the first is kinder than refusing a multiple selection
+            // somebody made by habit.
+            if let Some(mut paths) = answer
+                && let Some(path) = paths.drain(..).next()
+            {
+                self.send_as(Some(&at), Cmd::SetProfilePicture(Some(path)));
             }
         }
         if let Some((at, seq, index, pick)) = &self.saving

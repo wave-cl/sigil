@@ -1806,6 +1806,14 @@ pub enum Cmd {
     },
     /// Set the open channel's picture, or clear it.
     SetChannelAvatar(Option<std::path::PathBuf>),
+    /// **This account's own picture (SIP-21).** `Some` publishes the file,
+    /// shrunk to fit the record; `None` takes it away.
+    ///
+    /// Its own command rather than a third field on [`Cmd::SetProfile`]
+    /// because choosing a file is a round trip through the platform's
+    /// picker: the dialog's Publish cannot wait on it, and the picture is
+    /// the one part of a profile somebody changes without touching the rest.
+    SetProfilePicture(Option<std::path::PathBuf>),
 
     // ---- devices (SIP-20/22) --------------------------------------------
     /// Re-read the device list.
@@ -4797,7 +4805,7 @@ pub fn preview_of(path: &std::path::Path, kind: u8) -> Option<(Vec<u8>, Vec<u8>)
             let image = image::ImageReader::open(path).ok()?.decode().ok()?;
             Some((
                 shape_meta(image.width(), image.height(), None),
-                thumbnail_of(&image).unwrap_or_default(),
+                thumbnail_of(&image, MAX_PREVIEW).unwrap_or_default(),
             ))
         }
         sqex_proto::blob::KIND_VIDEO => {
@@ -4809,7 +4817,7 @@ pub fn preview_of(path: &std::path::Path, kind: u8) -> Option<(Vec<u8>, Vec<u8>)
                     described.height,
                     Some(described.duration_ms),
                 ),
-                thumbnail_of(&frame_image(&first)).unwrap_or_default(),
+                thumbnail_of(&frame_image(&first), MAX_PREVIEW).unwrap_or_default(),
             ))
         }
         // **A voice note has no picture and is not exempt.** SIP-18 gives
@@ -4905,7 +4913,7 @@ fn frame_image(frame: &egui::ColorImage) -> image::DynamicImage {
 
 /// [`thumbnail`] from a decoded image, so it can be tested on one built in
 /// memory rather than on a file.
-fn thumbnail_of(image: &image::DynamicImage) -> Option<Vec<u8>> {
+fn thumbnail_of(image: &image::DynamicImage, budget: usize) -> Option<Vec<u8>> {
     use image::ImageFormat;
     // Lossless and with alpha first; then lossy, then smaller and lossy. A
     // JPEG has no alpha, so it is encoded from the colour channels alone --
@@ -4939,7 +4947,7 @@ fn thumbnail_of(image: &image::DynamicImage) -> Option<Vec<u8>> {
             _ => small.write_to(&mut out, format).is_ok(),
         };
         let bytes = out.into_inner();
-        if written && bytes.len() <= MAX_PREVIEW {
+        if written && bytes.len() <= budget {
             return Some(bytes);
         }
     }
@@ -4949,6 +4957,17 @@ fn thumbnail_of(image: &image::DynamicImage) -> Option<Vec<u8>> {
 /// SIP-18's cap on a preview, re-said here so the sender and the reader agree
 /// by construction: the reader refuses anything over it.
 const MAX_PREVIEW: usize = sqex_proto::blob::MAX_PREVIEW;
+
+/// SIP-21's cap on a profile picture, which is carried **inline** in the
+/// record rather than as a blob — the document's own reason is that blobs
+/// live in a channel and are pruned on its window, and a profile is in no
+/// channel.
+///
+/// The same number as [`MAX_PREVIEW`] today, and named separately anyway:
+/// they are two documents' caps and nothing keeps them equal. `thumbnail_of`
+/// takes the budget for exactly this reason, rather than each caller trusting
+/// the coincidence.
+const MAX_AVATAR: usize = sqex_proto::profile::MAX_AVATAR;
 
 #[cfg(test)]
 mod thumbnail_tests {
@@ -4971,7 +4990,7 @@ mod thumbnail_tests {
     /// The preview of a busy picture fits the protocol's cap.
     #[test]
     fn a_busy_picture_gets_a_preview_that_fits() {
-        let preview = thumbnail_of(&noise()).expect("some preview of it");
+        let preview = thumbnail_of(&noise(), MAX_PREVIEW).expect("some preview of it");
         assert!(
             preview.len() <= MAX_PREVIEW,
             "the preview is {} bytes against a cap of {MAX_PREVIEW}, and every \
@@ -4999,7 +5018,7 @@ mod thumbnail_tests {
             image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(400, 300, |x, _| {
                 image::Rgba([x as u8, 40, 90, 128])
             }));
-        let preview = thumbnail_of(&smooth).expect("a preview");
+        let preview = thumbnail_of(&smooth, MAX_PREVIEW).expect("a preview");
         assert!(preview.len() <= MAX_PREVIEW);
         assert!(
             preview.starts_with(&[0x89, b'P', b'N', b'G']),
@@ -7446,10 +7465,50 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             desk.restructure = true;
         }
         Cmd::SetProfile { name, title } => {
+            // **What is not being edited has to be carried across.**
+            //
+            // `set_profile` signs and posts the *whole* SIP-21 record at a
+            // serial above whatever the exchange holds, so the record that
+            // goes up replaces the one that is there -- it is not a patch.
+            // This built one from `..Default::default()`, which meant an
+            // empty `avatar` and `flags` of zero, so editing a display name
+            // in sigil quietly did two other things:
+            //
+            //   * it deleted the account's picture, for everybody, with no
+            //     way to put it back from here (SIP-21's `avatar` is the
+            //     field every face in this app is drawn from); and
+            //   * it cleared `FLAG_WITHHOLD`, which is to say it *published*
+            //     a profile somebody had chosen to withhold.
+            //
+            // The second is the one that matters: a privacy setting undone
+            // by an unrelated edit, silently, is the worst shape a bug can
+            // take. Read what is held and keep everything this command was
+            // not given.
+            //
+            // A read that fails is not a reason to refuse the edit -- the
+            // name is what the person asked for -- but it *is* a reason not
+            // to overwrite what we could not see, so nothing is published
+            // when the held record cannot be read.
+            let me = chat.me;
+            let held = match chat.profile_of(&me).await {
+                Ok(got) => got.record.map(|r| r.profile),
+                Err(e) => {
+                    state.send_modify(|s| {
+                        s.trouble = Some(format!(
+                            "Could not read your profile to change it, so nothing was \
+                             published: {e}"
+                        ))
+                    });
+                    return;
+                }
+            };
             let profile = sqex_proto::profile::Profile {
                 name,
                 title,
-                ..Default::default()
+                // Kept exactly as published, because this command is about
+                // the two fields the dialog offers and nothing else.
+                avatar: held.as_ref().map(|p| p.avatar.clone()).unwrap_or_default(),
+                flags: held.as_ref().map(|p| p.flags).unwrap_or_default(),
             };
             match chat.set_profile(profile).await {
                 // Read it straight back rather than assuming: the exchange
@@ -8276,6 +8335,61 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             };
             match chat.set_avatar(&channel, attachment).await {
                 Ok(_) => desk.dirty.insert(channel),
+                Err(e) => {
+                    trouble(state, e);
+                    false
+                }
+            };
+        }
+
+        Cmd::SetProfilePicture(path) => {
+            // **Inline, and small.** SIP-21 carries the picture in the record
+            // itself, capped at `MAX_AVATAR` — so this is not the blob upload
+            // a channel's picture does, it is a thumbnail small enough to be
+            // part of a signed record everybody fetches.
+            let avatar = match path {
+                None => Vec::new(),
+                Some(path) => {
+                    let decoded = match image::open(&path) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            return trouble(state, format!("{}: {e}", path.display()));
+                        }
+                    };
+                    match thumbnail_of(&decoded, MAX_AVATAR) {
+                        Some(bytes) => bytes,
+                        None => {
+                            return trouble(
+                                state,
+                                "That picture could not be made small enough to publish."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            };
+            // The rest of the record, kept: `set_profile` posts the whole of
+            // it at a higher serial, so a picture published on its own would
+            // otherwise wipe the name and title beside it. The same rule as
+            // `Cmd::SetProfile`, in the other direction.
+            let me = chat.me;
+            let held = match chat.profile_of(&me).await {
+                Ok(got) => got.record.map(|r| r.profile),
+                Err(e) => {
+                    return trouble(
+                        state,
+                        format!("Could not read your profile to change it: {e}"),
+                    );
+                }
+            };
+            let profile = sqex_proto::profile::Profile {
+                name: held.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+                title: held.as_ref().map(|p| p.title.clone()).unwrap_or_default(),
+                flags: held.as_ref().map(|p| p.flags).unwrap_or_default(),
+                avatar,
+            };
+            match chat.set_profile(profile).await {
+                Ok(()) => desk.restale.insert(chat.me),
                 Err(e) => {
                     trouble(state, e);
                     false
@@ -9185,7 +9299,7 @@ mod preview_size_tests {
             let g = (y * 255 / 1080) as u8;
             image::Rgb([r, g, 128])
         }));
-        let preview = thumbnail_of(&photo).expect("a preview");
+        let preview = thumbnail_of(&photo, MAX_PREVIEW).expect("a preview");
         assert!(preview.len() <= MAX_PREVIEW, "{} bytes", preview.len());
         let decoded = image::load_from_memory(&preview).expect("it decodes");
         assert!(
@@ -9209,7 +9323,7 @@ mod preview_size_tests {
             let b = seed.to_le_bytes();
             image::Rgba([b[0], b[1], b[2], 255])
         }));
-        let preview = thumbnail_of(&noise).expect("a preview");
+        let preview = thumbnail_of(&noise, MAX_PREVIEW).expect("a preview");
         assert!(
             preview.len() <= MAX_PREVIEW,
             "{} bytes against {MAX_PREVIEW}",
