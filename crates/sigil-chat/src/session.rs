@@ -3462,6 +3462,16 @@ impl Desk {
             // every two seconds, and cost about a thousand requests a day
             // finding nothing. It is gone.
             Event::Ringing { channel, .. } => {
+                // **Said out loud, because its absence is the diagnosis.**
+                // A ring that never arrives and a ring that arrives and is
+                // dropped on the way to `ringing` look identical from
+                // outside: both are a phone ringing out at one end and
+                // silence at the other. This line is the only thing that
+                // separates them, and an afternoon went on not having it.
+                tracing::info!(
+                    channel = %bs58::encode(channel).into_string(),
+                    "a call is ringing here"
+                );
                 self.dirty.insert(channel);
             }
             // SIP-39: another exchange carried a call here and ours is
@@ -3471,6 +3481,10 @@ impl Desk {
             // rings replaces it: a bridge is for one call, and the caller
             // whose bridge lapsed is told by their own exchange.
             Event::CrossCall { bridge, caller } => {
+                // The other way a ring reaches this client, and worth the
+                // same line for the same reason: which of the two arrived
+                // says which path the caller's exchange chose.
+                tracing::info!(%caller, "a call was carried here from another exchange");
                 self.cross_ring = Some((CrossRing { bridge, caller }, std::time::Instant::now()));
             }
             Event::Admission | Event::Heartbeat | Event::Unknown(_) => {}
@@ -8498,13 +8512,31 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             };
             match chat.call(&channel, media, RING_SECS).await {
                 Ok((posted, _secret)) => {
+                    // **What the invitation did, not what was decided.** The
+                    // screen above this logs which way a call was routed and
+                    // then says nothing about whether it went out, so a call
+                    // that posted and one that was refused read the same in
+                    // the log -- and the refusal only reaches a field on the
+                    // pane, which the next thing drawn clears.
+                    tracing::info!(
+                        channel = %bs58::encode(channel).into_string(),
+                        seq = posted.seq,
+                        direct,
+                        "invitation posted"
+                    );
                     // The signal says it is ringing *now*; the entry is what
                     // says it happened. Both, because neither does the other's
                     // job.
                     chat.ring_state(&channel, posted.seq, RING_RINGING).await;
                     desk.dirty.insert(channel);
                 }
-                Err(e) => trouble(state, e),
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %bs58::encode(channel).into_string(),
+                        "the invitation was refused: {e}"
+                    );
+                    trouble(state, e)
+                }
             }
         }
         Cmd::Answer { channel, seq } => {
