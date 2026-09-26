@@ -5981,6 +5981,29 @@ fn lines_of(
         .collect()
 }
 
+/// How long a call lasted, for the line it leaves in the transcript.
+///
+/// **Hours once there are hours, and no unit that says nothing.** Minutes
+/// were the largest unit this knew, so a two-hour call read "120m 0s"; and
+/// the seconds were printed whether or not there were any, so a call of a
+/// round minute read "1m 0s". A length is read at a glance in a transcript,
+/// beside a time of day, which is the argument for the largest unit that
+/// fits and nothing after it that is zero.
+fn call_length(secs: u32) -> String {
+    match secs {
+        0 => String::new(),
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => match s % 60 {
+            0 => format!("{}m", s / 60),
+            rest => format!("{}m {rest}s", s / 60),
+        },
+        s => match (s / 60) % 60 {
+            0 => format!("{}h", s / 3600),
+            mins => format!("{}h {mins}m", s / 3600),
+        },
+    }
+}
+
 fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
     let verified: HashMap<PubKey, u64> = chat
         .store()
@@ -6265,10 +6288,9 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
             let said = match outcome {
                 CALL_ANSWERED => {
                     let secs = call.ended.map(|(_, d, _)| d).unwrap_or(0);
-                    let length = match secs {
-                        0 => String::new(),
-                        s if s < 60 => format!(", {s}s"),
-                        s => format!(", {}m {}s", s / 60, s % 60),
+                    let length = match call_length(secs) {
+                        none if none.is_empty() => none,
+                        some => format!(", {some}"),
                     };
                     if mine {
                         format!("You called{length}")
@@ -9313,5 +9335,36 @@ mod chain_apart_tests {
     #[test]
     fn a_device_that_has_written_nothing_is_never_apart() {
         assert!(!chain_apart(0, A, &[(0, B), (1, B)]));
+    }
+}
+
+#[cfg(test)]
+mod call_length_tests {
+    use super::call_length;
+
+    /// **The largest unit that fits, and nothing after it that is zero.**
+    ///
+    /// Minutes were the largest unit this knew, so a two-hour call read
+    /// "120m 0s" in the transcript; and seconds were always printed, so a
+    /// call of a round minute read "1m 0s".
+    #[test]
+    fn a_length_reads_at_a_glance() {
+        assert_eq!(call_length(0), "", "a call with no length says nothing");
+        assert_eq!(call_length(1), "1s");
+        assert_eq!(call_length(31), "31s");
+        assert_eq!(call_length(59), "59s");
+        // The boundaries, both ways round.
+        assert_eq!(call_length(60), "1m");
+        assert_eq!(call_length(61), "1m 1s");
+        assert_eq!(call_length(3599), "59m 59s");
+        assert_eq!(call_length(3600), "1h");
+        assert_eq!(call_length(3660), "1h 1m");
+        // The two this was written for: a round hour and a long call.
+        assert_eq!(call_length(7200), "2h");
+        assert_eq!(call_length(5430), "1h 30m");
+        // Seconds are dropped once there are hours -- 5430 is 1h 30m 30s,
+        // and one second past the hour is still "1h": a stopwatch counts
+        // seconds, and this sits beside a time of day.
+        assert_eq!(call_length(3601), "1h");
     }
 }
