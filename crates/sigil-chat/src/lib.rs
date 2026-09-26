@@ -5660,10 +5660,17 @@ impl ChatApp {
             Some((origin, _)) => sigil_ui::short(&origin.to_string()),
             None => self.exchange_label(at.0, &at.1),
         };
-        ui.colored_label(
-            theme.text_muted,
-            egui::RichText::new(format!("Ordered now by {now}.")).small(),
-        );
+        // **"Ordered now by default." reads as "by convention".**
+        // `default_label` answers with the bare word "default" where nothing
+        // is yet known about the identity's default exchange — which names
+        // it well enough in a switcher, beside other names, and collides
+        // with English in a sentence. Where that is all there is, say the
+        // longer thing; the short one is a label, not a place.
+        let ordered = match now.as_str() {
+            "default" => "Ordered now by this identity's default exchange.".to_string(),
+            name => format!("Ordered now by {name}."),
+        };
+        ui.colored_label(theme.text_muted, egui::RichText::new(ordered).small());
         ui.add_space(tokens::SPACING_SM);
 
         ui.label("Exchange");
@@ -5903,9 +5910,14 @@ impl ChatApp {
         // legible from the word; what is not is that the name goes back to
         // the pool and is somebody else's to take, and that nothing of yours
         // goes with it. A pointer gets the same sentence as a tooltip.
-        const GIVING_UP: &str = "Stop being reachable at this name. Nothing is deleted — your \
-                                 conversations, keys and counters are untouched — and somebody \
-                                 else may take it afterwards.";
+        // **It names what it is about.** On a phone the same sentence is
+        // drawn under the row, where it followed three buttons and began
+        // "Stop being reachable…" -- an instruction with no subject, which
+        // a reader could attach to Claim as easily as to Give it up. A
+        // caveat under a row of buttons has to say which one it is for.
+        const GIVING_UP: &str = "Giving it up stops you being reachable at this name. Nothing \
+                                 is deleted — your conversations, keys and counters are \
+                                 untouched — and somebody else may take it afterwards.";
         let mut release = None;
         ui.horizontal(|ui| {
             if ui.button("Claim").clicked() || entered {

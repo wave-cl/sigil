@@ -14175,3 +14175,92 @@ fn the_backup_quota_is_a_size_not_a_byte_count() {
         "the quota line before the exchange has answered: {said}"
     );
 }
+
+/// Open one dialog on a phone and photograph it.
+///
+/// **Five of the ten had no picture at all**: the profile, adding an
+/// exchange, claiming a name, and both SIP-53 moves — two of which were
+/// added this month. `every_dialog_fits_a_phones_screen` measures all ten
+/// now, but a dialog that fits is not a dialog that reads, and both defects
+/// found by this month's audit were found by looking at one.
+fn photograph_dialog(which: &str, name: &str) {
+    let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), which, them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    // Not `run`: these carry text fields, and a focused caret repaints past
+    // the four steps `run` allows.
+    h.run_steps(2);
+    h.snapshot(name);
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_profile() {
+    photograph_dialog("profile", "phone_dialog_profile");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_exchange() {
+    photograph_dialog("exchange", "phone_dialog_exchange");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_name() {
+    photograph_dialog("name", "phone_dialog_name");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_rehome() {
+    photograph_dialog("rehome", "phone_dialog_rehome");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_movehome() {
+    photograph_dialog("movehome", "phone_dialog_movehome");
+}
+
+/// **A caveat under a row of buttons says which button it is for**, and a
+/// fallback label is not a place name. Both found by photographing dialogs
+/// that had never been rendered.
+#[test]
+fn two_dialogs_say_which_thing_they_mean() {
+    let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "name", them());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Giving it up stops you being reachable"),
+        "the caveat names the button it belongs to: {said}"
+    );
+    assert!(
+        !said.contains("Stop being reachable at this name."),
+        "an instruction with no subject, under three buttons: {said}"
+    );
+
+    let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "rehome", them());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Ordered now by this identity's default exchange."),
+        "{said}"
+    );
+    assert!(
+        !said.contains("Ordered now by default."),
+        "the bare word, where a place name belongs: {said}"
+    );
+}
