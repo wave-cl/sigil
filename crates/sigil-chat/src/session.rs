@@ -590,6 +590,9 @@ pub struct ChatState {
     /// for one pair, and the store cannot tell them apart. Reported as the key
     /// rather than as a sentence so the interface can look at its own other
     /// sessions and say which of the two it is.
+    /// Lowered when the link comes back: a session that is up holds the
+    /// lock, so saying somebody else has it is saying something that has
+    /// stopped being true.
     pub locked_out: Option<PubKey>,
     /// SIP-59: this exchange told the session, on start, that the account
     /// lives at another one -- the key and its domain -- and hands its
@@ -625,6 +628,10 @@ pub struct ChatState {
     /// the one route left open is `/admission/request`, which is the way
     /// in. Without this the refusal arrived as an ordinary error string and
     /// retried for ever, and the whole of SIP-24 had nothing that asked.
+    /// Lowered when the link comes back, for the reason
+    /// [`locked_out`](ChatState::locked_out) is: a session that is up has
+    /// been admitted, and the banner offering the way in stayed after being
+    /// let in.
     pub not_admitted: Option<String>,
     /// Why the device list could not be fetched, if it could not.
     ///
@@ -6177,13 +6184,13 @@ fn call_length(secs: u32) -> String {
     }
 }
 
-/// Whether the last thing that went wrong has stopped being true.
+/// Whether the link has just come back after being anything else.
 ///
 /// A rule of its own so it can be read and tested without a session: the
 /// three-way condition inside `publish`'s field comparison is exactly the
 /// kind that is easy to get backwards and impossible to see.
-fn trouble_is_over(was: LinkState, now: LinkState, held: bool) -> bool {
-    held && now == LinkState::Up && was != LinkState::Up
+fn link_came_back(was: LinkState, now: LinkState) -> bool {
+    now == LinkState::Up && was != LinkState::Up
 }
 
 fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me: PubKey) -> bool {
@@ -6705,9 +6712,16 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         // read, and the ones that are about a standing condition rather than
         // a blip — "this exchange does not admit this account" — are raised
         // where the link never comes up at all, so they stay.
-        if trouble_is_over(s.link, link, s.trouble.is_some()) {
-            s.trouble = None;
-            moved = true;
+        if link_came_back(s.link, link) {
+            // A session that is up is not locked out of its store and is not
+            // refused by its exchange: those are the two reasons it could not
+            // be up, and each was raised where it was not and never lowered.
+            // So the banner offering "ask to be let in" stayed after being
+            // let in, and "another client is already using this account"
+            // stayed after that client had quit and this one had the lock.
+            moved |= s.trouble.take().is_some();
+            moved |= s.locked_out.take().is_some();
+            moved |= s.not_admitted.take().is_some();
         }
         set!(link, link);
         set!(conversations, summaries);
@@ -9570,39 +9584,36 @@ mod call_length_tests {
 
 #[cfg(test)]
 mod trouble_tests {
-    use super::{LinkState, trouble_is_over};
+    use super::{LinkState, link_came_back};
 
-    /// **A failure that is over stops being said, and one that is not does
-    /// not.**
+    /// **What is over stops being said, and what is not does not.**
     ///
-    /// `trouble` is the only field `publish` does not republish and nothing
-    /// anywhere set it back to `None`, so one refused command or one dropped
-    /// connection left a red sentence under the conversation for the rest of
-    /// the session — a line below a `link` that had gone back to saying
-    /// *connected*. Two answers to "is anything wrong", and the stale one
-    /// was the louder.
+    /// Three fields are raised where the session cannot work and were never
+    /// lowered when it could: `trouble`, `locked_out` and `not_admitted`.
+    /// `publish` sets about thirty fields one by one and none of these is
+    /// among them, so a red sentence sat under the conversation for the rest
+    /// of the session a line below a `link` that said *connected*; the
+    /// banner offering "ask to be let in" stayed after being let in; and
+    /// "another client is already using this account" stayed after that
+    /// client had quit and this one had taken the lock.
+    ///
+    /// The transition is the whole rule, so it is what is tested.
     #[test]
     fn a_trouble_goes_when_the_link_comes_back() {
         // The case this exists for: it broke, it was said, it came back.
-        assert!(trouble_is_over(LinkState::Retrying, LinkState::Up, true));
-        assert!(trouble_is_over(LinkState::Connecting, LinkState::Up, true));
+        assert!(link_came_back(LinkState::Retrying, LinkState::Up));
+        assert!(link_came_back(LinkState::Connecting, LinkState::Up));
 
         // **Not on every pass while it is up**, or a trouble raised a moment
         // before a publish would be cleared before anybody could read it.
-        assert!(!trouble_is_over(LinkState::Up, LinkState::Up, true));
+        assert!(!link_came_back(LinkState::Up, LinkState::Up));
 
         // **And not while it is still broken.** A standing refusal — "this
         // exchange does not admit this account" — is raised where the link
         // never comes up, and has to stay there.
-        assert!(!trouble_is_over(
-            LinkState::Connecting,
-            LinkState::Retrying,
-            true
-        ));
-        assert!(!trouble_is_over(LinkState::Up, LinkState::Retrying, true));
+        assert!(!link_came_back(LinkState::Connecting, LinkState::Retrying));
+        assert!(!link_came_back(LinkState::Up, LinkState::Retrying));
 
-        // Nothing to forget is not a change: `publish` reports whether
-        // anything moved, and a pass that says it did repaints the window.
-        assert!(!trouble_is_over(LinkState::Retrying, LinkState::Up, false));
+        assert!(!link_came_back(LinkState::Gone, LinkState::Gone));
     }
 }
