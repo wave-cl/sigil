@@ -14703,3 +14703,50 @@ fn a_conversation_put_away_leaves_the_list_and_can_be_found() {
         "the way back leads nowhere: {said:?}"
     );
 }
+
+/// **The head of a conversation carries a face, with the presence on it.**
+///
+/// It drew a bare dot and a name, so the heading of the one screen somebody
+/// spends their time on was the last place in sigil where a person appeared
+/// without a face — while their row in the list, every bubble under it, the
+/// ring and the call card all had one. And the dot alone was a coloured
+/// circle belonging to nothing; on the corner of a mark it is what it was
+/// always for.
+///
+/// Asserted by geometry rather than by a label, because a mark has no words:
+/// the presence carries the only name in the header that belongs to the
+/// mark, and where that name's rectangle *is* says whether a mark was drawn
+/// and where.
+#[test]
+fn the_conversation_head_carries_a_mark() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+
+    let mark = h
+        .get_all(egui_kittest::kittest::by().label_contains("offline"))
+        .map(|n| n.rect())
+        .next()
+        .expect("the other party's presence, which the mark carries");
+    // Square, and the size a mark is — not a dot, which is a third of it.
+    assert!(
+        (mark.width() - mark.height()).abs() < 2.0,
+        "the presence is not on a square mark: {mark:?}"
+    );
+    assert!(
+        mark.width() >= sigil::tokens::AVATAR_SM - 1.0,
+        "the presence is on something {} wide, smaller than a mark ({})",
+        mark.width(),
+        sigil::tokens::AVATAR_SM
+    );
+    // And the name reads after it, as it does on every row in the list.
+    let name = h
+        .get_all(egui_kittest::kittest::by().label_contains("Ada"))
+        .map(|n| n.rect())
+        .find(|r| (r.center().y - mark.center().y).abs() < mark.height())
+        .expect("the conversation's name beside it");
+    assert!(
+        mark.right() <= name.left() + 1.0,
+        "the mark is not before the name: mark {mark:?}, name {name:?}"
+    );
+}

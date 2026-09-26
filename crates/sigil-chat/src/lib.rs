@@ -4154,19 +4154,62 @@ impl ChatApp {
     fn conversation_name_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
-        _at: &At,
+        at: &At,
         state: &ChatState,
         open: &session::Summary,
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
         let dm = open.peer.is_some();
-        // Whether the other person is there, before their name: the one
-        // fact about a direct message that changes while it is open.
-        if let Some(peer) = open.peer {
-            let (seen, hover) = self.presence_of(state, &peer);
-            seen.dot(ui, &hover);
+        // **Who this is with, at the head of it.**
+        //
+        // This drew a bare presence dot and a name: the heading of the one
+        // screen somebody spends their time on was the last place in sigil
+        // where a person appeared without a face, while their row in the
+        // list beside it, every bubble under it, the ring and the call card
+        // all had one. `presence` is the mark with the dot on its corner,
+        // which is what the dot was always for -- alone it was a coloured
+        // circle belonging to nothing.
+        //
+        // The room's own picture for a room and the other party's for a
+        // direct message, which is the same rule the list uses: a DM has no
+        // metadata of its own to carry one.
+        let picture = open
+            .avatar
+            .as_ref()
+            .and_then(|bytes| self.channel_picture(at, ui.ctx(), open.channel, bytes))
+            .or_else(|| {
+                let peer = open.peer?;
+                let face = state.people.get(&peer)?.picture.clone();
+                self.person_picture(at, ui.ctx(), peer, face.as_ref())
+            });
+        let key = match open.peer {
+            Some(peer) => peer.to_string(),
+            None => bs58::encode(open.channel).into_string(),
+        };
+        match open.peer {
+            // Whether the other person is there, on the corner of their
+            // mark: the one fact about a direct message that changes while
+            // it is open.
+            Some(peer) => {
+                let (seen, hover) = self.presence_of(state, &peer);
+                sigil_ui::presence(
+                    ui,
+                    &key,
+                    picture.as_ref(),
+                    tokens::AVATAR_SM,
+                    seen,
+                    seen.word(),
+                    &hover,
+                );
+            }
+            // A room is not somewhere anybody is "online", so it gets the
+            // mark and no dot.
+            None => {
+                sigil_ui::avatar(ui, &key, picture.as_ref(), tokens::AVATAR_SM);
+            }
         }
+        ui.add_space(tokens::SPACING_XS);
         let may_rename = state.i_am_admin && !dm;
         let named = ui.scope_builder(
             egui::UiBuilder::new().sense(if may_rename {
