@@ -1793,8 +1793,8 @@ fn on_a_phone_a_dialog_fits_the_screen() {
     state.open = None;
     let mut h = harness_phone(state, sigil_chat::Route::Conversations);
     h.run();
-    // Behind the heading's dots on a phone.
-    h.get_by_label("More choices").click();
+    // Straight to it: writing to somebody is a button on the list now, not
+    // a row behind the three dots.
     h.run();
     h.get_by_label("Write to somebody").click();
     h.run();
@@ -12728,7 +12728,9 @@ fn a_menu_is_no_wider_than_a_menu() {
     h.run();
     h.get_by_label("More choices").click();
     h.run_steps(3);
-    let row = h.get_by_label("Write to somebody").rect();
+    // Any row in it: what is measured is the menu, and writing to somebody
+    // moved out of it onto the list's own corner.
+    let row = h.get_by_label("Public channels").rect();
     assert!(
         row.width() <= sigil::tokens::MENU_MAX + 1.0,
         "the menu is {} wide on a {PHONE_WIDTH}-point phone",
@@ -14809,5 +14811,91 @@ fn a_confirmation_colours_the_grave_half_and_not_the_other() {
     assert_ne!(
         safe, theme.destructive,
         "the way out is coloured as though it were the grave one"
+    );
+}
+
+/// **The one action this screen leads to is on the screen.**
+///
+/// On a phone "Write to somebody" was behind the three dots, because the
+/// heading holds two controls and a fifth pushes it off its own row. That is
+/// true, and it is about the *heading*: a floating button takes no room
+/// there at all, so the reason for the menu survives while the action stops
+/// being two presses away and invisible.
+///
+/// Not on a desktop, where the heading has the room and already carries it —
+/// two ways to the same dialog on one screen is one of them being noise.
+#[test]
+fn a_phone_can_start_a_conversation_from_the_list() {
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+
+    // One, with the menu shut: the item behind the three dots exists only
+    // while that menu is open, so this is the floating button and nothing
+    // else.
+    let said = labels(&h);
+    assert_eq!(
+        said.iter().filter(|l| *l == "Write to somebody").count(),
+        1,
+        "the list does not offer it without opening a menu first: {said:?}"
+    );
+
+    // Bottom-right, over the list rather than in it: a button that took a
+    // row's height would move the list every time it was drawn.
+    let button = h.get_by_label("Write to somebody").rect();
+    assert!(
+        button.width() >= sigil::tokens::BUTTON_LG - 1.0,
+        "a finger's target, not a menu row: {button:?}"
+    );
+    nothing_runs_off_the_edge(&h, "the conversation list with its compose button");
+
+    // **And not while somebody is calling.** A ring is drawn at the foot of
+    // this pane and the button is pinned to the same corner, so it landed on
+    // the caller's key — the one thing on that card worth reading carefully.
+    // `nothing_runs_off_the_edge` passed on it: two things inside the screen
+    // can still be on top of each other, which is why the picture is what
+    // caught it.
+    let mut state = a_conversation();
+    state.open = None;
+    state.ringing = vec![sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: them(),
+        mine: false,
+        secret: [3u8; 32],
+        answered: false,
+        label: "Ada".into(),
+        direct: false,
+        peer: None,
+    }];
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Answer"),
+        "the ring is not on screen, so this says nothing: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l == "Write to somebody"),
+        "the compose button is drawn over the ring card: {said:?}"
+    );
+
+    // And not on a desktop, where the heading already has one.
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_with(state, true);
+    h.run();
+    h.run();
+    assert_eq!(
+        labels(&h)
+            .iter()
+            .filter(|l| *l == "Write to somebody")
+            .count(),
+        0,
+        "the desktop heading's own control says it differently and this \
+         should not be drawn over the list there"
     );
 }

@@ -6947,13 +6947,13 @@ impl ChatApp {
                         sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "More choices");
                     egui::Popup::menu(&dots).show(|ui| {
                         sigil_ui::menu_width(ui);
-                        if sigil_ui::icon_item(ui, sigil_ui::Icon::Compose, "Write to somebody")
-                            .clicked()
-                        {
-                            self.panes.entry(at.clone()).or_default().dialog =
-                                Some(Dialog::Compose);
-                            ui.close();
-                        }
+                        // **Writing to somebody is not in here.** It is the
+                        // one thing this screen leads to, and it is on the
+                        // screen: a button over the list's corner, where
+                        // every phone puts it. Offering it in both places
+                        // would be two ways to one thing and two controls
+                        // answering to one name -- which anything reading
+                        // rather than looking would announce twice.
                         if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Public channels")
                             .clicked()
                         {
@@ -7064,6 +7064,10 @@ impl ChatApp {
         // the pointer arrives: a floating bar takes no width, so nothing
         // moves, and the test written for that could not be made to fail.
         let bar = ui.spacing().scroll.bar_width;
+        // Where the list is drawn, for the compose button that floats over
+        // its corner. Taken before the scroll area, which is what fills it.
+        let pane = ui.max_rect();
+        let mut compose = false;
         // **Collected, then done.** A row's menu is drawn inside the scroll
         // area's closure, which already holds `self` and the state it is
         // listing; acting there would want both again. The same shape the
@@ -7208,6 +7212,74 @@ impl ChatApp {
                         });
                 }
             });
+
+        // **Somewhere to start one, where every phone puts it.**
+        //
+        // On a phone "Write to somebody" is behind the three dots, because
+        // the heading holds two controls and a fifth pushes it off its own
+        // row — which is true, and is about the *heading*. The one action
+        // this screen exists to lead to should not be two presses away and
+        // invisible, and a floating button takes no room in that row at all,
+        // so the reason for the menu is untouched by putting it here too.
+        //
+        // The idiom is the transcript's jump-to-latest pill: an `Area` on
+        // its own layer rather than a scope in this ui, because a scope
+        // advances the parent's cursor and would take a button's height out
+        // of the list on every pass.
+        // **Not while somebody is calling.** A ring — incoming, carried from
+        // another exchange, or ringing out — is drawn at the foot of this
+        // pane, and the button is pinned to the same corner: it landed on
+        // the caller's key, which is the one thing on that card worth
+        // reading carefully. A ring is what the screen is about while there
+        // is one, and writing to somebody can wait the few seconds it lasts.
+        //
+        // The snapshot caught this and `nothing_runs_off_the_edge` did not:
+        // two things inside the screen can still be on top of each other.
+        let at_the_foot = state.cross_ring.is_some() || state.ringing.iter().any(|r| !r.answered);
+        if sigil::Form::of(ui.ctx()).is_phone() && !at_the_foot {
+            let side = tokens::BUTTON_LG;
+            // Clear of the system's own gesture bar: an area is its own
+            // layer and no panel's inset reaches it, which is the same trap
+            // the message menu fell into at the foot of a phone.
+            let safe = sigil::Insets::safe_rect(ui.ctx());
+            let corner = egui::pos2(
+                pane.right().min(safe.right()) - side - tokens::SPACING_MD,
+                pane.bottom().min(safe.bottom()) - side - tokens::SPACING_MD,
+            );
+            egui::Area::new(ui.id().with("compose"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(corner)
+                .constrain_to(pane)
+                .show(ui.ctx(), |ui| {
+                    ui.set_max_size(egui::vec2(side, side));
+                    let (rect, press) =
+                        ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+                    let said = "Write to somebody";
+                    press.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, said)
+                    });
+                    if ui.is_rect_visible(rect) {
+                        let fill = if press.hovered() {
+                            theme.accent
+                        } else {
+                            theme.accent_muted
+                        };
+                        ui.painter().circle_filled(rect.center(), side / 2.0, fill);
+                        sigil::icon::draw(
+                            ui.painter(),
+                            rect.shrink(side / 4.0),
+                            sigil_ui::Icon::Compose,
+                            theme.text_primary,
+                        );
+                    }
+                    if press.clicked() {
+                        compose = true;
+                    }
+                });
+        }
+        if compose {
+            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Compose);
+        }
         for (channel, peer, act) in acts {
             match act {
                 Some(RowAct::Mute(muted)) => ctx.accounts.quiet.set_muted(&at.1, &channel, muted),
