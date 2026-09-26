@@ -5681,5 +5681,17 @@ async fn an_account_can_move_to_another_exchange() {
         "the client still thinks it lives at the old exchange: {:?}",
         chat.state().my_home
     );
+
+    // **And the window is told to start again.** `move_home` leaves this
+    // session connected to the exchange it left, so the state carries the cue
+    // the window acts on -- without it the account moves and the client goes
+    // on talking to the old exchange with a store that is no longer filed
+    // there, which is the failure this whole thing exists to avoid.
+    let cue = chat.state().home_moved;
+    assert!(
+        cue.is_some_and(|(home, _)| home == PubKey::new(b_key)),
+        "no cue to reconnect at the new home: {:?}",
+        chat.state().home_moved
+    );
     chat.stop();
 }

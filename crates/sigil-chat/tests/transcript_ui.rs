@@ -307,6 +307,7 @@ fn a_conversation() -> ChatState {
         // line that says where. With `None` it draws nothing and the screen
         // has no picture of it at all.
         my_home: Some((PubKey::new([7u8; 32]), "trunk.exchange".into())),
+        home_moved: None,
     }
 }
 

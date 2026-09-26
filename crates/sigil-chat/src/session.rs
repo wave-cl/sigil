@@ -667,6 +667,16 @@ pub struct ChatState {
     /// as an alias while living somewhere else, which is exactly the case
     /// that decides whether a call needs SIP-39's bridge.
     pub peer_home: Option<(PubKey, String)>,
+    /// SIP-53: this account's home has just moved, and the session is still
+    /// connected to the exchange it left.
+    ///
+    /// **A signal for the window, not a fact about the account.** The store
+    /// is now filed under the new home, so this session is talking to the
+    /// wrong exchange and has to be started again — which the window does by
+    /// dropping it, because the dial is recomputed from the identity's home
+    /// file on every reconcile pass and that file has just been rewritten.
+    /// Cleared once acted on, or the session would restart for ever.
+    pub home_moved: Option<(PubKey, String)>,
     /// SIP-59: where **this account** lives — the exchange that orders its
     /// direct messages and carries what it starts elsewhere.
     ///
@@ -3275,6 +3285,8 @@ struct Desk {
     peer_homes: HashMap<PubKey, (PubKey, String)>,
     /// SIP-59: where this account lives, once asked.
     my_home: Option<(PubKey, String)>,
+    /// SIP-53: set the moment a move lands, read once by the window.
+    home_moved: Option<(PubKey, String)>,
     /// SIP-5: the mailbox as last listed, with whatever has been opened.
     mail: Vec<MailItem>,
 }
@@ -3285,6 +3297,7 @@ impl Default for Desk {
             channels: HashMap::new(),
             peer_homes: HashMap::new(),
             my_home: None,
+            home_moved: None,
             mail: Vec::new(),
             open: None,
             dirty: HashSet::new(),
@@ -6469,6 +6482,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(peer_home, peer_home);
         set!(mail, desk.mail.clone());
         set!(my_home, desk.my_home.clone());
+        set!(home_moved, desk.home_moved.clone());
         set!(events, events);
         set!(earlier, earlier);
         set!(loading, loading);
@@ -7104,6 +7118,10 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     record_home(path, chat).await;
                 }
                 desk.my_home = Some((home, domain.clone()));
+                // The window's cue to start this session again at the new
+                // home. Nothing here can do it: the session is what would be
+                // replaced.
+                desk.home_moved = Some((home, domain.clone()));
                 desk.restructure = true;
                 let named = if domain.is_empty() {
                     home.to_string()

@@ -2574,6 +2574,38 @@ impl ChatApp {
             ctx.connections.forget(at.0, &at.1);
         }
 
+        // **SIP-53: a session whose account has moved is talking to the wrong
+        // exchange.** `move_home` re-files the store under the new home and
+        // says plainly that afterwards the connection is still to the old
+        // one. Dropping the session is the whole reconnect: the loop below
+        // starts anything held but missing, and it rebuilds the dial from
+        // `discovery::layers(.., Some(&path))` every pass -- reading the
+        // identity's home file, which the move has just rewritten.
+        //
+        // Only the **default** exchange, whose name is empty: that is the one
+        // the home file names. An extra exchange is named in its own right
+        // and an account move does not touch it.
+        let moved: Vec<At> = self
+            .sessions
+            .keys()
+            .filter(|at| at.1.is_empty())
+            // **No guard against repeating is needed**: the state carrying
+            // this flag belongs to the session being dropped, and the session
+            // that replaces it starts with the flag clear.
+            .filter(|at| self.state_of(Some(at)).home_moved.is_some())
+            .cloned()
+            .collect();
+        for at in moved {
+            tracing::info!(identity = %at.0, "the account moved; starting again at its new home");
+            if let Some(session) = self.sessions.remove(&at) {
+                ctx.connections.forget(at.0, &at.1);
+                self.closing.push((at.clone(), session.close()));
+            }
+            // The pane goes too: its conversations belonged to the exchange
+            // this identity has left, and the new session brings its own.
+            self.panes.remove(&at);
+        }
+
         for (at, path, via) in held {
             // Where the identity file is, for what the session records
             // beside it (the home, SIP-60).
