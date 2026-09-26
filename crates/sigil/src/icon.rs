@@ -171,6 +171,24 @@ icons! {
     /// notifications happen and one saying how much they say, read as the
     /// same control drawn twice.
     Lock => "Locked",
+    /// Where this account lives (SIP-59).
+    ///
+    /// **Its own shape, because the globe had six jobs.** `Icon::Public` is
+    /// the public-channel glyph and was also carrying "Add an exchange",
+    /// "Ask to be let in", "Calls go through the exchange" and this — two of
+    /// them four rows apart in the same settings list, drawn identically. The
+    /// protocol calls this an account's *home*, so a house says it and says
+    /// nothing else in the set.
+    Home => "Where this account lives",
+    /// Redact a message for everybody in the conversation (SIP-19).
+    ///
+    /// **Its own shape, because Delete had been borrowing [`Icon::Close`].**
+    /// A bare cross is what closes things all over this app -- the viewer,
+    /// every dialog, the search box -- and the message menu was using it,
+    /// tinted red, for the one row in it that cannot be undone. A glyph that
+    /// already means something else does not stop meaning it because it was
+    /// given a colour, and the row it was on redacts a message for everybody.
+    Bin => "Delete",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -404,6 +422,42 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 p(0.24, 0.82),
                 p(0.76, 0.82),
                 p(0.76, 0.72),
+            ]);
+        }
+        Icon::Home => {
+            // Roof and walls, and **no door**. The stroke is 11% of the
+            // icon, so anything enclosed by less than that fills in: the
+            // first draft had a door and a smaller house, and at the size
+            // this is actually drawn the roof and the walls closed up into
+            // a blob with a dark slot in it. Drawn large, with nothing
+            // inside it, a house is still unmistakably a house.
+            path(vec![p(0.14, 0.50), p(0.50, 0.16), p(0.86, 0.50)]);
+            path(vec![
+                p(0.26, 0.46),
+                p(0.26, 0.84),
+                p(0.74, 0.84),
+                p(0.74, 0.46),
+            ]);
+        }
+        Icon::Bin => {
+            // Lid, handle, tapered body — and **no ribs**. The first draft
+            // had the two vertical ribs a bin usually carries, 0.12 apart
+            // against a stroke 0.11 wide, so they merged into one dark
+            // rectangle and the whole glyph read as a solid block. The lid
+            // and the taper are what make a bin a bin; the ribs are
+            // decoration this size cannot hold.
+            line(p(0.16, 0.33), p(0.84, 0.33));
+            path(vec![
+                p(0.39, 0.33),
+                p(0.39, 0.19),
+                p(0.61, 0.19),
+                p(0.61, 0.33),
+            ]);
+            path(vec![
+                p(0.26, 0.33),
+                p(0.33, 0.84),
+                p(0.67, 0.84),
+                p(0.74, 0.33),
             ]);
         }
         Icon::Copy => {

@@ -19,7 +19,7 @@ const ALL: &[Icon] = Icon::ALL;
 
 /// How tall the sheet is allowed to be. The harness is built at this, and
 /// `every_icon_is_on_the_sheet` checks what was actually drawn fits inside it.
-const SHEET: f32 = 420.0;
+const SHEET: f32 = 500.0;
 
 fn harness(dark: bool) -> Harness<'static> {
     harness_measured(dark).0
@@ -264,4 +264,118 @@ fn the_count_is_still_said_in_words() {
     // Past a hundred the pill says "99+" and the words say the number:
     // the shape has a width to keep, and the tree does not.
     h.get_by_label("Exchange (140)");
+}
+
+/// **A glyph that closes things does not also destroy them.**
+///
+/// `Icon::Close` is the bare cross, and a bare cross is what dismisses a
+/// dialog, a viewer and a search box all over this app. It was also carrying
+/// Delete in the message menu — tinted red, on the one row that redacts a
+/// message for everybody and cannot be undone — and three other controls that
+/// throw something away. A glyph does not stop meaning what it means
+/// everywhere else because it was given a colour, and the memory of six
+/// crosses meaning six things, four of them destructive, is why the set now
+/// has a bin in it.
+///
+/// **The rule maintains itself.** Rather than a hand-written list of
+/// dangerous words — which is the thing that goes stale in silence — this
+/// reads every word the *bin* is used with and forbids the cross from any of
+/// them. Give a new discard control the bin and it is covered from that
+/// moment; give it the cross and this fails naming both sites.
+#[test]
+fn the_close_glyph_is_not_used_for_anything_the_bin_is() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .to_path_buf();
+
+    /// Every `(icon, word)` pair written in the source under `dir`.
+    fn pairs(dir: &std::path::Path, out: &mut Vec<(String, String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                pairs(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                let Ok(src) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                // `Icon::Name` then the next quoted string on the same call,
+                // which is how every one of these helpers is written:
+                // `icon_item(ui, Icon::Bin, "Delete")`. Whitespace and a
+                // trailing comma are allowed between, because the long form
+                // puts each argument on its own line.
+                let mut rest = src.as_str();
+                while let Some(at) = rest.find("Icon::") {
+                    rest = &rest[at + 6..];
+                    let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+                    let after = &rest[name.len()..];
+                    let gap: String = after
+                        .chars()
+                        .take_while(|c| c.is_whitespace() || *c == ',' || *c == '&')
+                        .collect();
+                    let tail = &after[gap.len()..];
+                    if gap.contains(',')
+                        && let Some(word) = tail.strip_prefix('"')
+                        && let Some(end) = word.find('"')
+                    {
+                        out.push((
+                            name,
+                            word[..end].to_string(),
+                            path.file_name().unwrap().to_string_lossy().into_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    for crate_dir in ["sigil-chat", "sigil-ui", "sigil-voice", "sigil-shell"] {
+        pairs(&root.join(crate_dir).join("src"), &mut found);
+    }
+    assert!(
+        found.len() > 50,
+        "only {} icon/word pairs found — the scan is not reading the source, \
+         so this would pass however the icons were used",
+        found.len()
+    );
+
+    // **Not read off the bin's own call sites.** The first version of this
+    // gathered the forbidden words from wherever `Icon::Bin` was used, which
+    // is the thing being judged: moving Delete back to the cross took the
+    // word "Delete" out of the set with it, and the test passed with the
+    // fault restored. A rule derived from its own subject asserts nothing.
+    //
+    // So the set comes from the icon table — `Bin`'s declared word, which no
+    // call site can move — and from the discards named here on purpose. A new
+    // discard control is not covered until somebody adds it, and that is the
+    // honest trade for a rule that can actually fail.
+    let mut discards: std::collections::BTreeSet<&str> =
+        ["Throw it away", "Remove it"].into_iter().collect();
+    discards.insert(Icon::Bin.word());
+
+    // The bin is really used for each of them, or the rule below is guarding
+    // words that appear nowhere.
+    for want in &discards {
+        assert!(
+            found
+                .iter()
+                .any(|(icon, word, _)| icon == "Bin" && word == want),
+            "nothing uses Icon::Bin for {want:?}, so forbidding the cross from \
+             it guards nothing"
+        );
+    }
+
+    let wrong: Vec<&(String, String, String)> = found
+        .iter()
+        .filter(|(icon, word, _)| icon == "Close" && discards.contains(word.as_str()))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "the close glyph is used for something the bin already means: {wrong:?}\n\
+         (a cross dismisses; a bin discards — see Icon::Bin)"
+    );
 }

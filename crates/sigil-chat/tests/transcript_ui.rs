@@ -1110,8 +1110,10 @@ fn no_phone_pane_is_wider_than_the_phone() {
             // tokio runtime these three do not have. With no call it
             // replaces itself with the conversations route, so what is
             // measured here is that the fallback fits and does not panic.
-            // The card's own width is held by `call_card_ui` in sigil-ui and
-            // by `tests/call_card.rs`, which has a runtime and a call.
+            // The card's own width is held where the widget lives, by
+            // `sigil-ui/tests/call_card_ui.rs`, which needs no runtime at
+            // all; `tests/calls_end.rs` holds it inside the app, where
+            // there is a runtime and a call.
             sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
@@ -1183,8 +1185,10 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             // tokio runtime these three do not have. With no call it
             // replaces itself with the conversations route, so what is
             // measured here is that the fallback fits and does not panic.
-            // The card's own width is held by `call_card_ui` in sigil-ui and
-            // by `tests/call_card.rs`, which has a runtime and a call.
+            // The card's own width is held where the widget lives, by
+            // `sigil-ui/tests/call_card_ui.rs`, which needs no runtime at
+            // all; `tests/calls_end.rs` holds it inside the app, where
+            // there is a runtime and a call.
             sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
@@ -9484,8 +9488,10 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             // tokio runtime these three do not have. With no call it
             // replaces itself with the conversations route, so what is
             // measured here is that the fallback fits and does not panic.
-            // The card's own width is held by `call_card_ui` in sigil-ui and
-            // by `tests/call_card.rs`, which has a runtime and a call.
+            // The card's own width is held where the widget lives, by
+            // `sigil-ui/tests/call_card_ui.rs`, which needs no runtime at
+            // all; `tests/calls_end.rs` holds it inside the app, where
+            // there is a runtime and a call.
             sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
@@ -10774,6 +10780,49 @@ fn a_scrolled_transcript_offers_the_way_back_to_the_newest() {
         h.query_by_label_contains("Go to the latest").is_none(),
         "pressing it did not go back to the newest: {}",
         text_of(&h)
+    );
+}
+
+/// **Nor does the way back float over a dialog.**
+///
+/// The pill is an `Area` at `Foreground` and so is egui's `Modal`, which
+/// takes the top modal layer and with it every press on the screen. A
+/// control on any other layer is then drawn bright over the backdrop and
+/// does nothing at all when it is pressed -- the same fault the compose
+/// button on the list had, in the other half of the app.
+#[test]
+fn the_way_back_stands_down_under_a_dialog() {
+    let (mut h, app, _) = harness_phone_measured(a_page(50, 120), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.hover_at(egui::pos2(26.0, 300.0));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 240.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    assert!(
+        h.query_by_label_contains("Go to the latest").is_some(),
+        "the way back is not on screen, so what follows says nothing: {}",
+        text_of(&h)
+    );
+
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "report", them());
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Report"),
+        "the report dialog did not open, so this says nothing: {said}"
+    );
+    assert!(
+        h.query_by_label_contains("Go to the latest").is_none(),
+        "the way back is drawn over the dialog: {said}"
     );
 }
 
@@ -14851,6 +14900,24 @@ fn a_phone_can_start_a_conversation_from_the_list() {
     );
     nothing_runs_off_the_edge(&h, "the conversation list with its compose button");
 
+    // **And not while the dialog it opens is open over it.** egui's `Modal`
+    // takes the top modal layer, so every other layer stops answering a
+    // press -- but this button is an `Area` of its own at `Foreground` and
+    // was still *drawn*, in full accent, over the backdrop: a bright
+    // control sitting on a form, which does nothing at all when pressed.
+    h.get_by_label("Write to somebody").click();
+    h.run();
+    h.run();
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "New group"),
+        "the compose dialog did not open, so this says nothing: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l == "Write to somebody"),
+        "the button is drawn over the dialog it opened: {said:?}"
+    );
+
     // **And not while somebody is calling.** A ring is drawn at the foot of
     // this pane and the button is pinned to the same corner, so it landed on
     // the caller's key — the one thing on that card worth reading carefully.
@@ -14897,5 +14964,101 @@ fn a_phone_can_start_a_conversation_from_the_list() {
         0,
         "the desktop heading's own control says it differently and this \
          should not be drawn over the list there"
+    );
+}
+
+/// **A confirm that refuses in silence is a dead key.**
+///
+/// "Claim" was drawn live with an empty field and its arm simply did nothing
+/// -- `if !name.is_empty()`, and no other branch. Two dialogs in the same
+/// family, Move this account and Move where this conversation lives, already
+/// grey theirs on the same condition and say why on a hover, so this screen
+/// was the odd one out as well as the wrong one.
+#[test]
+fn claiming_a_name_needs_a_name_in_the_box() {
+    let (mut h, app, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "name", them());
+    h.run();
+    h.run();
+
+    let claim = h.get_by_label("Claim");
+    assert!(
+        claim.accesskit_node().is_disabled(),
+        "Claim is live with an empty box, and pressing it does nothing at all"
+    );
+
+    // And it comes back the moment there is something to claim. Typed rather
+    // than set, because what makes the button live is the box's contents and
+    // nothing else knows them.
+    let field = h
+        .get_all(
+            egui_kittest::kittest::by()
+                .predicate(|n| matches!(format!("{:?}", n.role()).as_str(), "TextInput")),
+        )
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the name box");
+    field.focus();
+    field.type_text("ada");
+    h.run();
+    h.run();
+    assert!(
+        !h.get_by_label("Claim").accesskit_node().is_disabled(),
+        "a name is typed and the button is still dead"
+    );
+}
+
+/// **Answer and Decline are not a menu's width apart.**
+///
+/// They are the two most consequential controls on a phone and the two least
+/// looked at: the phone is ringing, it is in a pocket or face down, and the
+/// press is a stab. They mean opposite things, they are both round handsets
+/// of the same size, and they sat side by side with the ordinary
+/// `item_spacing` between them — the same gap as two items in a menu nobody
+/// is in a hurry about. A mis-press either refuses a call or takes one that
+/// was not wanted, and neither can be taken back.
+///
+/// Measured rather than eyeballed, and measured from the *gap* rather than
+/// from centres, because the targets are a thumb wide and it is the space
+/// between their edges that a thumb misses into.
+#[test]
+fn answer_and_decline_are_kept_apart() {
+    let mut state = a_conversation();
+    state.open = None;
+    state.ringing = vec![sigil_chat::Ring {
+        channel: [9u8; 32],
+        seq: 7,
+        from: them(),
+        mine: false,
+        secret: [3u8; 32],
+        answered: false,
+        label: "Ada".into(),
+        direct: false,
+        peer: None,
+    }];
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+
+    let answer = h.get_by_label("Answer").rect();
+    let decline = h.get_by_label("Decline").rect();
+    assert!(
+        answer.width() >= sigil::tokens::BUTTON_LG - 1.0
+            && decline.width() >= sigil::tokens::BUTTON_LG - 1.0,
+        "a handset is under a thumb's worth: answer {answer:?}, decline {decline:?}"
+    );
+
+    // They are on one row, so the gap is horizontal.
+    let gap = if answer.left() > decline.right() {
+        answer.left() - decline.right()
+    } else {
+        decline.left() - answer.right()
+    };
+    assert!(
+        gap >= sigil::tokens::SPACING_LG - 0.5,
+        "Answer and Decline are {gap:.1} points apart, under {} — two \
+         opposite meanings within a thumb's slip of each other",
+        sigil::tokens::SPACING_LG
     );
 }

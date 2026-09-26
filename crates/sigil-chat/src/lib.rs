@@ -475,6 +475,21 @@ fn ring_card(
                 sigil_ui::avatar(ui, &key, picture, tokens::AVATAR_MD);
                 ui.add_space(tokens::SPACING_SM);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // **Held apart, and by a stated amount.** These are the
+                    // two most consequential controls on a phone and the two
+                    // least looked at: it is ringing, it is face down or in a
+                    // pocket, and the press is a stab. Two round handsets of
+                    // one size meaning opposite things sat 8 points apart --
+                    // the ordinary `item_spacing`, which is the gap between
+                    // two rows of a menu nobody is in a hurry about. A slip
+                    // either refuses a call or takes one that was not wanted.
+                    //
+                    // Set here rather than trusting the theme's default to
+                    // stay where it is: the number this needs is a property
+                    // of the pair, not of the spacing scale it happens to
+                    // match today. `answer_and_decline_are_kept_apart`
+                    // measures the gap between their edges.
+                    ui.spacing_mut().item_spacing.x = tokens::SPACING_LG;
                     // The handsets: the struck-through one in the destructive
                     // colour, the whole one in the colour of a thing going
                     // well. Each carries its word for anything that cannot
@@ -4935,12 +4950,8 @@ impl ChatApp {
                         // Nothing to save until it is here.
                         // Nothing to save or to hand on until it is here.
                         if bytes.is_some() {
-                            if sigil_ui::icon_button_named(
-                                ui,
-                                sigil_ui::Icon::Forward,
-                                "Forward it",
-                            )
-                            .clicked()
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Send, "Forward it")
+                                .clicked()
                             {
                                 forward = true;
                             }
@@ -5080,7 +5091,14 @@ impl ChatApp {
                         {
                             save = true;
                         }
-                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Forward, "Forward it")
+                        // **Not the arrow.** `Icon::Forward` is a bare `->`
+                        // and the icon table names it "Next"; the viewer pages
+                        // with it two rows below this, so the screen carried
+                        // the same glyph twice with two meanings -- and the
+                        // one that is not paging hands a file to somebody
+                        // else. The paper plane already means "this goes to
+                        // somebody" here, which is what forwarding is.
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Send, "Forward it")
                             .clicked()
                         {
                             forward = true;
@@ -5295,12 +5313,8 @@ impl ChatApp {
                             {
                                 save = true;
                             }
-                            if sigil_ui::icon_button_named(
-                                ui,
-                                sigil_ui::Icon::Forward,
-                                "Forward it",
-                            )
-                            .clicked()
+                            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Send, "Forward it")
+                                .clicked()
                             {
                                 forward = true;
                             }
@@ -5693,7 +5707,7 @@ impl ChatApp {
                 // Only where there is one: a control that takes away nothing
                 // is a control that does nothing.
                 if state.mine.picture.is_some() {
-                    clear = sigil_ui::icon_item(ui, sigil_ui::Icon::Close, "Remove it").clicked();
+                    clear = sigil_ui::icon_item(ui, sigil_ui::Icon::Bin, "Remove it").clicked();
                 }
             });
         });
@@ -6205,14 +6219,26 @@ impl ChatApp {
                                  is deleted — your conversations, keys and counters are \
                                  untouched — and somebody else may take it afterwards.";
         let mut release = None;
+        // **Greyed while there is nothing to claim**, as Move this account
+        // and Move where this conversation lives both are. This was drawn
+        // live over an empty box and its arm simply did nothing -- the
+        // `is_empty` guard below and no other branch -- so the one screen in
+        // the family that did not say why was also the one that refused in
+        // silence. Enter is gated on the same thing, or the key does what the
+        // dead button did.
+        let ready = !self.pane(at).naming.trim().is_empty();
         ui.horizontal(|ui| {
-            if ui.button("Claim").clicked() || entered {
+            if (ui
+                .add_enabled(ready, egui::Button::new("Claim"))
+                .on_disabled_hover_text("The name you want, without the domain.")
+                .clicked()
+                || entered)
+                && ready
+            {
                 let name = self.pane(at).naming.trim().to_string();
-                if !name.is_empty() {
-                    self.pane(at).naming.clear();
-                    self.pane(at).dialog = None;
-                    self.send_as(Some(at), Cmd::ClaimName(name));
-                }
+                self.pane(at).naming.clear();
+                self.pane(at).dialog = None;
+                self.send_as(Some(at), Cmd::ClaimName(name));
             }
             // **The only way to give a name up**, and it is here rather than
             // on the card because it cannot be undone: the name goes back to
@@ -7236,7 +7262,20 @@ impl ChatApp {
         // The snapshot caught this and `nothing_runs_off_the_edge` did not:
         // two things inside the screen can still be on top of each other.
         let at_the_foot = state.cross_ring.is_some() || state.ringing.iter().any(|r| !r.answered);
-        if sigil::Form::of(ui.ctx()).is_phone() && !at_the_foot {
+        // **Nor while the dialog it opens is open over it.** A dialog is a
+        // modal, and egui gives the top modal layer every press: everything
+        // on a lower layer goes dead for as long as it is up. This button is
+        // an `Area` of its own at the *same* `Foreground` order, so it went
+        // on being drawn -- in full accent, over the backdrop -- while doing
+        // nothing at all when pressed. A bright control that answers nobody
+        // is worse than no control. The picture viewer is the same thing
+        // without a frame around it, and `back` already reads this pair as
+        // "something is over the pane".
+        let over = self
+            .panes
+            .get(at)
+            .is_some_and(|p| p.dialog.is_some() || p.viewing.is_some());
+        if sigil::Form::of(ui.ctx()).is_phone() && !at_the_foot && !over {
             let side = tokens::BUTTON_LG;
             // Clear of the system's own gesture bar: an area is its own
             // layer and no panel's inset reaches it, which is the same trap
@@ -7475,7 +7514,20 @@ impl ChatApp {
                             self.messages_ui(at, state, ui, theme, now);
                         });
                     });
-                self.way_back_ui(state, &out, ui, theme);
+                // **Not while something is over the pane.** A dialog is a
+                // modal and takes the top modal layer, so every press on the
+                // screen goes to it; the pill is an `Area` of its own at the
+                // same `Foreground` order, so it went on being drawn bright
+                // over the backdrop while answering nobody. The viewer is
+                // the same thing without a frame around it -- and it is the
+                // whole screen, which the pill would sit on top of.
+                let over = self
+                    .panes
+                    .get(at)
+                    .is_some_and(|p| p.dialog.is_some() || p.viewing.is_some());
+                if !over {
+                    self.way_back_ui(state, &out, ui, theme);
+                }
 
                 // **The pass that discovered it is thrown away.**
                 //
@@ -9304,7 +9356,7 @@ impl ChatApp {
         let mut send = false;
         ui.horizontal(|ui| {
             ui.set_min_height(tokens::FIELD_LG);
-            if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Throw it away").clicked() {
+            if sigil::icon::named_control(ui, sigil_ui::Icon::Bin, "Throw it away").clicked() {
                 throw_away = true;
             }
             if deaf {
@@ -10974,7 +11026,7 @@ impl ChatApp {
                         self.picturing = Some((at.clone(), files::pick_files()));
                         ui.ctx().request_repaint();
                     }
-                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Close, "Remove it").clicked() {
+                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Bin, "Remove it").clicked() {
                         self.send_as(Some(at), Cmd::SetChannelAvatar(None));
                     }
                 });
@@ -11164,16 +11216,20 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_MD);
         let pane = self.panes.entry(at.clone()).or_default();
         if !pane.confirming_destroy {
-            if ui
-                .add(egui::Button::new(
-                    egui::RichText::new(if dm {
-                        "Destroy this conversation"
-                    } else {
-                        "Destroy this channel"
-                    })
-                    .color(theme.destructive),
-                ))
-                .clicked()
+            // `grave`, as the confirmation below it already does: it is the
+            // one definition of what a destructive button looks like, and
+            // this site was building the same thing by hand. Identical
+            // today; the point is that it stays identical when `grave`
+            // changes.
+            if sigil_ui::grave(
+                ui,
+                if dm {
+                    "Destroy this conversation"
+                } else {
+                    "Destroy this channel"
+                },
+            )
+            .clicked()
             {
                 pane.confirming_destroy = true;
             }
@@ -12893,7 +12949,7 @@ impl ChatApp {
         // the account lives and how many conversations are ordered here are
         // directly above; this is the control that acts on them, so the fact
         // and the act are not on different screens.
-        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Move this account…")
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Home, "Move this account…")
             .on_hover_text(
                 "SIP-53: hand this account to another exchange. The direct messages ordered \
                  here go with it; this window reopens at the new home.",

@@ -1056,7 +1056,7 @@ fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
             if b.deletable
                 && crate::icon_item_tinted(
                     ui,
-                    crate::Icon::Close,
+                    crate::Icon::Bin,
                     "Delete",
                     sigil::ColorTheme::current(ui.ctx()).destructive,
                 )
@@ -1100,7 +1100,11 @@ fn more_menu(ui: &mut egui::Ui, b: &Bubble<'_>, action: &mut BubbleAction) {
                         action.save = Some(0);
                         ui.close();
                     }
-                    if crate::icon_item(ui, crate::Icon::Forward, "Forward file").clicked() {
+                    // The paper plane, as the viewer's own Forward it uses:
+                    // `Icon::Forward` is the bare arrow the icon table names
+                    // "Next", and handing a file to somebody else is not
+                    // paging.
+                    if crate::icon_item(ui, crate::Icon::Send, "Forward file").clicked() {
                         action.forward = Some(0);
                         ui.close();
                     }
