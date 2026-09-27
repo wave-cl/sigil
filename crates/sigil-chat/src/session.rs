@@ -2725,6 +2725,7 @@ async fn run(
             holds.set(chat.connection().map(|c| (c, endpoint)));
             // A new connection may be to a redeployed exchange: ask again.
             desk.peers_read = false;
+            desk.lineage_read = false;
         }
         // **Pictures still waiting come first, and at once.** The fetch just
         // done was the pacing; a wait here on top of it -- seven hundred
@@ -2963,6 +2964,10 @@ async fn run(
                     if !desk.peers_read {
                         desk.peers_read = true;
                         moved |= read_peers(&mut chat, &mut desk).await;
+                    }
+                    if !desk.lineage_read {
+                        desk.lineage_read = true;
+                        read_lineage(&mut chat).await;
                     }
                     if desk
                         .beat_at
@@ -3243,6 +3248,10 @@ struct Desk {
     /// SIP-39 §The peer directory: what this exchange federates with, read once per connection.
     peers: Vec<(PubKey, String)>,
     peers_read: bool,
+    /// SIP-64: this connection's exchange has been asked what keys it
+    /// succeeded. Reset with `peers_read`, because a new connection may be a
+    /// redeployed exchange.
+    lineage_read: bool,
     /// SIP-45: the endpoint the platform offered, to be registered on every
     /// connect (SIP-47 §Connecting, step 2), or `Some(None)` to forget the
     /// one registered. `wake_told` is whether this connection was told.
@@ -3365,6 +3374,7 @@ impl Default for Desk {
             presence: HashMap::new(),
             peers: Vec::new(),
             peers_read: false,
+            lineage_read: false,
             wake: None,
             wake_told: false,
             siblings: crate::siblings::Siblings::default(),
@@ -5869,6 +5879,84 @@ async fn read_peers(chat: &mut Chat, desk: &mut Desk) -> bool {
         true
     } else {
         false
+    }
+}
+
+/// SIP-64: ask the exchange which keys it succeeded, and pin what it says.
+///
+/// **A client that never asks calls honest history forged.** SIP-31 binds
+/// the exchange's key into every entry signature and SIP-40 re-signs
+/// nothing, so an entry written before a handover is signed under the key
+/// the exchange held *then*. `sqex_chat` checks the current key and then
+/// each predecessor the **pin store** remembers -- and a fresh install
+/// remembers none, because it was not there when the handover happened. So
+/// every entry older than the rotation fails, is marked `Verdict::Forged`,
+/// is never shown, and raises the loudest banner in the app over perfectly
+/// good messages. Seen on a newly installed phone against trunk.exchange,
+/// which rotated `7tbBEPxK...` to `3kHiw569...`: four entries in one room,
+/// all of them legitimate. A false alarm on the one signal that must never
+/// be noise teaches people to ignore it.
+///
+/// **Verified backwards, never taken as offered.** `predecessors_for`
+/// checks each link's signature, that the links chain, that none repeats,
+/// and -- the part that matters -- that the last lands on the key we are
+/// already pinned to. An exchange free to name its own predecessors could
+/// make a forged entry verify under one, so the chain is worth nothing
+/// except anchored at the key we already trust.
+///
+/// **One hop, because that is what the pin store holds.** `Known` keeps a
+/// single entry per domain and `predecessor_of` walks by key, so a chain
+/// longer than one link cannot be written down here: the second
+/// `add_moved` would replace the first. The newest hop is recorded, which
+/// is the whole of trunk.exchange's history and the common case; an
+/// exchange that has rotated twice would still hide anything older than
+/// its last rotation until `Known` can hold a chain.
+///
+/// Once per connection, like the peer directory, and quiet about an
+/// exchange from before the route: a 404 is "never moved", not a fault.
+async fn read_lineage(chat: &mut Chat) {
+    let Some(domain) = chat.domain().map(str::to_string) else {
+        return;
+    };
+    let current = chat.exchange_key();
+    let Some(mut client) = chat.connection() else {
+        return;
+    };
+    let Ok((200, body)) = client.get("/exchange/lineage").await else {
+        return;
+    };
+    let Ok(lineage) = sqex_proto::lineage::Lineage::decode(&body) else {
+        return;
+    };
+    match lineage.predecessors_for(&current, Some(&domain)) {
+        // Nothing behind it: the ordinary case, and not worth a word.
+        Ok(older) if older.is_empty() => {}
+        Ok(_) => {
+            let Some(last) = lineage.links.last() else {
+                return;
+            };
+            let path = sqex_discovery::known::path();
+            let Ok(mut known) = sqex_discovery::Known::load(&path) else {
+                return;
+            };
+            if known.predecessor_of(&current) == Some(last.from) {
+                return;
+            }
+            known.add_moved(&domain, last.from, last.to, "succeeded, per SIP-64");
+            match known.save(&path) {
+                Ok(()) => tracing::info!(
+                    %domain,
+                    from = %last.from,
+                    "pinned the key this exchange succeeded, so what it signed before \
+                     the handover reads as its own"
+                ),
+                Err(e) => tracing::warn!(%domain, "could not write the pin store: {e}"),
+            }
+        }
+        // Said, not silently dropped: an exchange offering a history that
+        // does not lead to the key we hold is the one case here worth
+        // hearing about.
+        Err(why) => tracing::warn!(%domain, "its key history does not check out: {why:?}"),
     }
 }
 
