@@ -59,6 +59,20 @@ pub struct Presence {
     /// The exchange's clock when this was read, so `last_seen` can be
     /// said in words against the right clock.
     pub read_at: u64,
+    /// SIP-50 §Reachable: a wake would land somewhere on this account --
+    /// some device of theirs holds a registration that has not expired and
+    /// did not ask to be left out.
+    ///
+    /// **Orthogonal to [`Seen`], not a fourth value of it.** Somebody
+    /// active is also reachable, and the bit is answered whether or not
+    /// anything beat, because "never beaten, can be woken" is the ordinary
+    /// state of somebody asleep with a phone. It is where it changes what a
+    /// reader expects -- absent -- that it is worth saying.
+    ///
+    /// False against an exchange from before SIP-50, which sends a reply
+    /// without the byte. Absent and silent is what such an exchange has
+    /// always said, so nothing reads worse than it did.
+    pub reachable: bool,
 }
 
 impl Presence {
@@ -80,6 +94,7 @@ impl Presence {
             seen,
             last_seen: reply.last_seen,
             read_at: reply.now,
+            reachable: reply.reach,
         }
     }
 }
@@ -140,7 +155,38 @@ mod tests {
             interval_secs: interval,
             now: 10_000,
             away,
+            reach: false,
         }
+    }
+
+    /// SIP-50: the reach bit is carried through, and it is **not** a fourth
+    /// value of `Seen` -- it rides beside every one of them, including the
+    /// two where somebody is plainly there.
+    ///
+    /// The case it exists for is the last one: not found, nothing ever
+    /// beaten, and a wake would still land. That is somebody asleep with a
+    /// phone, and an exchange before SIP-50 could not tell it from somebody
+    /// gone.
+    #[test]
+    fn reach_rides_beside_being_seen_rather_than_replacing_it() {
+        let woken = |found, staleness, away| Reply {
+            reach: true,
+            ..reply(found, staleness, 30, away)
+        };
+        for (r, want) in [
+            (woken(true, 5, false), Seen::Active),
+            (woken(true, 5, true), Seen::Away),
+            (woken(true, 500, false), Seen::Offline),
+            (woken(false, 0, false), Seen::Offline),
+        ] {
+            let p = Presence::of(&r);
+            assert_eq!(p.seen, want);
+            assert!(p.reachable, "the reach bit was dropped for {want:?}");
+        }
+        assert!(
+            !Presence::of(&reply(false, 0, 30, false)).reachable,
+            "an exchange that said nothing was read as saying yes"
+        );
     }
 
     /// SIP-4's rule, and the away bit on top of it: fresh is active or

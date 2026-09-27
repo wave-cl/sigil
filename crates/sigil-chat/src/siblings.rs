@@ -74,6 +74,36 @@ impl Siblings {
         self.listed_at = Some(now);
     }
 
+    /// SIP-51: a sibling has a SIP-12 open standing toward this device, and
+    /// the exchange said so.
+    ///
+    /// Everything here is throttled for *polling* -- ask who the siblings
+    /// are every `LIST_SECS`, do not sync with the same one inside
+    /// `AGAIN_SECS`, do not re-offer an open inside `OPEN_SECS`. A device
+    /// woken for this event has a budget of seconds (SIP-47's window), and
+    /// a wake spent waiting out a poll interval is a wake wasted, which is
+    /// the whole failure SIP-51 exists to end.
+    ///
+    /// **The registry stays the authority, and needs no check here.** The
+    /// event is a hint; `relist` makes the next pass ask the exchange, and
+    /// `listed` keeps only what the exchange lists while `to_open` walks
+    /// exactly that. So an event naming a device this account does not list
+    /// costs one refreshed list and opens toward nobody -- which is the
+    /// structural version of SIP-51's "verify before opening", and is what
+    /// `an_event_naming_a_stranger_opens_toward_nobody` is pointed at.
+    ///
+    /// **The same ephemeral, re-offered.** SIP-12 answers an open carrying a
+    /// *different* ephemeral by starting again and discarding the session --
+    /// so minting a fresh one here would throw away the very open that
+    /// caused this event.
+    pub fn wanted_by(&mut self, device: &PubKey, now: Instant) {
+        self.relist();
+        self.synced_at.remove(device);
+        if let Some((_, at)) = self.opens.get_mut(device) {
+            *at = now - std::time::Duration::from_secs(OPEN_SECS);
+        }
+    }
+
     /// Which siblings to open toward now, with the ephemeral to offer each:
     /// those not synced with lately, whose open is not fresh. A first open
     /// goes at once.
@@ -162,6 +192,74 @@ mod tests {
 
     fn key(b: u8) -> PubKey {
         PubKey::new([b; 32])
+    }
+
+    /// **SIP-51: a woken device acts now, and offers what it offered
+    /// before.**
+    ///
+    /// Everything here is paced for polling. A device woken for a sibling's
+    /// open has seconds, not minutes, and every throttle it waits out is
+    /// the wake wasted -- which is the failure the SIP exists to end. The
+    /// ephemeral has to survive the hurry: SIP-12 reads a *different* one
+    /// as somebody starting again and discards the session, so minting a
+    /// fresh one here would throw away the open that caused the event.
+    #[test]
+    fn a_sibling_that_asks_is_met_now_and_with_the_same_ephemeral() {
+        let now = Instant::now();
+        let mut s = Siblings::default();
+        s.listed(vec![key(2)], now);
+        let first = s.to_open(now);
+        assert_eq!(first.len(), 1, "a newly listed sibling opens at once");
+        let offered = first[0].1.to_bytes();
+
+        // Synced with a moment ago, and the open freshly offered: nothing
+        // is due, which is the state a poll would leave a phone in.
+        s.synced_at.insert(key(2), now);
+        let later = now + Duration::from_secs(1);
+        assert!(
+            s.to_open(later).is_empty(),
+            "this proves nothing unless the throttles are actually holding"
+        );
+
+        s.wanted_by(&key(2), later);
+        let due = s.to_open(later);
+        assert_eq!(due.len(), 1, "the wake was spent waiting out a poll");
+        assert_eq!(
+            due[0].1.to_bytes(),
+            offered,
+            "a fresh ephemeral discards the very open that caused the event"
+        );
+        assert!(
+            s.list_due(later),
+            "the registry is the authority and was not asked again"
+        );
+    }
+
+    /// **A forged event opens toward nobody**, and nothing in `wanted_by`
+    /// checks for it.
+    ///
+    /// SIP-51 says the event is a hint and the registry is the authority.
+    /// That holds here by construction rather than by a test of a key: the
+    /// hint makes the next pass ask the exchange, `listed` keeps only what
+    /// the exchange lists, and `to_open` walks exactly that. An exchange
+    /// that lied about a sibling costs one refreshed list.
+    #[test]
+    fn an_event_naming_a_stranger_opens_toward_nobody() {
+        let now = Instant::now();
+        let mut s = Siblings::default();
+        s.listed(vec![key(2)], now);
+
+        s.wanted_by(&key(9), now);
+        // The exchange answers, and does not list 9.
+        assert!(s.list_due(now), "the hint did not make it ask again");
+        s.listed(vec![key(2)], now);
+
+        let due = s.to_open(now + Duration::from_secs(600));
+        assert!(
+            due.iter().all(|(k, _)| *k != key(9)),
+            "opened toward a device the account does not list: {due:?}",
+            due = due.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+        );
     }
 
     /// A newly listed sibling is opened toward at once, then not again

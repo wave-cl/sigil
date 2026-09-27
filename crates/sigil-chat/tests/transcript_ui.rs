@@ -3793,6 +3793,7 @@ fn list_dark() {
             seen: sigil_chat::presence::Seen::Away,
             last_seen: NOW - 600,
             read_at: NOW,
+            reachable: false,
         },
     );
     let mut h = harness_with(state, true);
@@ -3812,6 +3813,7 @@ fn members_dark() {
             seen: sigil_chat::presence::Seen::Away,
             last_seen: NOW - 600,
             read_at: NOW,
+            reachable: false,
         },
     );
     let mut h = harness_at(state, sigil_chat::Route::Members);
@@ -9008,6 +9010,7 @@ fn seen(seen: sigil_chat::presence::Seen, last_seen: u64) -> sigil_chat::presenc
         seen,
         last_seen,
         read_at: NOW,
+        reachable: false,
     }
 }
 

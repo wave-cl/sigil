@@ -4305,10 +4305,17 @@ impl ChatApp {
     /// a pointer learns. Nothing known is offline with nothing to say.
     fn presence_of(&self, state: &ChatState, who: &PubKey) -> (sigil_ui::Presence, String) {
         let known = state.presence.get(who).copied().unwrap_or_default();
-        let seen = match known.seen {
-            presence::Seen::Active => sigil_ui::Presence::Active,
-            presence::Seen::Away => sigil_ui::Presence::Away,
-            presence::Seen::Offline => sigil_ui::Presence::Offline,
+        let seen = match (known.seen, known.reachable) {
+            (presence::Seen::Active, _) => sigil_ui::Presence::Active,
+            (presence::Seen::Away, _) => sigil_ui::Presence::Away,
+            // **SIP-50: absent and wakeable is not absent and gone.** The
+            // reach bit rides beside all three states, but it is only here
+            // that it changes what a reader should expect -- somebody
+            // asleep with a phone answers, and somebody whose only client
+            // is shut does not. Before SIP-50 an exchange could not tell
+            // the two apart and neither could this.
+            (presence::Seen::Offline, true) => sigil_ui::Presence::Asleep,
+            (presence::Seen::Offline, false) => sigil_ui::Presence::Offline,
         };
         // Both on the exchange's clock: `last_seen` as recorded, `read_at`
         // as of the read -- which is within a tick of now, so "last seen

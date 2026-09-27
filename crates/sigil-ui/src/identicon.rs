@@ -274,6 +274,15 @@ pub enum Presence {
     /// Not connected, or not for long enough to say.
     #[default]
     Offline,
+    /// Not connected, and a wake would reach them (SIP-50's `reach`).
+    ///
+    /// **A separate state because it is a separate expectation**, not
+    /// because it looks different: somebody asleep with a phone is not
+    /// there and is not gone, and what you get from writing to them is not
+    /// what you get from writing to somebody whose only client is shut.
+    /// SIP-50 calls it a fact and not a verdict -- a registration stands --
+    /// so the word says asleep and promises nothing.
+    Asleep,
 }
 
 impl Presence {
@@ -283,6 +292,7 @@ impl Presence {
             Presence::Active => "active",
             Presence::Away => "away",
             Presence::Offline => "offline",
+            Presence::Asleep => "asleep",
         }
     }
 
@@ -293,7 +303,14 @@ impl Presence {
         match self {
             Presence::Active => (true, theme.link_up),
             Presence::Away => (true, theme.warning),
-            Presence::Offline => (false, theme.text_muted),
+            // **The same mark as offline, deliberately.** The dot carries
+            // one bit -- filled or hollow -- so that it survives somebody
+            // who cannot tell green from amber, and a second hollow state
+            // in another colour would put weight back on the axis this
+            // design took it off. Asleep is *absent*; that it can be woken
+            // is what the word says, and the word is on the accessibility
+            // node and drawn beside it on a phone.
+            Presence::Offline | Presence::Asleep => (false, theme.text_muted),
         }
     }
 
@@ -367,7 +384,9 @@ pub fn presence_hover(seen: Presence, last_seen: u64, now: u64, key: &str) -> St
         (Presence::Active, _) => String::new(),
         (_, 0) => " — never seen".to_string(),
         (Presence::Away, at) => format!(" — last active {}", crate::brief(at, now)),
-        (Presence::Offline, at) => format!(" — last seen {}", crate::brief(at, now)),
+        (Presence::Offline | Presence::Asleep, at) => {
+            format!(" — last seen {}", crate::brief(at, now))
+        }
     };
     format!("{}{when}\n{key}", seen.word())
 }

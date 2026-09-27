@@ -3497,6 +3497,15 @@ impl Desk {
                 tracing::info!(%caller, "a call was carried here from another exchange");
                 self.cross_ring = Some((CrossRing { bridge, caller }, std::time::Instant::now()));
             }
+            // **SIP-51: a device of this account has a session open toward
+            // this one.** The phone was woken for exactly this, so the
+            // sibling machine acts now rather than at its next poll -- see
+            // `Siblings::wanted_by`, which also says why the registry needs
+            // no check here and why the ephemeral is kept.
+            Event::Sibling { device } => {
+                tracing::info!(peer = %device, "a device of this account wants a session");
+                self.siblings.wanted_by(&device, std::time::Instant::now());
+            }
             Event::Admission | Event::Heartbeat | Event::Unknown(_) => {}
         }
     }
@@ -4353,6 +4362,12 @@ async fn tell_wake(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut
             sqex_proto::wake::Register {
                 ttl: (*ttl).clamp(1, sqex_proto::wake::MAX_TTL),
                 endpoint: url.clone(),
+                // SIP-50: **not** quiet. The flag is for a device that does
+                // not want to count toward its account's reach; a phone
+                // registering to be woken is the device that reach is about,
+                // and saying otherwise would report its owner unreachable
+                // while the one thing that can reach them is listening.
+                quiet: false,
             }
             .encode(),
             "registered",
