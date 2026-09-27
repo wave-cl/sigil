@@ -11060,21 +11060,26 @@ impl ChatApp {
                 // it. A room only: a direct message is drawn as the person
                 // in it, whose picture is their profile's (SIP-21).
                 ui.add_space(tokens::SPACING_MD);
-                ui.horizontal(|ui| {
-                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Attach, "Set a picture")
-                        .on_hover_text(
-                            "Everybody here sees it. It rides with the channel, so it \
-                             reaches whoever holds a copy of it too.",
-                        )
-                        .clicked()
-                    {
-                        self.picturing = Some((at.clone(), files::pick_files()));
-                        ui.ctx().request_repaint();
-                    }
-                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Bin, "Remove it").clicked() {
-                        self.send_as(Some(at), Cmd::SetChannelAvatar(None));
-                    }
-                });
+                // **Two rows, not one.** `icon_item` is a full-width row, and
+                // two of them in a `horizontal` put the second one past the
+                // right edge: on a 360-point phone "Remove it" was drawn at
+                // x=348..465, and egui grows a ui to what is drawn in it, so
+                // the field and every row below -- Mint a new key, Leave --
+                // were then laid out for a 469-point pane. Every other
+                // control on this screen is its own row; these are too.
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Attach, "Set a picture")
+                    .on_hover_text(
+                        "Everybody here sees it. It rides with the channel, so it \
+                         reaches whoever holds a copy of it too.",
+                    )
+                    .clicked()
+                {
+                    self.picturing = Some((at.clone(), files::pick_files()));
+                    ui.ctx().request_repaint();
+                }
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Bin, "Remove it").clicked() {
+                    self.send_as(Some(at), Cmd::SetChannelAvatar(None));
+                }
 
                 ui.add_space(tokens::SPACING_MD);
                 ui.label("Let another exchange carry a copy");

@@ -1094,8 +1094,16 @@ fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
 #[test]
 fn no_phone_pane_is_wider_than_the_phone() {
     for (what, build) in [
-        ("ordinary", a_conversation as fn() -> ChatState),
-        ("long", a_long_conversation as fn() -> ChatState),
+        ("ordinary names", a_conversation as fn() -> ChatState),
+        ("long names", a_long_conversation as fn() -> ChatState),
+        // **And with a conversation open**, which is the state half these
+        // routes exist for. Without it `Route::Settings` is nearly empty --
+        // 351 points against a 360-point phone -- so this passed while the
+        // screen it names drew 469, with "Remove it" at x=348..465 and every
+        // row below laid out for a pane that wide. A test that measures a
+        // route in the one state where it has no content passes for the same
+        // reason nothing is wrong: there is nothing there.
+        ("with a conversation open", the_room as fn() -> ChatState),
     ] {
         for route in [
             sigil_chat::Route::Conversations,
@@ -1149,7 +1157,7 @@ fn no_phone_pane_is_wider_than_the_phone() {
             // faults this catches were tens of points, not fractions.
             assert!(
                 width <= PHONE_WIDTH + 1.0,
-                "{route:?} with {what} names draws {width} points wide in a \
+                "{route:?} with {what} draws {width} points wide in a \
              {PHONE_WIDTH}-point pane. egui grows a ui to what is drawn in it, \
              so every row after the one that overflowed is laid out for a pane \
              that wide -- which is how a roster's buttons end up painted over \
@@ -1169,8 +1177,16 @@ fn no_phone_pane_is_wider_than_the_phone() {
 #[test]
 fn no_widget_on_any_route_is_drawn_off_the_screen() {
     for (what, build) in [
-        ("ordinary", a_conversation as fn() -> ChatState),
-        ("long", a_long_conversation as fn() -> ChatState),
+        ("ordinary names", a_conversation as fn() -> ChatState),
+        ("long names", a_long_conversation as fn() -> ChatState),
+        // **And with a conversation open**, which is the state half these
+        // routes exist for. Without it `Route::Settings` is nearly empty --
+        // 351 points against a 360-point phone -- so this passed while the
+        // screen it names drew 469, with "Remove it" at x=348..465 and every
+        // row below laid out for a pane that wide. A test that measures a
+        // route in the one state where it has no content passes for the same
+        // reason nothing is wrong: there is nothing there.
+        ("with a conversation open", the_room as fn() -> ChatState),
     ] {
         for route in [
             sigil_chat::Route::Conversations,
@@ -1213,7 +1229,7 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             let mut h = harness_phone(state, route.clone());
             h.run();
             h.run();
-            nothing_runs_off_the_edge(&h, &format!("{route:?} with {what} names"));
+            nothing_runs_off_the_edge(&h, &format!("{route:?} with {what}"));
         }
     }
 }
@@ -2707,6 +2723,33 @@ fn phone_settings() {
     h.run();
     h.run();
     h.snapshot("phone_settings");
+}
+
+/// **And the half of it a direct message never draws.**
+///
+/// `phone_settings` above renders a DM, so the whole admin half — the name,
+/// the topic, the picture, authorising a replica, moving where the
+/// conversation lives — had no picture at all. That is the taller half and
+/// the newer one, and it is where "Set a picture" and "Remove it" sat side
+/// by side as two full-width rows: 469 points of pane on a 360-point phone,
+/// with every row below them laid out that wide. The fix moved not one
+/// snapshot, because none of them drew this half.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_settings_room() {
+    let mut state = a_conversation();
+    state.i_am_admin = true;
+    if let Some(open) = state.open
+        && let Some(c) = state.conversations.iter_mut().find(|c| c.channel == open)
+    {
+        c.peer = None;
+        c.group = true;
+        c.label = "the square".into();
+    }
+    let mut h = harness_phone(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    h.snapshot("phone_settings_room");
 }
 
 /// Put the conversation list away.
@@ -9638,8 +9681,8 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
     let mut was_below = Vec::new();
     let mut unreachable = Vec::new();
     for (what, build) in [
-        ("ordinary", a_conversation as fn() -> ChatState),
-        ("long", a_long_conversation as fn() -> ChatState),
+        ("ordinary names", a_conversation as fn() -> ChatState),
+        ("long names", a_long_conversation as fn() -> ChatState),
     ] {
         for route in [
             sigil_chat::Route::Conversations,
@@ -9674,13 +9717,13 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             h.run();
             let before = deepest(&h);
             if before.1 > PHONE_HEIGHT as f64 + 1.0 {
-                was_below.push(format!("{route:?} with {what} names"));
+                was_below.push(format!("{route:?} with {what}"));
             }
             to_the_end(&mut h);
             let after = deepest(&h);
             if after.1 > PHONE_HEIGHT as f64 + 1.0 {
                 unreachable.push(format!(
-                    "{route:?} with {what} names: {:?} still ends at y={:.0} on a \
+                    "{route:?} with {what}: {:?} still ends at y={:.0} on a \
                      {PHONE_HEIGHT}-point screen after scrolling to the end, so \
                      nothing reaches it",
                     after.0, after.1
