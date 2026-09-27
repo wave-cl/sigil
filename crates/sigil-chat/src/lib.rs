@@ -5847,7 +5847,7 @@ impl ChatApp {
         let moving = dms_ordered_here(at.0, &state.conversations);
         if moving.is_empty() {
             ui.colored_label(
-                theme.text_muted,
+                theme.text_secondary,
                 "No direct message is ordered here, so none moves with the account.",
             );
         } else {
@@ -5874,7 +5874,7 @@ impl ChatApp {
         }
         ui.add_space(tokens::SPACING_XS);
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "The rest are ordered at the other person's home and stay there. Rooms stay \
                  where they were made. This window reopens at the new home when it is done.",
@@ -6001,7 +6001,7 @@ impl ChatApp {
         );
         ui.add_space(tokens::SPACING_XS);
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "It must already hold a copy of this conversation. Everyone in it reads the \
                  move, and what was said before stays where it was said.",
@@ -6289,7 +6289,7 @@ impl ChatApp {
         // about a button that is not there.
         if held.is_some() && sigil::Form::of(ui.ctx()).is_phone() {
             ui.add_space(tokens::SPACING_XS);
-            ui.colored_label(theme.text_muted, egui::RichText::new(GIVING_UP).small());
+            ui.colored_label(theme.text_secondary, egui::RichText::new(GIVING_UP).small());
         }
         if let Some(local) = release {
             let pane = self.pane(at);
@@ -10521,7 +10521,7 @@ impl ChatApp {
             // a side effect: sealing the current epoch is what hands it over,
             // and rotating instead would deny it.
             ui.colored_label(
-                theme.text_muted,
+                theme.text_secondary,
                 egui::RichText::new(
                     "Somebody invited is given the key in force, so they can read what is \
                      already here.",
@@ -11089,7 +11089,7 @@ impl ChatApp {
                 // already holds was lawfully obtained and no protocol can
                 // unsend it.
                 ui.colored_label(
-                    theme.text_muted,
+                    theme.text_secondary,
                     egui::RichText::new(
                         "Withdrawing stops what follows. What it already holds, it keeps.",
                     )
@@ -13632,7 +13632,7 @@ impl ChatApp {
         // Said before it is needed, not after it is missed: registering makes
         // this device act for the account and hands it no keys at all.
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "Registering does not bring any conversation with it. An epoch key is \
                  sealed to a device, so the other one has to hand them over before \
@@ -13899,7 +13899,7 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_SM);
         ui.heading("If you lose your key");
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "Your account is your key. Say now who takes over when it is gone, and the \
                  exchange carries everything across when they do: names, conversations, \
