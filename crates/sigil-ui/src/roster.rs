@@ -220,17 +220,29 @@ pub fn roster(ui: &mut egui::Ui, rows: &[Row], connecting: usize, detail: bool) 
                         .on_hover_text(&row.key);
                 }
                 keyed(ui);
-                meter(ui, tokens::AVATAR_XL);
-            }
-            // **On a phone the detail goes under the row, not after it.**
-            // It is a sentence about the path -- "2.1% lost, 180 ms of
-            // buffer, concealing 3 frames in 100" -- and a `horizontal` never
-            // wraps, so after a key and a meter it took a 360-point pane out
-            // to 572 and every row after it with it. There is no shortening
-            // it either: each clause is a separate fact somebody is reading
-            // it for.
-            if !narrow && detail {
-                ui.colored_label(theme.text_muted, &row.detail);
+                // **On a phone the detail goes under the row, not after it.**
+                // It is a sentence about the path -- "2.1% lost, 180 ms of
+                // buffer, concealing 3 frames in 100" -- and a `horizontal`
+                // never wraps, so after a key and a meter it took a
+                // 360-point pane out to 572 and every row after it with it.
+                // There is no shortening it either: each clause is a
+                // separate fact somebody is reading it for. Here it is on
+                // the row, and now *before* the meter, because a meter laid
+                // against the right edge has to be laid out last.
+                if detail {
+                    ui.colored_label(theme.text_muted, &row.detail);
+                }
+                // **Against the right edge here too.** The narrow branch has
+                // done this all along and says why -- so the meters make a
+                // column rather than stepping in and out with the length of
+                // each name -- and this branch, with the same rows and the
+                // same names, did not: measured at 325 and 531 for two
+                // speakers whose names differ, which is not a set of levels
+                // anybody can compare at a glance. A column is the only
+                // reason to draw them beside each other.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    meter(ui, tokens::AVATAR_XL);
+                });
             }
         });
         if narrow && detail && !row.detail.is_empty() {

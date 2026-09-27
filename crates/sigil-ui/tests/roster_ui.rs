@@ -395,3 +395,101 @@ fn a_meter_does_not_take_its_height_from_the_caller() {
         );
     }
 }
+
+/// **The meters make a column, at any width.**
+///
+/// The narrow branch lays its meter against the right edge and says why:
+/// "so the meters make a column rather than stepping in and out with the
+/// length of each name". The wide branch — the same rows, the same names,
+/// drawn in sigil-voice's pane — did neither, so every meter began wherever
+/// its key happened to end and a roster of six was six meters at six
+/// offsets. A column is what makes a set of levels comparable at a glance,
+/// which is the only reason to draw them beside each other.
+///
+/// Two speakers with deliberately unequal names, because equal ones cannot
+/// tell a column from a coincidence.
+#[test]
+fn the_meters_line_up_whatever_the_names_are() {
+    fn uneven() -> Vec<Row> {
+        vec![
+            Row {
+                key: "3yMhjNhZ8kLpQr2vWx7TnBcDfGhJkLmNpQrStUvWxYz1".into(),
+                named: Some("Ada".into()),
+                picture: None,
+                speaking: true,
+                level: 0.42,
+                detail: "loss 0% · conceal 0 · buf 3".into(),
+            },
+            Row {
+                key: "GkpAfVhY4jNmRt6uXz9QwErTyUiOpAsDfGhJkLzXcVbN".into(),
+                named: Some("Alexandra Constantinopoulos-Whitmore".into()),
+                picture: None,
+                speaking: true,
+                level: 0.61,
+                detail: "loss 2% · conceal 4 · buf 3".into(),
+            },
+        ]
+    }
+
+    fn meters(size: egui::Vec2, form: sigil::Form) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, want: egui::Color32, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(r) if r.fill == want => out.push(r.rect),
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, want, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let rows = uneven();
+        let mut h = Harness::builder().with_size(size).build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, form);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(t.surface_primary))
+                .show(ui, |ui| roster(ui, &rows, 0, true));
+        });
+        h.run();
+        h.run();
+        let mut found = Vec::new();
+        for shape in &h.output().shapes {
+            walk(&shape.shape, theme::dark().speaking, &mut found);
+        }
+        found
+    }
+
+    for (what, size, form) in [
+        ("a phone", egui::vec2(360.0, 320.0), sigil::Form::Phone),
+        (
+            "a wide pane",
+            egui::vec2(900.0, 260.0),
+            sigil::Form::Desktop,
+        ),
+    ] {
+        let drawn = meters(size, form);
+        assert_eq!(
+            drawn.len(),
+            2,
+            "{what}: both speakers' meters were not painted: {drawn:?}"
+        );
+        // **The left edge, not the right.** A `ProgressBar` fills from the
+        // left, so the filled rect's right edge moves with the level — the
+        // first version of this compared that and failed on two rows that
+        // were in a perfect column, because one speaker was louder than the
+        // other. The fill starts at the track, so its left edge is where the
+        // meter begins and is what a column is made of.
+        let (a, b) = (drawn[0], drawn[1]);
+        assert!(
+            (a.left() - b.left()).abs() < 1.0,
+            "{what}: the meters begin at x {:.0} and {:.0} — they step in and \
+             out with the names rather than making a column",
+            a.left(),
+            b.left()
+        );
+    }
+}
