@@ -2559,6 +2559,36 @@ fn phone_dialog_report() {
     h.snapshot("phone_dialog_report");
 }
 
+/// The same dialog in the light theme, which no dialog picture covered.
+///
+/// **Because light is the worse case for the tier these captions sit in.**
+/// The palette holds `text_muted` to the large-text floor of 3.0, and at
+/// `small` it measures 3.40 on light against 4.24 on dark -- so a caveat
+/// left in that tier is least readable exactly here. Twenty-one of them
+/// moved to `text_secondary` (6.90 light, 8.11 dark) on the argument that
+/// somebody has to read them before pressing, and every picture of that
+/// change was a dark one. A claim about contrast with no light-theme
+/// rendering behind it is a claim about the half of the problem that was
+/// already better.
+///
+/// This dialog because it carries one of them — the note is stored in the
+/// clear at the exchange, and who reads it — beside a field and the two
+/// buttons, so the caption is seen against the things it is competing with
+/// rather than alone.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_report_light() {
+    let mut h = harness_phone_light(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.get_by_label("Report this conversation…").click();
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "the report dialog in the light theme");
+    h.snapshot("phone_dialog_report_light");
+}
+
 /// The conversation's own settings on a phone: name, topic, retention.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
