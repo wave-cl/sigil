@@ -820,6 +820,36 @@ impl Shell {
         self.navigator.set_siblings(siblings);
     }
 
+    /// Whether a Back press has anywhere to go, for a platform that has to
+    /// decide *before* handing the press over.
+    ///
+    /// Android is that platform. Its framework asks the application whether
+    /// it wants the gesture and leaves the app when nothing answers, so the
+    /// question has to be answerable synchronously, from the system's own
+    /// thread, while the interface is a frame behind. It is therefore a
+    /// snapshot and not a promise: at most one frame stale, and the way it
+    /// goes wrong is one press that does nothing rather than an app that
+    /// cannot be left.
+    ///
+    /// The three answers, in the order [`Shell::ui`] asks them: a menu is
+    /// open, the history has somewhere to go, or an app is on screen -- which
+    /// on a phone always has a step of its own, down to closing the
+    /// conversation and then showing the identity it belongs to. With none of
+    /// them there is nothing behind this screen but the system, and the
+    /// system should have the press.
+    pub fn back_reaches_something(&self, egui_ctx: &egui::Context) -> bool {
+        if egui::Popup::is_any_open(egui_ctx) {
+            return true;
+        }
+        // **The opening screen is not the app, and the history is.** Asking
+        // `nav` here said yes on a screen that draws none of it, so Back
+        // walked a stack nobody could see: three presses on the handset, the
+        // routes stepping underneath, the screen never moving and the app
+        // impossible to leave. Behind the opening screen there is nothing of
+        // sigil's, which is the whole reason it is the opening screen.
+        self.accounts.active().is_unlocked() && self.choosing.is_none()
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.publish_insets(ui.ctx());
         self.restore_focus(ui.ctx());
@@ -858,6 +888,15 @@ impl Shell {
         {
             if egui::Popup::is_any_open(ui.ctx()) {
                 egui::Popup::close_all(ui.ctx());
+            } else if !(self.accounts.active().is_unlocked() && self.choosing.is_none()) {
+                // **Behind the opening screen is the system.** Its history is
+                // the app's and the app is not drawn under it, so asking
+                // `nav` here stepped through a stack nobody could see: three
+                // presses on the handset, the routes moving underneath, the
+                // screen never changing and no way out of sigil but the task
+                // switcher. Leaving is what Back means here, and the platform
+                // is the only thing that can do it.
+                self.platform.leave();
             } else if !self.nav.go_back() {
                 let active = self.active();
                 let stepped = {

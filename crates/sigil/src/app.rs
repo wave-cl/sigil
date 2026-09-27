@@ -297,6 +297,22 @@ pub trait Notify {
     /// notifications with different lives.
     fn withdraw_notice(&self, _target: &Target) {}
 
+    /// Back was pressed with nothing behind the screen. Leave the
+    /// application, if leaving is a thing this platform does.
+    ///
+    /// **Android, and nowhere else.** There, Back off the last screen means
+    /// leaving, and an app that will not go is one the person has to use the
+    /// task switcher to escape. Measured on the handset: from the opening
+    /// screen, three presses and nothing at all -- no window button to
+    /// close, no step left to take, and no way out of sigil.
+    ///
+    /// A desktop closes its window with the window's own control and must
+    /// not vanish because somebody pressed a key, so the default is to do
+    /// nothing and say so.
+    fn leave(&self) -> bool {
+        false
+    }
+
     /// A call is up, with whoever is named; `None` when it is not.
     ///
     /// **For the platforms that have to be told a process is busy.** Android
@@ -371,6 +387,15 @@ pub struct Silent;
 /// **Every method, and no `..` to hide behind.** A method added to the trait
 /// above and not added here does the same thing again, and the only warning
 /// is that this block is the next thing in the file.
+/// A shared notifier is a notifier.
+///
+/// **Every method, forwarded, and a test that says so.** This impl is written
+/// out by hand, and a trait method left off it does not fail to compile: it
+/// quietly falls through to the trait's own default. `leave` was added to the
+/// trait and not to this list, and the phone answered "I did not leave"
+/// forever after -- the shell asked, the default said no, and Back on the
+/// opening screen did nothing on a real handset. Nothing in the language will
+/// catch the next one, so `an_arc_forwards_every_notify_method` does.
 impl<T: Notify + ?Sized> Notify for std::sync::Arc<T> {
     fn notice(&self, notice: Notice<'_>) -> bool {
         (**self).notice(notice)
@@ -398,6 +423,9 @@ impl<T: Notify + ?Sized> Notify for std::sync::Arc<T> {
     }
     fn route(&self, speaker: bool) -> bool {
         (**self).route(speaker)
+    }
+    fn leave(&self) -> bool {
+        (**self).leave()
     }
 }
 
@@ -668,5 +696,114 @@ mod tests {
     fn a_zero_badge_is_no_badge() {
         assert!(TabNotifications::count(0).is_empty());
         assert!(!TabNotifications::count(1).is_empty());
+    }
+
+    /// Every [`Notify`] method reaches the notifier through an `Arc`.
+    ///
+    /// **The one failure the language will not report.** The forwarding impl
+    /// is a hand-written list, and a method missing from it compiles and runs
+    /// and answers with the trait's default. That is how `leave` came to be a
+    /// silent no-op on Android: the shell asked to leave, the `Arc` in
+    /// between answered "no" on the notifier's behalf, and Back on the
+    /// opening screen did nothing on a handset somebody was holding.
+    ///
+    /// So: call every one of them through an `Arc` and require each to arrive.
+    /// Add a method to the trait, add it here, and the impl above will not be
+    /// forgotten -- which is the whole job of this test.
+    #[test]
+    fn an_arc_forwards_every_notify_method() {
+        #[derive(Default)]
+        struct Counting(std::sync::Mutex<Vec<&'static str>>);
+        impl Counting {
+            fn saw(&self, what: &'static str) {
+                self.0.lock().unwrap().push(what);
+            }
+        }
+        // Every method overridden, including the ones with a default: a
+        // default that happens to do the right thing would hide a missing
+        // forward, which is exactly what is being tested for.
+        impl Notify for Counting {
+            fn notice(&self, _notice: Notice<'_>) -> bool {
+                self.saw("notice");
+                true
+            }
+            fn post(&self, _summary: &str, _body: &str) -> bool {
+                self.saw("post");
+                true
+            }
+            fn pressed(&self) -> Vec<Target> {
+                self.saw("pressed");
+                Vec::new()
+            }
+            fn withdraw(&self, _target: &Target) {
+                self.saw("withdraw");
+            }
+            fn withdraw_notice(&self, _target: &Target) {
+                self.saw("withdraw_notice");
+            }
+            fn leave(&self) -> bool {
+                self.saw("leave");
+                true
+            }
+            fn calling(&self, _live: Option<InCall<'_>>) {
+                self.saw("calling");
+            }
+            fn call_presses(&self) -> Vec<CallPress> {
+                self.saw("call_presses");
+                Vec::new()
+            }
+            fn routable(&self) -> bool {
+                self.saw("routable");
+                true
+            }
+            fn route(&self, speaker: bool) -> bool {
+                self.saw("route");
+                speaker
+            }
+        }
+
+        let inner = std::sync::Arc::new(Counting::default());
+        // As the shell holds it: the concrete type erased behind the `Arc`,
+        // which is the shape the forwarding impl exists for.
+        let through: std::sync::Arc<dyn Notify + Send + Sync> = inner.clone();
+        let target = Target {
+            identity: sqnr_core::PubKey::new([1; 32]),
+            exchange: String::new(),
+            channel: [2; 32],
+            answer: false,
+        };
+        through.notice(Notice::plain("a", "b"));
+        through.post("a", "b");
+        through.pressed();
+        through.withdraw(&target);
+        through.withdraw_notice(&target);
+        through.leave();
+        through.calling(None);
+        through.call_presses();
+        through.routable();
+        through.route(true);
+
+        let reached = inner.0.lock().unwrap().clone();
+        let every = [
+            "notice",
+            "post",
+            "pressed",
+            "withdraw",
+            "withdraw_notice",
+            "leave",
+            "calling",
+            "call_presses",
+            "routable",
+            "route",
+        ];
+        let missing: Vec<&str> = every
+            .iter()
+            .copied()
+            .filter(|m| !reached.contains(m))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "an Arc answered for the notifier instead of asking it: {missing:?}"
+        );
     }
 }

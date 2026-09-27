@@ -445,6 +445,116 @@ fn on_a_phone_back_closes_an_open_menu() {
     );
 }
 
+/// A notifier that remembers being asked to leave.
+///
+/// Held behind an `Arc`, as the phone holds its own: that is where the fault
+/// this test exists for actually was. `Notify` is forwarded through `Arc` by
+/// a hand-written impl, `leave` was missing from it, and every call answered
+/// with the trait's default instead of reaching the notifier -- so the shell
+/// asked, something in between said no, and the app could not be left.
+#[derive(Default)]
+struct Leaving(std::sync::atomic::AtomicU32);
+
+impl Leaving {
+    fn asked(&self) -> u32 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl sigil::Notify for Leaving {
+    fn notice(&self, _notice: sigil::Notice<'_>) -> bool {
+        false
+    }
+    fn leave(&self) -> bool {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+}
+
+/// A phone on the opening screen, with something that counts being asked
+/// to leave.
+fn phone_asking_to_switch() -> (Harness<'static>, std::sync::Arc<Leaving>) {
+    let leaving = std::sync::Arc::new(Leaving::default());
+    let apps: Vec<Box<dyn App>> = vec![Box::new(Stub {
+        asks_to_switch: true,
+        ..Stub::named("Calls", 0)
+    })];
+    let mut shell = sigil_shell::Shell::new(apps, None)
+        .with_notify(Box::new(leaving.clone()))
+        .with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+            sigil::Account::unlocked_for_test([5u8; 32]),
+        ]));
+    let h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    (h, leaving)
+}
+
+/// **Back off the last screen leaves the application**, which on Android is
+/// what Back means and the one thing the interface cannot do for itself.
+///
+/// Behind the opening screen there is nothing of sigil's. Asking `nav` there
+/// said otherwise -- the history belongs to the app, which is not drawn
+/// under this screen -- so Back stepped through a stack nobody could see:
+/// on the handset, three presses, the screen never moving, and no way out of
+/// sigil but the task switcher.
+#[test]
+fn on_a_phone_back_off_the_opening_screen_leaves_the_application() {
+    let (mut h, leaving) = phone_asking_to_switch();
+    h.run();
+    let seen = said(&h);
+    assert!(
+        seen.contains("Switch identity"),
+        "the opening screen is not up, so this is pointed at the wrong screen: {seen}"
+    );
+    assert_eq!(leaving.asked(), 0, "asked to leave before anybody pressed");
+
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert_eq!(
+        leaving.asked(),
+        1,
+        "Back on the opening screen did not ask the platform to leave"
+    );
+    let seen = said(&h);
+    assert!(
+        seen.contains("Switch identity"),
+        "and it left the screen as well -- leaving is the platform's to do: {seen}"
+    );
+}
+
+/// The same press, one screen earlier, is a step and **not** a way out. The
+/// two have to be told apart or Back either strands somebody in the app or
+/// throws them out of it from the middle.
+#[test]
+fn on_a_phone_back_with_an_app_on_screen_does_not_leave() {
+    let (mut h, leaving) = phone_asking_to_switch();
+    h.run();
+    h.get_by_label("Cancel").click();
+    h.run();
+    let seen = said(&h);
+    assert!(
+        !seen.contains("Switch identity"),
+        "still on the opening screen, so this proves nothing: {seen}"
+    );
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert_eq!(
+        leaving.asked(),
+        0,
+        "Back with an app on screen threw the person out of sigil"
+    );
+}
+
 /// On a phone there is no rail: the screen is the app's, and the other
 /// apps are behind the title in the app bar. The status bar lies over the
 /// top of the surface and the app bar sits under it, so the title moves
