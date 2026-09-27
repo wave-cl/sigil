@@ -11107,6 +11107,51 @@ fn phone_message_menu() {
     h.snapshot("phone_message_menu");
 }
 
+/// **The compose button, in what the system leaves.**
+///
+/// `a_messages_menu_stays_out_of_the_systems_own_row` below says the rule
+/// and why it exists: an `Area` is its own layer and no panel's inset
+/// reaches it, so anything placed near the foot of a phone grows straight
+/// into the navigation bar, where the touch is the system's and the control
+/// cannot be pressed. It was written after that happened to one menu.
+///
+/// The compose button is the other thing down there, it is an `Area`, and
+/// the clearance it keeps was a comment and a `safe_rect` call with nothing
+/// asserting either. One trap, two controls, one test.
+#[test]
+fn the_compose_button_stays_out_of_the_systems_own_row() {
+    const BOTTOM: f32 = 48.0;
+    let mut state = a_conversation();
+    state.open = None;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    sigil::Insets::install(
+        &h.ctx,
+        sigil::Insets {
+            bottom: BOTTOM,
+            ..sigil::Insets::NONE
+        },
+    );
+    h.run();
+    h.run();
+    let button = h.get_by_label("Write to somebody").rect();
+    let floor = PHONE_HEIGHT - BOTTOM;
+    assert!(
+        button.bottom() <= floor + 1.0,
+        "the compose button reaches y={:.0} of a screen whose last {BOTTOM} \
+         points are the system's — it is drawn under the navigation bar, \
+         where the touch is not sigil's",
+        button.bottom()
+    );
+    // And it is still where a thumb expects it: at the foot, not floated up
+    // the page by a clearance measured from the wrong edge.
+    assert!(
+        button.bottom() > floor - sigil::tokens::BUTTON_LG * 2.0,
+        "the button is {:.0} points above the system's row, which is not the \
+         corner anybody reaches for",
+        floor - button.bottom()
+    );
+}
+
 /// A message's menu opens inside what the system leaves.
 ///
 /// A popup is its own layer and no panel's inset reaches it, so a menu
