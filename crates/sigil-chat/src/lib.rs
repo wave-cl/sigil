@@ -4053,7 +4053,13 @@ impl ChatApp {
                 if sigil_ui::icon_item(ui, bell, word).clicked() {
                     ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
                 }
-                if sigil_ui::icon_item(ui, sigil_ui::Icon::Device, "Devices").clicked() {
+                // **Whose devices.** Everything else in this menu is the
+                // conversation's -- its members, muting it, its settings --
+                // and an unqualified "Devices" in that company reads as the
+                // conversation's too. It is the account's, which is what the
+                // Me card has always called it, and this is the one place
+                // where the surrounding items make the bare word wrong.
+                if sigil_ui::icon_item(ui, sigil_ui::Icon::Device, "Your devices").clicked() {
                     go = Some(Route::Devices);
                 }
                 if sigil_ui::icon_item(ui, sigil_ui::Icon::Settings, "Settings").clicked() {

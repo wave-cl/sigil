@@ -1299,7 +1299,16 @@ fn on_a_phone_the_conversation_bar_fits_the_screen() {
     h.get_by_label("More about this conversation").click();
     h.run();
     assert!(h.query_by_label("Settings").is_some());
-    assert!(h.query_by_label("Devices").is_some());
+    // **"Your devices", not "Devices".** The rest of this menu is the
+    // conversation's — its members, muting it, its settings — so a bare
+    // "Devices" among them reads as the conversation's, and it is the
+    // account's. The Me card has always called it this.
+    assert!(
+        h.query_by_label("Your devices").is_some(),
+        "the account's devices are offered here under a name that reads as \
+         the conversation's: {:?}",
+        labels(&h)
+    );
 }
 
 /// On a phone the composer is the whole width and a little taller, with
