@@ -5612,8 +5612,21 @@ impl ChatApp {
         }
         // Said beside the control, not in a help page. A public channel is
         // plaintext by design -- anybody may join, so any key in it is public.
+        //
+        // **`text_secondary`, not `text_muted`.** The palette holds the muted
+        // tier to the *large-text* floor of 3.0 on purpose -- it is for text
+        // nobody has to read -- and this was drawn in it, at `small`, which
+        // is under the 4.5 body text is held to. It is the one sentence in
+        // this dialog that decides whether what somebody is about to make can
+        // be read by anybody who finds it. That is not a caption. The same
+        // reasoning put a key beside a name at `text_secondary`, and for the
+        // same reason: something read to make a decision belongs above the
+        // tier meant for things that are not.
+        //
+        // Not `text_primary` either: it is still said *beside* the control
+        // rather than instead of it.
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new("A public channel is not encrypted.").small(),
         );
     }
@@ -13833,10 +13846,7 @@ impl ChatApp {
                 // copy is not undone by anything but writing another.
                 let confirming = self.pane(at).confirming_drop;
                 if !confirming {
-                    if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("Drop backup").color(theme.destructive),
-                        ))
+                    if sigil_ui::grave(ui, "Drop backup")
                         .on_hover_text("Release the copy the exchange holds. What is here stays.")
                         .clicked()
                     {
@@ -14131,12 +14141,7 @@ impl ChatApp {
                 .small(),
             );
             if !self.pane(at).confirming_handover {
-                if ui
-                    .add(egui::Button::new(
-                        egui::RichText::new("Change this account's key").color(theme.destructive),
-                    ))
-                    .clicked()
-                {
+                if sigil_ui::grave(ui, "Change this account's key").clicked() {
                     self.pane(at).confirming_handover = true;
                 }
             } else {
