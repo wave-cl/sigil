@@ -2642,6 +2642,63 @@ fn phone_mailbox_light() {
     h.snapshot("phone_mailbox_light");
 }
 
+/// **A key shortened with nowhere to be whole.**
+///
+/// "This account lives at ..." draws the home exchange's domain when it has
+/// one and a shortened key when it does not — and the whole key was on a
+/// hover, which a phone has no pointer to reach. The home is not always the
+/// exchange you are connected to (that is what SIP-53 moves are), so when it
+/// falls back to a key this line is the only mention of it anywhere, and
+/// there was no way to the whole of it. Seen on the handset, where this
+/// account's home has no domain and the line reads `3kHi…Qdnz`.
+///
+/// Shortening in prose is right. Shortened with no path to the whole is not.
+#[test]
+fn the_home_offers_its_whole_key_when_it_is_shown_as_one() {
+    let with_domain = a_conversation();
+    let mut h = harness_phone(with_domain, sigil_chat::Route::Me);
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("trunk.exchange"),
+        "the domain is not drawn, so the other half of this proves nothing"
+    );
+    assert!(
+        h.query_by_label("Copy the home exchange's key").is_none(),
+        "a domain is drawn whole and needs no way to copy a key nobody is shown"
+    );
+
+    let mut bare = a_conversation();
+    bare.my_home = Some((sqnr_core::PubKey::new([7u8; 32]), String::new()));
+    let mut h = harness_phone(bare, sigil_chat::Route::Me);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Copy the home exchange's key").is_some(),
+        "the home is a shortened key with no way to the whole of it: {}",
+        text_of(&h)
+    );
+}
+
+/// The home drawn as a key, which is the state this account is actually in.
+///
+/// `phone_me_settings` renders a home with a domain, so the fallback -- a
+/// shortened key, and now a way to the whole of it -- had no picture. The
+/// row reads parallel to the one above it: the same structure, the same
+/// button in the same place, because it is the same kind of fact.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_me_home_key() {
+    let mut bare = a_conversation();
+    bare.my_home = Some((sqnr_core::PubKey::new([7u8; 32]), String::new()));
+    let mut h = harness_phone(bare, sigil_chat::Route::Me);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_me_home_key");
+}
+
 /// The conversation's own settings on a phone: name, topic, retention.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]

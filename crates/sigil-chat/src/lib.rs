@@ -12949,19 +12949,50 @@ impl ChatApp {
             } else {
                 domain.clone()
             };
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("This account lives at {where_}"))
-                        .small()
-                        .color(theme.text_muted),
-                )
-                .truncate(),
-            )
-            .on_hover_text(format!(
+            let hover = format!(
                 "{home}\n\nThe exchange that orders this account's direct messages and \
                  carries what it starts elsewhere. A direct message lives at the home of \
                  whichever of the two keys sorts lower, so it is not always this one."
-            ));
+            );
+            // **Not muted**, for the reason the move dialog's own lines are
+            // not: this is where the account lives, drawn directly above the
+            // control that moves it, and `text_muted` is the tier for text
+            // nobody has to read.
+            let line = egui::RichText::new(format!("This account lives at {where_}"))
+                .small()
+                .color(theme.text_secondary);
+            // **A key shortened with nowhere to be whole.** With a domain
+            // this line is complete as drawn. Without one it falls back to a
+            // shortened key, the whole of it was on a hover, and a phone has
+            // no pointer -- so on a handset the home exchange's key had no
+            // form anywhere but the short one. The home is not always the
+            // exchange you are connected to; that is what a SIP-53 move is,
+            // and it is why the copy at the top of the chat list does not
+            // cover this one.
+            //
+            // A row only when there is something to put in it: a plain label
+            // is 18 points tall and a row holding a button is 44, and this
+            // screen has no height to spend on a control that is not there.
+            if domain.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(line).truncate())
+                        .on_hover_text(hover.clone());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if sigil_ui::icon_button_named(
+                            ui,
+                            sigil_ui::Icon::Copy,
+                            "Copy the home exchange's key",
+                        )
+                        .clicked()
+                        {
+                            ui.ctx().copy_text(home.to_string());
+                        }
+                    });
+                });
+            } else {
+                ui.add(egui::Label::new(line).truncate())
+                    .on_hover_text(hover);
+            }
             // **What a move would cost, before anybody considers one.** These
             // are the conversations ordered here, and an account that moved
             // would take them with it. A count, with the names behind it: a
