@@ -11116,6 +11116,74 @@ fn phone_message_menu() {
     h.snapshot("phone_message_menu");
 }
 
+/// **What is done to a person is drawn as grave, from either place.**
+///
+/// A conversation's own row already gives Block the destructive colour
+/// (`icon_item_tinted`, beside Leave). The same action reached from a
+/// member's menu was the ordinary one, and Kick — putting somebody out of a
+/// room — sat beside it as a bare cross. Two ways of asking for the same
+/// thing, one of them saying it is ordinary.
+///
+/// Read off the paint list, because a colour has no label: the words are
+/// laid into a galley with their colour on them, and that is the only place
+/// it exists.
+#[test]
+fn blocking_somebody_is_grave_from_the_member_menu_too() {
+    fn coloured(h: &mut Harness<'static>, word: &str) -> Option<egui::Color32> {
+        fn walk(shape: &egui::Shape, word: &str, out: &mut Option<egui::Color32>) {
+            match shape {
+                egui::Shape::Text(t) => {
+                    if t.galley.job.text == word {
+                        *out = t
+                            .galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|s| s.format.color)
+                            .or(Some(t.fallback_color));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, word, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        h.run();
+        let mut found = None;
+        for shape in &h.output().shapes {
+            walk(&shape.shape, word, &mut found);
+        }
+        found
+    }
+
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    h.get_all_by_label("What may be done about them")
+        .next()
+        .expect("a member offers what may be done about them")
+        .click();
+    h.run();
+    h.run();
+    let theme = sigil::theme::dark();
+    assert_eq!(
+        coloured(&mut h, "Block"),
+        Some(theme.destructive),
+        "Block is drawn in the ordinary colour here and in the destructive \
+         one on the conversation's row — the same act, told two ways"
+    );
+    // And the tier is not spread over everything: a menu where all three are
+    // red says no more than one where none is.
+    assert_ne!(
+        coloured(&mut h, "Verify"),
+        Some(theme.destructive),
+        "Verify is drawn as grave, which it is not"
+    );
+}
+
 /// **A member row names somebody, and the badge is beside them.**
 ///
 /// The name was drawn only when there was one, and on a **desktop** that is

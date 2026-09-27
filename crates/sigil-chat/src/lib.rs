@@ -1011,6 +1011,14 @@ fn member_actions_ui(
     key: &str,
 ) -> Option<MemberAct> {
     let mut chose = None;
+    let theme = ColorTheme::current(ui.ctx());
+    // **Which of these are grave.** Blocking somebody and putting them out
+    // of a room are the two that act *on a person*, and the app already
+    // draws the first of them in the destructive colour -- on a
+    // conversation's own row, where `icon_item_tinted` gives Block exactly
+    // this treatment. The same action reached from a member's menu was the
+    // ordinary colour, and Kick beside it was a bare cross.
+    let grave = |act: &MemberAct| matches!(act, MemberAct::Block(true) | MemberAct::Kick);
     if narrow {
         let more =
             sigil_ui::icon_button_named(ui, sigil_ui::Icon::More, "What may be done about them");
@@ -1028,10 +1036,12 @@ fn member_actions_ui(
                     MemberAct::Block(true) => sigil_ui::Icon::Muted,
                     MemberAct::Block(false) => sigil_ui::Icon::Sound,
                 };
-                if sigil_ui::icon_item(ui, icon, label)
-                    .on_hover_text(*hover)
-                    .clicked()
-                {
+                let pressed = if grave(act) {
+                    sigil_ui::icon_item_tinted(ui, icon, label, theme.destructive)
+                } else {
+                    sigil_ui::icon_item(ui, icon, label)
+                };
+                if pressed.on_hover_text(*hover).clicked() {
                     chose = Some(*act);
                 }
             }
@@ -1042,7 +1052,13 @@ fn member_actions_ui(
         });
     } else {
         for (label, hover, act) in acts {
-            if ui.button(label.as_str()).on_hover_text(*hover).clicked() {
+            // `grave` here, as every other destructive button in sigil is.
+            let pressed = if grave(act) {
+                sigil_ui::grave(ui, label.as_str())
+            } else {
+                ui.button(label.as_str())
+            };
+            if pressed.on_hover_text(*hover).clicked() {
                 chose = Some(*act);
             }
         }
