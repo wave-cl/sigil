@@ -5896,3 +5896,112 @@ async fn a_voice_note_is_fetched_when_it_is_asked_for() {
         bob.state().trouble
     );
 }
+
+/// **A search hit names whoever said it, even in a room nobody has open.**
+///
+/// `people_of` covers every channel's *peer* and the messages and members of
+/// the **open** channel. That is what drawing the open one needs, and it
+/// runs every pass, so it is right to stay narrow. Search does not: it reads
+/// every channel this machine holds. So a hit found in a room that is not
+/// open had nobody in that map and fell through to the key — on the handset,
+/// two rows of one result read `38a5…LPsv` and `HR2v…aADL`, the same two
+/// people the Members screen of that very room calls by name.
+///
+/// A room rather than a direct message, because a DM's peer is in the map
+/// either way and would pass without the fix.
+#[tokio::test]
+async fn a_hit_in_a_room_that_is_not_open_still_names_who_said_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(61);
+    let (b_signer, b_id) = signer(62);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    // Bob is somebody this machine can name.
+    bob.send(Cmd::SetProfile {
+        name: "Bob Okafor".into(),
+        title: String::new(),
+    });
+
+    alice.send(Cmd::NewGroup("the room".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.group && c.public == Some(false)),
+            15
+        )
+        .await,
+        "the room should be made"
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.group && c.public == Some(false))
+        .map(|c| c.channel)
+        .unwrap();
+    alice.send(Cmd::Invite(b_id));
+    assert!(
+        until(
+            || bob
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel),
+            20
+        )
+        .await,
+        "bob should be let in"
+    );
+    bob.send(Cmd::Show(channel));
+    bob.send(Cmd::Send("a needle in the haystack".into()));
+    assert!(
+        until(
+            || alice
+                .state()
+                .lines
+                .iter()
+                .any(|l| l.text == "a needle in the haystack"),
+            20
+        )
+        .await,
+        "alice should receive it"
+    );
+
+    // **Nothing open**, which is the state the map does not cover.
+    alice.send(Cmd::Close);
+    assert!(
+        until(|| alice.state().open.is_none(), 15).await,
+        "the room should close"
+    );
+    alice.send(Cmd::Search("needle".into()));
+    assert!(
+        until(|| alice.state().searched_messages, 20).await,
+        "the search should answer"
+    );
+    let hits = alice.state().hits.clone();
+    let hit = hits
+        .iter()
+        .find(|h| h.text.contains("needle"))
+        .unwrap_or_else(|| panic!("the message is held and should match: {hits:?}"));
+    assert_eq!(
+        hit.who, "Bob Okafor",
+        "the hit names a key where this machine knows a name: {hits:?}"
+    );
+}

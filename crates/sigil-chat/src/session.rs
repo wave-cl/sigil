@@ -5797,6 +5797,31 @@ fn search_local(
         // way the list resolves it, or a search would be the one place
         // still showing a whole key.
         let people = people_of(chat, desk);
+        // **Who said it, for a conversation that is not the open one.**
+        // `people_of` covers every channel's *peer* and the messages and
+        // members of the **open** channel -- which is what drawing that one
+        // needs, and it runs every pass, so it is right to stay narrow.
+        // Search does not: it reads every channel this machine holds, so a
+        // hit in a room nobody has open had nobody in that map and fell
+        // through to the key. On the handset, two rows of one result named
+        // `38a5…LPsv` and `HR2v…aADL` -- the same two people the Members
+        // screen calls Anne Droid and Claude Marlow.
+        //
+        // Asked once per distinct sender, and only for senders that actually
+        // hit, which is why this is here rather than in `people_of`.
+        let mut named: HashMap<PubKey, Option<String>> = HashMap::new();
+        let mut name_of = |account: &PubKey, people: &HashMap<PubKey, Person>| {
+            named
+                .entry(*account)
+                .or_insert_with(|| {
+                    people
+                        .get(account)
+                        .and_then(Person::named)
+                        .or_else(|| chat.display_name(account))
+                        .or_else(|| chat.handle(account))
+                })
+                .clone()
+        };
         for (channel, known) in &desk.channels {
             for m in known.timeline.messages() {
                 if m.redacted {
@@ -5819,10 +5844,9 @@ fn search_local(
                     who: if m.account == me {
                         "You".to_string()
                     } else {
-                        people
-                            .get(&m.account)
-                            .and_then(|p| p.name.clone())
-                            .unwrap_or_else(|| short(&m.account))
+                        // `named`, not `name`: somebody with a handle and no
+                        // display name is their handle everywhere else.
+                        name_of(&m.account, &people).unwrap_or_else(|| short(&m.account))
                     },
                     text: text.to_string(),
                     found,
