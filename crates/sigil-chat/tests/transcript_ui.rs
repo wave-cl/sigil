@@ -2589,6 +2589,59 @@ fn phone_dialog_report_light() {
     h.snapshot("phone_dialog_report_light");
 }
 
+/// **The other two dialogs whose captions light was the worse case for.**
+///
+/// `phone_dialog_report_light` above says why one dialog was rendered in
+/// light: `text_muted` is held to the large-text floor and measures 3.40 at
+/// `small` on a light ground, so a caveat left in that tier is least
+/// readable exactly there. One dialog was the representative, and rendering
+/// the other nine found two more -- which is the argument for rendering a
+/// set rather than a sample.
+///
+/// **Move this account** had the home it is moving *from* and the DNSSEC
+/// refusal in that tier, in the one dialog that can strand a conversation.
+/// **Messages left for you** had every one of its own answers there:
+/// "Nothing is waiting", and the three lines that stand where an item's
+/// content would be and say why there is none to show. That is the text the
+/// dialog was opened to read, in the tier for text nobody has to read.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_movehome_light() {
+    let (mut h, app, _) = harness_phone_themed(
+        a_conversation(),
+        sigil_chat::Route::Members,
+        egui::Theme::Light,
+    );
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "movehome", them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "the move dialog in the light theme");
+    h.snapshot("phone_dialog_movehome_light");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_mailbox_light() {
+    let (mut h, app, _) = harness_phone_themed(
+        a_conversation(),
+        sigil_chat::Route::Members,
+        egui::Theme::Light,
+    );
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "mail", them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "the mailbox in the light theme");
+    h.snapshot("phone_mailbox_light");
+}
+
 /// The conversation's own settings on a phone: name, topic, retention.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]

@@ -5825,7 +5825,11 @@ impl ChatApp {
             None => self.exchange_label(at.0, &at.1),
         };
         ui.colored_label(
-            theme.text_muted,
+            // **Not muted.** This is the home the move is judged against, in
+            // the one dialog that can strand a conversation. `text_muted` is
+            // held to the large-text floor -- 3.40 at `small` on a light
+            // ground -- and is for text nobody has to read.
+            theme.text_secondary,
             egui::RichText::new(format!("It lives at {now} now.")).small(),
         );
         ui.add_space(tokens::SPACING_SM);
@@ -5840,7 +5844,7 @@ impl ChatApp {
         );
         ui.add_space(tokens::SPACING_XS);
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "Discovered over DNSSEC, and refused if its key later differs. Your key is \
                  the same there.",
@@ -6084,7 +6088,7 @@ impl ChatApp {
         if state.mail.is_empty() {
             // The ordinary case, and it must not read as a failure: a
             // mailbox is empty far more often than not.
-            ui.colored_label(theme.text_muted, "Nothing is waiting.");
+            ui.colored_label(theme.text_secondary, "Nothing is waiting.");
             ui.add_space(tokens::SPACING_SM);
             if ui.button("Check again").clicked() {
                 self.send_as(Some(at), Cmd::Mail);
@@ -6158,7 +6162,10 @@ impl ChatApp {
                     }
                     Some(session::MailBody::Opaque(len)) => {
                         ui.colored_label(
-                            theme.text_muted,
+                            // The item's own content stands here; muted is
+                            // for text nobody has to read, and this is what
+                            // the dialog was opened to read.
+                            theme.text_secondary,
                             format!("Opened: {len} bytes, not text. Left by another client."),
                         );
                         if ui.button("Delete").clicked() {
@@ -6168,13 +6175,13 @@ impl ChatApp {
                     Some(session::MailBody::Elsewhere) => {
                         // Not an error, and not deletable here.
                         ui.colored_label(
-                            theme.text_muted,
+                            theme.text_secondary,
                             "Sealed to another of your devices. Open it there.",
                         );
                     }
                     Some(session::MailBody::Gone) => {
                         ui.colored_label(
-                            theme.text_muted,
+                            theme.text_secondary,
                             "No longer at the exchange — collected elsewhere, or expired.",
                         );
                     }
@@ -6495,7 +6502,7 @@ impl ChatApp {
         if let Some(issuers) = state.attested.get(&who) {
             if issuers.is_empty() {
                 ui.colored_label(
-                    theme.text_muted,
+                    theme.text_secondary,
                     egui::RichText::new("Nobody else has said they compared these words.").small(),
                 );
             } else {
