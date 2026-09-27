@@ -308,7 +308,7 @@ fn an_exchange_can_be_added_from_the_pane_that_offers_it() {
     let mut h = adrift(unlocked(dir.path()));
     h.run();
 
-    h.get_by_label("Add a different exchange").click();
+    h.get_by_label("Add a different exchange…").click();
     h.run();
     assert!(
         text_of(&h).contains("a domain, or host:port") || text_of(&h).contains("Exchange"),
@@ -443,7 +443,7 @@ fn an_exchange_that_cannot_be_added_says_why() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = adrift(unlocked(dir.path()));
     h.run();
-    h.get_by_label("Add a different exchange").click();
+    h.get_by_label("Add a different exchange…").click();
     h.run();
 
     // Nothing typed.
@@ -465,7 +465,7 @@ fn an_exchange_that_cannot_be_added_says_why() {
     h.run();
     h.get_by_label("Add").click();
     h.run();
-    h.get_by_label("Add an exchange").click();
+    h.get_by_label("Add an exchange…").click();
     h.run();
     let field = h.get(
         egui_kittest::kittest::by()
@@ -659,7 +659,7 @@ fn being_told_you_already_have_an_exchange_offers_to_remove_it() {
         h.run();
     }
 
-    h.get_by_label("Add a different exchange").click();
+    h.get_by_label("Add a different exchange…").click();
     h.run();
     type_and_add(&mut h, "indra.org");
 

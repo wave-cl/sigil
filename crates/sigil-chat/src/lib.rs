@@ -3770,9 +3770,9 @@ impl ChatApp {
             }
             if ui
                 .button(if only {
-                    "Add a different exchange"
+                    "Add a different exchange…"
                 } else {
-                    "Add an exchange"
+                    "Add an exchange…"
                 })
                 .clicked()
             {
@@ -4614,7 +4614,7 @@ impl ChatApp {
         // Beside the other thing done *to* this identity rather than seen
         // about it, and in the same shape: it was a plain button on its own
         // between the key and the exchange, which is where the facts are.
-        if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile…")
             .on_hover_text("Your name and title, as others see them")
             .clicked()
         {
@@ -7099,7 +7099,7 @@ impl ChatApp {
                 "No conversations yet. Write to somebody by their key, or by name@domain.",
             );
             ui.add_space(tokens::SPACING_SM);
-            if ui.button("Write to somebody").clicked() {
+            if ui.button("Write to somebody…").clicked() {
                 self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Compose);
             }
             return;
@@ -7319,6 +7319,11 @@ impl ChatApp {
                     ui.set_max_size(egui::vec2(side, side));
                     let (rect, press) =
                         ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+                    // No ellipsis, unlike the titled button this replaces
+                    // on a phone: that is a *title*, read before pressing,
+                    // and the mark tells it from a command that acts at
+                    // once. This is the name of an icon, read aloud by a
+                    // screen reader, where an ellipsis is a noise.
                     let said = "Write to somebody";
                     press.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, said)
@@ -12975,6 +12980,23 @@ impl ChatApp {
         // the account lives and how many conversations are ordered here are
         // directly above; this is the control that acts on them, so the fact
         // and the act are not on different screens.
+        // **A command that opens a form says so, with an ellipsis.** Not
+        // decoration: it is the one thing that tells "this asks me something
+        // first" from "this happens the moment I press it", and on a phone a
+        // press is the only way to find out otherwise.
+        //
+        // Every titled command in sigil that opens a form now carries it --
+        // this one, Move where this conversation lives, Report this room,
+        // Edit your profile, Add an exchange (the row here and the button in
+        // the exchange switcher) and Write to somebody. Three of them did
+        // and the rest did not, which is worse than none: it taught the
+        // convention and then broke it.
+        //
+        // **Not** for a command that opens a *view* (Messages left for you),
+        // one that names a state (Notifications say everything), one that
+        // goes somewhere the bar can bring you back from (Your devices), or
+        // an icon's accessibility name, where the mark is read aloud as
+        // noise -- see the compose button on the list.
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Home, "Move this account…")
             .on_hover_text(
                 "SIP-53: hand this account to another exchange. The direct messages ordered \
@@ -12984,7 +13006,7 @@ impl ChatApp {
         {
             self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::MoveHome);
         }
-        if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile")
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Pencil, "Edit your profile…")
             .on_hover_text("Your name and title, as others see them")
             .clicked()
         {
@@ -13005,7 +13027,7 @@ impl ChatApp {
         // account than to changing a setting. *Switching* between the ones
         // already added is in the corner of the chats list, where changing
         // it changes the list under it.
-        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Add an exchange")
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "Add an exchange…")
             .on_hover_text(
                 "Your key is the same everywhere. Conversations are not: they belong to the \
                  exchange they were had at.",
@@ -13127,7 +13149,10 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_MD);
         ui.colored_label(
             theme.text_muted,
-            egui::RichText::new(format!("sigil {}", env!("CARGO_PKG_VERSION"))).small(),
+            // The package's version too, where there is one: on a phone this
+            // line was the only version anybody could read and it named the
+            // wrong repository. See `sigil::build`.
+            egui::RichText::new(sigil::build::version_line(env!("CARGO_PKG_VERSION"))).small(),
         );
     }
 
@@ -13540,11 +13565,22 @@ impl ChatApp {
             .small(),
         );
         ui.add_space(tokens::SPACING_SM);
+        // **Short enough to be read where it is narrow**, as the search hint
+        // already is. At 360 points, with "Go there" beside it, this field
+        // drew `sqx-pair:<account>@<domain…` and lost ", or name@domain" --
+        // a second form it accepts, which nobody could guess was there. The
+        // shape of the first is recognisable from its prefix; the existence
+        // of the second is recognisable from nothing.
+        let hint = if sigil::Form::of(ui.ctx()).is_phone() {
+            "sqx-pair:… or name@domain"
+        } else {
+            "sqx-pair:<account>@<domain>, or name@domain"
+        };
         let (_, go) = sigil_ui::labelled_field(
             ui,
             "",
             &mut self.panes.entry(at.clone()).or_default().pairing,
-            "sqx-pair:<account>@<domain>, or name@domain",
+            hint,
             // A tick says "yes, that one"; this goes somewhere. The rule
             // on `Action` says a word stays where no picture means the
             // thing, and no picture here means "go".
@@ -13615,11 +13651,19 @@ impl ChatApp {
             .small(),
         );
         ui.add_space(tokens::SPACING_SM);
+        // The same, and the word this one lost was "base58". The sentence
+        // above already says whose credential it is; what a phone needs from
+        // the hint is the form to paste.
+        let credential_hint = if sigil::Form::of(ui.ctx()).is_phone() {
+            "the credential, in base58"
+        } else {
+            "the credential your other device wrote, in base58"
+        };
         let (_, register) = sigil_ui::labelled_field(
             ui,
             "",
             &mut self.panes.entry(at.clone()).or_default().presenting,
-            "the credential your other device wrote, in base58",
+            credential_hint,
             Some(sigil_ui::Action::Word("Register this device")),
         );
         if register {

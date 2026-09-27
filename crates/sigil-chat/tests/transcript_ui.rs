@@ -6986,7 +6986,7 @@ fn editing_your_profile_is_beside_switching_identity_and_shaped_like_it() {
     h.run();
     open_identity(&mut h);
 
-    let rows = ["Edit your profile", "Your devices", "Switch identity"]
+    let rows = ["Edit your profile…", "Your devices", "Switch identity"]
         .map(|label| h.get_by_label(label).rect());
     for pair in rows.windows(2) {
         let (above, below) = (pair[0], pair[1]);
@@ -12127,6 +12127,102 @@ fn a_card_with_no_other_apps_draws_no_way_to_them() {
 }
 
 /// Everything that used to be behind the mark is still reachable, on a card
+/// **A hint a phone cannot read is not a hint.**
+///
+/// Two of the pairing fields laid out longer than a 360-point screen and
+/// were cut: `sqx-pair:<account>@<domain…` lost ", or name@domain", a whole
+/// second form the field accepts and nobody could guess was there, and "the
+/// credential your other device wrote, in ba…" lost "base58", the one word
+/// saying what to paste. Both on the screen somebody reaches when pairing a
+/// phone, which is the screen where they have least idea what is wanted.
+///
+/// **`elided`, not the text.** `Galley::text()` returns the string that was
+/// *asked for*, not the one that was drawn, so a test reading it passes
+/// whether or not a word survived. Whether the layout ran out of room is
+/// recorded in one place and this is it. The word is required to be on
+/// screen as well, or the assertion is about a hint that is not there.
+#[test]
+fn a_pairing_hint_is_not_cut_short_on_a_phone() {
+    fn elisions(h: &mut Harness<'static>, word: &str) -> Vec<bool> {
+        fn walk(shape: &egui::Shape, word: &str, out: &mut Vec<bool>) {
+            match shape {
+                egui::Shape::Text(t) => {
+                    if t.galley.job.text.contains(word) {
+                        out.push(t.galley.elided);
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, word, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        h.run();
+        let mut out = Vec::new();
+        for shape in &h.output().shapes {
+            walk(&shape.shape, word, &mut out);
+        }
+        out
+    }
+
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Devices);
+    h.run();
+    h.run();
+    for word in ["name@domain", "base58"] {
+        let cut = elisions(&mut h, word);
+        assert!(
+            !cut.is_empty(),
+            "{word:?} is nowhere on the devices screen, so this is pointed at nothing"
+        );
+        assert!(
+            !cut.iter().any(|c| *c),
+            "the hint carrying {word:?} was cut short at phone width: {cut:?}"
+        );
+    }
+}
+
+/// **A row that opens a form says so; a row that does not, does not.**
+///
+/// The ellipsis is the only thing distinguishing "this will ask me something
+/// first" from "this happens the moment I press it", and on a phone pressing
+/// is the only other way to find out. sigil taught the convention on two
+/// rows -- Move this account… and Report this room… -- and then broke it on
+/// three more that open exactly the same kind of dialog.
+///
+/// **Both halves, or it is decoration.** A mark that spreads to everything
+/// says nothing, so the rows that open a view, name a state, or go somewhere
+/// the bar can bring you back from are asserted bare.
+#[test]
+fn a_row_that_opens_a_form_says_so_and_no_other_row_does() {
+    let (mut h, _) = me_card(a_conversation(), three_apps());
+    h.run();
+    let said = labels(&h);
+    let on_screen = |row: &str| said.iter().any(|l| l == row);
+
+    for asks in [
+        "Edit your profile…",
+        "Add an exchange…",
+        "Move this account…",
+    ] {
+        assert!(
+            on_screen(asks),
+            "{asks} is not on the card by that name, so this proves nothing: {said:?}"
+        );
+    }
+    for acts in ["Your devices", "Switch identity", "Messages left for you"] {
+        assert!(
+            on_screen(acts),
+            "{acts} is not on the card, so this proves nothing: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|l| *l == format!("{acts}…")),
+            "{acts} does not open a form and was marked as if it did: {said:?}"
+        );
+    }
+}
+
 /// that has a name in the bar and a Back that means something.
 #[test]
 fn the_card_keeps_everything_the_menu_had() {
