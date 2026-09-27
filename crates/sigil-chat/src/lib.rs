@@ -10696,19 +10696,54 @@ impl ChatApp {
                                     egui::vec2(ui.available_width(), line),
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        // Only when there is one to show. `label`
-                                        // falls back to the first characters of
-                                        // the key, and the whole key is on the
-                                        // very next line -- so an unnamed member
-                                        // would read as a prefix of themselves,
-                                        // above themselves.
-                                        if let Some(named) = person.named() {
-                                            let room = (ui.available_width() - badges).max(60.0);
+                                        // **Always somebody.** This drew the
+                                        // name only when there was one, on
+                                        // the argument that `label` falls
+                                        // back to the first characters of
+                                        // the key and the whole key is on
+                                        // the very next line -- so an
+                                        // unnamed member would read as a
+                                        // prefix of themselves, above
+                                        // themselves.
+                                        //
+                                        // True on a desktop. On a phone the
+                                        // line below is **also** shortened,
+                                        // so there was nothing to be a prefix
+                                        // of: the line was simply empty, the
+                                        // badges slid into it, and a row read
+                                        // "admin" where the person goes --
+                                        // naming a role instead of whoever
+                                        // holds it. Seen on the handset, in a
+                                        // room of eight.
+                                        //
+                                        // A prefix above the whole is a small
+                                        // redundancy; a row with no subject
+                                        // is a row about nobody. The key line
+                                        // below drops itself when it would
+                                        // only repeat this one.
+                                        // On a **desktop** the key below is
+                                        // the whole of it, and that is the
+                                        // identity -- `a_peers_key_is_in_full_in_members`
+                                        // says so. A short form above it
+                                        // would be a prefix of themselves,
+                                        // which is what the original
+                                        // condition was protecting and is
+                                        // still right there.
+                                        let subject = if narrow {
+                                            Some(person.label(&member.account))
+                                        } else {
+                                            person.named()
+                                        };
+                                        if let Some(subject) = subject {
+                                            let room =
+                                                (ui.available_width() - badges).max(60.0);
                                             ui.allocate_ui_with_layout(
                                                 egui::vec2(room, line),
                                                 egui::Layout::left_to_right(egui::Align::Center),
                                                 |ui| {
-                                                    ui.add(egui::Label::new(named).truncate());
+                                                    ui.add(
+                                                        egui::Label::new(subject).truncate(),
+                                                    );
                                                 },
                                             );
                                         }
@@ -10745,12 +10780,20 @@ impl ChatApp {
                                 } else {
                                     key.clone()
                                 };
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(shown).monospace().small(),
-                                    )
-                                    .selectable(true),
-                                );
+                                // **Not twice.** With no name the line above
+                                // is the shortened key, and on a phone so is
+                                // this one -- the same characters stacked on
+                                // themselves, saying nothing the first said.
+                                // A desktop keeps it: there this is the whole
+                                // key and the line above is its first nine.
+                                if shown != person.label(&member.account) {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(shown).monospace().small(),
+                                        )
+                                        .selectable(true),
+                                    );
+                                }
                             });
                         });
                         match chose {

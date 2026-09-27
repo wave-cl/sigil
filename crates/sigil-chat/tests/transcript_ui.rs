@@ -11116,6 +11116,60 @@ fn phone_message_menu() {
     h.snapshot("phone_message_menu");
 }
 
+/// **A member row names somebody, and the badge is beside them.**
+///
+/// The name was drawn only when there was one, and on a **desktop** that is
+/// right: the line below is the key *in full*, which is the identity —
+/// `a_peers_key_is_in_full_in_members` says so — and a short form above it
+/// would be a prefix of themselves. `an_unnamed_member_is_not_drawn_twice`
+/// holds that, and still does.
+///
+/// On a **phone** the line below is also shortened, so there was nothing to
+/// be a prefix of: the name line was simply empty, the badges slid into it,
+/// and the row read "admin" where the person goes — naming a role instead of
+/// whoever holds it. Seen on the handset in a room of eight, and present in
+/// this fixture all along, because `me()` has no `Person`.
+///
+/// So the fallback is the one thing that differs between the two: what the
+/// line below is carrying.
+///
+/// Asserted by geometry, because the label count cannot tell the two apart:
+/// the shortened key appears exactly once either way. What changed is which
+/// line it is on, and whether anything stands left of the badge.
+#[test]
+fn a_member_row_names_somebody_and_the_badge_sits_beside_them() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    let mine = sigil_ui::short(&me().to_string());
+    let subject = h
+        .query_by_label(&mine)
+        .map(|n| n.rect())
+        .unwrap_or_else(|| panic!("my own row does not show {mine}: {:?}", labels(&h)));
+    let badge = h
+        .query_by_label("you")
+        .map(|n| n.rect())
+        .expect("my own row is badged 'you'");
+    assert!(
+        (subject.top() - badge.top()).abs() < 4.0,
+        "the badge is on its own line at y={:.0} while the only thing naming \
+         me is at y={:.0} — so the row's first line is a badge and nothing else",
+        badge.top(),
+        subject.top()
+    );
+    assert!(
+        subject.left() < badge.left(),
+        "the badge is left of the subject, which is where the subject goes"
+    );
+    // And having moved up, it is not also still below: the same nine
+    // characters twice says nothing the first said.
+    assert_eq!(
+        h.get_all_by_label(&mine).count(),
+        1,
+        "{mine} is drawn twice in one row"
+    );
+}
+
 /// **The compose button, in what the system leaves.**
 ///
 /// `a_messages_menu_stays_out_of_the_systems_own_row` below says the rule
