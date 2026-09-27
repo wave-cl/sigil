@@ -9530,7 +9530,7 @@ impl ChatApp {
                 // can read it: this is a state somebody has never seen
                 // before and the buttons alone do not explain it.
                 if sigil::Form::of(ui.ctx()).is_phone() {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(STRANDED).small());
+                    ui.colored_label(theme.text_secondary, egui::RichText::new(STRANDED).small());
                 }
             });
             ui.horizontal_wrapped(|ui| {
@@ -10795,7 +10795,7 @@ impl ChatApp {
                 // A phone has no pointer, and this is the sentence somebody
                 // most needs before pressing.
                 if sigil::Form::of(ui.ctx()).is_phone() || dm {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(reaches).small());
+                    ui.colored_label(theme.text_secondary, egui::RichText::new(reaches).small());
                 }
                 if asked.clicked() {
                     let pane = self.pane(at);
