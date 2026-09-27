@@ -5752,8 +5752,21 @@ impl ChatApp {
         // Said next to the field rather than in a help page. A title asserts
         // standing, and somebody typing one should know that nothing behind
         // it is checked.
+        //
+        // **And "should know" is the whole argument for the tier.** This sat
+        // in `text_muted`, which the palette holds to the *large-text* floor
+        // of 3.0 because it is for text nobody has to read -- while the
+        // sentence above says the reader should. `text_secondary` is where
+        // the same claim is made on the public-channel directory, and where
+        // the one in the compose dialog went for the same reason.
+        //
+        // The SIP-41 attestation line stays muted and is not an
+        // inconsistency: its own comment says the safety words above it are
+        // the only check and that it is "shown to be read and not acted on",
+        // which is a different thing from a caveat about what somebody is
+        // typing right now.
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new("Both are what you say about yourself. Nobody verifies either.")
                 .small(),
         );
@@ -5932,7 +5945,7 @@ impl ChatApp {
         ui.heading("What notifications say");
         ui.add_space(tokens::SPACING_XS);
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "A notification is drawn where anybody near the screen can read it, and a \
                  locked phone shows one without being unlocked. Whichever of these you \
@@ -6052,7 +6065,7 @@ impl ChatApp {
         ui.heading("Messages left for you");
         ui.add_space(tokens::SPACING_XS);
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "Sealed to you and held at this exchange. Who sent it is what the exchange \
                  saw, not something they signed.",
@@ -6211,7 +6224,7 @@ impl ChatApp {
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "Bound at this exchange, so it means nothing at another one. Whether \
                  anybody may take a free name is the operator's policy.",
@@ -6341,7 +6354,7 @@ impl ChatApp {
             width,
         );
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "The note is stored in the clear at the exchange. The admins see who \
                  reported it; nobody else does.",
@@ -6545,7 +6558,7 @@ impl ChatApp {
         // out nobody can press. `a_phone_reads_what_attesting_does` holds both
         // halves.
         if sigil::Form::of(ui.ctx()).is_phone() && ui.ctx().content_rect().height() >= SHORT {
-            ui.colored_label(theme.text_muted, egui::RichText::new(ATTESTING).small());
+            ui.colored_label(theme.text_secondary, egui::RichText::new(ATTESTING).small());
         }
         ui.add_space(tokens::SPACING_SM);
         ui.horizontal(|ui| {
@@ -6625,7 +6638,7 @@ impl ChatApp {
                 ui.checkbox(&mut pane.exchange_via, format!("Reach it through {home}"))
                     .on_hover_text(CARRIED);
                 if sigil::Form::of(ui.ctx()).is_phone() {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(CARRIED).small());
+                    ui.colored_label(theme.text_secondary, egui::RichText::new(CARRIED).small());
                 }
             }
             None => {
@@ -11164,7 +11177,7 @@ impl ChatApp {
             // handset it was an unexplained single tap, beside a
             // *destruction* that asks twice.
             if sigil::Form::of(ui.ctx()).is_phone() {
-                ui.colored_label(theme.text_muted, egui::RichText::new(MINTING).small());
+                ui.colored_label(theme.text_secondary, egui::RichText::new(MINTING).small());
             }
 
             // **SIP-42, which was built and had no control.**
@@ -11193,7 +11206,7 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::ResealToSiblings);
                 }
                 if sigil::Form::of(ui.ctx()).is_phone() {
-                    ui.colored_label(theme.text_muted, egui::RichText::new(RESEAL).small());
+                    ui.colored_label(theme.text_secondary, egui::RichText::new(RESEAL).small());
                 }
             }
         });
@@ -11216,7 +11229,7 @@ impl ChatApp {
         // to each other, and which one this is must not depend on a pointer
         // the reader does not have.
         if sigil::Form::of(ui.ctx()).is_phone() {
-            ui.colored_label(theme.text_muted, egui::RichText::new(LEAVING).small());
+            ui.colored_label(theme.text_secondary, egui::RichText::new(LEAVING).small());
         }
 
         // **Room, and a rule.** The comment above says leaving and
@@ -13642,7 +13655,7 @@ impl ChatApp {
         ui.add_space(tokens::SPACING_SM);
         ui.heading("Backup");
         ui.colored_label(
-            theme.text_muted,
+            theme.text_secondary,
             egui::RichText::new(
                 "A sealed copy of this account's conversations and contacts, kept at the \
                  exchange under a key it never sees. The 24 words are the whole of what \
