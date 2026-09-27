@@ -10432,10 +10432,19 @@ impl ChatApp {
                                 // so a narrow pane drops it from the button
                                 // rather than spending half the row on a
                                 // fact already on screen.
+                                //
+                                // **And it asks first**, so it says so. This
+                                // opens the same form as "Add an exchange…"
+                                // on the Me card and "Add a domain…" in the
+                                // exchange menu; it was the one opener the
+                                // ellipsis pass missed, because the sweep
+                                // walked back from `dialog = Some(..)` to the
+                                // nearest control and this label is fourteen
+                                // lines above it behind a `let`.
                                 let label = if narrow {
-                                    "Add exchange".to_string()
+                                    "Add exchange…".to_string()
                                 } else {
-                                    format!("Add {}", found.domain)
+                                    format!("Add {}…", found.domain)
                                 };
                                 if ui
                                     .button(label)

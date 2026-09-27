@@ -2355,6 +2355,17 @@ fn a_dialogs_controls_stay_on_a_phones_screen() {
     let mut h = harness_phone(state, sigil_chat::Route::Directory);
     h.run();
     h.run();
+    // **And it says that it asks first.** This opens the same form as "Add
+    // an exchange…" on the Me card and "Add a domain…" in the exchange menu.
+    // It was the one opener the ellipsis pass missed: that sweep walked back
+    // from `dialog = Some(..)` to the nearest control, and this label is
+    // fourteen lines above the assignment, behind a `let`.
+    assert!(
+        h.query_by_label("Add exchange…").is_some(),
+        "the control that opens the add-an-exchange form does not say it asks \
+         first, unlike every other way in: {:?}",
+        labels(&h)
+    );
     let add = h
         .get_all_by_label_contains("Add exchange")
         .next()
