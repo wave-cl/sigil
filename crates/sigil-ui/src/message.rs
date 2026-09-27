@@ -398,6 +398,26 @@ impl BubbleAction {
 const PAD_X: f32 = tokens::SPACING_LG;
 const PAD_Y: f32 = tokens::SPACING_MD;
 
+/// What a bubble holding nothing but pictures is padded by instead.
+///
+/// The padding above exists so that **words** do not touch the shape holding
+/// them. A message whose only content is a picture has no words to protect,
+/// and on a 360-point phone the 16 points on each side were 9% of the screen
+/// spent on a coloured frame -- which is what it read as, a framed picture
+/// rather than a message. Every other messenger lets a caption-less image be
+/// the bubble.
+///
+/// Four, and not nought. At nought the bubble's own corner radius is larger
+/// than the picture's and shows as a crescent of fill at each corner; four
+/// with [`BARE_RADIUS`] is concentric, and leaves the time and tick beneath
+/// the picture somewhere to sit.
+const BARE_PAD: f32 = tokens::SPACING_XS;
+
+/// The corner a bare bubble takes: [`BARE_PAD`] outside the picture's own
+/// [`tokens::RADIUS_MD`], so the two are concentric rather than one shape
+/// cutting across another.
+const BARE_RADIUS: f32 = tokens::RADIUS_LG;
+
 /// A label centred in the transcript with a rule either side of it.
 ///
 /// The shape every whole-conversation marker takes -- the day, the unread
@@ -1260,7 +1280,8 @@ fn fit(ui: &egui::Ui, b: &Bubble<'_>, limit: f32) -> Fit {
         && !b.redacted
         && together + PAD_X * 2.0 <= limit;
     let content = if one_line { together } else { body.max(meta) };
-    let width = content.max(author).max(reply).max(files).max(chips) + PAD_X * 2.0;
+    let pad = if bare_picture(b) { BARE_PAD } else { PAD_X };
+    let width = content.max(author).max(reply).max(files).max(chips) + pad * 2.0;
     Fit {
         width: width.clamp(120.0f32.min(limit), limit),
         one_line,
@@ -1553,6 +1574,31 @@ fn receipt_width(ui: &egui::Ui, receipt: Receipt) -> f32 {
     }
 }
 
+/// Whether this bubble holds nothing but pictures.
+///
+/// **One predicate, because two places have to agree about it.** `fit`
+/// measures a message to decide how wide its bubble should be and adds the
+/// padding on; `body` draws it. `PAD_X`'s own comment says what a width
+/// computed from one padding and drawn with another costs -- a bubble that
+/// wraps a line it had room for -- and that was said of two numbers that
+/// happened to match. This is one answer both ask.
+///
+/// Everything that would put a line of text in the bubble disqualifies it:
+/// words, a quoted reply, a name above it, a chip for somebody mentioned,
+/// the strike of a redaction. What is left is a picture, or several, and the
+/// time under them.
+fn bare_picture(b: &Bubble<'_>) -> bool {
+    !b.redacted
+        && b.text.is_empty()
+        && b.reply_to.is_none()
+        && b.mentions.is_empty()
+        && (b.grouped || b.mine)
+        && !b.attachments.is_empty()
+        && b.attachments
+            .iter()
+            .all(|a| a.kind == crate::attachment::IMAGE || a.kind == crate::attachment::VIDEO)
+}
+
 /// The bubble itself: the frame, what is in it, and the reactions under it.
 fn body(
     ui: &mut egui::Ui,
@@ -1566,13 +1612,24 @@ fn body(
     } else {
         theme.surface_elevated
     };
+    // A bubble that is only pictures is padded and rounded to the picture
+    // rather than to words it does not have. See `bare_picture`.
+    let bare = bare_picture(b);
     let frame = egui::Frame::NONE
         .fill(fill)
         // Properly round, and tight around the words. A 12px radius on a
         // two-line bubble reads as a box with the corners taken off; this is
         // the shape a message has.
-        .corner_radius(tokens::RADIUS_PILL)
-        .inner_margin(egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8))
+        .corner_radius(if bare {
+            BARE_RADIUS
+        } else {
+            tokens::RADIUS_PILL
+        })
+        .inner_margin(if bare {
+            egui::Margin::same(BARE_PAD as i8)
+        } else {
+            egui::Margin::symmetric(PAD_X as i8, PAD_Y as i8)
+        })
         // A message that names the reader is outlined in the accent: the one
         // bubble in a room worth finding again. Not on one's own -- naming
         // oneself is not being addressed.
@@ -2323,6 +2380,59 @@ mod tests {
             readonly: false,
             again: false,
         }
+    }
+
+    /// **A picture is the message, not a picture in a frame.**
+    ///
+    /// The bubble's padding exists so words do not touch the shape holding
+    /// them; a message that is only a picture has none, and the 16 points on
+    /// each side were 9% of a 360-point phone spent on a coloured border.
+    ///
+    /// Measured on what the bubble *asks for*, because that is the number
+    /// `fit` and `body` have to agree about -- and both now ask
+    /// `bare_picture` rather than each holding a constant.
+    #[test]
+    fn a_picture_on_its_own_is_not_padded_for_words() {
+        let ctx = egui::Context::default();
+        // Bound and cleared: measuring a picture allocates a texture, and
+        // epaint panics on a `TexturesDelta` dropped with work in it.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let shot = crate::Attachment {
+                kind: crate::attachment::IMAGE,
+                described: "[a.png, 40 kB]",
+                preview: crate::attachment::no_preview(),
+                bytes: None,
+                missing: false,
+                held: false,
+                size: 40_000,
+                id: "pic1",
+                video: None,
+                sending: false,
+                waveform: &[],
+                duration_ms: None,
+                voice: None,
+            };
+            let one = std::slice::from_ref(&shot);
+            let bare = fit(ui, &plain("", one), 10_000.0).width;
+            let caption = fit(ui, &plain("what I saw", one), 10_000.0).width;
+
+            assert!(
+                bare < caption,
+                "a picture alone asks for as much as one with a caption: {bare} vs {caption}"
+            );
+            assert_eq!(
+                caption - bare,
+                (PAD_X - BARE_PAD) * 2.0,
+                "the difference is not the padding, so something else moved"
+            );
+            // And the picture itself did not shrink: the bubble came in to
+            // meet it, rather than the other way about.
+            assert!(
+                bare >= crate::attachment::PICTURE,
+                "the bubble is narrower than the picture it holds: {bare}"
+            );
+        });
+        output.textures_delta.clear();
     }
 
     /// A message carrying a file asks for the size a picture is drawn at.

@@ -7620,6 +7620,29 @@ fn with_pictures(n: usize) -> ChatState {
     state
 }
 
+/// **A picture on its own is the message, and there was no picture of it.**
+///
+/// The bubble's padding exists so words do not touch the shape holding them,
+/// and a message that is only a picture has none -- so it now takes four
+/// points and the picture's own corner instead of sixteen and a pill. Every
+/// snapshot carrying a picture had a caption, so the whole of that path
+/// rendered nowhere and the change moved not one of them. A width test says
+/// the number is right; this says it looks right.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_picture_alone() {
+    let mut state = with_pictures(1);
+    let last = state.lines.len() - 1;
+    state.lines[last].text.clear();
+    // Mine, because an incoming one draws the sender's name above it and a
+    // name is words -- which is the case that keeps the old padding.
+    state.lines[last].mine = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.snapshot("phone_picture_alone");
+}
+
 /// Several pictures in one message are a gallery -- tiles two across --
 /// where one picture is its own row; pressing a tile opens the viewer on
 /// that picture, and the viewer moves through the message's pictures.
