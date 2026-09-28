@@ -1065,7 +1065,18 @@ impl Shell {
                                     if sigil_ui::icon_button(ui, sigil::Icon::Back).clicked() {
                                         back = true;
                                     }
-                                    ui.label(egui::RichText::new(&title).heading());
+                                    // **Truncated, which is what the gap
+                                    // above is for.** A `max_rect` neither
+                                    // clips nor constrains, and a label in a
+                                    // left-to-right layout extends -- so a
+                                    // long name, or an ordinary one at a
+                                    // large text size, was simply drawn past
+                                    // the right edge of the screen and over
+                                    // the buttons in the corner.
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&title).heading())
+                                            .truncate(),
+                                    );
                                     return;
                                 }
                                 // The app's own head first: an identity's mark,
@@ -1087,7 +1098,7 @@ impl Shell {
                                 }
                                 let heading = egui::RichText::new(&title).heading();
                                 if self.apps.len() < 2 {
-                                    ui.label(heading);
+                                    ui.add(egui::Label::new(heading).truncate());
                                     return;
                                 }
                                 // **The heading is the app menu, and on a

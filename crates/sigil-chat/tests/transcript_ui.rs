@@ -880,7 +880,11 @@ fn harness_phone_beside(
                                     if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
                                         app_ctx.navigator.back();
                                     }
-                                    ui.label(egui::RichText::new(title).heading());
+                                    // Truncated, as the shell draws it.
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(title).heading())
+                                            .truncate(),
+                                    );
                                 }
                                 None => {
                                     if !app.head_ui(&mut app_ctx, ui) {
@@ -1275,10 +1279,16 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
 
 /// **Nothing runs off the edge when the reader turns the text up.**
 ///
-/// Android's font-size slider ends at 1.3 and its accessibility one goes
-/// past 2.0. sigil reads neither today, so this is the question that has to
-/// be answered before it does: a phone that honours the setting and then
-/// draws its controls off the screen is worse than one that ignores it.
+/// Android's font-size slider ends at 1.3 and its accessibility one goes to
+/// 2.0, which is also what WCAG asks a layout to survive. sigil reads
+/// neither today, so this is the question that has to be answered before it
+/// does: a phone that honours the setting and then draws its controls off
+/// the screen is worse than one that ignores it.
+///
+/// **Those two scales, not four.** 1.15 was what first bit and 1.6 found
+/// nothing 2.0 did not; each scale is twenty-four renders, and the faults
+/// these catch get worse with the number rather than appearing at one and
+/// vanishing at the next.
 ///
 /// It scales the text and nothing else, which is what that slider does.
 /// Every row here was laid out against a 360-point pane at one size of
@@ -1288,7 +1298,7 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
 #[test]
 fn no_widget_runs_off_a_phone_when_the_text_is_turned_up() {
     let mut over: Vec<String> = Vec::new();
-    for scale in [1.15f32, 1.3] {
+    for scale in [1.3f32, 2.0] {
         for (what, build) in [
             ("ordinary names", a_conversation as fn() -> ChatState),
             ("long names", a_long_conversation as fn() -> ChatState),

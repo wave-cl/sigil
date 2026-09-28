@@ -789,7 +789,6 @@ fn item(
     let ink = tint.unwrap_or(theme.text_primary);
     let gap = tokens::SPACING_SM;
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, ink);
     // "99+" rather than a number that widens the row without adding a fact.
     let badge = (count > 0).then(|| {
         let said = if count > 99 {
@@ -807,6 +806,18 @@ fn item(
         .as_ref()
         .map(|g| egui::vec2(g.size().x + gap * 2.0, g.size().y + tokens::SPACING_XS))
         .unwrap_or(egui::Vec2::ZERO);
+    // **Wrapped to the room the row has, not laid out and then grown to
+    // fit.** This was `layout_no_wrap` under a `max`, so a label longer than
+    // the pane did not wrap or clip -- it widened the row, and egui grows a
+    // ui to what is drawn in it, so every row *after* this one was laid out
+    // for that width and drawn off the screen. Two rows did it on a phone
+    // once the reader's text size was turned up: "Notifications say
+    // everything" on the Me card and "Report this conversation…" on Members.
+    // Wrapping costs a second line, which is the right price: the row is the
+    // hit target either way, and the alternative is a sentence nobody can
+    // read beside controls nobody can reach.
+    let room = (ui.available_width() - tokens::BUTTON_MD - gap - pill.x - gap).max(0.0);
+    let galley = ui.painter().layout(text.to_owned(), font, ink, room);
     let height = tokens::BUTTON_MD.max(galley.size().y);
     let width = ui
         .available_width()

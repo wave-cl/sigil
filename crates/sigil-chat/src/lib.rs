@@ -11244,7 +11244,10 @@ impl ChatApp {
             // keeps the single row.
             let phone = sigil::Form::of(ui.ctx()).is_phone();
             let mut applied = false;
-            ui.horizontal(|ui| {
+            // **Wrapped**, because at a large text size the words and the
+            // counter do not fit one line either, and a row that does not
+            // wrap grows the pane instead.
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Keep messages for");
                 ui.add(
                     egui::DragValue::new(

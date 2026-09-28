@@ -412,7 +412,9 @@ pub use message::{
 /// menu's rows are [`icon_item`]s, and an icon row takes the width it is
 /// given so the whole row is a hit target; inside a popup the width it is
 /// given is the window's, so a menu of two short phrases spanned a phone
-/// edge to edge. A row longer than the maximum still grows the menu.
+/// edge to edge. A row longer than the maximum now wraps inside it rather
+/// than growing the menu, which is what [`icon_item`] does with any label
+/// wider than the room it has.
 /// A button for the press that cannot be taken back.
 ///
 /// **The colour belongs on the thing you press.** Sigil says "this ends the
