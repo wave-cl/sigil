@@ -72,8 +72,14 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
         "/channel/equivocation",
         // SIP-31 evidence that the exchange signed two histories for one
         // position. `Chat::poll` fetches it when a fetch is refused as
-        // equivocated, so it is reached — but sigil does not yet *render* the
-        // proof, which `Trouble` will want when it grows a `forked` field.
+        // equivocated, so the route is reached beneath sigil rather than
+        // called by it — which is still what `Beneath` means here.
+        //
+        // **`Trouble` has its `forked` field now.** The refusal used to be
+        // swallowed with every other failed fetch, so the proof was fetched
+        // and thrown away; the conversation says it, in the destructive
+        // colour, and `an_exchange_that_signed_two_histories_is_said` holds
+        // it there.
         Beneath,
     ),
     // ---- chat: keys, blobs, people --------------------------------------

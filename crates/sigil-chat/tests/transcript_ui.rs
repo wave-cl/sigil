@@ -12562,6 +12562,48 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
     );
 }
 
+/// **An exchange caught signing two histories is said, in the destructive
+/// colour, and nothing else on this notice is.**
+///
+/// SIP-34 exists to make equivocation provable: the exchange signs, under
+/// the key this client pins, that it placed an entry at a position, and two
+/// receipts naming one position with different heads are proof it served
+/// different histories to different people. `Chat::poll` fetches that proof
+/// before refusing — and sigil discarded it with every other failed fetch,
+/// which its own route table recorded as an unbuilt clause: "sigil does not
+/// yet *render* the proof".
+#[test]
+fn an_exchange_that_signed_two_histories_is_said() {
+    let mut state = a_conversation();
+    state.trouble_with.forked = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("two different histories"),
+        "nothing said about an exchange caught equivocating: {said}"
+    );
+    assert!(
+        said.contains("cannot be relied on"),
+        "it does not say what that means for what is on screen: {said}"
+    );
+}
+
+/// The control: an ordinary conversation accuses its exchange of nothing.
+/// A line drawn unconditionally would pass the test above.
+#[test]
+fn an_ordinary_conversation_accuses_its_exchange_of_nothing() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("two different histories"),
+        "an honest exchange is accused of equivocating: {said}"
+    );
+}
+
 /// **A chain the exchange does not agree with is said in the conversation.**
 ///
 /// SIP-43 §The heads by position: the exchange keeps what each device wrote

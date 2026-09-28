@@ -1361,6 +1361,18 @@ pub struct Trouble {
     /// or something was written here under this key that this machine did
     /// not write.
     pub chain_apart: bool,
+    /// SIP-34: the exchange signed two different histories for one position
+    /// in this channel, under the key this client pins.
+    ///
+    /// **Not a fetch that failed.** `Chat::poll` asks for receipts, checks
+    /// them, and where two name one position with different heads it fetches
+    /// the proof and refuses with `ChatError::Equivocated`. Every error from
+    /// that call was handled alike -- put the timeline back, try again later
+    /// -- so the one saying the exchange served different histories to
+    /// different people was indistinguishable from a link that blinked. It
+    /// is the most serious thing a client can detect, and the only one
+    /// nobody was told about.
+    pub forked: bool,
 }
 
 impl Trouble {
@@ -4311,6 +4323,10 @@ fn took(
         // Kept across a restructure: it is asked once a session and this
         // runs on every change to the conversation.
         chain_apart: known.trouble.chain_apart,
+        // The same, for a stronger reason: an exchange caught signing two
+        // histories has not stopped having done it because the next fetch
+        // came back clean.
+        forked: known.trouble.forked,
     };
     if !conversation.admins.is_empty() {
         known.admins = conversation.admins;
@@ -4445,7 +4461,18 @@ async fn refresh(
                     accepted.push((channel, seq));
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                // **An equivocation is not a failed fetch.** SIP-34: two
+                // receipts naming one position with different heads, which
+                // the library proves before it refuses. Caught here because
+                // `catchup` falls back to polling on any error of its own,
+                // so this is the call the refusal reaches either way.
+                if matches!(e, sqex_chat::client::ChatError::Equivocated(_)) {
+                    tracing::error!(
+                        "the exchange signed two histories for one position in this channel"
+                    );
+                    known.trouble.forked = true;
+                }
                 known.timeline = timeline;
             }
         }

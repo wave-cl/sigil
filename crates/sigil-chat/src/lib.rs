@@ -8344,6 +8344,28 @@ impl ChatApp {
         fn say(ui: &mut egui::Ui, colour: egui::Color32, text: String) {
             ui.colored_label(colour, text);
         }
+        // **First, and in the destructive colour.** Everything else in this
+        // notice is something that happened *to* this conversation -- a key
+        // that never came, a window that closed, a machine rolled back.
+        // This one is the exchange itself, caught: it signed two different
+        // histories for one position, under the key this client pins, which
+        // is not a thing that happens by accident or by fault. SIP-34 exists
+        // to make it provable, `Chat::poll` fetches the proof before it
+        // refuses, and sigil discarded it with every other failed fetch.
+        //
+        // No button: there is nothing to press that mends it. What it is
+        // for is to stop somebody trusting that what they are reading is
+        // what everybody else read.
+        if trouble.forked {
+            say(
+                ui,
+                theme.destructive,
+                "This exchange has signed two different histories for one position in this \
+                 conversation. What is shown here is not necessarily what the others were \
+                 shown, and the exchange's word about this channel cannot be relied on."
+                    .to_string(),
+            );
+        }
         if trouble.chain_apart {
             // SIP-43 §The heads by position. Said, not acted on: there is
             // nothing here to press. What it means is that two things wrote
