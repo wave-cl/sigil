@@ -9587,7 +9587,7 @@ impl ChatApp {
                 if ui.small_button("Send again").clicked() {
                     self.send_as(Some(at), Cmd::PostAgain(first.seq));
                 }
-                if ui.small_button("Let it go").clicked() {
+                if sigil_ui::grave_small(ui, "Let it go").clicked() {
                     self.send_as(Some(at), Cmd::ForgetStranded(first.seq));
                 }
             });
@@ -9617,7 +9617,7 @@ impl ChatApp {
                     pane.editing = unsent.editing;
                     pane.replying = unsent.replying;
                 }
-                if ui.small_button("Forget it").clicked() {
+                if sigil_ui::grave_small(ui, "Forget it").clicked() {
                     keep = None;
                 }
             });

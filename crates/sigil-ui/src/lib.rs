@@ -433,6 +433,19 @@ pub fn grave(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ))
 }
 
+/// The same, at the size a row inside the transcript uses.
+///
+/// **Not a style choice.** The two places that offer to throw away your own
+/// words — a post the conversation moved out from under, and a draft the
+/// composer is holding — put the discarding half beside an ordinary one as
+/// two identical small buttons: "Send again" and "Let it go", "Put it back"
+/// and "Forget it". Every other destructive button in sigil is [`grave`];
+/// these were small, so they were not.
+pub fn grave_small(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let theme = sigil::ColorTheme::current(ui.ctx());
+    ui.add(egui::Button::new(egui::RichText::new(text).color(theme.destructive)).small())
+}
+
 pub fn menu_width(ui: &mut egui::Ui) {
     ui.set_min_width(sigil::tokens::MENU_MIN);
     ui.set_max_width(sigil::tokens::MENU_MAX);

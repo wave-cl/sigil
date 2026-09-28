@@ -11249,6 +11249,72 @@ fn a_member_row_names_somebody_and_the_badge_sits_beside_them() {
     );
 }
 
+/// **Throwing your own words away is grave; keeping them is not.**
+///
+/// Two places offer to discard something you wrote — a post the conversation
+/// moved out from under, and a draft the composer is holding — and each puts
+/// the discarding half beside an ordinary one as two identical small
+/// buttons: "Send again" and "Let it go", "Put it back" and "Forget it".
+/// Every other destructive control in sigil is `grave`. These were small, so
+/// they were not, and the pair read as a choice between two equal things.
+///
+/// Off the paint list, because a colour has no label.
+#[test]
+fn letting_your_own_words_go_is_drawn_as_grave() {
+    fn coloured(h: &mut Harness<'static>, word: &str) -> Option<egui::Color32> {
+        fn walk(shape: &egui::Shape, word: &str, out: &mut Option<egui::Color32>) {
+            match shape {
+                egui::Shape::Text(t) => {
+                    if t.galley.job.text == word {
+                        *out = t
+                            .galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|s| s.format.color)
+                            .or(Some(t.fallback_color));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, word, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        h.run();
+        let mut found = None;
+        for shape in &h.output().shapes {
+            walk(&shape.shape, word, &mut found);
+        }
+        found
+    }
+
+    let mut state = a_conversation();
+    state.stranded = vec![sigil_chat::Stranded {
+        seq: 41,
+        posted: NOW - DAY,
+        text: "the one the fork took".into(),
+        files: 0,
+    }];
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let theme = sigil::theme::dark();
+    assert_eq!(
+        coloured(&mut h, "Let it go"),
+        Some(theme.destructive),
+        "letting two of your own messages go is drawn as an ordinary choice"
+    );
+    // The half that keeps them is not, or the pair says nothing again.
+    assert_ne!(
+        coloured(&mut h, "Send again"),
+        Some(theme.destructive),
+        "sending again is drawn as grave, which it is not"
+    );
+}
+
 /// **The first screen a new account sees**, and what is offered on it.
 ///
 /// Neither empty state had ever been rendered: not "Loading your chats…"
