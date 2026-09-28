@@ -6278,6 +6278,32 @@ impl ChatApp {
                 }
             });
         }
+        if state.mail.is_empty() {
+            // **The ordinary case, and it must not read as a failure**: a
+            // mailbox is empty far more often than not.
+            //
+            // **Centred, and without the caption above it.** That caption
+            // says who a message is from is what the exchange saw rather
+            // than something they signed -- which is a thing to know about
+            // messages, and there are none: it captioned a list that was
+            // not there. And it sat at the top left of an empty screen
+            // while the two states either side of this one, a pane still
+            // loading and an identity not connected, are both centred.
+            ui.add_space(tokens::SPACING_XL);
+            ui.vertical_centered(|ui| {
+                ui.colored_label(theme.text_primary, "Nothing is waiting.");
+                ui.add_space(tokens::SPACING_SM);
+                ui.colored_label(
+                    theme.text_secondary,
+                    egui::RichText::new(
+                        "Anything sealed to you and left at this exchange arrives here.",
+                    )
+                    .small(),
+                );
+            });
+            return AppResponse::default();
+        }
+
         // **Whose word it is that this came from them.** Every other place
         // somebody appears draws their published face and what they are
         // called; a mailbox draws the mark the key itself makes and nothing
@@ -6293,13 +6319,6 @@ impl ChatApp {
             .small(),
         );
         ui.add_space(tokens::SPACING_SM);
-
-        if state.mail.is_empty() {
-            // The ordinary case, and it must not read as a failure: a
-            // mailbox is empty far more often than not.
-            ui.colored_label(theme.text_secondary, "Nothing is waiting.");
-            return AppResponse::default();
-        }
 
         let now = self.now();
         let mut open = None;

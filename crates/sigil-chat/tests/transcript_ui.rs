@@ -11596,6 +11596,21 @@ fn only_a_message_this_device_can_read_may_be_deleted() {
     }
 }
 
+/// **An empty mailbox, which is what a mailbox usually is.** The code says
+/// so where it draws this -- "a mailbox is empty far more often than not" --
+/// and the branch that says it had never been rendered.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_mailbox_empty() {
+    let (mut h, _, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Mail);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "an empty mailbox");
+    h.snapshot("phone_mailbox_empty");
+}
+
 /// One waiting message, open: the screen a row in the mailbox leads to.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
