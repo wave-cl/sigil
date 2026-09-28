@@ -11546,6 +11546,56 @@ fn phone_chats_loading() {
     h.snapshot("phone_chats_loading");
 }
 
+/// **Every state an opened message can be in, and which may be deleted.**
+///
+/// `MailBody::Elsewhere` is the one that matters. It is sealed to another of
+/// this account's devices, and deleting completes collection for *every*
+/// device — so a Delete here would throw away, on behalf of the device that
+/// can read it, a message this one cannot. `session.rs` says exactly that on
+/// the variant, and nothing asserted it: four of the five states had never
+/// been drawn at all, this screen having had no test and no picture until
+/// today.
+///
+/// The `true` rows are the control for the `false` ones: if the lookup
+/// stopped finding the button, they would fail rather than passing quietly.
+#[test]
+fn only_a_message_this_device_can_read_may_be_deleted() {
+    use sigil_chat::session::MailBody;
+    for (body, says, deletable) in [
+        (None, "Opening", false),
+        (
+            Some(MailBody::Text("what it said".into())),
+            "what it said",
+            true,
+        ),
+        (Some(MailBody::Opaque(12)), "not text", true),
+        (Some(MailBody::Elsewhere), "Open it there", false),
+        (Some(MailBody::Gone), "No longer at the exchange", false),
+    ] {
+        let mut state = a_mailbox();
+        state.mail[1].opened = body.clone();
+        let (mut h, _, _) = harness_phone_measured(
+            state,
+            sigil_chat::Route::MailItem(2, PubKey::new([5u8; 32])),
+        );
+        // `run_steps`, not `run`: the unopened state draws a spinner, and
+        // `run` spins until nothing asks to repaint. Same fault, same
+        // morning, as the picture test three thousand lines up.
+        h.run_steps(2);
+        h.run_steps(2);
+        let said = text_of(&h);
+        assert!(
+            said.contains(says),
+            "{body:?} does not say what it is: {said}"
+        );
+        assert_eq!(
+            h.query_by_label("Delete").is_some(),
+            deletable,
+            "{body:?} offers the wrong answer to whether it may be deleted: {said}"
+        );
+    }
+}
+
 /// One waiting message, open: the screen a row in the mailbox leads to.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
