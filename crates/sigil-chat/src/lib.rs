@@ -11244,11 +11244,22 @@ impl ChatApp {
             // keeps the single row.
             let phone = sigil::Form::of(ui.ctx()).is_phone();
             let mut applied = false;
-            // **Wrapped**, because at a large text size the words and the
-            // counter do not fit one line either, and a row that does not
-            // wrap grows the pane instead.
-            ui.horizontal_wrapped(|ui| {
+            // **On a phone the words are a caption and the value keeps its
+            // action.** Drawn as one row, the button went off the edge; with
+            // the button alone on the line below it dangled under the words
+            // rather than under the number it applies. The label above and
+            // `[30 days] [Set how long]` together is the same two lines and
+            // the right two things paired.
+            if phone {
                 ui.label("Keep messages for");
+            }
+            // **Wrapped**, because at a large text size even the value and
+            // its button do not fit one line, and a row that does not wrap
+            // grows the pane instead.
+            ui.horizontal_wrapped(|ui| {
+                if !phone {
+                    ui.label("Keep messages for");
+                }
                 ui.add(
                     egui::DragValue::new(
                         &mut self.panes.entry(at.clone()).or_default().retention_days,
@@ -11256,13 +11267,8 @@ impl ChatApp {
                     .range(1..=365)
                     .suffix(" days"),
                 );
-                if !phone {
-                    applied = sigil_ui::apply_button(ui, "Set how long").clicked();
-                }
-            });
-            if phone {
                 applied = sigil_ui::apply_button(ui, "Set how long").clicked();
-            }
+            });
             if applied {
                 let days = self.pane(at).retention_days;
                 self.send_as(
