@@ -2652,6 +2652,26 @@ fn a_dialog_too_tall_for_the_screen_can_still_be_left() {
 /// which is three screens nobody had looked at on a 360-point pane.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_directory_nothing_matched() {
+    // **A search that found nothing, which nothing had ever drawn.** The
+    // pane distinguishes "nothing matched" from "nobody has searched" and
+    // only the second had ever been rendered, so the sentence somebody
+    // actually reads — the one after a search that failed — was unseen.
+    let mut state = a_conversation();
+    state.open = None;
+    state.found = Vec::new();
+    state.searched = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Directory);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "a search that matched nothing");
+    h.snapshot("phone_directory_nothing_matched");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn phone_directory() {
     let mut state = a_conversation();
     state.open = None;
