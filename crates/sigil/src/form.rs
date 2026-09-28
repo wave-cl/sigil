@@ -135,9 +135,97 @@ impl Insets {
     }
 }
 
+/// How large the reader asked for text to be, as a multiple of sigil's own
+/// sizes.
+///
+/// **A phone has a text-size setting and sigil read none of it.** Android's
+/// `Configuration.fontScale` is 0.85, 1.0, 1.15 or 1.3 from its own slider
+/// and reaches 2.0 from the accessibility one; nothing in winit or eframe
+/// reports it, so the phone drew one size of type whatever the system had
+/// been set to. The host says what it is, as it says the [`Form`], and
+/// [`crate::theme::install`] is what applies it.
+///
+/// **Text, not everything.** That setting scales type; Display size scales
+/// the whole interface and arrives as a density change, which egui already
+/// has as `zoom_factor`. Scaling controls and spacing here would be the
+/// second setting done under the first one's name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextScale(f32);
+
+impl Default for TextScale {
+    fn default() -> Self {
+        TextScale(1.0)
+    }
+}
+
+impl TextScale {
+    const KEY: &'static str = "sigil_text_scale";
+
+    /// The band sigil honours. **The top is what the layout is held to**, by
+    /// `no_widget_runs_off_a_phone_when_the_text_is_turned_up`, which is also
+    /// what WCAG asks a layout to survive -- an OEM slider that goes further
+    /// would be honoured past the last size anybody measured, and the rows it
+    /// broke would be off the side of the screen where nobody can see that
+    /// they broke. The floor is Android's own smallest.
+    pub const SMALLEST: f32 = 0.85;
+    pub const LARGEST: f32 = 2.0;
+
+    /// Say how large text should be. Before the theme is installed, which is
+    /// what applies it; installing the theme again is how a change lands.
+    pub fn install(ctx: &egui::Context, scale: f32) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(Self::KEY), TextScale::new(scale)));
+    }
+
+    /// Sigil's own sizes, when nobody said -- a desktop, or a test.
+    pub fn of(ctx: &egui::Context) -> TextScale {
+        ctx.data(|d| d.get_temp(egui::Id::new(Self::KEY)))
+            .unwrap_or_default()
+    }
+
+    /// **Clamped, and a number that is not one is refused.** This comes from
+    /// the platform, and nought or a NaN multiplied into every font size is
+    /// an interface with no text in it at all -- a blank screen rather than a
+    /// wrong one, and nothing on it to say why.
+    pub fn new(scale: f32) -> TextScale {
+        if scale.is_finite() {
+            TextScale(scale.clamp(Self::SMALLEST, Self::LARGEST))
+        } else {
+            TextScale::default()
+        }
+    }
+
+    pub fn factor(self) -> f32 {
+        self.0
+    }
+
+    pub fn is_one(self) -> bool {
+        self.0 == 1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_context_nobody_told_draws_sigils_own_text_size() {
+        let ctx = egui::Context::default();
+        assert!(TextScale::of(&ctx).is_one());
+        TextScale::install(&ctx, 1.3);
+        assert_eq!(TextScale::of(&ctx).factor(), 1.3);
+    }
+
+    #[test]
+    fn a_text_scale_the_platform_could_send_never_empties_the_screen() {
+        // Nought would multiply every font size to nothing, and a NaN would
+        // take the layout with it. Both are what a platform is free to send.
+        assert!(TextScale::new(0.0).factor() >= TextScale::SMALLEST);
+        assert!(TextScale::new(f32::NAN).is_one());
+        assert!(TextScale::new(f32::INFINITY).is_one());
+        // Past the top of the band the layout was measured at.
+        assert_eq!(TextScale::new(3.5).factor(), TextScale::LARGEST);
+        assert_eq!(TextScale::new(0.2).factor(), TextScale::SMALLEST);
+    }
 
     #[test]
     fn a_context_nobody_told_is_a_desktop() {

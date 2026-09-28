@@ -40,7 +40,7 @@ pub use app::{
 pub use deck::{Layout, layout};
 pub use deeplink::Link;
 pub use filed::Filed;
-pub use form::{Form, Insets};
+pub use form::{Form, Insets, TextScale};
 pub use icon::{Icon, apply_button, icon_button, icon_button_named, icon_button_tinted};
 pub use nav::{Discarded, NavStack};
 pub use navigator::{ActiveEntry, AppId, NavEntry, NavRequest, Navigator, Sibling};

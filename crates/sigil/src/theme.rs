@@ -301,10 +301,20 @@ pub fn install(ctx: &egui::Context, light_theme: ColorTheme, dark_theme: ColorTh
     // The form the host installed before this, if any. A desktop installs
     // none and gets the style it always had; a phone gets the touch scale.
     let form = crate::Form::of(ctx);
+    // How large the reader asked for text to be, applied **last**, over
+    // whichever set of sizes this form uses. Installing the theme again is
+    // how a change to the setting lands, so this has to be read here rather
+    // than done once by the host.
+    let scale = crate::TextScale::of(ctx);
     ctx.all_styles_mut(|style| {
         custom_style(style);
         if form.is_phone() {
             phone_style(style);
+        }
+        if !scale.is_one() {
+            for font in style.text_styles.values_mut() {
+                font.size *= scale.factor();
+            }
         }
     });
 }
@@ -412,6 +422,78 @@ mod tests {
             phone.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size
                 > desktop.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size,
             "a phone's body text is a size up"
+        );
+    }
+
+    /// **The reader's text size reaches the type, and stops there.**
+    ///
+    /// Android's font-size slider scales text; Display size scales the whole
+    /// interface and arrives as a density change, which is egui's
+    /// `zoom_factor`. Scaling controls and spacing here would be the second
+    /// setting done under the first one's name -- so the row height is
+    /// asserted unchanged, not left to be noticed.
+    #[test]
+    fn the_readers_text_size_scales_the_type_and_not_the_controls() {
+        let plain = egui::Context::default();
+        crate::Form::install(&plain, crate::Form::Phone);
+        install(&plain, light(), dark());
+        let plain = plain.style_of(egui::Theme::Dark);
+
+        let large = egui::Context::default();
+        crate::Form::install(&large, crate::Form::Phone);
+        crate::TextScale::install(&large, 1.3);
+        install(&large, light(), dark());
+        let large = large.style_of(egui::Theme::Dark);
+
+        for style in [
+            egui::TextStyle::Body,
+            egui::TextStyle::Button,
+            egui::TextStyle::Small,
+            egui::TextStyle::Heading,
+            egui::TextStyle::Monospace,
+        ] {
+            let was = plain.text_styles[&style].size;
+            let now = large.text_styles[&style].size;
+            assert!(
+                (now - was * 1.3).abs() < 0.01,
+                "{style:?} is {now} points at 1.3x, not {}",
+                was * 1.3
+            );
+        }
+        assert_eq!(
+            large.spacing.interact_size.y, plain.spacing.interact_size.y,
+            "a larger text size grew the controls too, which is the other \
+             setting"
+        );
+        assert_eq!(
+            large.spacing.item_spacing, plain.spacing.item_spacing,
+            "a larger text size grew the spacing too"
+        );
+
+        // **The sequence the phone actually runs.** A change to the setting
+        // arrives mid-session, and what applies it is installing the theme
+        // *again* -- so the case that matters is a scale set after the theme,
+        // not before it. Installing the scale and forgetting the second
+        // `install` is a change that reaches nothing and looks, from the
+        // phone, exactly like the platform never said.
+        let changed = egui::Context::default();
+        crate::Form::install(&changed, crate::Form::Phone);
+        install(&changed, light(), dark());
+        let before = changed.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+        crate::TextScale::install(&changed, 1.3);
+        assert_eq!(
+            changed.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size,
+            before,
+            "saying the scale was enough on its own, so nothing holds the \
+             second install the phone depends on"
+        );
+        install(&changed, light(), dark());
+        assert!(
+            (changed.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size
+                - before * 1.3)
+                .abs()
+                < 0.01,
+            "installing the theme again did not apply the new scale"
         );
     }
 
