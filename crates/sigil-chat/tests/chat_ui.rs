@@ -38,6 +38,101 @@ fn adrift(account: Account) -> Harness<'static> {
     build(account, None)
 }
 
+/// The unconnected pane on a phone, with however many identities are given.
+///
+/// **No shell bar over it**, which is the point: the app used to draw its
+/// own identity block -- a mark and a link light at the right end of a row
+/// -- over a screen whose entire subject is that there is no link. What the
+/// bar carried is on the pane itself now.
+fn adrift_phone(accounts: Vec<Account>) -> Harness<'static> {
+    let mut app = ChatApp::new();
+    let mut accounts = sigil::accounts::Accounts::of(accounts);
+    Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            let t = sigil::ColorTheme::current(&ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(t.surface_primary)
+                        .inner_margin(egui::Margin::same(sigil::tokens::SPACING_MD as i8)),
+                )
+                .show(ui, |ui| {
+                    let mut nav = Navigator::default();
+                    let mut app_ctx = AppContext {
+                        navigator: &mut nav,
+                        accounts: &mut accounts,
+                        unfocused: false,
+                        away: false,
+                        notify: &sigil::Silent,
+                        connections: &Default::default(),
+                    };
+                    let _ = app.render(&mut app_ctx, ui);
+                });
+        })
+}
+
+/// **The screen nothing had ever drawn.** It is where somebody lands when
+/// their key is not one the exchange has been given, and it had no picture
+/// at all -- which is how it kept a bar that said the link was down beside a
+/// heading that said the same, and a key nobody could copy.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_not_connected() {
+    // **A fixed identity, not a generated one.** `unlocked` writes a fresh
+    // key every run, so the mark and the shortened key under it differ every
+    // time: the update pass writes whatever it drew and the verify pass
+    // rejects it, which is precisely what the second render is there to
+    // catch. It caught this.
+    let mut h = adrift_phone(vec![Account::unlocked_for_test([4u8; 32])]);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_not_connected");
+}
+
+/// The key on that screen is the thing to send, so it can be taken.
+#[test]
+fn the_unconnected_pane_offers_its_key_and_a_way_to_another_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = adrift_phone(vec![unlocked(dir.path())]);
+    h.run();
+    h.run();
+    assert!(text_of(&h).contains("Not connected"), "{}", text_of(&h));
+    assert!(
+        h.query_by_label("Copy your key").is_some(),
+        "the one thing to send from this screen cannot be copied: {}",
+        text_of(&h)
+    );
+    // With one identity there is nowhere else to be, and nothing offers it.
+    assert!(
+        h.query_by_label("Switch identity").is_none(),
+        "a way to another identity, with only one: {}",
+        text_of(&h)
+    );
+
+    // **And with two, a control rather than an instruction.** This screen
+    // used to say "switch to another identity, from the block in the
+    // corner", and the block in the corner is gone.
+    // Two directories: `unlocked` generates an identity and refuses to
+    // overwrite one, so both cannot come from the same place.
+    let one = tempfile::tempdir().unwrap();
+    let two = tempfile::tempdir().unwrap();
+    let mut h = adrift_phone(vec![unlocked(one.path()), unlocked(two.path())]);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Switch identity").is_some(),
+        "no way off an identity that cannot connect: {}",
+        text_of(&h)
+    );
+}
+
 fn connected(account: Account, state: ChatState) -> Harness<'static> {
     build(account, Some(state))
 }

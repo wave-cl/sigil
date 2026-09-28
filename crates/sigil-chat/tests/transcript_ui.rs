@@ -1075,6 +1075,8 @@ fn _every_route_is_measured(r: sigil_chat::Route) {
         | sigil_chat::Route::Devices
         | sigil_chat::Route::Search
         | sigil_chat::Route::Me
+        | sigil_chat::Route::Mail
+        | sigil_chat::Route::MailItem(..)
         | sigil_chat::Route::Call(_) => {}
     }
 }
@@ -1165,6 +1167,12 @@ fn no_phone_pane_is_wider_than_the_phone() {
             // `sigil-ui/tests/call_card_ui.rs`, which needs no runtime at
             // all; `tests/calls_end.rs` holds it inside the app, where
             // there is a runtime and a call.
+            sigil_chat::Route::Mail,
+            // **The fallback, not a message.** These fixtures have nothing
+            // waiting, so this is the arm that replaces itself with the list,
+            // which is the case worth measuring: it is what a message deleted
+            // under an open screen does.
+            sigil_chat::Route::MailItem(1, me()),
             sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
@@ -1248,6 +1256,12 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             // `sigil-ui/tests/call_card_ui.rs`, which needs no runtime at
             // all; `tests/calls_end.rs` holds it inside the app, where
             // there is a runtime and a call.
+            sigil_chat::Route::Mail,
+            // **The fallback, not a message.** These fixtures have nothing
+            // waiting, so this is the arm that replaces itself with the list,
+            // which is the case worth measuring: it is what a message deleted
+            // under an open screen does.
+            sigil_chat::Route::MailItem(1, me()),
             sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
@@ -1312,6 +1326,12 @@ fn no_widget_runs_off_a_phone_when_the_text_is_turned_up() {
                 sigil_chat::Route::Devices,
                 sigil_chat::Route::Search,
                 sigil_chat::Route::Me,
+                sigil_chat::Route::Mail,
+                // **The fallback, not a message.** These fixtures have nothing
+                // waiting, so this is the arm that replaces itself with the list,
+                // which is the case worth measuring: it is what a message deleted
+                // under an open screen does.
+                sigil_chat::Route::MailItem(1, me()),
                 sigil_chat::Route::Call(me()),
             ] {
                 let mut state = build();
@@ -2779,14 +2799,14 @@ fn phone_dialog_movehome_light() {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn phone_mailbox_light() {
-    let (mut h, app, _) = harness_phone_themed(
-        a_conversation(),
-        sigil_chat::Route::Members,
-        egui::Theme::Light,
-    );
-    h.run();
-    app.borrow_mut()
-        .open_dialog_for_test((me(), String::new()), "mail", them());
+    // **`a_mailbox`, as the dark one uses.** This was `a_conversation`,
+    // whose mailbox is empty -- so "the mailbox in the light theme" drew
+    // "Nothing is waiting." and the cards it exists to show had never been
+    // rendered on a light ground at all. The two themes are two sets of
+    // colours rather than one inverted, which is the reason this test is
+    // here; measuring the empty case answers nothing about the cards.
+    let (mut h, _, _) =
+        harness_phone_themed(a_mailbox(), sigil_chat::Route::Mail, egui::Theme::Light);
     h.run();
     h.run();
     h.remove_cursor();
@@ -9838,6 +9858,12 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             // `sigil-ui/tests/call_card_ui.rs`, which needs no runtime at
             // all; `tests/calls_end.rs` holds it inside the app, where
             // there is a runtime and a call.
+            sigil_chat::Route::Mail,
+            // **The fallback, not a message.** These fixtures have nothing
+            // waiting, so this is the arm that replaces itself with the list,
+            // which is the case worth measuring: it is what a message deleted
+            // under an open screen does.
+            sigil_chat::Route::MailItem(1, me()),
             sigil_chat::Route::Call(me()),
         ] {
             let mut state = build();
@@ -11520,6 +11546,84 @@ fn phone_chats_loading() {
     h.snapshot("phone_chats_loading");
 }
 
+/// The same pane once the wait has gone on long enough to mean something.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_chats_waiting() {
+    let (mut h, app, _) = harness_phone_measured(nothing_yet(), sigil_chat::Route::Conversations);
+    h.run();
+    app.borrow_mut().set_now_for_test(NOW + 60);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "the chats pane after a long wait");
+    h.snapshot("phone_chats_waiting");
+}
+
+/// A list that has not arrived, with nothing in it yet.
+fn nothing_yet() -> ChatState {
+    let mut state = a_conversation();
+    state.conversations.clear();
+    state.lines.clear();
+    state.open = None;
+    state.synced = false;
+    state.link = sigil_chat::session::LinkState::Up;
+    state
+}
+
+/// **A wait says what it usually means, and only once it is one.**
+///
+/// An exchange can be set to answer only the keys it has been given, and a
+/// key it has not been given is not refused out loud: the connection stands
+/// and the list never comes. Waiting is what that looks like, and waiting is
+/// also what a slow start looks like -- so the difference is time, and the
+/// pane may only say so after enough of it.
+#[test]
+fn a_long_wait_for_the_list_says_what_to_do_and_offers_the_key() {
+    let (mut h, app, _) = harness_phone_measured(nothing_yet(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let early = text_of(&h);
+    assert!(early.contains("Loading your chats"), "{early}");
+    assert!(
+        !early.contains("taking longer"),
+        "a pane that has just opened is not a pane that is stuck: {early}"
+    );
+    assert!(
+        h.query_by_label("Copy your key").is_none(),
+        "the key is offered before there is any reason to: {early}"
+    );
+
+    app.borrow_mut().set_now_for_test(NOW + 60);
+    h.run();
+    h.run();
+    let late = text_of(&h);
+    assert!(late.contains("taking longer"), "{late}");
+    assert!(
+        late.contains("has to be added to it"),
+        "it does not say what to do about it: {late}"
+    );
+    assert!(
+        h.query_by_label("Copy your key").is_some(),
+        "there is nowhere to copy the key from: {late}"
+    );
+
+    // **And it goes away when the list arrives.** The wait is read off the
+    // state every pass rather than latched, so a connection that comes good
+    // leaves nothing behind.
+    let mut arrived = nothing_yet();
+    arrived.synced = true;
+    app.borrow_mut().show_state_for_test(arrived);
+    h.run();
+    h.run();
+    let after = text_of(&h);
+    assert!(
+        !after.contains("taking longer") && !after.contains("Loading your chats"),
+        "the pane is still explaining a wait that is over: {after}"
+    );
+}
+
 /// **The compose button, in what the system leaves.**
 ///
 /// `a_messages_menu_stays_out_of_the_systems_own_row` below says the rule
@@ -12856,7 +12960,10 @@ fn a_row_that_opens_a_form_says_so_and_no_other_row_does() {
             "{asks} is not on the card by that name, so this proves nothing: {said:?}"
         );
     }
-    for acts in ["Your devices", "Switch identity", "Messages left for you"] {
+    // "Mailbox" is on the rail under Chat now rather than down here under
+    // "This identity", and it goes to a place rather than opening a form --
+    // so it still belongs on this list, under its new name.
+    for acts in ["Your devices", "Switch identity", "Mailbox"] {
         assert!(
             on_screen(acts),
             "{acts} is not on the card, so this proves nothing: {said:?}"
@@ -15166,23 +15273,46 @@ fn a_mailbox() -> ChatState {
 /// count left in sigil sat there through a release.
 #[test]
 fn the_mailbox_says_a_size_not_a_byte_count() {
-    let (mut h, app, _) = harness_phone_measured(a_mailbox(), sigil_chat::Route::Members);
-    h.run();
-    app.borrow_mut()
-        .open_dialog_for_test((me(), String::new()), "mail", them());
+    // The mailbox is a route now, not a dialog: it is reached the way
+    // Devices is, from the rail under Chat.
+    let (mut h, _, _) = harness_phone_measured(a_mailbox(), sigil_chat::Route::Mail);
     h.run();
     h.run();
     let said = text_of(&h);
-    assert!(said.contains("Messages left for you"), "{said}");
+    assert!(said.contains("Sealed to you"), "{said}");
     assert!(
         said.contains("4 KiB"),
         "a size the way the rest of sigil writes one: {said}"
     );
     assert!(!said.contains("4096"), "and not a raw byte count: {said}");
-    assert!(said.contains("99 B"), "{said}");
+    // **The opened one shows what it says, not how big it is.** That is
+    // what the second line of a mailbox is for: the size answers "is this
+    // worth fetching", and once it has been fetched the message itself is
+    // the better answer. The size is still on the message's own screen.
     assert!(
         said.contains("left for you from the command line"),
         "the opened one shows what it held: {said}"
+    );
+    assert!(
+        !said.contains("99 B"),
+        "the opened one still leads with its size: {said}"
+    );
+
+    // And on the message itself: who, when, how big, and the whole of it.
+    let (mut h, _, _) = harness_phone_measured(
+        a_mailbox(),
+        sigil_chat::Route::MailItem(2, PubKey::new([5u8; 32])),
+    );
+    h.run();
+    h.run();
+    let open = text_of(&h);
+    assert!(
+        open.contains("99 B"),
+        "the message does not say its size: {open}"
+    );
+    assert!(
+        open.contains("left for you from the command line"),
+        "the message does not show what it held: {open}"
     );
 }
 
@@ -15190,10 +15320,9 @@ fn the_mailbox_says_a_size_not_a_byte_count() {
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
 fn phone_mailbox() {
-    let (mut h, app, _) = harness_phone_measured(a_mailbox(), sigil_chat::Route::Members);
-    h.run();
-    app.borrow_mut()
-        .open_dialog_for_test((me(), String::new()), "mail", them());
+    // **A place, not a dialog.** The mailbox moved onto the rail under Chat
+    // and became a route of its own, so this is reached the way Devices is.
+    let (mut h, _, _) = harness_phone_measured(a_mailbox(), sigil_chat::Route::Mail);
     h.run();
     h.run();
     h.remove_cursor();

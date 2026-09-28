@@ -219,7 +219,14 @@ fn exchange_row(
             egui::vec2(height, height),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(square), |ui| {
-            removed = sigil::icon::named_control(ui, sigil::Icon::Close, "Remove")
+            // **The glyph, on a phone too.** Everywhere else in sigil a
+            // control's word is drawn on a handset and hovered on a desktop,
+            // because a phone has no pointer to reach a tooltip. This one is
+            // drawn into a square the height of the row, at the row's right,
+            // and a word does not fit a square: it is the one place where
+            // the rule makes the control worse rather than clearer. The name
+            // still travels, in the accessibility tree and in the tooltip.
+            removed = sigil::icon::icon_button_named(ui, sigil::Icon::Close, "Remove")
                 .on_hover_text(
                     "Stop connecting to this exchange. Nothing said there is deleted — the \
                      conversations stay in this store and come back if it is added again.",

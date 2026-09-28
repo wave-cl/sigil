@@ -39,9 +39,6 @@ enum Bar {
     /// `back`: the list is not on screen, so Back to it is the leftmost
     /// control.
     Conversation { back: bool },
-    /// The identity alone: nothing is connected, and the chevron is the
-    /// way to another identity.
-    Identity,
 }
 
 /// Where you are inside the chat app.
@@ -61,6 +58,18 @@ pub enum Route {
     Settings,
     /// Which devices act for this account, and how to link or revoke one.
     Devices,
+    /// **What was left for you** (SIP-5): sealed to this account and held at
+    /// the exchange until a device collects it. Held there rather than in a
+    /// conversation, which is why it is a place of its own and not a
+    /// conversation's pane -- it belongs to the identity, and it reads the
+    /// way a mailbox reads: a list of what is waiting, newest first, and one
+    /// of them open.
+    Mail,
+    /// One of them, open. **A route and not a field on the pane**, because
+    /// the shell tries the history before it asks the app to step back -- so
+    /// a reading view held anywhere else is one the phone's Back key walks
+    /// straight past, out of the mailbox altogether.
+    MailItem(u64, PubKey),
     /// Searching what has been said: the box and what it found, on a card
     /// of its own. A phone's list heading has room for a magnifier and not
     /// for a box, and a box that pushes the list down is a search that
@@ -255,6 +264,115 @@ pub fn reset_drawn() {
 /// `grouped` is in it because the author line comes and goes with it; the width
 /// is kept beside it rather than hashed, so a resized pane invalidates every
 /// row at once and obviously.
+/// A short key with the way to the whole of it, on a line of its own.
+///
+/// **Allocated at its own width, so it centres.** A bare `horizontal` inside
+/// a `vertical_centered` takes the whole width and starts at the left, which
+/// put the key hard against the edge under a centred name and a centred
+/// handle. `vertical_centered` centres each item it allocates, so the row
+/// has to be one item of a known size.
+///
+/// **Short and copyable, not long and selectable**: 44 characters of base58,
+/// and nobody reads one. What anybody does with their own key is send it to
+/// somebody. The button comes with it, because a bare tappable key copies in
+/// silence, and on a phone that is a press that says nothing.
+fn copyable_key(ui: &mut egui::Ui, key: &str, theme: &ColorTheme, hover: &str) {
+    let short = egui::RichText::new(sigil_ui::short(key))
+        .monospace()
+        .small()
+        .color(theme.text_muted);
+    let drawn = egui::WidgetText::from(short.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Small,
+    );
+    let button = sigil::Form::of(ui.ctx()).button_size();
+    let row = egui::vec2(
+        drawn.size().x + ui.spacing().item_spacing.x + button,
+        button.max(drawn.size().y),
+    );
+    ui.allocate_ui_with_layout(
+        row,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add(egui::Label::new(short).truncate())
+                .on_hover_text(hover.to_string());
+            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy your key").clicked() {
+                ui.ctx().copy_text(key.to_string());
+            }
+        },
+    );
+}
+
+/// How long a list may be on its way before the pane says what a wait this
+/// long usually means. Seconds.
+const SLOW_TO_SYNC: u64 = 12;
+
+/// One line of the mailbox: who it is from, when, and what is in it.
+///
+/// **The whole row is the target**, as every other list row in sigil is, and
+/// the unread mark is a filled dot rather than bold alone -- weight is a
+/// difference somebody has to have seen the other rows to notice, and this
+/// list is often two lines long.
+fn mail_row(
+    ui: &mut egui::Ui,
+    item: &session::MailItem,
+    now: u64,
+    theme: &ColorTheme,
+) -> egui::Response {
+    let key = item.from.to_string();
+    let unread = item.opened.is_none();
+    // What the second line says: the size until it has been opened, and
+    // afterwards what opening it found. A mailbox's second line is the
+    // message, where there is one.
+    let said = match &item.opened {
+        None => sigil_ui::human(item.bytes.into()),
+        Some(session::MailBody::Text(text)) => text.replace('\n', " "),
+        Some(session::MailBody::Opaque(len)) => format!("{len} bytes, and not text"),
+        Some(session::MailBody::Elsewhere) => "Sealed to another of your devices".to_string(),
+        Some(session::MailBody::Gone) => "No longer at the exchange".to_string(),
+    };
+    ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let dot = tokens::SPACING_SM;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(dot, dot), egui::Sense::hover());
+            if unread && ui.is_rect_visible(rect) {
+                ui.painter()
+                    .circle_filled(rect.center(), dot / 2.0, theme.accent);
+            }
+            sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+            ui.add_space(tokens::SPACING_SM);
+            ui.vertical(|ui| {
+                // Bounded before anything is drawn in it, so the time
+                // can be laid out from the right: a `with_layout` in an
+                // unbounded vertical takes the rest of the pane.
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let from = egui::RichText::new(sigil_ui::short(&key)).monospace();
+                    ui.add(egui::Label::new(if unread { from.strong() } else { from }).truncate());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.colored_label(
+                            theme.text_muted,
+                            egui::RichText::new(sigil_ui::brief(item.at, now)).small(),
+                        );
+                    });
+                });
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(said)
+                            .small()
+                            .color(theme.text_secondary),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+    })
+    .response
+}
+
 fn shape_of(line: &Line, grouped: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -865,8 +983,6 @@ enum Dialog {
     /// SIP-56: report a message (`target` is its seq) or the room (0) to the
     /// admins.
     Report { target: u64 },
-    /// SIP-5: what is waiting in the mailbox here.
-    Mail,
     /// SIP-53: move where this conversation is ordered.
     Rehome,
     /// SIP-53: move where this **account** lives.
@@ -1568,6 +1684,14 @@ struct Pane {
     /// pane, not per frame: it is a round trip and the answer only changes
     /// when somebody moves home.
     asked_my_home: bool,
+    /// Whether this pane has asked the exchange what is waiting. Once when
+    /// the mailbox is opened, not per frame: it is a round trip, and the
+    /// bar's corner is how to ask again.
+    asked_mail: bool,
+    /// When this pane started waiting for a list it has not been sent, so a
+    /// wait long enough to mean something can say so. Cleared the moment one
+    /// arrives.
+    waiting_since: Option<u64>,
     /// Why a video will not play, by blob id.
     unplayable: HashMap<String, String>,
     /// What is in the box. Taken out to be sent, and held in `in_flight`
@@ -1919,6 +2043,8 @@ impl Default for Pane {
             pictures: HashMap::new(),
             faces: HashMap::new(),
             asked_my_home: false,
+            asked_mail: false,
+            waiting_since: None,
             settings_for: None,
             asking: false,
             saw: (None, 0),
@@ -2593,7 +2719,6 @@ impl ChatApp {
             "name" => Dialog::Name,
             "verify" => Dialog::Verify(who),
             "report" => Dialog::Report { target: 3 },
-            "mail" => Dialog::Mail,
             "rehome" => Dialog::Rehome,
             "movehome" => Dialog::MoveHome,
             "notices" => Dialog::Notices,
@@ -2624,7 +2749,6 @@ impl ChatApp {
             Dialog::Name,
             Dialog::Verify(PubKey::new([2u8; 32])),
             Dialog::Report { target: 3 },
-            Dialog::Mail,
             Dialog::Rehome,
             Dialog::MoveHome,
             Dialog::Notices,
@@ -2640,7 +2764,6 @@ impl ChatApp {
             Dialog::Name => ("name", "Your name here"),
             Dialog::Verify(_) => ("verify", "Verify"),
             Dialog::Report { .. } => ("report", "Report this message"),
-            Dialog::Mail => ("mail", "Messages left for you"),
             Dialog::Rehome => ("rehome", "Move where this conversation lives"),
             Dialog::MoveHome => ("movehome", "Move this account"),
             Dialog::Notices => ("notices", "What notifications say"),
@@ -3106,6 +3229,8 @@ impl App for ChatApp {
             Route::Members => self.members_view(ctx, ui),
             Route::Settings => self.settings_view(ctx, ui),
             Route::Devices => self.devices_view(ctx, ui),
+            Route::Mail => self.mail_view(ctx, ui),
+            Route::MailItem(id, _) => self.mail_item_view(ctx, id, ui),
             Route::Search => self.search_view(ctx, ui),
             Route::Me => self.me_view(ctx, ui),
             // **The call is gone and the card is still on screen.** It pops
@@ -3141,6 +3266,10 @@ impl App for ChatApp {
                 Route::Members => "Members",
                 Route::Settings => "Conversation settings",
                 Route::Devices => "Devices",
+                Route::Mail => "Mailbox",
+                // Who it is from, as the list says it: the bar and the
+                // screen under it name the same message.
+                Route::MailItem(_, from) => return Some(sigil_ui::short(&from.to_string())),
                 Route::Search => "Search",
                 Route::Me => "Settings",
                 // The name the notification uses, so the shade and the screen
@@ -3333,12 +3462,14 @@ impl App for ChatApp {
         if self.fixed.is_none() && !self.sessions.contains_key(at) {
             let none = ChatState::default();
             self.dialogs_ui(ctx, at, &none, ui, &theme);
-            // **The bar stays.** Without it this screen had no identity block
-            // and therefore no chevron — so there was no way to switch to an
-            // identity that does work, and nothing on it reflected an exchange
-            // being added either. The one instruction it gave pointed at a
-            // corner that was empty.
-            self.bar_ui(ctx, at, &none, ui, &theme, Bar::Identity);
+            // **No bar over this one.** It used to draw the identity block
+            // here so that the screen had a chevron to switch identities
+            // with -- but a mark and a link light in the corner of a screen
+            // whose whole subject is that there is no link say the same
+            // thing twice, the second time as furniture. What the bar was
+            // carrying is on the pane itself now: the identity is the mark
+            // in the middle, and switching is a control rather than an
+            // instruction pointing at a corner.
             self.unconnected_ui(ctx, at, ui, &theme);
             // **Here too.** The identity menu is on this screen as well, and
             // it is the screen somebody is most likely to want to leave: an
@@ -3560,6 +3691,19 @@ impl App for ChatApp {
                 // A call has no exchange to choose: it is already connected,
                 // and switching one underneath it would mean nothing.
                 Route::Call(_) => return,
+                // The one action a mailbox has: ask the exchange again.
+                // Where Devices puts its refresh, for the same reason -- a
+                // list you collect from needs a way to say "and now?".
+                Route::Mail => {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                        self.send_as(Some(&at), Cmd::Mail);
+                    }
+                    return;
+                }
+                // An open message has its controls under it, and asking the
+                // exchange again from here would answer about a list this
+                // one has already been taken out of.
+                Route::MailItem(..) => return,
                 Route::Directory | Route::Members | Route::Settings | Route::Search | Route::Me => {
                     return;
                 }
@@ -3741,6 +3885,7 @@ impl ChatApp {
         // identity with a dead default and nothing named is one with nothing.
         let held = self.listable_exchanges(ctx);
         let only = held.iter().all(String::is_empty);
+        let mut switch = false;
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.25);
             sigil_ui::identicon(ui, &me.to_string(), tokens::AVATAR_LG);
@@ -3751,15 +3896,19 @@ impl ChatApp {
                 if only {
                     "This identity names no exchange, so there is nothing for it to talk to."
                 } else {
-                    "Not connected to this exchange. The others this identity holds are in \
-                     the block in the corner."
+                    "Not connected to this exchange. The others this identity holds are \
+                     behind the exchange control."
                 },
             );
             ui.add_space(tokens::SPACING_SM);
-            ui.add(
-                egui::Label::new(egui::RichText::new(me.to_string()).monospace().small())
-                    .wrap()
-                    .selectable(true),
+            // Copyable, not selectable: this is the screen somebody is on
+            // when the exchange has not been told about them, and the key
+            // is the thing they have to send.
+            copyable_key(
+                ui,
+                &me.to_string(),
+                theme,
+                "your key, to be added to the exchange",
             );
             ui.add_space(tokens::SPACING_MD);
             if only {
@@ -3796,18 +3945,20 @@ impl ChatApp {
             }
             // Somebody arriving here by switching identity wants the way back
             // more often than the way forward.
+            // **A control, not an instruction.** This said "switch to
+            // another identity, from the block in the corner" -- and the
+            // block in the corner is gone, which is the right reason to
+            // stop describing where a thing is and simply offer it.
             if ctx.accounts.len() > 1 {
                 ui.add_space(tokens::SPACING_SM);
-                ui.colored_label(
-                    theme.text_muted,
-                    egui::RichText::new(
-                        "Or switch to another identity, from the block in the corner.",
-                    )
-                    .small(),
-                );
+                if ui.button("Switch identity").clicked() {
+                    switch = true;
+                }
             }
-            let _ = ctx;
         });
+        if switch {
+            self.switching = true;
+        }
     }
 
     /// The one row over the conversation: what it is and everything that
@@ -3835,13 +3986,11 @@ impl ChatApp {
         bar: Bar,
     ) {
         let me = at.0;
-        let open = match bar {
-            Bar::Conversation { .. } => state
-                .conversations
-                .iter()
-                .find(|c| Some(c.channel) == state.open),
-            Bar::Identity => None,
-        };
+        let Bar::Conversation { .. } = bar;
+        let open = state
+            .conversations
+            .iter()
+            .find(|c| Some(c.channel) == state.open);
         // **The controls are laid out first, from the right.** Given the
         // name first, a long one takes the row and the controls wrap onto a
         // second line -- which is what this did, and it moved the header
@@ -5515,7 +5664,6 @@ impl ChatApp {
                     Dialog::Profile => self.profile_dialog(at, state, ui, theme),
                     Dialog::Exchange => self.exchange_dialog(ctx, at, me, ui, theme),
                     Dialog::Name => self.name_dialog(at, ui, theme),
-                    Dialog::Mail => self.mail_dialog(at, state, ui, theme),
                     Dialog::Rehome => self.rehome_dialog(at, state, ui, theme),
                     Dialog::MoveHome => self.move_home_dialog(ctx, at, state, ui, theme),
                     Dialog::Notices => self.notices_dialog(ctx, at, ui, theme),
@@ -6094,9 +6242,48 @@ impl ChatApp {
     /// connection, so who sent it is the exchange's observation and not a
     /// cryptographic fact. It is drawn as such: the key, never a verification
     /// mark, and never in the voice a signed message gets.
-    fn mail_dialog(&mut self, at: &At, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
-        ui.heading("Messages left for you");
-        ui.add_space(tokens::SPACING_XS);
+    /// **The mailbox** (SIP-5): what was sealed to this account and left at
+    /// the exchange for a device to collect.
+    ///
+    /// A place of its own rather than a dialog behind the identity card. It
+    /// is not about a conversation, it fills whether or not sigil is
+    /// running, and a thing you collect from is a thing you visit -- so it
+    /// reads the way a mailbox reads: one line per message, who it is from
+    /// and when, unread ones marked, and the message itself on a screen of
+    /// its own.
+    fn mail_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+
+        // Asked once, when the screen is opened. A list you collect from is
+        // stale the moment you are not looking at it, and the bar's corner
+        // is how to ask again.
+        if !self.pane(at).asked_mail {
+            self.pane(at).asked_mail = true;
+            self.send_as(Some(at), Cmd::Mail);
+        }
+
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Mailbox");
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                    self.send_as(Some(at), Cmd::Mail);
+                }
+            });
+        }
+        // **Whose word it is that this came from them.** Every other place
+        // somebody appears draws their published face and what they are
+        // called; a mailbox draws the mark the key itself makes and nothing
+        // else, because who sent it is what the exchange saw and not
+        // something they signed. A face and a name are what a *verified*
+        // sender looks like everywhere else here.
         ui.colored_label(
             theme.text_secondary,
             egui::RichText::new(
@@ -6111,117 +6298,154 @@ impl ChatApp {
             // The ordinary case, and it must not read as a failure: a
             // mailbox is empty far more often than not.
             ui.colored_label(theme.text_secondary, "Nothing is waiting.");
-            ui.add_space(tokens::SPACING_SM);
-            if ui.button("Check again").clicked() {
-                self.send_as(Some(at), Cmd::Mail);
-            }
-            return;
+            return AppResponse::default();
         }
 
-        let mut read = None;
-        let mut delete = None;
         let now = self.now();
-        for item in &state.mail {
-            let key = item.from.to_string();
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    // **No picture and no name here, on purpose.** Every
-                    // other place somebody appears draws their published
-                    // face and what they are called; this one draws the mark
-                    // the key itself makes and nothing else, because the
-                    // caption three lines above says who sent it is what the
-                    // exchange saw and not something they signed. A face and
-                    // a name are what a *verified* sender looks like
-                    // everywhere else in the app, and putting them on an
-                    // unsigned claim would make it look like one.
-                    sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
-                    ui.add_space(tokens::SPACING_SM);
-                    ui.vertical(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(sigil_ui::short(&key)).monospace(),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(&key);
-                        ui.colored_label(
-                            theme.text_muted,
-                            egui::RichText::new(format!(
-                                "{} · {}",
-                                sigil_ui::brief(item.at, now),
-                                sigil_ui::human(item.bytes.into())
-                            ))
-                            .small(),
-                        );
-                    });
-                });
-                match &item.opened {
-                    None => {
-                        if ui.button("Open").clicked() {
-                            read = Some(item.id);
-                        }
+        let mut open = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (n, item) in state.mail.iter().enumerate() {
+                    if n > 0 {
+                        ui.separator();
                     }
-                    Some(session::MailBody::Text(text)) => {
-                        ui.add_space(tokens::SPACING_XS);
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(text).color(theme.text_primary))
-                                .wrap(),
-                        );
-                        ui.add_space(tokens::SPACING_XS);
-                        // **Only once it has been read.** Deleting completes
-                        // collection for every device of the account, so it
-                        // is offered where this one can say what it is
-                        // deleting.
-                        if sigil_ui::grave(ui, "Delete")
-                            .on_hover_text(
-                                "Completes collection: the exchange drops it for all your \
-                                 devices.",
-                            )
-                            .clicked()
-                        {
-                            delete = Some(item.id);
-                        }
-                    }
-                    Some(session::MailBody::Opaque(len)) => {
-                        ui.colored_label(
-                            // The item's own content stands here; muted is
-                            // for text nobody has to read, and this is what
-                            // the dialog was opened to read.
-                            theme.text_secondary,
-                            format!("Opened: {len} bytes, not text. Left by another client."),
-                        );
-                        if ui.button("Delete").clicked() {
-                            delete = Some(item.id);
-                        }
-                    }
-                    Some(session::MailBody::Elsewhere) => {
-                        // Not an error, and not deletable here.
-                        ui.colored_label(
-                            theme.text_secondary,
-                            "Sealed to another of your devices. Open it there.",
-                        );
-                    }
-                    Some(session::MailBody::Gone) => {
-                        ui.colored_label(
-                            theme.text_secondary,
-                            "No longer at the exchange — collected elsewhere, or expired.",
-                        );
+                    if mail_row(ui, item, now, &theme).clicked() {
+                        open = Some(item.id);
                     }
                 }
             });
-            ui.add_space(tokens::SPACING_XS);
-        }
 
-        if let Some(id) = read {
-            self.send_as(Some(at), Cmd::MailRead(id));
+        if let Some(id) = open {
+            // **Opening is a round trip, and only for the one opened.** The
+            // list is what the exchange holds; the body is fetched per
+            // message, which is why a mailbox never opens all of them.
+            if state.mail.iter().any(|m| m.id == id && m.opened.is_none()) {
+                self.send_as(Some(at), Cmd::MailRead(id));
+            }
+            if let Some(m) = state.mail.iter().find(|m| m.id == id) {
+                ctx.navigator.push_here(Route::MailItem(id, m.from));
+            }
+        }
+        AppResponse::default()
+    }
+
+    /// One waiting message, open.
+    fn mail_item_view(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        id: u64,
+        ui: &mut egui::Ui,
+    ) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+        let Some(item) = state.mail.iter().find(|m| m.id == id).cloned() else {
+            // Deleted here, or collected by another device while this was
+            // open: there is no message to draw. `replace_here`, so Back
+            // does not come forward onto a screen about nothing.
+            ctx.navigator.replace_here(Route::Mail);
+            return self.mail_view(ctx, ui);
+        };
+        let key = item.from.to_string();
+
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading(sigil_ui::short(&key));
+            });
+        }
+        ui.horizontal(|ui| {
+            sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
+            ui.add_space(tokens::SPACING_SM);
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&key).monospace())
+                        .wrap()
+                        .selectable(true),
+                );
+                ui.colored_label(
+                    theme.text_muted,
+                    egui::RichText::new(format!(
+                        "{} · {}",
+                        sigil_ui::brief(item.at, self.now()),
+                        sigil_ui::human(item.bytes.into())
+                    ))
+                    .small(),
+                );
+            });
+        });
+        ui.add_space(tokens::SPACING_SM);
+        ui.separator();
+        ui.add_space(tokens::SPACING_SM);
+
+        let mut delete = None;
+        match &item.opened {
+            // Asked for on the way in; this is the moment before it lands.
+            None => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(tokens::ICON_SM));
+                    ui.colored_label(theme.text_secondary, "Opening…");
+                });
+            }
+            Some(session::MailBody::Text(text)) => {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).color(theme.text_primary))
+                        .wrap()
+                        .selectable(true),
+                );
+                ui.add_space(tokens::SPACING_MD);
+                // **Only once it has been read.** Deleting completes
+                // collection for every device of the account, so it is
+                // offered where this one can say what it is deleting.
+                if sigil_ui::grave(ui, "Delete")
+                    .on_hover_text(
+                        "Completes collection: the exchange drops it for all your devices.",
+                    )
+                    .clicked()
+                {
+                    delete = Some(item.id);
+                }
+            }
+            Some(session::MailBody::Opaque(len)) => {
+                ui.colored_label(
+                    // The item's own content stands here; muted is for text
+                    // nobody has to read, and this is what was opened to be
+                    // read.
+                    theme.text_secondary,
+                    format!("{len} bytes, and not text. Left by another client."),
+                );
+                ui.add_space(tokens::SPACING_MD);
+                if sigil_ui::grave(ui, "Delete").clicked() {
+                    delete = Some(item.id);
+                }
+            }
+            // Not an error, and not deletable here: deleting completes
+            // collection for every device, and this one cannot read it.
+            Some(session::MailBody::Elsewhere) => {
+                ui.colored_label(
+                    theme.text_secondary,
+                    "Sealed to another of your devices. Open it there.",
+                );
+            }
+            Some(session::MailBody::Gone) => {
+                ui.colored_label(
+                    theme.text_secondary,
+                    "No longer at the exchange — collected elsewhere, or expired.",
+                );
+            }
         }
         if let Some(id) = delete {
             self.send_as(Some(at), Cmd::MailDelete(id));
+            // Back to the list: the screen this was is now about nothing.
+            ctx.navigator.back();
         }
-        ui.add_space(tokens::SPACING_SM);
-        if ui.button("Check again").clicked() {
-            self.send_as(Some(at), Cmd::Mail);
-        }
+        AppResponse::default()
     }
 
     fn name_dialog(&mut self, at: &At, ui: &mut egui::Ui, theme: &ColorTheme) {
@@ -7125,13 +7349,67 @@ impl ChatApp {
         // and the first was being said during the second on every launch --
         // to somebody whose conversations were about to appear underneath it.
         if state.conversations.is_empty() && !state.synced {
-            ui.add_space(tokens::SPACING_SM);
-            ui.horizontal(|ui| {
+            let now = self.now();
+            let since = *self.pane(at).waiting_since.get_or_insert(now);
+            let waited = now.saturating_sub(since);
+            ui.add_space(tokens::SPACING_XL);
+            ui.vertical_centered(|ui| {
                 sigil_ui::working(ui);
+                ui.add_space(tokens::SPACING_SM);
                 ui.colored_label(theme.text_secondary, "Loading your chats…");
+
+                // **What a wait this long usually means.** An exchange can
+                // be set to answer only the keys it has been given, and a
+                // key it has not been given is not refused out loud: the
+                // connection stands, the list never comes, and the pane
+                // says "loading" for ever. That is indistinguishable from a
+                // slow start for as long as somebody is willing to wait --
+                // so after a while it says what to do about it, with the
+                // one thing they have to send in order to do it.
+                //
+                // Said from the state and not latched: the moment the list
+                // arrives this whole branch stops being drawn.
+                if waited >= SLOW_TO_SYNC {
+                    ui.add_space(tokens::SPACING_LG);
+                    ui.separator();
+                    ui.add_space(tokens::SPACING_MD);
+                    ui.colored_label(theme.text_primary, "This is taking longer than it should.");
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.colored_label(
+                        theme.text_secondary,
+                        match state.link {
+                            // Answering, and sending nothing: the shape of a
+                            // key the exchange has not been told about.
+                            LinkState::Up => {
+                                "The exchange is answering but has sent nothing. An exchange \
+                                 can be set to accept only the keys it has been given — if \
+                                 this one is, yours has to be added to it."
+                            }
+                            _ => {
+                                "There is no connection to the exchange yet. If it accepts \
+                                 only the keys it has been given, yours has to be added to it."
+                            }
+                        },
+                    );
+                    ui.add_space(tokens::SPACING_SM);
+                    ui.colored_label(
+                        theme.text_muted,
+                        egui::RichText::new("Send this key to whoever runs the exchange.").small(),
+                    );
+                    ui.add_space(tokens::SPACING_SM);
+                    copyable_key(
+                        ui,
+                        &at.0.to_string(),
+                        theme,
+                        "your key, to be added to the exchange",
+                    );
+                }
             });
             return;
         }
+        // Not waiting any more: a later wait is timed from when it starts,
+        // not from the first one this pane ever had.
+        self.pane(at).waiting_since = None;
 
         if state.conversations.is_empty() {
             // Both halves, every time: that it is empty, and what to do about
@@ -12808,7 +13086,7 @@ impl ChatApp {
             .show(ui, |ui| {
                 self.me_head_ui(ctx, at, &state, ui, &theme, &key);
                 ui.add_space(tokens::SPACING_LG);
-                self.me_keys_ui(&state, ui, &theme, &key);
+                self.me_carried_ui(&state, ui, &theme);
                 ui.add_space(tokens::SPACING_MD);
                 self.me_apps_ui(ctx, ui, &theme);
                 ui.add_space(tokens::SPACING_MD);
@@ -12930,6 +13208,29 @@ impl ChatApp {
                 }
             }
 
+            // **Your key, here and nowhere else on this card.** It was a
+            // row of its own further down -- "You  AKnL…RSZ9  [Copy]" --
+            // so the card introduced you twice: once under the mark in the
+            // words others see, and again as a key under a heading. One of
+            // them is enough, and it belongs *with* the rest of your
+            // identity rather than below it.
+            //
+            // **The Copy button comes with it.** Short and copyable, not
+            // long and selectable: these are 44 characters of base58 and
+            // nobody reads one -- what anybody does with their own key is
+            // send it to somebody. A bare tappable key would copy in
+            // silence, which on a phone is a press that says nothing.
+            ui.add_space(tokens::SPACING_SM);
+            copyable_key(
+                ui,
+                key,
+                theme,
+                &format!(
+                    "{key}\nthe only thing that identifies you to somebody who wants to \
+                     write to you"
+                ),
+            );
+
             // What others see of you, and -- when the link is down -- the
             // one thing worth doing about it. A colour says nothing to
             // somebody who cannot see it, so the word is here too.
@@ -12949,10 +13250,14 @@ impl ChatApp {
                         LinkState::Gone => theme.link_gone,
                         _ => theme.link_retrying,
                     };
+                    // **The word, and no button.** There was a Reconnect
+                    // row under this one, and nothing it did was not already
+                    // happening: `LinkState::Gone` means "down through the
+                    // whole backoff ramp, still trying". A control that asks
+                    // for what is already under way can only be pressed and
+                    // watched, and on the pass where it changed nothing it
+                    // read as a control that does not work.
                     ui.colored_label(colour, egui::RichText::new(state.link.word()).small());
-                    if sigil_ui::icon_item(ui, sigil_ui::Icon::Refresh, "Reconnect").clicked() {
-                        self.send_as(Some(at), Cmd::Reconnect);
-                    }
                 }
             }
         });
@@ -12964,47 +13269,15 @@ impl ChatApp {
         }
     }
 
-    /// The keys, short, with the way to the whole of each.
+    /// Whether this connection is carried, and by whom.
     ///
-    /// **Short and copyable, not long and selectable.** These are 44
-    /// characters of base58 and nobody reads one: what anybody does with
-    /// their own key is send it to somebody, and what they do with the
-    /// exchange's is compare it -- which the head and tail settle. The whole
-    /// of it goes to the clipboard, and is on the hover for a pointer.
-    /// Your key, and nothing else.
-    ///
-    /// **The exchange's key is not yours and does not live here.** It was
-    /// a second row under this one, which put a key you cannot act on
-    /// beside the one key on this card that is about you. It is copied
-    /// where the exchange itself is chosen -- the domain control at the
-    /// top of the chat list -- which is where somebody wanting it is
-    /// already looking.
-    fn me_keys_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme, key: &str) {
-        let rows: Vec<(&str, String, &str, &str)> = vec![(
-            "You",
-            key.to_string(),
-            "Copy your key",
-            "the only thing that identifies you to somebody who wants to write to you",
-        )];
-        for (said, whole, button, hover) in rows {
-            ui.horizontal(|ui| {
-                ui.colored_label(theme.text_muted, egui::RichText::new(said).small());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, button).clicked() {
-                        ui.ctx().copy_text(whole.clone());
-                    }
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(sigil_ui::short(&whole))
-                                .monospace()
-                                .small(),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(format!("{whole}\n{hover}"));
-                });
-            });
-        }
+    /// **Your key is no longer here.** This drew it under a heading of its
+    /// own, below the mark and the name that had already said who you are;
+    /// it is in the head now, with the rest of your identity, and copied
+    /// from there. The exchange's key was never here either, for the same
+    /// reason in reverse: it is not yours, and it is copied where the
+    /// exchange itself is chosen.
+    fn me_carried_ui(&mut self, state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
         // SIP-85: the exchange sees the home's address, not this machine's.
         if let Some(home) = &state.carried {
             ui.colored_label(
@@ -13031,13 +13304,40 @@ impl ChatApp {
         }
         ui.separator();
         ui.colored_label(theme.text_muted, egui::RichText::new("sigil").small());
-        for s in siblings {
-            if sigil_ui::icon_item_counted(ui, s.icon, &s.title, s.active, s.badge).clicked()
-                && !s.active
+        for sib in siblings {
+            let here = sib.active;
+            if sigil_ui::icon_item_counted(ui, sib.icon, &sib.title, here, sib.badge).clicked()
+                && !here
             {
-                ctx.navigator.switch_to(s.id);
+                ctx.navigator.switch_to(sib.id);
+            }
+            // **The mailbox, under the app it belongs to.** It was a row
+            // near the foot of this card that opened a dialog -- a long way
+            // down for the one place messages arrive that no conversation
+            // will ever show. It is a destination of this app rather than an
+            // app of its own, so it sits under Chat and not beside it;
+            // `here` is this app's row, because the card being drawn is
+            // this app's.
+            if here {
+                let waiting = self.mail_waiting(ctx);
+                if sigil_ui::icon_item_counted(ui, sigil_ui::Icon::Mail, "Mailbox", false, waiting)
+                    .on_hover_text(
+                        "SIP-5: something sealed to you and left at the exchange to collect \
+                         when you next connect. Held there, not in a conversation.",
+                    )
+                    .clicked()
+                {
+                    ctx.navigator.push_here(Route::Mail);
+                }
             }
         }
+    }
+
+    /// How many are waiting, as the exchange last said.
+    fn mail_waiting(&self, ctx: &AppContext<'_>) -> u32 {
+        self.showing_at(ctx)
+            .map(|at| self.state_of(Some(&at)).mail.len() as u32)
+            .unwrap_or(0)
     }
 
     /// Everything done *to* this identity, and the one setting that is not
@@ -13207,22 +13507,6 @@ impl ChatApp {
         // carries only what another client left, and polling would spend a
         // per-caller limit on a store that is almost always empty. The row
         // is the ask; the count beside it is from the last one.
-        if sigil_ui::icon_item_counted(
-            ui,
-            sigil_ui::Icon::Mail,
-            "Messages left for you",
-            false,
-            state.mail.len() as u32,
-        )
-        .on_hover_text(
-            "SIP-5: something sealed to you and left at the exchange to collect when you \
-             next connect. Held there, not in a conversation, and deleted once you take it.",
-        )
-        .clicked()
-        {
-            self.send_as(Some(at), Cmd::Mail);
-            self.panes.entry(at.clone()).or_default().dialog = Some(Dialog::Mail);
-        }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Switch, "Switch identity")
             .on_hover_text(
                 "Choose another identity. This one stays open — its messages keep arriving \
