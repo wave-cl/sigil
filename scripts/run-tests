@@ -18,6 +18,23 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
+# **The stack libtest gives a test, raised.** libtest runs each test on a
+# thread of its own, 2 MiB by default, and
+# `reaching_session::alice_at_a_writes_to_bob_at_b_by_name_and_domain` needs
+# between 1.5 and 2 MiB of it: a debug-built async test that stands up two
+# exchanges, where every nested `.await` embeds the state of the future below
+# it. Sitting exactly on the default, it passed on macOS and aborted on Linux
+# with "fatal runtime error: stack overflow" -- flakily from 2026-09-27 16:32,
+# then on every run, five reds nobody had looked at.
+#
+# Measured, not guessed: at 1 MiB and 1.5 MiB it reproduces the CI abort on
+# macOS too, and at 2 MiB it passes. Eight is four times what it needs.
+#
+# Here rather than in the workflow, so the same limit applies to the same
+# command on a dev machine. Overridable, because lowering it is how the
+# fault above was reproduced.
+export RUST_MIN_STACK="${RUST_MIN_STACK:-8388608}"
+
 floor_file="$repo/scripts/test-floor"
 floor="$(cat "$floor_file" 2>/dev/null || echo 1)"
 args=()
