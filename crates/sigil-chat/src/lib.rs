@@ -11225,6 +11225,25 @@ impl ChatApp {
             }
 
             ui.add_space(tokens::SPACING_MD);
+            // **A word where there is no pointer.** The tick is named for a
+            // screen reader and hovers on a desktop, and a phone has neither
+            // -- so the control that applies a change which *deletes
+            // immediately* was a bare glyph beside a number. The same rule
+            // the call bar and the Leave row already follow here: drawn on a
+            // phone, hovered on a desktop.
+            //
+            // **And on a phone that word goes on its own line**, because a
+            // label, a counter and a spelled-out button do not fit a
+            // 360-point pane. That did not merely clip the button: egui
+            // grows a ui to what is drawn in it, so every row below this one
+            // -- Mint a new key, Leave, and the sentences under them -- was
+            // laid out for a pane 66 points wider than the screen and drawn
+            // off the right edge. Found by turning the reader's text size up
+            // to 1.15, the mildest step on Android's own slider, where this
+            // row was already 27 points over. A desktop keeps the tick and
+            // keeps the single row.
+            let phone = sigil::Form::of(ui.ctx()).is_phone();
+            let mut applied = false;
             ui.horizontal(|ui| {
                 ui.label("Keep messages for");
                 ui.add(
@@ -11234,23 +11253,23 @@ impl ChatApp {
                     .range(1..=365)
                     .suffix(" days"),
                 );
-                // **A word where there is no pointer.** The tick is named
-                // for a screen reader and hovers on a desktop, and a phone
-                // has neither -- so the control that applies a change which
-                // *deletes immediately* was a bare glyph beside a number.
-                // The same rule the call bar and the Leave row already
-                // follow here: drawn on a phone, hovered on a desktop.
-                if sigil_ui::apply_button(ui, "Set how long").clicked() {
-                    let days = self.pane(at).retention_days;
-                    self.send_as(
-                        Some(at),
-                        Cmd::SetRetention {
-                            secs: days * 24 * 60 * 60,
-                            max_entries: 0,
-                        },
-                    );
+                if !phone {
+                    applied = sigil_ui::apply_button(ui, "Set how long").clicked();
                 }
             });
+            if phone {
+                applied = sigil_ui::apply_button(ui, "Set how long").clicked();
+            }
+            if applied {
+                let days = self.pane(at).retention_days;
+                self.send_as(
+                    Some(at),
+                    Cmd::SetRetention {
+                        secs: days * 24 * 60 * 60,
+                        max_entries: 0,
+                    },
+                );
+            }
             // Narrowing a window deletes, at once. It is not a policy that
             // takes effect later, and somebody shortening it should know that
             // before they press the button rather than after.

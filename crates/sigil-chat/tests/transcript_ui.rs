@@ -653,6 +653,31 @@ fn harness_phone_light(state: ChatState, route: sigil_chat::Route) -> Harness<'s
     harness_phone_themed(state, route, egui::Theme::Light).0
 }
 
+/// The same phone with the reader's text size turned up.
+///
+/// Android's own font-size slider is 0.85, 1.0, 1.15 and 1.3, and the
+/// accessibility one goes further; nothing in sigil reads it yet, so this
+/// asks the question the feature would raise before the feature exists. It
+/// scales the text and nothing else, which is what that slider does --
+/// Display size is the one that scales everything, and that is a
+/// `zoom_factor`.
+fn harness_phone_text_scale(
+    state: ChatState,
+    route: sigil_chat::Route,
+    scale: f32,
+) -> Harness<'static> {
+    harness_phone_beside(
+        state,
+        route,
+        egui::Theme::Dark,
+        Asks::default(),
+        Routes::default(),
+        Vec::new(),
+        scale,
+    )
+    .0
+}
+
 /// How wide the pane's contents actually came out, per route.
 ///
 /// egui grows a ui to whatever is drawn in it, and that is the whole
@@ -750,7 +775,7 @@ fn harness_phone_recording(
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
     Drawn,
 ) {
-    harness_phone_beside(state, route, theme_choice, asks, routes, Vec::new())
+    harness_phone_beside(state, route, theme_choice, asks, routes, Vec::new(), 1.0)
 }
 
 /// The phone with the other apps beside this one, as the shell publishes
@@ -767,6 +792,7 @@ fn harness_phone_beside(
     asks: Asks,
     routes: Routes,
     siblings: Vec<sigil::Sibling>,
+    text_scale: f32,
 ) -> (
     Harness<'static>,
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
@@ -793,6 +819,16 @@ fn harness_phone_beside(
             sigil::Form::install(&ctx, sigil::Form::Phone);
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(theme_choice);
+            // **After the theme, every frame.** `theme::install` writes the
+            // text styles from scratch each pass, so a scale applied once
+            // outside this closure would last until the first repaint.
+            if text_scale != 1.0 {
+                ctx.all_styles_mut(|style| {
+                    for font in style.text_styles.values_mut() {
+                        font.size *= text_scale;
+                    }
+                });
+            }
             let t = sigil::ColorTheme::current(&ctx);
             let mut nav = Navigator::default();
             nav.set_siblings(siblings.clone());
@@ -1039,7 +1075,7 @@ fn _every_route_is_measured(r: sigil_chat::Route) {
     }
 }
 
-fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
+fn runs_off_the_edge(h: &Harness<'static>, what: &str) -> Vec<String> {
     // The accesskit node's own bounding box, not `Node::rect`: that one
     // `expect`s a rectangle and the root has none, so it panics -- a test
     // failing for a reason that has nothing to do with the layout. The box
@@ -1066,11 +1102,14 @@ fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
         seen.len()
     );
     let edge = PHONE_WIDTH as f64;
-    let over: Vec<String> = seen
-        .iter()
+    seen.iter()
         .filter(|(_, (x0, x1))| x1 - x0 > 0.0 && (*x1 > edge + 1.0 || *x0 < -1.0))
         .map(|(name, (x0, x1))| format!("{name:?} at {x0:.0}..{x1:.0}"))
-        .collect();
+        .collect()
+}
+
+fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
+    let over = runs_off_the_edge(h, what);
     assert!(
         over.is_empty(),
         "{what}: {} widget(s) are drawn outside a {PHONE_WIDTH}-point screen:\n  {}",
@@ -1232,6 +1271,74 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             nothing_runs_off_the_edge(&h, &format!("{route:?} with {what}"));
         }
     }
+}
+
+/// **Nothing runs off the edge when the reader turns the text up.**
+///
+/// Android's font-size slider ends at 1.3 and its accessibility one goes
+/// past 2.0. sigil reads neither today, so this is the question that has to
+/// be answered before it does: a phone that honours the setting and then
+/// draws its controls off the screen is worse than one that ignores it.
+///
+/// It scales the text and nothing else, which is what that slider does.
+/// Every row here was laid out against a 360-point pane at one size of
+/// type, and egui grows a ui to what is drawn in it -- so one row that no
+/// longer fits re-lays every row after it, which is the mechanism behind
+/// every phone fault found in this file.
+#[test]
+fn no_widget_runs_off_a_phone_when_the_text_is_turned_up() {
+    let mut over: Vec<String> = Vec::new();
+    for scale in [1.15f32, 1.3] {
+        for (what, build) in [
+            ("ordinary names", a_conversation as fn() -> ChatState),
+            ("long names", a_long_conversation as fn() -> ChatState),
+            ("with a conversation open", the_room as fn() -> ChatState),
+        ] {
+            for route in [
+                sigil_chat::Route::Conversations,
+                sigil_chat::Route::Directory,
+                sigil_chat::Route::Members,
+                sigil_chat::Route::Settings,
+                sigil_chat::Route::Devices,
+                sigil_chat::Route::Search,
+                sigil_chat::Route::Me,
+                sigil_chat::Route::Call(me()),
+            ] {
+                let mut state = build();
+                state.searched = true;
+                let mut h = harness_phone_text_scale(state, route.clone(), scale);
+                h.run();
+                h.run();
+                // **The instrument says what it is pointed at.** A scale
+                // that never reached the style would leave every one of
+                // these passing for the same reason the unscaled test
+                // passes, and say so nowhere.
+                let body =
+                    h.ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+                assert!(
+                    (body - 15.0 * scale).abs() < 0.01,
+                    "the text was not turned up: body is {body} points, not \
+                     {} -- so this proves nothing",
+                    15.0 * scale
+                );
+                let where_ = format!("{route:?} with {what} at {scale}x text");
+                for one in runs_off_the_edge(&h, &where_) {
+                    over.push(format!("{where_}: {one}"));
+                }
+            }
+        }
+    }
+    // **The whole matrix in one failure.** Asserting inside the loop reports
+    // the first screen and hides the rest, and these faults come in
+    // families: one row too wide re-lays every row after it, on every route
+    // that draws that row.
+    assert!(
+        over.is_empty(),
+        "{} widget(s) are drawn outside a {PHONE_WIDTH}-point screen when the \
+         text is turned up:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
 }
 
 /// On a phone every field and its button fit the width: the key field in
@@ -12530,6 +12637,7 @@ fn me_card(state: ChatState, siblings: Vec<sigil::Sibling>) -> (Harness<'static>
         Asks::default(),
         routes.clone(),
         siblings,
+        1.0,
     );
     (h, routes)
 }
