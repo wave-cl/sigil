@@ -8807,6 +8807,8 @@ impl ChatApp {
                 .enumerate()
                 .map(|(i, u)| session::Line {
                     seq: ECHO_SEQ + i as u64,
+                    // An echo has not been sent, so it carries no timer yet.
+                    expires_at: None,
                     who: at.0,
                     name: None,
                     mine: true,
@@ -9005,8 +9007,25 @@ impl ChatApp {
                     key,
                 })
                 .collect();
+            // SIP-57: worded here, where the clock is. `sigil-ui` draws and
+            // keeps no clock, which is why `at` is a formatted string too.
+            let goes = line.expires_at.map(|until| {
+                let left = until.saturating_sub(now);
+                if left == 0 {
+                    "goes now".to_string()
+                } else if left < 60 {
+                    format!("goes in {left}s")
+                } else if left < 3600 {
+                    format!("goes in {} min", left / 60)
+                } else if left < 86_400 {
+                    format!("goes in {}h", left / 3600)
+                } else {
+                    format!("goes in {}d", left / 86_400)
+                }
+            });
             let bubble = sigil_ui::Bubble {
                 id: egui::Id::new(("message", at, copy, line.seq)),
+                goes: goes.as_deref(),
                 key: &key,
                 picture: faces.get(&line.who).and_then(Option::as_ref),
                 name: line.name.as_deref(),

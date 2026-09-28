@@ -230,6 +230,13 @@ pub struct Bubble<'a> {
     /// the name are left off and the gap above is smaller.
     pub grouped: bool,
     pub edited: bool,
+    /// SIP-57: when this message goes, already worded — "goes in 4 min".
+    ///
+    /// **A phrase, not a deadline.** `at` is a formatted string here for the
+    /// same reason: this crate draws and does not keep a clock, and a
+    /// countdown computed where there is no clock is a countdown computed
+    /// wrong. `None` is the ordinary message, which stays.
+    pub goes: Option<&'a str>,
     /// SIP-53 §Posting again: the poster sent this again after a move
     /// stranded it, and said when they first said it.
     ///
@@ -1864,6 +1871,19 @@ fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::
     if b.edited {
         ui.colored_label(quiet, egui::RichText::new("edited").small());
     }
+    // SIP-57. **Not in the quiet tier**: everything else on this row is
+    // something that already happened and this is the one thing about to,
+    // and a reader who misses it watches the message leave with nothing to
+    // explain it. Warning rather than destructive -- it is what the sender
+    // asked for, not a fault.
+    if let Some(goes) = b.goes {
+        ui.colored_label(theme.warning, egui::RichText::new(goes).small())
+            .on_hover_text(
+                "The sender put a timer on this. It is deleted everywhere at the same \
+                 moment \u{2014} here, at the exchange, and for everybody else in the \
+                 conversation.",
+            );
+    }
     if b.again {
         ui.colored_label(quiet, egui::RichText::new("posted again").small())
             .on_hover_text(
@@ -2352,6 +2372,7 @@ mod tests {
 
     fn plain<'a>(text: &'a str, files: &'a [crate::Attachment<'a>]) -> Bubble<'a> {
         Bubble {
+            goes: None,
             id: egui::Id::new("plain"),
             key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
             picture: None,

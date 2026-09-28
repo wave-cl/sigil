@@ -101,6 +101,7 @@ fn a_conversation() -> ChatState {
         peer_home: None,
         lines: vec![
             Line {
+                expires_at: None,
                 seq: 1,
                 who: them(),
                 name: Some("Ada".into()),
@@ -121,6 +122,7 @@ fn a_conversation() -> ChatState {
                 earlier: false,
             },
             Line {
+                expires_at: None,
                 seq: 2,
                 who: me(),
                 name: None,
@@ -141,6 +143,7 @@ fn a_conversation() -> ChatState {
                 earlier: false,
             },
             Line {
+                expires_at: None,
                 seq: 3,
                 who: them(),
                 name: Some("Ada".into()),
@@ -176,6 +179,7 @@ fn a_conversation() -> ChatState {
                 earlier: false,
             },
             Line {
+                expires_at: None,
                 seq: 4,
                 who: them(),
                 name: Some("Ada".into()),
@@ -201,6 +205,7 @@ fn a_conversation() -> ChatState {
                 earlier: false,
             },
             Line {
+                expires_at: None,
                 seq: 5,
                 who: them(),
                 name: Some("Ada".into()),
@@ -3740,6 +3745,7 @@ fn a_page(from: u32, to: u32) -> ChatState {
     state.earlier = from as usize;
     state.lines = (from..to)
         .map(|i| Line {
+            expires_at: None,
             seq: i as u64 + 1,
             who: them(),
             name: Some("Ada".into()),
@@ -7030,6 +7036,7 @@ fn a_long_preview_stays_on_one_line() {
 fn the_time_and_receipt_are_against_the_bubble_edge() {
     let mut state = a_conversation();
     state.lines.push(Line {
+        expires_at: None,
         seq: 9,
         who: me(),
         name: None,
@@ -7050,6 +7057,7 @@ fn the_time_and_receipt_are_against_the_bubble_edge() {
         earlier: false,
     });
     state.lines.push(Line {
+        expires_at: None,
         seq: 10,
         who: me(),
         name: None,
@@ -12563,6 +12571,42 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
     );
 }
 
+/// **A message that is going says so, before it goes.**
+///
+/// The sending half without this is half a feature: messages vanish from the
+/// transcript with nothing to explain them, which is what loss looks like.
+/// The library had no way to ask — `expire_timed` learns a timer by deleting
+/// the message — so this needed `Store::timers`, added in sqex 0.116.0.
+#[test]
+fn a_message_with_a_timer_says_when_it_goes() {
+    let mut state = a_conversation();
+    // **From the clock, not from the message.** Set from the line's own time
+    // this deadline is yesterday's, so it read "goes now" — which is the
+    // right answer to the question I asked and not the one I meant.
+    state.lines[0].expires_at = Some(NOW + 240);
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("goes in"),
+        "a message about to be deleted says nothing: {said}"
+    );
+}
+
+/// The control: an ordinary message is not announced as going anywhere.
+#[test]
+fn a_message_with_no_timer_is_not_said_to_be_going() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        !said.contains("goes in"),
+        "a message that is staying claims to be going: {said}"
+    );
+}
+
 /// **SIP-57's timer was in the library and nowhere in the interface.**
 ///
 /// `Chat::set_timer` puts a timer on what this client sends in a channel,
@@ -13507,6 +13551,7 @@ fn a_staged_voice_note_shows_its_waveform_and_its_length() {
 /// channel it belongs to does not exist any more.
 fn an_earlier_line(seq: u64, said: &str) -> Line {
     Line {
+        expires_at: None,
         seq,
         who: them(),
         name: Some("Ada".into()),

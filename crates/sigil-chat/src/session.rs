@@ -108,6 +108,13 @@ pub const PAGE: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub seq: u64,
+    /// SIP-57: when this message goes, if it carries a timer.
+    ///
+    /// **Whoever set it.** The card's control says what *this* client puts
+    /// on what it sends; this is what is on the message in hand. A reader
+    /// with no way to see it watches the transcript shrink with nothing to
+    /// explain it, which is what loss looks like.
+    pub expires_at: Option<u64>,
     pub who: PubKey,
     /// Their display name, if a profile has been seen for them.
     ///
@@ -3850,6 +3857,11 @@ pub(crate) trait Local {
     /// **No default here.** A trait method with one is a method a forwarding
     /// impl keeps by forgetting, which has bitten this codebase twice.
     fn timer(&self, channel: &[u8; 32]) -> u32;
+    /// SIP-57: when each timed message in `channel` goes, by sequence.
+    ///
+    /// Whatever the sender put on it, not what this client would put on its
+    /// own -- which is `timer`. A reader needs this one.
+    fn timers(&self, channel: &[u8; 32]) -> HashMap<u64, u64>;
     fn display_name(&self, account: &PubKey) -> Option<String>;
     fn title_of(&self, account: &PubKey) -> Option<String>;
     /// The picture an account published, as published (SIP-21 sends it
@@ -3876,6 +3888,11 @@ impl Local for Chat {
     }
     fn timer(&self, channel: &[u8; 32]) -> u32 {
         Chat::timer(self, channel)
+    }
+    fn timers(&self, channel: &[u8; 32]) -> HashMap<u64, u64> {
+        // A store read that fails is a store that will fail louder in a
+        // moment; a transcript is not the place to raise it.
+        Chat::timers(self, channel).unwrap_or_default()
     }
     fn display_name(&self, account: &PubKey) -> Option<String> {
         Chat::display_name(self, account)
@@ -3932,6 +3949,11 @@ impl Local for Offline<'_> {
     /// Nothing is sent with no session, so nothing carries a timer.
     fn timer(&self, _channel: &[u8; 32]) -> u32 {
         0
+    }
+    fn timers(&self, channel: &[u8; 32]) -> HashMap<u64, u64> {
+        // The store is here even with no session, and what it holds is what
+        // was received: an offline reader still needs to know what is going.
+        self.store.timers(channel).unwrap_or_default()
     }
     fn display_name(&self, account: &PubKey) -> Option<String> {
         let (name, _, _) = self.store.profile(account).ok().flatten()?;
@@ -6162,6 +6184,7 @@ pub fn verified_holder(
 #[allow(clippy::too_many_arguments)]
 fn lines_of(
     timeline: &Timeline,
+    channel: &[u8; 32],
     window: usize,
     receipts: Option<&Known>,
     earlier: bool,
@@ -6232,11 +6255,15 @@ fn lines_of(
             (m.seq, (m.account, said, preview))
         })
         .collect();
+    // SIP-57: when each of these goes, asked once for the channel rather
+    // than once per line.
+    let timers = chat.timers(channel);
     timeline
         .messages()
         .skip(window)
         .map(|m| Line {
             seq: m.seq,
+            expires_at: timers.get(&m.seq).copied(),
             who: m.account,
             name: people.get(&m.account).and_then(|p| p.name.clone()),
             mine: m.account == me,
@@ -6460,7 +6487,19 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         .map(|(_, k)| counted.saturating_sub(k.wanted))
         .unwrap_or(0);
     let lines: Vec<Line> = open
-        .map(|(_, k)| lines_of(&k.timeline, window, Some(k), false, me, &people, desk, chat))
+        .map(|(c, k)| {
+            lines_of(
+                &k.timeline,
+                &c,
+                window,
+                Some(k),
+                false,
+                me,
+                &people,
+                desk,
+                chat,
+            )
+        })
         .unwrap_or_default();
     // SIP-60 §The client keeps what it read: what this client read of an
     // earlier incarnation of the same conversation -- a direct message
@@ -6488,7 +6527,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         .map(|(c, k)| {
             chat.earlier(&c, &k.admins)
                 .iter()
-                .map(|t| lines_of(t, 0, None, true, me, &people, desk, chat))
+                .map(|t| lines_of(t, &c, 0, None, true, me, &people, desk, chat))
                 .filter(|lines| !lines.is_empty())
                 .collect()
         })
