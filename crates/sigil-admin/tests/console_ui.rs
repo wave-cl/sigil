@@ -416,6 +416,21 @@ fn answered() -> AdminState {
 }
 
 /// The console with an answer in it fits a phone too.
+/// Every section the console folds, in the order it draws them.
+///
+/// **One list, because two tests walk it**: the one that asks whether
+/// everything can be reached, and the one that asks how wide it comes out.
+/// Two copies drift, and the half that is not updated goes quiet rather than
+/// red — it simply stops opening the section that was added.
+const SECTIONS: [&str; 6] = [
+    "Whitelist",
+    "Admission",
+    "Names",
+    "Relay peers",
+    "Audit and status",
+    "Answers",
+];
+
 #[test]
 fn an_answer_does_not_make_the_console_wider_than_the_phone() {
     const PHONE: f32 = 360.0;
@@ -430,6 +445,25 @@ fn an_answer_does_not_make_the_console_wider_than_the_phone() {
     assert!(
         width <= PHONE + 1.0,
         "an answer makes the console {width} points wide in a {PHONE}-point pane"
+    );
+
+    // **And with its sections open**, which on a phone they are not by
+    // default. Shut, this measures a page of six headings — nearly empty,
+    // and a width that cannot say anything about the fields and button rows
+    // inside. `sigil-chat` had exactly this: its route-width test passed
+    // while `Route::Settings` drew 469 points, because its fixture left that
+    // route with almost nothing on it. This one comes out at 344 either way;
+    // the point is that it is now asked.
+    for area in SECTIONS {
+        h.get_by_label(area).click();
+        h.run();
+    }
+    h.run();
+    let opened = drawn.get();
+    assert!(
+        opened <= PHONE + 1.0,
+        "with every section open the console is {opened} points wide in a \
+         {PHONE}-point pane"
     );
 }
 
@@ -583,14 +617,7 @@ fn nothing_in_the_console_is_out_of_reach_on_a_phone() {
         // which leaves nothing for the sweep below to prove. What this
         // test is about is the console at its longest: every area open,
         // and still nothing out of reach.
-        for area in [
-            "Whitelist",
-            "Admission",
-            "Names",
-            "Relay peers",
-            "Audit and status",
-            "Answers",
-        ] {
+        for area in SECTIONS {
             h.get_by_label(area).click();
             h.run();
         }
