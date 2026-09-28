@@ -6363,22 +6363,29 @@ impl ChatApp {
         ui.horizontal(|ui| {
             sigil_ui::avatar(ui, &key, None, tokens::AVATAR_SM);
             ui.add_space(tokens::SPACING_SM);
-            ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&key).monospace())
-                        .wrap()
-                        .selectable(true),
-                );
-                ui.colored_label(
-                    theme.text_muted,
-                    egui::RichText::new(format!(
-                        "{} · {}",
-                        sigil_ui::brief(item.at, self.now()),
-                        sigil_ui::human(item.bytes.into())
-                    ))
-                    .small(),
-                );
-            });
+            // **The sender is named once, in the heading.** This drew
+            // the whole key under the mark, which wrapped wherever the line
+            // ran out -- `…6o3LH` then `HuDzjfcY`, a key split in the
+            // middle with nothing to say so. Shortening it put the same
+            // string on the screen twice, once here and once in the bar
+            // above. So the heading keeps the name, and what is left here
+            // is what the heading cannot carry: when it arrived, how big it
+            // is, and the way to take the key itself.
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!(
+                    "{} · {}",
+                    sigil_ui::brief(item.at, self.now()),
+                    sigil_ui::human(item.bytes.into())
+                ))
+                .small(),
+            );
+            if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy the sender's key")
+                .on_hover_text(format!("{key}\nwho the exchange saw send it"))
+                .clicked()
+            {
+                ui.ctx().copy_text(key.clone());
+            }
         });
         ui.add_space(tokens::SPACING_SM);
         ui.separator();

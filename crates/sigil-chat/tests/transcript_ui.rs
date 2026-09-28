@@ -11546,6 +11546,22 @@ fn phone_chats_loading() {
     h.snapshot("phone_chats_loading");
 }
 
+/// One waiting message, open: the screen a row in the mailbox leads to.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_mail_message() {
+    let (mut h, _, _) = harness_phone_measured(
+        a_mailbox(),
+        sigil_chat::Route::MailItem(2, PubKey::new([5u8; 32])),
+    );
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    nothing_runs_off_the_edge(&h, "an open message");
+    h.snapshot("phone_mail_message");
+}
+
 /// The same pane once the wait has gone on long enough to mean something.
 #[test]
 #[ignore = "needs a renderer; run via scripts/snapshot-test"]
