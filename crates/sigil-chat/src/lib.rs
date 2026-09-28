@@ -1688,6 +1688,9 @@ struct Pane {
     /// the mailbox is opened, not per frame: it is a round trip, and the
     /// bar's corner is how to ask again.
     asked_mail: bool,
+    /// SIP-57: the timer being set for what this client sends here, in
+    /// minutes. Seeded from the channel's own when the card is opened.
+    timer_mins: u32,
     /// When this pane started waiting for a list it has not been sent, so a
     /// wait long enough to mean something can say so. Cleared the moment one
     /// arrives.
@@ -2044,6 +2047,7 @@ impl Default for Pane {
             faces: HashMap::new(),
             asked_my_home: false,
             asked_mail: false,
+            timer_mins: 0,
             waiting_since: None,
             settings_for: None,
             asking: false,
@@ -5840,6 +5844,9 @@ impl ChatApp {
         let pane = self.panes.entry(at.clone()).or_default();
         pane.channel_name = name;
         pane.channel_topic = topic;
+        // SIP-57, in minutes because seconds is not a unit anybody sets a
+        // disappearing message in.
+        pane.timer_mins = state.timer_secs / 60;
         pane.settings_for = Some(channel);
     }
 
@@ -11619,6 +11626,50 @@ impl ChatApp {
                     "Shortening this deletes anything already outside the window, \
                      immediately and for everybody.",
                 )
+                .small(),
+            );
+
+            // **SIP-57, and not the same thing as the window above it.** The
+            // retention window is the channel's policy: an admin sets it, it
+            // binds every holder, and narrowing it deletes what is already
+            // outside. This is a timer on what *this client* sends from now
+            // on, signed into each entry so the exchange, every copy and
+            // every reader drop it at the same moment. The library has had
+            // it and nothing offered it, which is why it says whose it is
+            // and when it starts rather than only how long.
+            ui.add_space(tokens::SPACING_MD);
+            if phone {
+                ui.label("What you send here disappears after");
+            }
+            ui.horizontal_wrapped(|ui| {
+                if !phone {
+                    ui.label("What you send here disappears after");
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.panes.entry(at.clone()).or_default().timer_mins)
+                        .range(0..=10080)
+                        .suffix(" min"),
+                );
+                if sigil_ui::apply_button(ui, "Set the timer").clicked() {
+                    let mins = self.pane(at).timer_mins;
+                    self.send_as(Some(at), Cmd::SetTimer(mins * 60));
+                }
+            });
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(if state.timer_secs == 0 {
+                    "Nothing you send here carries a timer. Nought is none.".to_string()
+                } else {
+                    // The same unit the control is in: a sentence that
+                    // converted to hours would describe a number nobody
+                    // typed.
+                    let mins = state.timer_secs / 60;
+                    format!(
+                        "What you send here is deleted after {mins} {}, everywhere at once. \
+                         What is already sent is unaffected.",
+                        if mins == 1 { "minute" } else { "minutes" }
+                    )
+                })
                 .small(),
             );
 

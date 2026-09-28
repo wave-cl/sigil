@@ -54,6 +54,7 @@ fn a_conversation() -> ChatState {
         me: Some(me()),
         prekeys: None,
         folds: 0,
+        timer_secs: 0,
         devices_known: true,
         join_trouble: None,
         not_admitted: None,
@@ -12559,6 +12560,61 @@ fn a_file_on_its_way_is_drawn_while_it_goes() {
         !above.is_empty(),
         "a file in flight is nowhere in the transcript: {}",
         text_of(&h)
+    );
+}
+
+/// **SIP-57's timer was in the library and nowhere in the interface.**
+///
+/// `Chat::set_timer` puts a timer on what this client sends in a channel,
+/// signed into each entry so the exchange, every copy and every reader
+/// delete at the same moment. `Chat::expire` — the receiving half — is
+/// already called inside `poll`, so timed messages *arriving* here have
+/// always vanished on time. Nothing could set one.
+///
+/// It is not the retention window beside it: that is the channel's policy,
+/// an admin's to set, binding every holder, and narrowing it deletes what is
+/// already outside. This binds only what this client writes from now on, so
+/// the card says whose it is and when it starts.
+#[test]
+fn a_timer_can_be_put_on_what_this_client_sends() {
+    let mut state = a_conversation();
+    state.timer_secs = 300;
+    let (mut h, app, _) = harness_phone_measured(state, sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("disappears after"),
+        "no way to put a timer on what you send: {said}"
+    );
+    assert!(
+        said.contains("deleted after 5 minutes"),
+        "it does not say what the timer currently is: {said}"
+    );
+
+    h.get_by_label("Set the timer").click();
+    h.run();
+    let sent = app.borrow().sent_for_test().join(" | ");
+    assert!(
+        sent.contains("SetTimer"),
+        "pressing it asked for nothing: {sent}"
+    );
+}
+
+/// And with none set it says so, rather than showing a bare nought.
+#[test]
+fn no_timer_says_there_is_none() {
+    let (mut h, _, _) = harness_phone_measured(a_conversation(), sigil_chat::Route::Settings);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Nought is none"),
+        "a conversation with no timer does not say so: {said}"
+    );
+    assert!(
+        !said.contains("deleted after"),
+        "it claims a timer nobody set: {said}"
     );
 }
 

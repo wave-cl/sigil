@@ -799,6 +799,14 @@ pub struct ChatState {
     pub reports_pending: usize,
     /// The open conversation's topic, when it has one.
     pub topic: String,
+    /// SIP-57: how long what *this client* sends in the open conversation
+    /// lasts, in seconds; 0 for no timer.
+    ///
+    /// Signed into each entry, so the exchange, every copy and every reader
+    /// delete at the same moment — which is what makes it different from the
+    /// retention window beside it, that being the channel's policy and an
+    /// admin's to set.
+    pub timer_secs: u32,
     /// SIP-43: where the open conversation lives, when that is not the
     /// exchange this session is connected to -- the origin's key and, when
     /// the operator recorded one, the domain it is reached by. Posts made
@@ -1737,6 +1745,11 @@ pub enum Cmd {
         secs: u32,
         max_entries: u32,
     },
+    /// SIP-57: put a timer on what this client sends here, in seconds; 0 for
+    /// none. Not the retention window: that is the channel's policy, set by
+    /// an admin and binding every holder, where this binds only what this
+    /// client writes from now on.
+    SetTimer(u32),
 
     // ---- doing things to a message -------------------------------------
     /// Add or take back an emoji. Keyed on `(account, target, emoji)` by the
@@ -3831,6 +3844,12 @@ fn acting_as(chat: &Chat, state: &watch::Sender<ChatState>, me: &mut PubKey) -> 
 /// on launch was a window with nothing to draw until the handshake).
 pub(crate) trait Local {
     fn store(&self) -> &Store;
+    /// SIP-57: the timer this client puts on what it sends in `channel`,
+    /// in seconds; 0 for none.
+    ///
+    /// **No default here.** A trait method with one is a method a forwarding
+    /// impl keeps by forgetting, which has bitten this codebase twice.
+    fn timer(&self, channel: &[u8; 32]) -> u32;
     fn display_name(&self, account: &PubKey) -> Option<String>;
     fn title_of(&self, account: &PubKey) -> Option<String>;
     /// The picture an account published, as published (SIP-21 sends it
@@ -3854,6 +3873,9 @@ pub(crate) trait Local {
 impl Local for Chat {
     fn store(&self) -> &Store {
         Chat::store(self)
+    }
+    fn timer(&self, channel: &[u8; 32]) -> u32 {
+        Chat::timer(self, channel)
     }
     fn display_name(&self, account: &PubKey) -> Option<String> {
         Chat::display_name(self, account)
@@ -3906,6 +3928,10 @@ struct Offline<'a> {
 impl Local for Offline<'_> {
     fn store(&self) -> &Store {
         self.store
+    }
+    /// Nothing is sent with no session, so nothing carries a timer.
+    fn timer(&self, _channel: &[u8; 32]) -> u32 {
+        0
     }
     fn display_name(&self, account: &PubKey) -> Option<String> {
         let (name, _, _) = self.store.profile(account).ok().flatten()?;
@@ -6914,6 +6940,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(prekeys, desk.prekeys);
         set!(folds, desk.folds);
         set!(topic, topic);
+        set!(timer_secs, open.map(|(c, _)| chat.timer(&c)).unwrap_or(0));
         set!(home, home);
         set!(ringing, ringing);
         set!(cross_ring, cross_ring);
@@ -8968,6 +8995,21 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     false
                 }
             };
+        }
+        Cmd::SetTimer(secs) => {
+            let Some(channel) = desk.open else { return };
+            chat.set_timer(&channel, secs);
+            desk.dirty.insert(channel);
+            note(
+                state,
+                if secs == 0 {
+                    "What you send here from now on has no timer.".into()
+                } else {
+                    "Set. What you send here from now on carries a timer; what is already \
+                     sent does not."
+                        .to_string()
+                },
+            );
         }
         Cmd::SetRetention { secs, max_entries } => {
             let Some(channel) = desk.open else { return };
