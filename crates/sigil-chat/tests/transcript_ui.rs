@@ -1297,6 +1297,25 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
     }
 }
 
+/// A conversation with every notice it can carry, and a message on a timer:
+/// the longest prose this app draws, and none of it in the ordinary
+/// fixtures.
+fn a_conversation_in_trouble() -> ChatState {
+    let mut state = a_long_conversation();
+    // SIP-34, the destructive line at the top of the notice.
+    state.trouble_with.forked = true;
+    // SIP-43's chain disagreement, the warning line under it.
+    state.trouble_with.chain_apart = true;
+    // SIP-17's stranded member, which puts a count in a sentence.
+    state.trouble_with.no_key = Some(4);
+    state.trouble_with.forged = 2;
+    // SIP-57: a message that says when it goes.
+    if let Some(line) = state.lines.first_mut() {
+        line.expires_at = Some(NOW + 240);
+    }
+    state
+}
+
 /// **Nothing runs off the edge when the reader turns the text up.**
 ///
 /// Android's font-size slider ends at 1.3 and its accessibility one goes to
@@ -1323,6 +1342,19 @@ fn no_widget_runs_off_a_phone_when_the_text_is_turned_up() {
             ("ordinary names", a_conversation as fn() -> ChatState),
             ("long names", a_long_conversation as fn() -> ChatState),
             ("with a conversation open", the_room as fn() -> ChatState),
+            // **The states the other three do not reach.** Every fixture
+            // above is a healthy conversation, so the sentences this app
+            // says when something is *wrong* — the longest sentences it has
+            // — had never been measured at any text size but its own. Each
+            // of these was added to the interface today and none of them
+            // was covered by the three lists above, which is the same trap
+            // this test's neighbours record: a screen measured in the one
+            // state where it has nothing on it passes for the reason
+            // nothing is wrong.
+            (
+                "something to say about it",
+                a_conversation_in_trouble as fn() -> ChatState,
+            ),
         ] {
             for route in [
                 sigil_chat::Route::Conversations,
