@@ -12262,14 +12262,22 @@ fn the_viewer_hands_a_picture_on() {
 #[test]
 fn a_tap_on_a_picture_leaves_the_phones_viewer() {
     let mut h = phone_pictures(1);
-    h.run();
-    h.run();
+    // **Let the tile decode first**, as the two snapshot tests next to it
+    // already do. `Harness::run` panics when the ui is still asking to
+    // repaint after four passes, and egui's loader thread asks for one on
+    // every pass until the texture is there -- so on a machine slower than
+    // this one the `run` after the press aborted the test with "exceeded
+    // max_steps (4)", the repaint cause naming `egui_extras`' image loader.
+    // Seen on CI, on macOS, while Linux passed the same commit.
+    let_pictures_arrive(&mut h);
     let tile = h.get_by_label_contains("[image 0").rect();
+    // `run_steps`, not `run`, around the gesture for the same reason: the
+    // viewer's own picture is loaded when it opens, and a fixed number of
+    // passes cannot be surprised by that.
     finger_down(&mut h, tile.center());
-    h.run();
+    h.run_steps(1);
     finger_up(&mut h, tile.center());
-    h.run();
-    h.run();
+    h.run_steps(4);
     assert!(
         h.query_by_label("Save…").is_some(),
         "the tile did not open the viewer: {}",
@@ -12278,10 +12286,9 @@ fn a_tap_on_a_picture_leaves_the_phones_viewer() {
 
     let middle = egui::pos2(PHONE_WIDTH / 2.0, PHONE_HEIGHT / 2.0);
     finger_down(&mut h, middle);
-    h.run();
+    h.run_steps(1);
     finger_up(&mut h, middle);
-    h.run();
-    h.run();
+    h.run_steps(4);
     assert!(
         h.query_by_label("Save…").is_none(),
         "a tap on the picture did not leave the viewer: {}",
