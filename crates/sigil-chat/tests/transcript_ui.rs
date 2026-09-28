@@ -15652,6 +15652,33 @@ fn the_backup_quota_is_a_size_not_a_byte_count() {
 /// added this month. `every_dialog_fits_a_phones_screen` measures all ten
 /// now, but a dialog that fits is not a dialog that reads, and both defects
 /// found by this month's audit were found by looking at one.
+/// **"Nobody has vouched" is not "we have not asked", and only one of them
+/// had ever been drawn.**
+///
+/// SIP-27: the verify dialog reads back what others have said at the
+/// exchange about this key. The line is deliberately absent while the
+/// question is in flight — an empty answer must not be drawn for one nobody
+/// has answered yet — so `attested` holding an empty list for somebody is a
+/// different screen from `attested` holding nothing for them, and it is the
+/// one that says a real thing: the exchange answered, and nobody has
+/// compared these words.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_dialog_verify_nobody_vouched() {
+    let mut state = the_room();
+    state.attested.insert(them(), Vec::new());
+    let (mut h, app, _) = harness_phone_measured(state, sigil_chat::Route::Members);
+    h.run();
+    app.borrow_mut()
+        .open_dialog_for_test((me(), String::new()), "verify", them());
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run_steps(2);
+    nothing_runs_off_the_edge(&h, "the verify dialog with nobody vouching");
+    h.snapshot("phone_dialog_verify_nobody_vouched");
+}
+
 fn photograph_dialog(which: &str, name: &str) {
     let (mut h, app, _) = harness_phone_measured(the_room(), sigil_chat::Route::Members);
     h.run();
