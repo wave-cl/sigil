@@ -424,6 +424,111 @@ fn with_phone(insets: sigil::Insets) -> Harness<'static> {
         })
 }
 
+/// The same phone, with the reader's text size turned up.
+fn with_phone_text_scale(insets: sigil::Insets, scale: f32, named: bool) -> Harness<'static> {
+    // **A view with a name of its own**, because that is the branch where
+    // the bar draws somebody else's words. Without it the bar says "Sigil"
+    // and the title path this is here to measure never runs: reverting the
+    // truncation that fixed it left this test green.
+    let apps: Vec<Box<dyn App>> = vec![
+        if named {
+            Box::new(Stub::view(
+                "Calls",
+                "A conversation with a very long name indeed",
+            )) as Box<dyn App>
+        } else {
+            Box::new(Stub::named("Calls", 0)) as Box<dyn App>
+        },
+        Box::new(Stub::named("Chat", 3)),
+    ];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            sigil::TextScale::install(&ctx, scale);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.set_insets(insets);
+            shell.ui(ui);
+        })
+}
+
+/// **The shell's own chrome fits a phone when the text is turned up.**
+///
+/// The app bar, and the menu the heading opens, are the shell's and not any
+/// app's -- so the guards in `sigil-chat`, `sigil-android` and `sigil-admin`
+/// all measure panes *inside* a bar none of them draws. The bar is where the
+/// title goes, and a title is the one thing on a phone that is somebody
+/// else's words.
+#[test]
+fn nothing_in_the_shells_chrome_runs_off_a_phone_when_the_text_is_turned_up() {
+    const PHONE: f64 = 360.0;
+    fn sideways(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<(String, f64, f64)>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box() {
+            out.push((name, b.x0 / ppp, b.x1 / ppp));
+        }
+        for c in node.children() {
+            sideways(c, ppp, out);
+        }
+    }
+
+    let mut over: Vec<String> = Vec::new();
+    for (scale, named) in [(1.3f32, false), (1.3, true), (2.0, false), (2.0, true)] {
+        let mut h = with_phone_text_scale(sigil::Insets::NONE, scale, named);
+        h.run();
+        // What the instrument is pointed at, so a pass cannot be vacuous.
+        let body = h.ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+        assert!(
+            (body - 15.0 * scale).abs() < 0.01,
+            "the text was not turned up: body is {body}, not {}",
+            15.0 * scale
+        );
+        // Shut, and then with the app menu open -- which is where the rows
+        // are, and a menu of rows is what `icon_item` draws.
+        // A named view owns the bar, and draws no menu to open.
+        for open in if named {
+            vec![false]
+        } else {
+            vec![false, true]
+        } {
+            if open {
+                h.get_by_label("Sigil").click();
+                h.run();
+            }
+            let mut seen = Vec::new();
+            sideways(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+            assert!(seen.len() > 3, "only {} widgets drew", seen.len());
+            let what = match (named, open) {
+                (true, _) => "on a named view",
+                (false, true) => "with the menu open",
+                (false, false) => "shut",
+            };
+            for (name, x0, x1) in seen {
+                if x1 - x0 > 0.0 && (x1 > PHONE + 1.0 || x0 < -1.0) {
+                    over.push(format!("at {scale}x {what}: {name:?} at {x0:.0}..{x1:.0}"));
+                }
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} widget(s) outside a {PHONE}-point screen:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
+}
+
 /// A phone's Back button closes whatever menu is open. winit hands it to
 /// egui as BrowserBack, and nothing looked at it, so it did nothing.
 #[test]
