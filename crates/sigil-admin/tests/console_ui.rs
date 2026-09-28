@@ -38,6 +38,16 @@ fn sized_measured(
     size: egui::Vec2,
     form: sigil::Form,
 ) -> (Harness<'static>, Drawn) {
+    sized_scaled(state, size, form, 1.0)
+}
+
+/// The same console, with the reader's text size turned up.
+fn sized_scaled(
+    state: AdminState,
+    size: egui::Vec2,
+    form: sigil::Form,
+    text_scale: f32,
+) -> (Harness<'static>, Drawn) {
     let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
     let width = drawn.clone();
     let mut app = AdminApp::new();
@@ -46,6 +56,7 @@ fn sized_measured(
     let h = Harness::builder().with_size(size).build_ui(move |ui| {
         let ctx = ui.ctx().clone();
         sigil::Form::install(&ctx, form);
+        sigil::TextScale::install(&ctx, text_scale);
         theme::install(&ctx, theme::light(), theme::dark());
         ctx.set_theme(egui::Theme::Dark);
         let t = sigil::ColorTheme::current(&ctx);
@@ -503,6 +514,86 @@ fn the_console_is_not_wider_than_the_phone() {
         width <= PHONE + 1.0,
         "the console draws {width} points wide in a {PHONE}-point pane"
     );
+}
+
+/// **Nor when the reader turns the text up.**
+///
+/// The console is on the phone -- `host.rs` gives the shell Chat, Exchange
+/// and Phone -- and it is the pane most likely to be a desktop's: rows of
+/// operations with their buttons beside them. Now that the phone honours
+/// `Configuration.fontScale`, those rows are drawn at up to twice the size
+/// they were measured at, and one row wider than the pane re-lays every row
+/// after it.
+#[test]
+fn the_console_is_not_wider_than_the_phone_when_the_text_is_turned_up() {
+    const PHONE: f32 = 360.0;
+    let mut over: Vec<String> = Vec::new();
+    for scale in [1.3f32, 2.0] {
+        // **An answer, and every section open** -- the state the unscaled
+        // test next door had to be corrected to measure. Shut, this is a
+        // page of six headings, and a width taken off six headings cannot
+        // say anything about the field and button rows inside them.
+        let (mut h, drawn) = sized_scaled(
+            answered(),
+            egui::vec2(PHONE, 804.0),
+            sigil::Form::Phone,
+            scale,
+        );
+        h.run();
+        h.run();
+        h.run();
+        for area in SECTIONS {
+            h.get_by_label(area).click();
+            h.run();
+        }
+        h.run();
+        // What the instrument is pointed at, so a pass cannot be vacuous.
+        let body = h.ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+        assert!(
+            (body - 15.0 * scale).abs() < 0.01,
+            "the text was not turned up: body is {body}, not {}",
+            15.0 * scale
+        );
+        let width = drawn.get();
+        assert!(width > 0.0, "the console drew nothing at {scale}x");
+        if width > PHONE + 1.0 {
+            over.push(format!(
+                "at {scale}x the console draws {width:.0} points wide"
+            ));
+        }
+        for (name, x0, x1) in sideways(&h) {
+            if x1 - x0 > 0.0 && (x1 > PHONE as f64 + 1.0 || x0 < -1.0) {
+                over.push(format!("at {scale}x {name:?} at {x0:.0}..{x1:.0}"));
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} fault(s) on a {PHONE}-point phone with the text turned up:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
+}
+
+/// Every widget's left and right edge, in points, with what it is called.
+fn sideways(h: &Harness<'static>) -> Vec<(String, f64, f64)> {
+    fn walk(node: egui_kittest::Node<'_>, ppp: f64, out: &mut Vec<(String, f64, f64)>) {
+        let n = node.accesskit_node();
+        let name = n
+            .label()
+            .map(|l| l.to_string())
+            .or_else(|| n.value().map(|v| v.to_string()))
+            .unwrap_or_else(|| format!("{:?}", n.role()));
+        if let Some(b) = n.bounding_box() {
+            out.push((name, b.x0 / ppp, b.x1 / ppp));
+        }
+        for c in node.children() {
+            walk(c, ppp, out);
+        }
+    }
+    let mut seen = Vec::new();
+    walk(h.root(), h.ctx.pixels_per_point() as f64, &mut seen);
+    seen
 }
 
 /// **A long answer does not push the console off the screen.**

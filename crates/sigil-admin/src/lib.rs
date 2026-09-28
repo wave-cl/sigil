@@ -255,6 +255,54 @@ fn key_trouble(typed: &str) -> String {
     )
 }
 
+/// An answer, wrapped so that a token with nowhere to break cannot widen the
+/// pane.
+///
+/// An answer is JSON full of base58 keys: forty-five characters with no
+/// space in them. egui wraps at word boundaries, so such a token overflows
+/// the wrap width instead of breaking -- and a ui grows to what is drawn in
+/// it, so the next pass wraps at the grown width and the token fits. The
+/// console settled at 434 points inside a 360-point phone, centred, hanging
+/// off *both* edges: the key lines from -62, and the headings with them.
+///
+/// It only showed once the phone began honouring the reader's text size,
+/// because at sigil's own size the longest of these lines happens to fit.
+/// `break_anywhere` is the only wrapping that bounds data, and bounded, the
+/// width stops feeding itself.
+fn broken_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) -> egui::Response {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: ui.available_width(),
+        break_anywhere: true,
+        ..Default::default()
+    };
+    ui.add(egui::Label::new(job).selectable(true))
+}
+
+/// An exchange's reply: JSON, in monospace.
+fn data_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let size = egui::TextStyle::Small.resolve(ui.style()).size;
+    let color = ui.visuals().text_color();
+    broken_label(
+        ui,
+        text,
+        egui::FontId::new(size, egui::FontFamily::Monospace),
+        color,
+    )
+}
+
 impl App for AdminApp {
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
@@ -400,7 +448,14 @@ impl App for AdminApp {
 /// Enough for a short reply whole -- a status, a refusal, a handful of keys
 /// -- without a bar, and far short of pushing the console it is pinned above
 /// off the screen. The rest of any answer is in Answers, at the foot.
-const LAST_ANSWER: f32 = 160.0;
+///
+/// **A line less than it was**, because the header above it took one: what
+/// was asked moved off the "Last answer" row onto its own, so that the
+/// domain in it could break. The bound is on the preview, and what the
+/// preview costs the console is the header and the body together --
+/// `a_long_answer_does_not_push_the_console_off_the_screen` measures that
+/// total and caught the four points the split added.
+const LAST_ANSWER: f32 = 140.0;
 
 impl AdminApp {
     /// Who we are signing as, and what we are signing at.
@@ -770,17 +825,24 @@ impl AdminApp {
                 // the whole pane out past its edge and the reply under it
                 // with it. `set_width` above sets the minimum, not a cap on
                 // what children draw.
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(theme.text_muted, egui::RichText::new("Last answer").small());
-                    ui.colored_label(
-                        if answer.refused {
-                            theme.destructive
-                        } else {
-                            theme.text_secondary
-                        },
-                        &answer.asked,
-                    );
-                });
+                ui.colored_label(theme.text_muted, egui::RichText::new("Last answer").small());
+                // **And what was asked on its own line, breaking anywhere.**
+                // `horizontal_wrapped` wraps between words, and this one has
+                // no space where it needs one: the domain in it --
+                // `an-exchange-with-a-long-name.example.org` -- is a single
+                // 381-point word on a 320-point line, so the row grew to fit
+                // it and took the console with it.
+                let size = egui::TextStyle::Body.resolve(ui.style()).size;
+                broken_label(
+                    ui,
+                    &answer.asked,
+                    egui::FontId::new(size, egui::FontFamily::Proportional),
+                    if answer.refused {
+                        theme.destructive
+                    } else {
+                        theme.text_secondary
+                    },
+                );
                 // **Bounded, and scrolled inside that bound.** This is a
                 // *preview*, pinned above the console because a reply below
                 // the fold reads as a button that did nothing -- and with no
@@ -796,10 +858,7 @@ impl AdminApp {
                     .max_height(LAST_ANSWER)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&answer.said).monospace().small())
-                                .selectable(true),
-                        );
+                        data_label(ui, &answer.said);
                     });
             });
         ui.add_space(tokens::SPACING_SM);
@@ -808,10 +867,7 @@ impl AdminApp {
     fn answers_ui(&self, state: &AdminState, ui: &mut egui::Ui, theme: &ColorTheme) {
         if let Some(status) = &state.status {
             ui.collapsing("status", |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(status).monospace().small())
-                        .selectable(true),
-                );
+                data_label(ui, status);
             });
         }
         if state.answers.is_empty() {
@@ -827,10 +883,7 @@ impl AdminApp {
                 },
                 &answer.asked,
             );
-            ui.add(
-                egui::Label::new(egui::RichText::new(&answer.said).monospace().small())
-                    .selectable(true),
-            );
+            data_label(ui, &answer.said);
             ui.separator();
         }
     }
