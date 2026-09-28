@@ -11173,7 +11173,12 @@ impl ChatApp {
                     "the exchange's key, in base58",
                     width,
                 );
-                ui.horizontal(|ui| {
+                // **Wrapped.** Two worded buttons are wider than a narrow
+                // screen once the reader's text size is up -- 17 points over
+                // on a 320-point pane, which then re-laid Mint a new key and
+                // Leave below them. A rigid row is the wrong shape for two
+                // buttons whose width is their words.
+                ui.horizontal_wrapped(|ui| {
                     let typed = self.pane(at).replica_key.trim().to_string();
                     let key: Option<PubKey> = typed.parse().ok();
                     ui.add_enabled_ui(key.is_some(), |ui| {
