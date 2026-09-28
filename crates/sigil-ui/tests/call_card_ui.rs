@@ -355,6 +355,75 @@ fn a_call_fits_a_phone_lying_down() {
     holds("a call lying down", &plain(), egui::vec2(TALL, PHONE));
 }
 
+/// **A call's controls are bigger than a thumb's minimum**, and each says
+/// what it is.
+///
+/// `CONTROL` is 56 points and its comment says why: these are pressed
+/// against an ear, without looking, and one of them ends the call — so they
+/// are deliberately larger than `BUTTON_LG`, which is the minimum for a
+/// control you can see while you press it. Nothing asserted that. The
+/// constant could go back to a thumb's minimum, or these could become
+/// ordinary named controls, and every test would stay green.
+///
+/// The word under each is the other half: a disc with a glyph on it is a
+/// guess, and this is not a screen to guess on.
+#[test]
+fn the_calls_controls_are_larger_than_a_thumbs_minimum_and_named() {
+    // **The disc, off the paint list, not the widget's rect.** The rect is
+    // `CONTROL.max(64.0)` wide — room for the word under the disc — so it
+    // stays 64 however small `CONTROL` gets, and an assertion on it passes
+    // with the discs back at a thumb's minimum. Checked: it did.
+    fn discs(h: &mut Harness<'static>) -> Vec<(egui::Pos2, f32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Pos2, f32)>) {
+            match shape {
+                egui::Shape::Circle(c) => out.push((c.center, c.radius * 2.0)),
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        h.run();
+        let mut out = Vec::new();
+        for shape in &h.output().shapes {
+            walk(&shape.shape, &mut out);
+        }
+        out
+    }
+
+    let (_, controls) = shown(&plain(), egui::vec2(PHONE, TALL));
+    assert!(
+        !controls.is_empty(),
+        "no controls were drawn, so this proves nothing"
+    );
+    let (mut h, _) = built(&plain(), egui::vec2(PHONE, TALL), egui::Theme::Dark);
+    let round = discs(&mut h);
+    // **The circle inside each control**, not the widest on the card: the
+    // avatar is a circle too, and at 80 points it answered this question for
+    // the controls and said yes however small they were. Checked: it did.
+    for (word, rect) in &controls {
+        let disc = round
+            .iter()
+            .filter(|(c, _)| rect.contains(*c))
+            .map(|(_, d)| *d)
+            .fold(0.0f32, f32::max);
+        assert!(
+            disc > sigil::tokens::BUTTON_LG,
+            "{word:?}'s disc is {disc:.0} points across, no more than the \
+             thumb's minimum of {} — these are pressed against an ear, \
+             without looking, and one of them ends the call",
+            sigil::tokens::BUTTON_LG
+        );
+    }
+    // And the one that ends it is among them, named.
+    assert!(
+        controls.iter().any(|(w, _)| w == "Hang up"),
+        "the way out is not one of the controls: {controls:?}"
+    );
+}
+
 #[test]
 fn a_call_without_routing_draws_no_routing_control() {
     let (_, controls) = shown(
