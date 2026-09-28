@@ -11249,6 +11249,94 @@ fn a_member_row_names_somebody_and_the_badge_sits_beside_them() {
     );
 }
 
+/// **The first screen a new account sees**, and what is offered on it.
+///
+/// Neither empty state had ever been rendered: not "Loading your chats…"
+/// and not "No conversations yet." The list has snapshots for one
+/// conversation, many, and one with a picture — and none for none.
+///
+/// What the picture showed is a magnifier on a client that holds nothing.
+/// Search reads the messages this client has; with no conversations it can
+/// only answer "Nothing here matched." sigil is careful about this
+/// everywhere else — the reseal row is "offered only when there is somewhere
+/// to send it", Give it up appears only where there is a name to give up —
+/// and this is the one screen where the rule matters most, because it is the
+/// first one anybody meets.
+///
+/// The compose button is right and needs no change: on an empty list the
+/// floating one stands down and the named button in the body is the only way
+/// in, so there is one control and not two.
+#[test]
+fn nothing_to_find_is_not_offered_a_way_to_find_it() {
+    let empty = || {
+        let mut state = a_conversation();
+        state.conversations.clear();
+        state.lines.clear();
+        state.open = None;
+        state.synced = true;
+        state
+    };
+    let mut h = harness_phone(empty(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let said = labels(&h);
+    assert!(
+        said.iter().any(|l| l == "Write to somebody…"),
+        "the one way in is not offered: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l == "Find a chat"),
+        "a client holding nothing offers to search it: {said:?}"
+    );
+
+    // And it comes back the moment there is something to search. The list
+    // itself, not a conversation: with one open, a phone's bar is that
+    // conversation's and there is no heading to hold a magnifier either way.
+    let mut with = a_conversation();
+    with.open = None;
+    let mut h = harness_phone(with, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    assert!(
+        labels(&h).iter().any(|l| l == "Find a chat"),
+        "search is withheld from a client that has conversations: {:?}",
+        labels(&h)
+    );
+}
+
+/// The list with nothing in it, and the list before it knows.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_chats_empty() {
+    let mut state = a_conversation();
+    state.conversations.clear();
+    state.lines.clear();
+    state.open = None;
+    state.synced = true;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_chats_empty");
+}
+
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_chats_loading() {
+    let mut state = a_conversation();
+    state.conversations.clear();
+    state.lines.clear();
+    state.open = None;
+    state.synced = false;
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_chats_loading");
+}
+
 /// **The compose button, in what the system leaves.**
 ///
 /// `a_messages_menu_stays_out_of_the_systems_own_row` below says the rule

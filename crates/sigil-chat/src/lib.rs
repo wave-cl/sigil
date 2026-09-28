@@ -7053,8 +7053,17 @@ impl ChatApp {
                     // opens on an empty box with the finger already in it:
                     // a search is a thing one goes to do, not a row the
                     // list carries about in case.
-                    if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Search, "Find a chat")
-                        .clicked()
+                    // **Only where there is something to find.** Search
+                    // reads the messages this client holds; with no
+                    // conversations it can answer nothing but "Nothing here
+                    // matched." The same rule the reseal row and Give it up
+                    // follow: a control that cannot succeed is offered
+                    // nowhere, so it is never a button that does nothing.
+                    // This is the first screen a new account sees, and it
+                    // had a magnifier on it.
+                    if !state.conversations.is_empty()
+                        && sigil_ui::icon_button_named(ui, sigil_ui::Icon::Search, "Find a chat")
+                            .clicked()
                     {
                         let pane = self.panes.entry(at.clone()).or_default();
                         pane.searching.clear();
