@@ -34,6 +34,18 @@ const URL: &str =
 
 /// Draw `add` in a phone-wide pane and answer how wide it came out.
 fn drawn(add: impl Fn(&mut egui::Ui) + 'static) -> f32 {
+    drawn_at(add, 1.0)
+}
+
+/// The same, at the reader's text size.
+///
+/// **The axis this file was missing.** Every case here was drawn at sigil's
+/// own size and no other, and the phone honours `Configuration.fontScale` —
+/// so a row that fits is a row that fits *once*, and the reader who most
+/// needs the words bigger is the one the layout was never checked for.
+/// `sigil-ui`'s call card had no scaled case either and overflowed a
+/// 360-point pane by 94 points at 1.3x.
+fn drawn_at(add: impl Fn(&mut egui::Ui) + 'static, scale: f32) -> f32 {
     let width = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
     let out = width.clone();
     let mut h = Harness::builder()
@@ -41,6 +53,7 @@ fn drawn(add: impl Fn(&mut egui::Ui) + 'static) -> f32 {
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             sigil::Form::install(&ctx, sigil::Form::Phone);
+            sigil::TextScale::install(&ctx, scale);
             theme::install(&ctx, theme::light(), theme::dark());
             ctx.set_theme(egui::Theme::Dark);
             let t = sigil::ColorTheme::current(&ctx);
@@ -61,96 +74,102 @@ fn drawn(add: impl Fn(&mut egui::Ui) + 'static) -> f32 {
     width.get()
 }
 
-/// What every case here asserts.
-fn fits(what: &str, width: f32) {
+/// What every case here asserts, at every size the reader can ask for.
+///
+/// **The sizes are the reader's, not a sample.** 1.0 is sigil's own; 1.3 is
+/// where the phone's slider sits one notch up and where the chat app's panes
+/// were once 45 widgets off the screen; 2.0 is the top of `TextScale`'s
+/// range, and a row that survives it survives anything between.
+const SIZES: [f32; 3] = [1.0, 1.3, 2.0];
+
+fn fits_at_every_size(what: &str, add: impl Fn(&mut egui::Ui) + Clone + 'static) {
+    let mut over: Vec<String> = Vec::new();
+    for scale in SIZES {
+        let width = drawn_at(add.clone(), scale);
+        assert!(
+            width > 0.0,
+            "{what} drew nothing at {scale}x, so this proves nothing about it"
+        );
+        // A point of slack for the rounding egui does on a margin; the faults
+        // this catches were tens of points, not fractions.
+        if width > PHONE + 1.0 {
+            over.push(format!("{width:.0} points at {scale}x"));
+        }
+    }
     assert!(
-        width > 0.0,
-        "{what} drew nothing, so this proves nothing about it"
-    );
-    // A point of slack for the rounding egui does on a margin; the faults
-    // this catches were tens of points, not fractions.
-    assert!(
-        width <= PHONE + 1.0,
-        "{what} draws {width} points wide in a {PHONE}-point pane"
+        over.is_empty(),
+        "{what} runs off a {PHONE}-point pane: {}",
+        over.join(", ")
     );
 }
 
 #[test]
 fn a_conversation_row_with_a_long_name_fits() {
-    fits(
-        "a conversation row",
-        drawn(|ui| {
-            sigil_ui::conversation_row(
-                ui,
-                &sigil_ui::ConversationRow {
-                    id: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
-                    label: LONG_NAME,
-                    preview: URL,
-                    at: "11:59",
-                    unread: 128,
-                    public: Some(true),
-                    group: true,
-                    waiting: false,
-                    typing: false,
-                    mentioned: true,
-                    muted: true,
-                    presence: None,
-                    verified: true,
-                    picture: None,
-                },
-                false,
-            );
-        }),
-    );
+    fits_at_every_size("a conversation row", |ui| {
+        sigil_ui::conversation_row(
+            ui,
+            &sigil_ui::ConversationRow {
+                id: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+                label: LONG_NAME,
+                preview: URL,
+                at: "11:59",
+                unread: 128,
+                public: Some(true),
+                group: true,
+                waiting: false,
+                typing: false,
+                mentioned: true,
+                muted: true,
+                presence: None,
+                verified: true,
+                picture: None,
+            },
+            false,
+        );
+    });
 }
 
 #[test]
 fn a_search_hit_with_a_long_name_fits() {
-    fits(
-        "a search hit",
-        drawn(|ui| {
-            sigil_ui::search_hit(
-                ui,
-                &sigil_ui::SearchHit {
-                    id: "SearchHitOnAPhone",
-                    picture: None,
-                    label: LONG_NAME,
-                    who: LONG_NAME,
-                    text: URL,
-                    // The match, somewhere in the middle of the unbroken word.
-                    found: 30..37,
-                    at: "Thu",
-                },
-                false,
-            );
-        }),
-    );
+    fits_at_every_size("a search hit", |ui| {
+        sigil_ui::search_hit(
+            ui,
+            &sigil_ui::SearchHit {
+                id: "SearchHitOnAPhone",
+                picture: None,
+                label: LONG_NAME,
+                who: LONG_NAME,
+                text: URL,
+                // The match, somewhere in the middle of the unbroken word.
+                found: 30..37,
+                at: "Thu",
+            },
+            false,
+        );
+    });
 }
 
 #[test]
 fn a_roster_row_with_a_long_detail_fits() {
-    fits(
-        "a roster",
-        drawn(|ui| {
-            sigil_ui::roster(
-                ui,
-                &[sigil_ui::Row {
-                    key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9".to_string(),
-                    // A name as long as anybody types, beside a key and a
-                    // meter: the row now carries three things, and this is the
-                    // case that says they still fit a phone.
-                    named: Some(LONG_NAME.to_string()),
-                    picture: None,
-                    speaking: true,
-                    level: 0.7,
-                    detail: "2.1% lost, 180 ms of buffer, concealing 3 frames in 100".to_string(),
-                }],
-                2,
-                // Open: the long detail line is the whole point of this case.
-                true,
-            );
-        }),
-    );
+    fits_at_every_size("a roster", |ui| {
+        sigil_ui::roster(
+            ui,
+            &[sigil_ui::Row {
+                key: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9".to_string(),
+                // A name as long as anybody types, beside a key and a
+                // meter: the row now carries three things, and this is the
+                // case that says they still fit a phone.
+                named: Some(LONG_NAME.to_string()),
+                picture: None,
+                speaking: true,
+                level: 0.7,
+                detail: "2.1% lost, 180 ms of buffer, concealing 3 frames in 100".to_string(),
+            }],
+            2,
+            // Open: the long detail line is the whole point of this case.
+            true,
+        );
+    });
 }
 
 /// The instrument can say no.
@@ -172,5 +191,37 @@ fn the_measurement_notices_something_too_wide() {
         width > PHONE,
         "six long names in a row that never wraps measured {width} in a \
          {PHONE}-point pane: the measurement is not seeing what is drawn"
+    );
+}
+
+/// **And the size axis bites.**
+///
+/// The cases above run three times, and three green results mean nothing
+/// unless a row that fits at sigil's own size and not at the reader's is
+/// caught. So: a word with no break in it, short enough for a phone at 1.0
+/// and too long at 2.0 — the shape wrapping cannot help, drawn at a size the
+/// reader chooses.
+///
+/// This is the fault the call card had, in miniature: it fitted when it was
+/// measured and not when it was read.
+#[test]
+fn the_measurement_notices_something_that_only_overflows_when_the_text_grows() {
+    // Forty characters, no spaces: at sigil's own size that is most of a
+    // phone's width, and at twice it is nearly two phones.
+    const UNBREAKABLE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let show = |ui: &mut egui::Ui| {
+        ui.add(egui::Label::new(UNBREAKABLE).wrap_mode(egui::TextWrapMode::Extend));
+    };
+    let small = drawn_at(show, 1.0);
+    let large = drawn_at(show, 2.0);
+    assert!(
+        small <= PHONE + 1.0,
+        "the control does not fit at sigil's own size either ({small} points), \
+         so it says nothing about the size axis"
+    );
+    assert!(
+        large > PHONE + 1.0,
+        "a row that only overflows when the text is turned up went unnoticed: \
+         {large} points at 2x in a {PHONE}-point pane"
     );
 }
