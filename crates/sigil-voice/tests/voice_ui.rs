@@ -44,6 +44,29 @@ fn sized_measured(
     size: egui::Vec2,
     form: sigil::Form,
 ) -> (Harness<'static>, Drawn) {
+    sized_scaled(account, dark, size, form, 1.0)
+}
+
+/// The same, at the reader's text size.
+///
+/// **The axis this pane had none of.** A phone honours
+/// `Configuration.fontScale`, and a row that fits is a row that fits *once*:
+/// `sigil-ui`'s call card had no scaled case either and overflowed a
+/// 360-point pane by 94 points at 1.3x while every picture of it looked
+/// right.
+///
+/// Applied **after the theme and every frame**, because `theme::install`
+/// writes the text styles from scratch each pass — a scale set once outside
+/// this closure lasts until the first repaint and then quietly stops being
+/// true. That is `sigil-chat`'s harness's rule, and it is the difference
+/// between measuring the size somebody chose and measuring sigil's own.
+fn sized_scaled(
+    account: Account,
+    dark: bool,
+    size: egui::Vec2,
+    form: sigil::Form,
+    scale: f32,
+) -> (Harness<'static>, Drawn) {
     let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
     let width = drawn.clone();
     let mut app = VoiceApp::new();
@@ -57,6 +80,13 @@ fn sized_measured(
         } else {
             egui::Theme::Light
         });
+        if scale != 1.0 {
+            ctx.all_styles_mut(|style| {
+                for font in style.text_styles.values_mut() {
+                    font.size *= scale;
+                }
+            });
+        }
         // A panel, as the shell gives it: filling the window, with the
         // shell's own margin. Rendering straight into the root Ui would
         // snapshot a layout nobody ever sees.
@@ -303,19 +333,45 @@ fn voice_phone() {
 #[test]
 fn the_calls_pane_is_not_wider_than_the_phone() {
     const PHONE: f32 = 360.0;
-    let (mut h, drawn) = sized_measured(
-        Account::unlocked_for_test([1u8; 32]),
-        true,
-        egui::vec2(PHONE, 804.0),
-        sigil::Form::Phone,
-    );
-    h.run();
-    h.run();
-    let width = drawn.get();
-    assert!(width > 0.0, "Calls drew nothing, so this proves nothing");
+    // 1.0 is sigil's own size; 1.3 is one notch up the phone's own slider,
+    // and where the chat app once had 45 widgets off the screen; 2.0 is the
+    // top of `TextScale`'s range, so a pane that survives it survives
+    // anything between. A failure names the size, because "too wide" and
+    // "too wide when you turn the text up" are different faults.
+    let mut over: Vec<String> = Vec::new();
+    for scale in [1.0f32, 1.3, 2.0] {
+        let (mut h, drawn) = sized_scaled(
+            Account::unlocked_for_test([1u8; 32]),
+            true,
+            egui::vec2(PHONE, 804.0),
+            sigil::Form::Phone,
+            scale,
+        );
+        h.run();
+        h.run();
+        // **The instrument says what it is pointed at.** A scale that never
+        // reached the style would leave every size passing for the reason
+        // 1.0 passes, and say so nowhere.
+        let body = h.ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+        assert!(
+            (body - 15.0 * scale).abs() < 0.01,
+            "the text was not turned up: body is {body} points, not {} — so \
+             this proves nothing",
+            15.0 * scale
+        );
+        let width = drawn.get();
+        assert!(
+            width > 0.0,
+            "Calls drew nothing at {scale}x, so this proves nothing"
+        );
+        if width > PHONE + 1.0 {
+            over.push(format!("{width:.0} points at {scale}x"));
+        }
+    }
     assert!(
-        width <= PHONE + 1.0,
-        "Calls draws {width} points wide in a {PHONE}-point pane"
+        over.is_empty(),
+        "Calls runs off a {PHONE}-point pane: {}",
+        over.join(", ")
     );
 }
 
