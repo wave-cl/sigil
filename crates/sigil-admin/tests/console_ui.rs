@@ -863,3 +863,34 @@ fn the_key_box_is_drawn_in_every_section_that_reads_it() {
         text_of(&h)
     );
 }
+
+/// **A picture of the console with its sections open**, which on a phone
+/// they never are by default.
+///
+/// `the_console_is_not_wider_than_the_phone` opens them and measures; that
+/// number says nothing runs off the edge and nothing at all about whether
+/// the rows inside read. Measured is not rendered, and the whole reason this
+/// pane is worth a picture is in the test above: its rows were built at
+/// widths chosen against a 900-point window, and every explanation on it
+/// ended mid-word before anybody drew it narrow.
+///
+/// Three of these sections now carry a key box and a label box beside their
+/// buttons — Whitelist always did, Admission and Relay peers did not — so
+/// this is the first look at the rows that change.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn console_phone_open() {
+    // **A phone's width, and whatever height holds it.** 804 points shows
+    // the first section and puts the other five under the fold, so a
+    // picture taken at a real phone's size cannot show the rows this is
+    // for. The width is the phone's, which is the dimension the layout
+    // turns on; the height is only so one picture holds the whole page.
+    let (mut h, _) = sized_measured(answered(), egui::vec2(360.0, 2200.0), sigil::Form::Phone);
+    h.run();
+    for area in SECTIONS {
+        h.get_by_label(area).click();
+        h.run();
+    }
+    h.run();
+    h.snapshot("console_phone_open");
+}
