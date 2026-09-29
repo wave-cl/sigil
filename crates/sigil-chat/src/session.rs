@@ -3126,7 +3126,18 @@ struct Known {
 }
 
 impl Known {
-    fn summary(&self, channel: [u8; 32], me: &PubKey) -> Summary {
+    /// Whoever spoke last here, which is whoever the list row is about to
+    /// name. One per channel, and only where the row names anybody: a
+    /// direct message's row is the person, and the preview carries no
+    /// prefix.
+    fn last_speaker(&self) -> Option<PubKey> {
+        if self.peer.is_some() {
+            return None;
+        }
+        self.timeline.messages().last().map(|m| m.account)
+    }
+
+    fn summary(&self, channel: [u8; 32], me: &PubKey, people: &HashMap<PubKey, Person>) -> Summary {
         Summary {
             channel,
             peer: self.peer,
@@ -3147,7 +3158,7 @@ impl Known {
                         .filter(|b| !b.is_empty())
                 })
                 .flatten(),
-            preview: self.preview(me),
+            preview: self.preview(me, people),
             at: (self.last_at > 0).then_some(self.last_at),
             public: self.public,
             group: self.group,
@@ -3159,7 +3170,7 @@ impl Known {
     ///
     /// A redaction shows as the gap it is rather than being skipped, or the
     /// list would claim the conversation ended at an older message.
-    fn preview(&self, me: &PubKey) -> Option<String> {
+    fn preview(&self, me: &PubKey, people: &HashMap<PubKey, Person>) -> Option<String> {
         let m = self.timeline.messages().last()?;
         let said = if m.redacted {
             "message deleted".to_string()
@@ -3176,11 +3187,16 @@ impl Known {
         if self.peer.is_some() {
             return Some(said);
         }
+        // **By `name_for`, like every other person this app draws.** This
+        // took the first eight characters of the key, which is a spelling
+        // that exists nowhere else -- not `short`'s `ArtP\u{2026}N71b`, not a
+        // name, not a handle -- so the list called somebody `ArtPN71b` in
+        // the same breath the conversation called them `Anne Droid2`. Found
+        // on the handset, on the row above the conversation that named her.
         let who = if m.account == *me {
             "you".to_string()
         } else {
-            let key = m.account.to_string();
-            key.chars().take(8).collect()
+            name_for(people, &m.account, "")
         };
         Some(format!("{who}: {said}"))
     }
@@ -5792,6 +5808,17 @@ async fn learn_names(chat: &mut Chat, desk: &mut Desk) {
 /// whoever has said anything in the conversation on screen -- and nobody twice.
 /// Not every member of every channel: that is a request per person per rebuild
 /// for names nobody is looking at.
+///
+/// **The conversation list names people too, and is deliberately not here.**
+/// Every group row says who spoke last, and that row drew a key until
+/// `preview` was made to go through `name_for`. Adding the last speaker of
+/// each channel to this set looked like the other half of that fix, and
+/// `a_group_row_names_whoever_spoke_last` passes with it reverted -- twice
+/// over, against a reader who opens nothing and a name published before she
+/// could overhear it. Whatever supplies the profile in that case, the list
+/// needs only to *read* what this machine already holds, so nothing is asked
+/// for here. If a row ever shows a key again, this is the first place to
+/// look.
 fn wanted_names(desk: &Desk, me: PubKey) -> Vec<PubKey> {
     let mut want: HashSet<PubKey> = HashSet::new();
     for known in desk.channels.values() {
@@ -5952,6 +5979,12 @@ fn people_of(chat: &impl Local, desk: &Desk) -> HashMap<PubKey, Person> {
     for known in desk.channels.values() {
         if let Some(peer) = known.peer {
             look(peer, &mut out);
+        }
+        // And whoever spoke last in a group, because the row's preview line
+        // says who said it. One lookup per channel, not per member: the
+        // list names exactly one person per row.
+        if let Some(who) = known.last_speaker() {
+            look(who, &mut out);
         }
     }
     if let Some(open) = desk.open
@@ -6448,7 +6481,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         .channels
         .iter()
         .map(|(c, k)| {
-            let mut summary = k.summary(*c, &me);
+            let mut summary = k.summary(*c, &me, &people);
             // A direct message's row names a *person*, and `name_for` is the
             // order that decides which name. It used to set the label only
             // when a profile had arrived, and leave the key sitting there

@@ -6005,3 +6005,154 @@ async fn a_hit_in_a_room_that_is_not_open_still_names_who_said_it() {
         "the hit names a key where this machine knows a name: {hits:?}"
     );
 }
+
+/// A group's row on the list says **who** spoke, by their name.
+///
+/// Found on the handset. The transcript called her `Anne Droid2` and the row
+/// one screen up called the same message `ArtPN71b: Hello` — the first eight
+/// characters of her key, a spelling that exists nowhere else in this app.
+///
+/// `preview` formatted the author itself instead of going through `name_for`,
+/// the tested order every other person in this app is drawn by, and
+/// `people_of` — which is where a name would have come from — collected
+/// nobody on account of the list.
+///
+/// **The reader here is the one person who opens nothing**, which is what
+/// two earlier drafts of this test cost. A name arrives on its own for
+/// anybody with the room open or lately open: in the first draft the speaker
+/// published while the reader was already a member, so SIP-30 told her
+/// unasked; in the second the reader had done the inviting, and an invitee is
+/// a member of the conversation *on screen*, whose members are asked about by
+/// name. So Carol does the inviting and Alice only looks at her list — the
+/// ordinary condition of a busy group, and of a client just installed.
+///
+/// Both remaining halves were then reverted one at a time, and the row came
+/// back as `6JhaGdek: Hello` and `6Jha…UVz7: Hello` respectively — the second
+/// being `name_for` falling through to a short key for somebody `people_of`
+/// had not collected.
+#[tokio::test]
+async fn a_group_row_names_whoever_spoke_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(31);
+    let (b_signer, b_id) = signer(32);
+    let (c_signer, c_id) = signer(33);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    let carol = start_at(endpoint, c_signer, &dir.path().join("c.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id)
+                && bob.state().me == Some(b_id)
+                && carol.state().me == Some(c_id),
+            15
+        )
+        .await,
+        "all three sessions should come up"
+    );
+
+    // Published before he and Alice share anything, so the SIP-30 event that
+    // tells a channel's members about a changed profile has no reason to
+    // reach her. What she knows of him she has to ask for.
+    bob.send(Cmd::SetProfile {
+        name: "Anne Droid".into(),
+        title: String::new(),
+    });
+    assert!(
+        until(
+            || bob.state().mine.name.as_deref() == Some("Anne Droid"),
+            15
+        )
+        .await,
+        "the profile should be published: {:?}",
+        bob.state().mine
+    );
+
+    carol.send(Cmd::NewGroup("the room".into()));
+    assert!(
+        until(
+            || carol
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.label == "the room")
+                && carol.state().i_am_admin,
+            15
+        )
+        .await,
+        "the group should appear for its creator: {:?}",
+        carol.state().conversations
+    );
+    let channel = carol
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.label == "the room")
+        .map(|c| c.channel)
+        .unwrap();
+
+    carol.send(Cmd::Invite(a_id));
+    carol.send(Cmd::Invite(b_id));
+    assert!(
+        until(
+            || alice
+                .state()
+                .conversations
+                .iter()
+                .any(|c| c.channel == channel)
+                && bob
+                    .state()
+                    .conversations
+                    .iter()
+                    .any(|c| c.channel == channel),
+            20
+        )
+        .await,
+        "both invitees should learn of it: {:?}",
+        alice.state().conversations
+    );
+
+    bob.send(Cmd::Show(channel));
+    bob.send(Cmd::Send("Hello".into()));
+
+    // Alice has opened nothing, which is the whole point.
+    assert!(
+        alice.state().open.is_none(),
+        "the reader in this test opens nothing: {:?}",
+        alice.state().open
+    );
+    let named =
+        until(
+            || {
+                alice.state().conversations.iter().any(|c| {
+                    c.channel == channel && c.preview.as_deref() == Some("Anne Droid: Hello")
+                })
+            },
+            30,
+        )
+        .await;
+    assert!(
+        named,
+        "the row should say who spoke, by name: {:?}",
+        alice
+            .state()
+            .conversations
+            .iter()
+            .map(|c| c.preview.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        alice.state().open.is_none(),
+        "and still without opening it: {:?}",
+        alice.state().open
+    );
+
+    alice.stop();
+    bob.stop();
+    carol.stop();
+}
