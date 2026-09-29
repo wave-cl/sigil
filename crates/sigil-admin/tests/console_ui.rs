@@ -806,3 +806,32 @@ fn on_a_phone_the_console_does_not_repeat_the_bars_title() {
     h.run();
     assert!(h.query_by_label("Exchange").is_some(), "{}", text_of(&h));
 }
+
+/// **The console names the exchange it is connecting to.**
+///
+/// Found on the handset: the tab's own control said `no exchange` while the
+/// line under it said `connecting…`, and the Chat tab was showing the same
+/// identity at `trunk.exchange` at that moment. Two lines on one screen
+/// disagreeing about whether there is an exchange at all.
+///
+/// One cause. `Accounts::exchanges` always offers the default, and `rows_for`
+/// dropped its row whenever discovery had nothing explicit to resolve it to —
+/// which is every phone. With no row for the selected name the control fell
+/// through to "no exchange", and the header, which takes its words from that
+/// same row, had nothing to say and said nothing.
+///
+/// So the fixture is the bare one: an identity with a default exchange and no
+/// configuration to name it, which is what a phone is.
+#[test]
+fn the_console_names_the_default_exchange_it_could_not_resolve() {
+    let h = harness(AdminState::default());
+    let said = text_of(&h);
+    assert!(
+        !said.contains("no exchange"),
+        "the console disowns an exchange it is connecting to: {said}"
+    );
+    assert!(
+        said.contains("the default"),
+        "and does not say which one it is instead: {said}"
+    );
+}

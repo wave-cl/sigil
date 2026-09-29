@@ -208,13 +208,30 @@ impl AdminApp {
             .active_held()
             .exchanges()
             .into_iter()
-            .filter_map(|name| {
+            .map(|name| {
+                // **Named, or said to be the default -- never dropped.**
+                // This was `default_label.clone()?`, so an identity whose
+                // default exchange resolved to no domain lost its row
+                // altogether: `Accounts::exchanges` always offers the
+                // default, and discovery has nothing explicit to resolve on
+                // a phone. The control then found no row for the selected
+                // name and fell through to "no exchange" -- on a screen
+                // whose next line said "connecting\u{2026}", and for an
+                // identity the Chat tab was showing as `trunk.exchange` at
+                // the same moment. One missing row, two lines disagreeing
+                // about whether there is an exchange at all.
+                //
+                // "the default" is the word the header beside it already
+                // uses for this, and a switcher is where that word reads
+                // correctly -- it is a label among names, not prose.
                 let label = if name.is_empty() {
-                    default_label.clone()?
+                    default_label
+                        .clone()
+                        .unwrap_or_else(|| "the default".to_string())
                 } else {
                     name.clone()
                 };
-                Some(sigil_ui::ExchangeRow {
+                sigil_ui::ExchangeRow {
                     removable: !name.is_empty(),
                     name,
                     label,
@@ -222,7 +239,7 @@ impl AdminApp {
                     // exchange's key in its own strip; it has nothing to
                     // say about the others it merely lists.
                     key: None,
-                })
+                }
             })
             .collect()
     }
