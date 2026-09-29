@@ -898,10 +898,24 @@ impl Shell {
             // it did not do that either, and on the handset Back with a strip
             // up did nothing at all. It is the topmost thing drawn, so it is
             // the first thing Back takes down.
+            // **Which link took the press, said outright.** A Back that
+            // changes nothing on screen is the hardest thing in this app to
+            // diagnose -- every link of this chain looks identical from
+            // outside, and a press swallowed by one of them is
+            // indistinguishable from a dead key. It was chased twice through
+            // screenshots and neither attempt found the cause; this is the
+            // same answer `placing a call` gives for the same reason, which
+            // its own comment states: five silent calls diagnosed by
+            // inference, four of the inferences wrong.
+            //
+            // One line per press, and a press is a thing a person does, so
+            // this costs nothing.
             if sigil_ui::put_away_message_controls(ui.ctx()) {
                 // Taking them down is the whole step: a press that also
                 // left the conversation would be two steps for one press.
+                tracing::info!("back: put a message's controls away");
             } else if egui::Popup::is_any_open(ui.ctx()) {
+                tracing::info!("back: closed a menu");
                 egui::Popup::close_all(ui.ctx());
             } else if !(self.accounts.active().is_unlocked() && self.choosing.is_none()) {
                 // **Behind the opening screen is the system.** Its history is
@@ -911,8 +925,19 @@ impl Shell {
                 // screen never changing and no way out of sigil but the task
                 // switcher. Leaving is what Back means here, and the platform
                 // is the only thing that can do it.
+                tracing::info!("back: leaving the application");
                 self.platform.leave();
-            } else if !self.nav.go_back() {
+            } else if !{
+                let moved = self.nav.go_back();
+                if moved {
+                    // **The one that has changed nothing before.** `nav` can
+                    // step to an entry that draws the same thing, and then a
+                    // press moves the history and not the screen -- which is
+                    // exactly what "the Back button is dead" looks like.
+                    tracing::info!("back: stepped the history");
+                }
+                moved
+            } {
                 let active = self.active();
                 let stepped = {
                     let mut ctx = AppContext {
@@ -925,6 +950,15 @@ impl Shell {
                     };
                     self.apps[active].back(&mut ctx)
                 };
+                // **Which app, and whether it had a step.** `false` here is
+                // the one outcome that changes nothing by itself -- it falls
+                // through to Escape, and Escape reaching nobody is a press
+                // that vanishes.
+                tracing::info!(
+                    app = self.apps[active].title(),
+                    stepped,
+                    "back: asked the app"
+                );
                 if !stepped {
                     // Escape, then: what closes a viewer or a dialog.
                     ui.ctx().input_mut(|i| {
