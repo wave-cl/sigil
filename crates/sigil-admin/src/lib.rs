@@ -633,21 +633,7 @@ impl AdminApp {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            // Room kept for the label box and the two buttons that follow.
-            let key = Self::box_width(ui, 260.0, 260.0);
-            sigil_ui::field(
-                ui,
-                &mut self.panes.entry(me).or_default().key,
-                "key, base58",
-                key,
-            );
-            let label = Self::box_width(ui, 120.0, 140.0);
-            sigil_ui::field(
-                ui,
-                &mut self.panes.entry(me).or_default().label,
-                "label",
-                label,
-            );
+            self.key_fields_ui(me, ui);
             if ui.button("Add").clicked()
                 && let Some(key) = self.take_key(me)
             {
@@ -697,6 +683,38 @@ impl AdminApp {
     }
 
     /// Under a key box: why the last press did nothing, until one does.
+    /// The key this console is about to act on, and the label to file it
+    /// under.
+    ///
+    /// **Drawn in every section that reads it.** It was drawn once, under
+    /// Whitelist, and three sections consume it: Whitelist's Add and Remove,
+    /// Admission's Approve and Deny, and Relay peers' Add and Remove. From
+    /// Admission the box is four headings up a desktop's console, and on a
+    /// phone it is inside a *different collapsed fold* -- so Approve was a
+    /// button whose input could not be seen from where it was pressed, and
+    /// with nothing typed it did nothing at all.
+    ///
+    /// One buffer behind all three, deliberately: it is this console's
+    /// scratch value, so a key pasted once is still there in the section it
+    /// turns out to belong to.
+    fn key_fields_ui(&mut self, me: PubKey, ui: &mut egui::Ui) {
+        // Room kept for the label box and the buttons that follow.
+        let key = Self::box_width(ui, 260.0, 260.0);
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(me).or_default().key,
+            "key, base58",
+            key,
+        );
+        let label = Self::box_width(ui, 120.0, 140.0);
+        sigil_ui::field(
+            ui,
+            &mut self.panes.entry(me).or_default().label,
+            "label",
+            label,
+        );
+    }
+
     fn key_trouble_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
         if let Some(why) = self.panes.get(&me).and_then(|p| p.key_trouble.clone()) {
             ui.colored_label(theme.destructive, why);
@@ -714,6 +732,7 @@ impl AdminApp {
             if ui.button("Pending").clicked() {
                 self.propose(me, vec![Op::AdmissionList]);
             }
+            self.key_fields_ui(me, ui);
             if ui.button("Approve").clicked()
                 && let Some(device) = self.take_key(me)
             {
@@ -732,6 +751,11 @@ impl AdminApp {
                 self.propose(me, vec![Op::AdmissionDeny(device)]);
             }
         });
+        // **And it says when it could not read one.** Whitelist and Relay
+        // peers both draw this; Admission did not, so a press with an empty
+        // or misspelt box wrote the complaint into a pane nobody was
+        // looking at and answered the reader with nothing.
+        self.key_trouble_ui(me, ui, theme);
     }
 
     fn names_ui(&mut self, me: PubKey, ui: &mut egui::Ui, theme: &ColorTheme) {
@@ -778,6 +802,7 @@ impl AdminApp {
             if ui.button("List").clicked() {
                 self.propose(me, vec![Op::PeerList]);
             }
+            self.key_fields_ui(me, ui);
             if ui.button("Add").clicked()
                 && let Some(key) = self.take_key(me)
             {

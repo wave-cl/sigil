@@ -835,3 +835,31 @@ fn the_console_names_the_default_exchange_it_could_not_resolve() {
         "and does not say which one it is instead: {said}"
     );
 }
+
+/// **Every section that reads the key box draws one.**
+///
+/// The box was drawn once, under Whitelist, and three sections consume it:
+/// Whitelist's Add and Remove, Admission's Approve and Deny, and Relay peers'
+/// Add and Remove. From Admission the box is four headings up a desktop's
+/// console, and on a phone it is inside a *different collapsed fold* — so
+/// Approve was a button whose input could not be seen from where it was
+/// pressed, and with nothing typed it did nothing and said nothing.
+///
+/// Counted rather than found, because one is what the bug looked like.
+#[test]
+fn the_key_box_is_drawn_in_every_section_that_reads_it() {
+    // **By role, not by the hint.** A `field`'s placeholder never reaches the
+    // accessibility tree -- the boxes come through it as nameless text
+    // inputs -- so the hint cannot be counted, and counting the blank labels
+    // they leave behind would be counting a coincidence.
+    let h = harness(AdminState::default());
+    let found = h.get_all_by_role(egui::accesskit::Role::TextInput).count();
+    // Two apiece in Whitelist, Admission and Relay peers -- the key and the
+    // label they file it under -- and one for the name in Names.
+    assert_eq!(
+        found,
+        7,
+        "the key box should be in Whitelist, Admission and Relay peers: {}",
+        text_of(&h)
+    );
+}
