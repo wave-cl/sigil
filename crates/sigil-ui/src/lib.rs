@@ -320,6 +320,7 @@ pub fn field_with_slot(
 ) -> (egui::Response, egui::Rect) {
     let line = ui.text_style_height(&egui::TextStyle::Body);
     let above = ((height - line) / 2.0).max(0.0);
+    let enabled = ui.is_enabled();
     let response = ui.add_sized(
         [width, height],
         egui::TextEdit::singleline(buf)
@@ -332,6 +333,7 @@ pub fn field_with_slot(
                 bottom: above as i8,
             }),
     );
+    name_the_field(&response, buf, hint, enabled);
     let rect = response.rect;
     let at = egui::Rect::from_center_size(
         egui::pos2(
@@ -371,6 +373,30 @@ pub fn in_slot<R>(ui: &mut egui::Ui, slot: egui::Rect, add: impl FnOnce(&mut egu
     add(&mut child)
 }
 
+/// Give a field the **name** its hint only looks like.
+///
+/// egui carries `hint_text` into the accessibility tree as accesskit's
+/// *placeholder*, and a placeholder is not a name: it is announced only
+/// while the box is empty, and `label()` stays `None`. So every field in
+/// sigil arrived as a nameless text input -- "text edit, blank" -- with
+/// nothing saying what goes in it. Found while writing a test that tried to
+/// count the boxes by their hint and counted nothing.
+///
+/// The hint is the right name here because these fields have no visible
+/// label beside them: the hint *is* what the reader is told the box is for,
+/// and the two must not be able to disagree.
+///
+/// Set after the widget, so egui's own info -- the value, the selection --
+/// is still what it built; this adds the label it left out.
+fn name_the_field(response: &egui::Response, buf: &str, hint: &str, enabled: bool) {
+    let hint = hint.to_owned();
+    let buf = buf.to_owned();
+    response.widget_info(|| egui::WidgetInfo {
+        label: Some(hint.clone()),
+        ..egui::WidgetInfo::text_edit(enabled, &buf, &buf, &hint)
+    });
+}
+
 fn field_as(
     ui: &mut egui::Ui,
     buf: &mut String,
@@ -384,7 +410,8 @@ fn field_as(
     // once.
     let line = ui.text_style_height(&egui::TextStyle::Body);
     let above = ((sigil::tokens::FIELD_MD - line) / 2.0).max(0.0);
-    ui.add_sized(
+    let enabled = ui.is_enabled();
+    let response = ui.add_sized(
         [width, sigil::tokens::FIELD_MD],
         egui::TextEdit::singleline(buf)
             // **Named by its hint, not by its place.** egui's automatic id is
@@ -400,7 +427,13 @@ fn field_as(
                 sigil::tokens::SPACING_MD as i8,
                 above as i8,
             )),
-    )
+    );
+    // **A password field is not named by what is in it.** `name_the_field`
+    // hands the buffer through as the value, which is what egui already
+    // publishes for an ordinary field; for a password egui publishes the
+    // dots, and so does this.
+    name_the_field(&response, if password { "" } else { buf }, hint, enabled);
+    response
 }
 pub use message::{
     Bubble, BubbleAction, Quote, Reaction, Receipt, Thumb, bubble, call_line, copy_separator,
