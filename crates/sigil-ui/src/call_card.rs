@@ -13,6 +13,10 @@ use sigil::{ColorTheme, Icon, tokens};
 /// pressed against an ear, without looking, and one of them ends the call.
 const CONTROL: f32 = 56.0;
 
+/// The microphone mark beside the chooser: a label's size, not a control's,
+/// because it is not one.
+const MARK: f32 = 14.0;
+
 /// Everything a call card draws.
 pub struct Call<'a> {
     /// Their key, or the room's, in full. The mark is drawn from it, and on a
@@ -192,39 +196,49 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
                     .map(|m| m.name)
                     .or_else(|| call.microphones.iter().find(|m| m.fallback).map(|m| m.name))
                     .unwrap_or("Default microphone");
-                ui.horizontal(|ui| {
-                    sigil::icon::draw(
-                        ui.painter(),
-                        egui::Rect::from_min_size(
-                            ui.cursor().min + egui::vec2(0.0, 2.0),
-                            egui::vec2(14.0, 14.0),
-                        ),
-                        Icon::Mic,
-                        theme.text_muted,
-                    );
-                    ui.add_space(18.0);
-                    egui::ComboBox::from_id_salt("call_microphone")
-                        .width((ui.available_width() - tokens::SPACING_SM).max(0.0))
-                        .height(240.0f32.min(ui.available_height().max(120.0) * 0.6))
-                        .selected_text(egui::RichText::new(shown).small())
-                        .show_ui(ui, |ui| {
-                            for mic in call.microphones {
-                                // The one a call would open if nobody chose is
-                                // marked, because it is often *not* the system
-                                // default -- a connected headset is stepped
-                                // around on purpose.
-                                let label = if mic.fallback {
-                                    format!("{} — used by default", mic.name)
-                                } else {
-                                    mic.name.to_string()
-                                };
-                                if ui.selectable_label(mic.live, label).clicked() && !mic.live {
-                                    pressed =
-                                        Some(CallPress::Microphone(Some(mic.name.to_string())));
+                // **The row is allocated, and the mark is allocated in it.**
+                // The mark was *painted* at `cursor().min` plus two points
+                // and the space after it added by hand -- so it sat two
+                // points below the top of a row a `ComboBox` makes a whole
+                // control tall, which is 44 points on a phone. A glyph
+                // hanging off the ceiling of its own row, beside the thing
+                // it labels.
+                //
+                // Giving the row its height up front is what lets
+                // `Align::Center` mean anything: a `horizontal` places each
+                // item as it comes, so a taller item added later never moves
+                // the ones already down.
+                let line = ui.spacing().interact_size.y.max(MARK);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), line),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(MARK, MARK), egui::Sense::hover());
+                        sigil::icon::draw(ui.painter(), rect, Icon::Mic, theme.text_muted);
+                        egui::ComboBox::from_id_salt("call_microphone")
+                            .width((ui.available_width() - tokens::SPACING_SM).max(0.0))
+                            .height(240.0f32.min(ui.available_height().max(120.0) * 0.6))
+                            .selected_text(egui::RichText::new(shown).small())
+                            .show_ui(ui, |ui| {
+                                for mic in call.microphones {
+                                    // The one a call would open if nobody chose is
+                                    // marked, because it is often *not* the system
+                                    // default -- a connected headset is stepped
+                                    // around on purpose.
+                                    let label = if mic.fallback {
+                                        format!("{} — used by default", mic.name)
+                                    } else {
+                                        mic.name.to_string()
+                                    };
+                                    if ui.selectable_label(mic.live, label).clicked() && !mic.live {
+                                        pressed =
+                                            Some(CallPress::Microphone(Some(mic.name.to_string())));
+                                    }
                                 }
-                            }
-                        });
-                });
+                            });
+                    },
+                );
                 ui.add_space(tokens::SPACING_SM);
             }
             ui.vertical_centered(|ui| {
@@ -312,37 +326,60 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
                 }
                 ui.add_space(tokens::SPACING_SM);
 
-                ui.horizontal(|ui| {
-                    let gap = (ui.available_width() - 120.0).max(0.0) / 2.0;
-                    ui.add_space(gap);
-                    crate::dot(
-                        ui,
-                        call.up && !call.deaf,
-                        theme.success,
-                        theme.warning,
-                        if call.deaf {
-                            "connected, but nothing is arriving"
-                        } else if call.up {
-                            "connected"
-                        } else {
-                            "connecting"
-                        },
-                    );
-                    let said = match (call.up, call.whose) {
-                        (true, None) => "In a call".to_string(),
-                        (true, Some(who)) => format!("In a call as {who}"),
-                        (false, None) => "Connecting…".to_string(),
-                        (false, Some(who)) => format!("Connecting… as {who}"),
-                    };
-                    ui.colored_label(
-                        if call.up {
-                            theme.success
-                        } else {
-                            theme.warning
-                        },
-                        egui::RichText::new(said).small(),
-                    );
-                });
+                // **Allocated at its own width, which is measured.**
+                // `vertical_centered` centres each *item* it is given, and a
+                // `horizontal` takes the whole width -- so the row was nudged
+                // right by half of `available_width() - 120.0`, a guess at
+                // how wide a dot and a word come out. They are four widths,
+                // not one: "In a call", "Connecting\u{2026}", and either of them
+                // with " as {whose}" after it. Only a call whose line
+                // happened to measure 120 points was centred, and the rest
+                // sat off to one side under a heading that was not.
+                let said = match (call.up, call.whose) {
+                    (true, None) => "In a call".to_string(),
+                    (true, Some(who)) => format!("In a call as {who}"),
+                    (false, None) => "Connecting\u{2026}".to_string(),
+                    (false, Some(who)) => format!("Connecting\u{2026} as {who}"),
+                };
+                let drawn = egui::WidgetText::from(egui::RichText::new(&said).small()).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Small,
+                );
+                // What `dot` allocates, which is the one number this row's
+                // width depends on that is not the text.
+                let row = egui::vec2(
+                    tokens::SPACING_MD + ui.spacing().item_spacing.x + drawn.size().x,
+                    drawn.size().y.max(tokens::SPACING_MD),
+                );
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        crate::dot(
+                            ui,
+                            call.up && !call.deaf,
+                            theme.success,
+                            theme.warning,
+                            if call.deaf {
+                                "connected, but nothing is arriving"
+                            } else if call.up {
+                                "connected"
+                            } else {
+                                "connecting"
+                            },
+                        );
+                        ui.colored_label(
+                            if call.up {
+                                theme.success
+                            } else {
+                                theme.warning
+                            },
+                            egui::RichText::new(&said).small(),
+                        );
+                    },
+                );
 
                 // Monospace so the digits do not shuffle the row every second.
                 let clock = format!("{:02}:{:02}", call.seconds / 60, call.seconds % 60);
