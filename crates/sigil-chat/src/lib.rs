@@ -3642,6 +3642,28 @@ impl App for ChatApp {
     /// One step back on a phone: a conversation closes for the list. Not
     /// while a picture or a dialog is over it -- those close on Escape,
     /// which is what the shell sends when this says no.
+    /// The mailbox, and nothing else.
+    ///
+    /// SIP-5 is the one place messages arrive that no conversation will ever
+    /// show, so it is a destination of this app rather than an app of its
+    /// own -- and the count is what makes it worth a row at all.
+    fn sections(&self, ctx: &AppContext<'_>) -> Vec<sigil::Section> {
+        vec![sigil::Section {
+            icon: sigil::Icon::Mail,
+            title: "Mailbox".into(),
+            badge: self.mail_waiting(ctx),
+            hover: "SIP-5: something sealed to you and left at the exchange to collect when \
+                    you next connect. Held there, not in a conversation."
+                .into(),
+        }]
+    }
+
+    fn open_section(&mut self, ctx: &mut AppContext<'_>, which: usize) {
+        if which == 0 {
+            ctx.navigator.push_here(Route::Mail);
+        }
+    }
+
     fn back(&mut self, ctx: &mut AppContext<'_>) -> bool {
         let Some(at) = self.showing_at(ctx) else {
             return false;
@@ -13482,23 +13504,34 @@ impl ChatApp {
             {
                 ctx.navigator.switch_to(sib.id);
             }
-            // **The mailbox, under the app it belongs to.** It was a row
-            // near the foot of this card that opened a dialog -- a long way
-            // down for the one place messages arrive that no conversation
-            // will ever show. It is a destination of this app rather than an
-            // app of its own, so it sits under Chat and not beside it;
-            // `here` is this app's row, because the card being drawn is
-            // this app's.
+            // **This app's own destinations, under the app they belong
+            // to.** The mailbox was a row near the foot of this card that
+            // opened a dialog -- a long way down for the one place messages
+            // arrive that no conversation will ever show. It is a
+            // destination of this app rather than an app of its own, so it
+            // sits under Chat and not beside it; `here` is this app's row,
+            // because the card being drawn is this app's.
+            //
+            // **Asked of `sections`, not written out here.** It was written
+            // out here, and this is one of three places the same list is
+            // drawn -- the rail and a phone's app menu are the others, and
+            // both showed Chat, Exchange and Phone with no mailbox under
+            // any of them. This card was the one the request was tested
+            // against.
             if here {
-                let waiting = self.mail_waiting(ctx);
-                if sigil_ui::icon_item_counted(ui, sigil_ui::Icon::Mail, "Mailbox", false, waiting)
-                    .on_hover_text(
-                        "SIP-5: something sealed to you and left at the exchange to collect \
-                         when you next connect. Held there, not in a conversation.",
+                for (which, section) in self.sections(ctx).into_iter().enumerate() {
+                    if sigil_ui::icon_item_counted(
+                        ui,
+                        section.icon,
+                        &section.title,
+                        false,
+                        section.badge,
                     )
+                    .on_hover_text(section.hover)
                     .clicked()
-                {
-                    ctx.navigator.push_here(Route::Mail);
+                    {
+                        self.open_section(ctx, which);
+                    }
                 }
             }
         }

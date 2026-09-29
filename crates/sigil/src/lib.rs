@@ -35,7 +35,7 @@ pub use account::{Account, Unlocked};
 pub use accounts::Accounts;
 pub use app::{
     App, AppAction, AppContext, AppResponse, Attention, CallAct, CallPress, InCall, Notice, Notify,
-    Silent, Sound, TabNotifications, Target,
+    Section, Silent, Sound, TabNotifications, Target,
 };
 pub use deck::{Layout, layout};
 pub use deeplink::Link;

@@ -32,6 +32,11 @@ struct Stub {
     /// Draw something anchored to the bottom, as a composer is, for the one
     /// test about what the keyboard's inset does.
     composer: bool,
+    /// Destinations inside this app, as `App::sections` answers -- a name
+    /// and how many are waiting in it.
+    sections: Vec<(&'static str, u32)>,
+    /// Which section the shell asked to open, for a test to read.
+    opened: std::rc::Rc<std::cell::Cell<Option<usize>>>,
 }
 
 impl Stub {
@@ -46,6 +51,8 @@ impl Stub {
             head: None,
             named: None,
             composer: false,
+            sections: Vec::new(),
+            opened: Default::default(),
         }
     }
 
@@ -79,6 +86,20 @@ impl Stub {
 impl App for Stub {
     fn runs_unopened(&self) -> bool {
         self.unopened
+    }
+    fn sections(&self, _ctx: &AppContext<'_>) -> Vec<sigil::Section> {
+        self.sections
+            .iter()
+            .map(|(title, badge)| sigil::Section {
+                icon: sigil::Icon::Mail,
+                title: (*title).into(),
+                badge: *badge,
+                hover: format!("what {title} is"),
+            })
+            .collect()
+    }
+    fn open_section(&mut self, _ctx: &mut AppContext<'_>, which: usize) {
+        self.opened.set(Some(which));
     }
     fn update(&mut self, _ctx: &mut AppContext<'_>, _egui_ctx: &egui::Context) {
         self.updates.set(self.updates.get() + 1);
@@ -526,6 +547,74 @@ fn nothing_in_the_shells_chrome_runs_off_a_phone_when_the_text_is_turned_up() {
         "{} widget(s) outside a {PHONE}-point screen:\n  {}",
         over.len(),
         over.join("\n  ")
+    );
+}
+
+/// **The app on screen offers its own destinations**, on the primary
+/// navigation, under its own row — and pressing one reaches the app.
+///
+/// Chat's mailbox is the one that exists. It had been written out by hand in
+/// the identity card's copy of this list, which is one of *three* places the
+/// same list is drawn, so it appeared there and in neither the rail nor a
+/// phone's app menu — and the menu is the primary navigation on a phone,
+/// which is where it had been asked for.
+///
+/// Asserted through `Section` rather than through Chat, because the shell
+/// must not know which app has one: a stub names a section and the shell
+/// draws it.
+#[test]
+fn a_phones_app_menu_offers_the_sections_of_the_app_on_screen() {
+    let opened = std::rc::Rc::<std::cell::Cell<Option<usize>>>::default();
+    let apps: Vec<Box<dyn App>> = vec![
+        Box::new(Stub {
+            sections: vec![("Mailbox", 2)],
+            opened: opened.clone(),
+            ..Stub::named("Calls", 0)
+        }),
+        // A second app, with a section of its own that must **not** be drawn:
+        // it is not the app on screen, and a menu offering the insides of
+        // somewhere nobody is would be a list of places, not a navigation.
+        Box::new(Stub {
+            sections: vec![("Drafts", 0)],
+            ..Stub::named("Chat", 3)
+        }),
+    ];
+    let mut shell =
+        sigil_shell::Shell::new(apps, None).with_accounts(sigil::accounts::Accounts::of(vec![
+            sigil::Account::unlocked_for_test([4u8; 32]),
+        ]));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(360.0, 804.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            sigil::Form::install(&ctx, sigil::Form::Phone);
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            shell.ui(ui);
+        });
+    h.run();
+    h.get_by_label("Sigil").click();
+    h.run();
+    assert!(
+        h.query_by_label("Chat (3)").is_some(),
+        "the menu did not open, so this says nothing about sections"
+    );
+    assert!(
+        h.query_by_label("Drafts").is_none(),
+        "the menu offered a section of an app nobody is in"
+    );
+    // The count travels with it: a mailbox with two waiting is the whole
+    // reason the row is worth a place on the navigation.
+    let mailbox = h
+        .query_by_label("Mailbox (2)")
+        .expect("the app on screen should offer its section, with its count");
+    mailbox.click();
+    h.run();
+    h.run();
+    assert_eq!(
+        opened.get(),
+        Some(0),
+        "pressing the section did not reach the app"
     );
 }
 

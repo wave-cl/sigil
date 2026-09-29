@@ -1066,6 +1066,22 @@ impl Shell {
                             (left.max.x - corner_used - tokens::SPACING_SM).max(left.min.x);
                         let mut switch = None;
                         let mut back = false;
+                        // **Asked before the menu is built**, because the
+                        // menu's own closure holds `self` and a section is
+                        // the app's to name. Disjoint fields, so the context
+                        // and the app can be borrowed at once.
+                        let mut open: Option<usize> = None;
+                        let sections = {
+                            let ctx = AppContext {
+                                navigator: &mut self.navigator,
+                                accounts: &mut self.accounts,
+                                unfocused: false,
+                                away: self.away,
+                                notify: self.platform.as_ref(),
+                                connections: &self.connections,
+                            };
+                            self.apps[active].sections(&ctx)
+                        };
                         ui.scope_builder(
                             egui::UiBuilder::new()
                                 .max_rect(left)
@@ -1187,6 +1203,31 @@ impl Shell {
                                         {
                                             switch = Some(i);
                                         }
+                                        // **And what the app on screen can
+                                        // show.** Chat's mailbox belongs
+                                        // here, under Chat -- it had been
+                                        // written out in the identity
+                                        // card's own copy of this list and
+                                        // nowhere else, so on a phone the
+                                        // primary navigation was the one
+                                        // place it could not be reached.
+                                        if i == active {
+                                            for (which, section) in
+                                                sections.iter().cloned().enumerate()
+                                            {
+                                                if sigil_ui::icon_item_counted(
+                                                    ui,
+                                                    section.icon,
+                                                    &section.title,
+                                                    false,
+                                                    section.badge,
+                                                )
+                                                .clicked()
+                                                {
+                                                    open = Some(which);
+                                                }
+                                            }
+                                        }
                                     }
                                 });
                             },
@@ -1196,6 +1237,17 @@ impl Shell {
                         }
                         if let Some(i) = switch {
                             self.navigator.switch_to(AppId(i));
+                        }
+                        if let Some(which) = open {
+                            let mut ctx = AppContext {
+                                navigator: &mut self.navigator,
+                                accounts: &mut self.accounts,
+                                unfocused: false,
+                                away: self.away,
+                                notify: self.platform.as_ref(),
+                                connections: &self.connections,
+                            };
+                            self.apps[active].open_section(&mut ctx, which);
                         }
                     }
                 });
@@ -1689,6 +1741,21 @@ impl Shell {
     /// already know.
     fn rail(&mut self, ui: &mut egui::Ui) {
         let active = self.active();
+        // Asked before the column is drawn, because the closure below holds
+        // `self`. Disjoint fields, so the context and the app can be
+        // borrowed at once.
+        let sections = {
+            let ctx = AppContext {
+                navigator: &mut self.navigator,
+                accounts: &mut self.accounts,
+                unfocused: false,
+                away: self.away,
+                notify: self.platform.as_ref(),
+                connections: &self.connections,
+            };
+            self.apps[active].sections(&ctx)
+        };
+        let mut open: Option<usize> = None;
         ui.vertical_centered(|ui| {
             for i in 0..self.apps.len() {
                 let title = self.apps[i].title().to_string();
@@ -1720,8 +1787,44 @@ impl Shell {
                     self.navigator.switch_to(AppId(i));
                 }
                 ui.add_space(tokens::SPACING_XS);
+                // **And the app on screen names its own destinations**, under
+                // its icon and before the next app's. Chat's mailbox is one,
+                // and it had been written out in the identity card's copy of
+                // this list alone -- so the rail, which is where a wide
+                // window goes anywhere, could not reach it. A section is
+                // never `selected`: the rail's fill says which *app* is
+                // drawn, and a mailbox opened is still Chat.
+                if selected {
+                    for (which, section) in sections.iter().cloned().enumerate() {
+                        let said = if section.badge == 0 {
+                            section.title.clone()
+                        } else {
+                            format!("{} ({})", section.title, section.badge)
+                        };
+                        let press =
+                            sigil::icon::icon_button_as_named(ui, section.icon, &said, None, false);
+                        if section.badge > 0 {
+                            rail_badge(ui, press.rect, section.badge, &theme);
+                        }
+                        if press.clicked() {
+                            open = Some(which);
+                        }
+                        ui.add_space(tokens::SPACING_XS);
+                    }
+                }
             }
         });
+        if let Some(which) = open {
+            let mut ctx = AppContext {
+                navigator: &mut self.navigator,
+                accounts: &mut self.accounts,
+                unfocused: false,
+                away: self.away,
+                notify: self.platform.as_ref(),
+                connections: &self.connections,
+            };
+            self.apps[active].open_section(&mut ctx, which);
+        }
     }
 
     /// The active app, drawn through the history entry that names it — so an

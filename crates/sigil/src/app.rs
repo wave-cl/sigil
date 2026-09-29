@@ -439,6 +439,21 @@ impl Notify for Silent {
 ///
 /// Only [`render`](App::render) has no default. A single-view app that never
 /// pushes a route implements exactly that one method.
+/// One destination inside an app, drawn on the primary navigation under
+/// that app's own row. See [`App::sections`].
+#[derive(Debug, Clone)]
+pub struct Section {
+    /// Its mark, beside the title.
+    pub icon: Icon,
+    /// What it calls itself, in the reader's words.
+    pub title: String,
+    /// How many things in it are waiting. Nought draws no badge.
+    pub badge: u32,
+    /// What it is, for a pointer that rests on it. A phone never sees this,
+    /// so nothing said only here is said at all.
+    pub hover: String,
+}
+
 pub trait App {
     /// Background work, run every pass for **every opened app** — including
     /// while the window is hidden. Never draws.
@@ -527,6 +542,36 @@ pub trait App {
     fn head_ui(&mut self, _ctx: &mut AppContext<'_>, _ui: &mut egui::Ui) -> bool {
         false
     }
+
+    /// Destinations **inside** this app that belong on the primary
+    /// navigation, drawn under the app's own row.
+    ///
+    /// Not a second list of applications: a section is a place this app can
+    /// show, reached the way another app is reached, because that is where
+    /// somebody looks for it. Chat's mailbox is the one -- SIP-5 is the only
+    /// place messages arrive that no conversation will ever show, and it is
+    /// a destination of Chat rather than an app of its own.
+    ///
+    /// Asked of the app **on screen** only, and drawn under its row, so the
+    /// list never offers a section of somewhere nobody is. The default has
+    /// none, which is the honest answer for an app that is one view.
+    ///
+    /// # Why the app is asked rather than told
+    ///
+    /// The same list is drawn in three places -- the rail, a phone's app
+    /// menu, and the identity card's own navigation -- and it was written
+    /// out by hand in the third. So the mailbox appeared in exactly one of
+    /// them, which is the one the request that asked for it was tested
+    /// against. One definition, three drawings.
+    fn sections(&self, _ctx: &AppContext<'_>) -> Vec<Section> {
+        Vec::new()
+    }
+
+    /// Go to the section [`sections`](App::sections) listed at `which`.
+    ///
+    /// By index rather than by name, so a section's title is a thing to
+    /// draw and not a key -- and a renamed one cannot quietly stop working.
+    fn open_section(&mut self, _ctx: &mut AppContext<'_>, _which: usize) {}
 
     /// A phone's Back button, once no menu is open and the shell's own
     /// history has nothing to go back to: take one step back within the
