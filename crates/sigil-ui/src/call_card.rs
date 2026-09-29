@@ -341,10 +341,18 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
                     (false, None) => "Connecting\u{2026}".to_string(),
                     (false, Some(who)) => format!("Connecting\u{2026} as {who}"),
                 };
+                // **Measured against the room, because the row is drawn in
+                // it.** `Extend` at `f32::INFINITY` asks how wide the line
+                // *wants* to be, and " as {whose}" plus the reader's text
+                // size makes that wider than the pane -- 388 points in 360
+                // at 1.3x, before anything is turned up further.
+                let room =
+                    (ui.available_width() - tokens::SPACING_MD - ui.spacing().item_spacing.x)
+                        .max(0.0);
                 let drawn = egui::WidgetText::from(egui::RichText::new(&said).small()).into_galley(
                     ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
+                    Some(egui::TextWrapMode::Wrap),
+                    room,
                     egui::TextStyle::Small,
                 );
                 // What `dot` allocates, which is the one number this row's
@@ -370,13 +378,22 @@ pub fn call_card(ui: &mut egui::Ui, call: &Call<'_>) -> Option<CallPress> {
                                 "connecting"
                             },
                         );
-                        ui.colored_label(
-                            if call.up {
-                                theme.success
-                            } else {
-                                theme.warning
-                            },
-                            egui::RichText::new(&said).small(),
+                        // **Wrapped, not `colored_label`.** A label in a
+                        // `left_to_right` layout *extends*: the row above
+                        // is allocated at the width the words were measured
+                        // at, and `max_rect` neither clips nor constrains
+                        // what is put inside it, so a label left to itself
+                        // walked straight out of the row and took the pane
+                        // with it.
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&said).small().color(
+                                if call.up {
+                                    theme.success
+                                } else {
+                                    theme.warning
+                                },
+                            ))
+                            .wrap(),
                         );
                     },
                 );

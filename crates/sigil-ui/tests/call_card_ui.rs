@@ -138,6 +138,22 @@ fn built(
     size: egui::Vec2,
     theme: egui::Theme,
 ) -> (Harness<'static>, std::rc::Rc<std::cell::Cell<f32>>) {
+    built_at(call, size, theme, 1.0)
+}
+
+/// The same, at the reader's text size.
+///
+/// **This card had no scaled case at all**, and two of its rows are now
+/// allocated at a width they *measure* — the dot and its state word, and the
+/// microphone mark beside its chooser. A measured width grows with the text,
+/// so the size somebody chose is exactly what decides whether those rows
+/// still fit.
+fn built_at(
+    call: &Call<'_>,
+    size: egui::Vec2,
+    theme: egui::Theme,
+    scale: f32,
+) -> (Harness<'static>, std::rc::Rc<std::cell::Cell<f32>>) {
     let width = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
     let out = width.clone();
     // `Call` borrows, so the closure gets owned copies of what it needs.
@@ -178,6 +194,7 @@ fn built(
             sigil::Form::Desktop
         };
         sigil::Form::install(&ctx, form);
+        sigil::TextScale::install(&ctx, scale);
         theme::install(&ctx, theme::light(), theme::dark());
         ctx.set_theme(theme);
         let t = sigil::ColorTheme::current(&ctx);
@@ -845,6 +862,29 @@ fn phone_call_card_another_identity() {
     );
 }
 
+/// **Whose it is, at a length that used to run off the edge.**
+///
+/// `phone_call_card_another_identity` says `me@squic.org`, which fits, so
+/// every picture of this card had a short state word and none of them moved
+/// when the row that draws it was rebuilt twice. The line this is about —
+/// "In a call as" plus a display name — reached 388 points in a 360-point
+/// pane, and the widest *labelled* widget was 280, so nothing on screen
+/// visibly hung off the edge: the ui had simply grown to fit a row nobody
+/// could see.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_call_card_as_a_long_name() {
+    snap(
+        "phone_call_card_as_a_long_name",
+        &Call {
+            whose: Some(LONG_NAME),
+            ..plain()
+        },
+        egui::vec2(PHONE, TALL),
+        egui::Theme::Dark,
+    );
+}
+
 /// **A room on the light theme**, which is where a quiet second thing on a
 /// row goes faint: the key beside each name is `small` monospace, and at
 /// `text_muted` it measured 3.40 against this ground -- under the 4.5 that
@@ -864,5 +904,75 @@ fn phone_call_card_room_light() {
         },
         egui::vec2(PHONE, TALL),
         egui::Theme::Light,
+    );
+}
+
+/// **The card still fits when the reader turns the text up.**
+///
+/// It had no scaled case at all, and it is a phone surface: the handset
+/// honours `Configuration.fontScale`, so every row here can be drawn at up to
+/// twice the size it was measured at, and one row wider than the pane re-lays
+/// every row after it.
+///
+/// The two rows this asks about hardest are the ones allocated at a width
+/// they *measure* — the state dot with its word, and the microphone mark
+/// beside its chooser. A measured width grows with the text, and the pane
+/// does not.
+#[test]
+fn the_card_fits_a_phone_at_every_text_size() {
+    let mut over: Vec<String> = Vec::new();
+    for scale in [1.0f32, 1.3, 2.0] {
+        // Every case that changes a row's width: the state word is four
+        // different strings, and " as {whose}" is the longest.
+        for (what, call) in [
+            ("plain", plain()),
+            (
+                "connecting as somebody",
+                Call {
+                    up: false,
+                    whose: Some(LONG_NAME),
+                    ..plain()
+                },
+            ),
+            (
+                "in a call as somebody",
+                Call {
+                    whose: Some(LONG_NAME),
+                    ..plain()
+                },
+            ),
+            (
+                "with a chooser",
+                Call {
+                    microphones: &[
+                        sigil_ui::Mic {
+                            name: "MacBook Pro Microphone",
+                            live: true,
+                            fallback: false,
+                        },
+                        sigil_ui::Mic {
+                            name: "A headset with a long name indeed",
+                            live: false,
+                            fallback: true,
+                        },
+                    ],
+                    ..plain()
+                },
+            ),
+        ] {
+            let (mut h, width) = built_at(&call, egui::vec2(PHONE, TALL), egui::Theme::Dark, scale);
+            h.run();
+            h.run();
+            let drew = width.get();
+            assert!(drew > 0.0, "{what} at {scale}x drew nothing");
+            if drew > PHONE + 1.0 {
+                over.push(format!("{what} at {scale}x drew {drew:.0} points"));
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "the call card runs off a {PHONE}-point phone:\n  {}",
+        over.join("\n  ")
     );
 }
