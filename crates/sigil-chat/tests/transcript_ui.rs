@@ -12659,6 +12659,54 @@ fn a_message_with_no_timer_is_not_said_to_be_going() {
     );
 }
 
+/// **An account with no name says its key once, and it is still copyable.**
+///
+/// Seen on the handset and on nothing else: every fixture here gives the
+/// account a name, so the heading was "Ada Lovelace" and the key row under
+/// it was a different string. On a phone with no profile published the
+/// heading falls back to the head of the key — which is right, it is what
+/// everybody else sees — and the row below then said the same string again,
+/// stacked. That is the duplication the row was moved under the mark to end.
+#[test]
+fn an_account_with_no_name_does_not_say_its_key_twice() {
+    let mut state = a_conversation();
+    state.mine.name = None;
+    state.mine.title = None;
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Me);
+    h.run();
+    h.run();
+    // **Guarded by the picture, not by a count here.** Two assertions were
+    // tried and neither bit: counting the label is confounded because the
+    // tree reports one node twice, and counting *positions* still passed
+    // with the duplication forced on -- the extra row's text does not reach
+    // the tree the way the heading's does. A snapshot shows two stacked
+    // strings at once, which is how this was found in the first place, on
+    // the handset. `me_card_phone_unnamed` is that picture.
+    // And it can still be taken, which is the whole reason it is up there.
+    assert!(
+        h.query_by_label("Copy your key").is_some(),
+        "an account with no name cannot copy its key: {:?}",
+        labels(&h)
+    );
+}
+
+/// The identity card for an account that has published no name — where the
+/// heading falls back to the key, and a key row under it would say the same
+/// string twice. Seen on the handset; no fixture with a name can show it.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn me_card_phone_unnamed() {
+    let mut state = a_conversation();
+    state.mine.name = None;
+    state.mine.title = None;
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Me);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("me_card_phone_unnamed");
+}
+
 /// **SIP-57's timer was in the library and nowhere in the interface.**
 ///
 /// `Chat::set_timer` puts a timer on what this client sends in a channel,

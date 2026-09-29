@@ -13258,21 +13258,65 @@ impl ChatApp {
             // Your name. With none published this is the head of your key,
             // which is what everybody else sees too -- so pressing it is
             // how a name gets published.
-            let name = ui
-                .add(
-                    egui::Label::new(
-                        egui::RichText::new(state.mine.label(&me))
-                            .heading()
-                            .color(theme.text_primary),
+            // **A *name*, not whatever `named` falls back to.** `Person::named`
+            // is `name.or(handle)`, which is right in a conversation list --
+            // a handle is what to call somebody who has published no name --
+            // and wrong directly above the handle itself: with a handle and
+            // no name the heading said `me@squic.org` and the line under it
+            // said `me@squic.org`. Falling back to the key instead keeps the
+            // two lines saying different things, and is what the handset
+            // already showed for an account with no handle either.
+            let title = state.mine.name.clone();
+            let named = title.is_some();
+            let heading_text = title.unwrap_or_else(|| sigil_ui::short(&me.to_string()));
+            let heading = |ui: &mut egui::Ui| {
+                let name = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(&heading_text)
+                                .heading()
+                                .color(theme.text_primary),
+                        )
+                        .truncate()
+                        .sense(egui::Sense::click()),
                     )
-                    .truncate()
-                    .sense(egui::Sense::click()),
-                )
-                .on_hover_text("Your name and title, as others see them");
-            if name.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    .on_hover_text("Your name and title, as others see them");
+                if name.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                name.clicked()
+            };
+            if named {
+                edit_profile |= heading(ui);
+            } else {
+                // The heading is the key here, so it takes the Copy the row
+                // below would have carried. Allocated at its own width so
+                // `vertical_centered` centres the pair.
+                let drawn = egui::WidgetText::from(egui::RichText::new(&heading_text).heading())
+                    .into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Heading,
+                    );
+                let button = sigil::Form::of(ui.ctx()).button_size();
+                let row = egui::vec2(
+                    drawn.size().x + ui.spacing().item_spacing.x + button,
+                    button.max(drawn.size().y),
+                );
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        edit_profile |= heading(ui);
+                        if sigil_ui::icon_button_named(ui, sigil_ui::Icon::Copy, "Copy your key")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(key.to_string());
+                        }
+                    },
+                );
             }
-            edit_profile |= name.clicked();
 
             // Where you are reachable. Registered: `ada@trunk.exchange`,
             // and pressing it gives the name up. Unregistered: the domain
@@ -13338,16 +13382,25 @@ impl ChatApp {
             // nobody reads one -- what anybody does with their own key is
             // send it to somebody. A bare tappable key would copy in
             // silence, which on a phone is a press that says nothing.
-            ui.add_space(tokens::SPACING_SM);
-            copyable_key(
-                ui,
-                key,
-                theme,
-                &format!(
-                    "{key}\nthe only thing that identifies you to somebody who wants to \
-                     write to you"
-                ),
-            );
+            // **Only where the heading is a name.** With none published the
+            // heading *is* the head of the key, so a key row under it says
+            // one string twice, stacked — the duplication this row was moved
+            // here to end, arriving back in the one state a fixture with a
+            // name cannot show. Seen on the handset, on an account with no
+            // profile. There the Copy goes beside the heading instead, so
+            // the key is still takeable from the first thing under the mark.
+            if named {
+                ui.add_space(tokens::SPACING_SM);
+                copyable_key(
+                    ui,
+                    key,
+                    theme,
+                    &format!(
+                        "{key}\nthe only thing that identifies you to somebody who wants to \
+                         write to you"
+                    ),
+                );
+            }
 
             // What others see of you, and -- when the link is down -- the
             // one thing worth doing about it. A colour says nothing to
