@@ -841,6 +841,11 @@ impl Shell {
         if egui::Popup::is_any_open(egui_ctx) {
             return true;
         }
+        // A message's controls, which are neither a popup nor a route --
+        // and are the one thing on screen a press should take down first.
+        if sigil_ui::message_controls_showing(egui_ctx) {
+            return true;
+        }
         // **The opening screen is not the app, and the history is.** Asking
         // `nav` here said yes on a screen that draws none of it, so Back
         // walked a stack nobody could see: three presses on the handset, the
@@ -886,7 +891,17 @@ impl Shell {
                 .ctx()
                 .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack))
         {
-            if egui::Popup::is_any_open(ui.ctx()) {
+            // **A message's controls are not a `Popup`.** They are revealed
+            // by a slot in `Context::data` and drawn on their own layer, so
+            // the question below answered no while a strip was on screen and
+            // the press went on to close the conversation instead -- except
+            // it did not do that either, and on the handset Back with a strip
+            // up did nothing at all. It is the topmost thing drawn, so it is
+            // the first thing Back takes down.
+            if sigil_ui::put_away_message_controls(ui.ctx()) {
+                // Taking them down is the whole step: a press that also
+                // left the conversation would be two steps for one press.
+            } else if egui::Popup::is_any_open(ui.ctx()) {
                 egui::Popup::close_all(ui.ctx());
             } else if !(self.accounts.active().is_unlocked() && self.choosing.is_none()) {
                 // **Behind the opening screen is the system.** Its history is

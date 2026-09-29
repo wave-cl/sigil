@@ -1050,9 +1050,43 @@ fn strip(ui: &mut egui::Ui, b: &Bubble<'_>, bubble: egui::Rect, action: &mut Bub
     }
 }
 
+/// Whether some message has its controls up.
+///
+/// Asked without taking them down, because Android wants the answer a frame
+/// early: `Shell::back_reaches_something` publishes it so the platform knows
+/// whether this press is sigil's, and a press that is not sigil's leaves the
+/// application.
+pub fn message_controls_showing(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new("sigil-message-revealed")))
+        .is_some()
+}
+
 /// Put away whatever message's strip is showing.
 fn hide_strip(ctx: &egui::Context) {
     ctx.data_mut(|d| d.remove::<egui::Id>(egui::Id::new("sigil-message-revealed")));
+}
+
+/// Put a message's controls away, and say whether there were any.
+///
+/// **For a phone's Back, which could not see them.** The strip is revealed
+/// by a slot in `Context::data` and drawn on its own layer -- it is not an
+/// `egui::Popup` -- so `Popup::is_any_open`, which is the first question the
+/// shell's Back asks, answered no while the strip was plainly on screen. The
+/// press then went on to the rest of that chain, which in a conversation
+/// closes it: on the handset Back with a strip up did **nothing at all**,
+/// twice over, and the strip stayed.
+///
+/// Its own menu goes with it. That menu *is* a `Popup`, drawn from inside
+/// the strip, so hiding the strip alone would leave one flagged open that
+/// nothing draws -- and the next Back would spend itself closing something
+/// invisible, which is the same dead key one press later.
+pub fn put_away_message_controls(ctx: &egui::Context) -> bool {
+    let showing = message_controls_showing(ctx);
+    if showing {
+        hide_strip(ctx);
+        egui::Popup::close_all(ctx);
+    }
+    showing
 }
 
 /// How long a finger holds still before it is a long press and not a tap.

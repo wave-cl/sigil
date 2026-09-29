@@ -901,10 +901,15 @@ fn harness_phone_beside(
                         },
                     );
                 });
-            // The phone's Back, as the shell handles it: a menu closes; else
-            // the app takes a step back; else it is Escape.
+            // The phone's Back, as the shell handles it: a message's
+            // controls go first, then a menu closes; else the app takes a
+            // step back; else it is Escape. **A copy of `Shell::ui`'s chain**
+            // -- keep the two in step, and see
+            // `on_a_phone_back_puts_away_a_messages_controls` for what the
+            // first link is for.
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)) {
-                if egui::Popup::is_any_open(&ctx) {
+                if sigil_ui::put_away_message_controls(&ctx) {
+                } else if egui::Popup::is_any_open(&ctx) {
                     egui::Popup::close_all(&ctx);
                 } else if !app.back(&mut app_ctx) {
                     ctx.input_mut(|i| {
@@ -1743,6 +1748,62 @@ fn away_from_the_strip(h: &Harness<'static>) -> egui::Pos2 {
         "the point meant to be away from the strip is on it: {away:?} in {pill:?}"
     );
     away
+}
+
+/// **The phone's Back puts a message's controls away**, and does not also
+/// leave the conversation.
+///
+/// Found on the handset: a tap on a bubble reveals the strip, and Back then
+/// did *nothing at all* — the strip stayed and the conversation stayed, and
+/// the key read as dead. The strip is revealed by a slot in `Context::data`
+/// and drawn on its own layer, so `Popup::is_any_open` — the first question
+/// the shell's Back asks — answered no while it was plainly on screen.
+///
+/// Two things are asserted, because fixing only the first would trade a dead
+/// key for a press that takes two steps: the controls go, **and** the
+/// conversation does not. That is the rule the open-picture case already
+/// holds to, one link further down the same chain.
+#[test]
+fn on_a_phone_back_puts_away_a_messages_controls() {
+    let (mut h, app) = harness_phone_with(a_conversation(), sigil_chat::Route::Conversations);
+    h.set_size(egui::vec2(PHONE_PANE, PHONE_HEIGHT));
+    h.run();
+    h.run();
+    let bubble = topmost(&h, "mine, on the other side");
+    let on = bubble.center();
+    finger_down(&mut h, on);
+    h.run();
+    finger_up(&mut h, on);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("More").is_some(),
+        "the tap did not reveal the controls, so this says nothing about Back"
+    );
+
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("More").is_none(),
+        "Back left the controls up: {}",
+        text_of(&h)
+    );
+    let sent = app.borrow().sent_for_test().to_vec();
+    assert!(
+        !sent.iter().any(|c| c == "Close"),
+        "one press put the controls away *and* left the conversation: {sent:?}"
+    );
+
+    // And the press after it does leave, which is the step behind.
+    h.key_press(egui::Key::BrowserBack);
+    h.run();
+    h.run();
+    let sent = app.borrow().sent_for_test().to_vec();
+    assert!(
+        sent.iter().any(|c| c == "Close"),
+        "with the controls gone, Back leaves the conversation: {sent:?}"
+    );
 }
 
 /// A strip that has been put away stays away when some other menu opens.
