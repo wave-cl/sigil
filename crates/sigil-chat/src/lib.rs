@@ -2415,6 +2415,16 @@ impl ChatApp {
         self.sessions.get(&(*me, String::new())).map(|s| s.state())
     }
 
+    /// What the pane is warning about, if anything — where a call that
+    /// ended badly says so.
+    #[doc(hidden)]
+    pub fn trouble_said_for_test(&self, me: &PubKey) -> Option<String> {
+        self.panes
+            .iter()
+            .find(|(at, _)| at.0 == *me)
+            .and_then(|(_, pane)| pane.command_trouble.clone())
+    }
+
     /// Whether every session this app holds has ended.
     #[doc(hidden)]
     pub fn stopped_for_test(&self) -> bool {
@@ -12154,12 +12164,31 @@ impl ChatApp {
             }
         }
         for me in over {
+            // **Why it ended, where the person is.** `CallState::trouble` is
+            // "why the call ended badly" and was read by nothing: a call
+            // that failed -- a microphone that would not open, a session
+            // that did not come up -- popped its card and vanished, and the
+            // only account of it was a `tracing::warn` nobody is looking at.
+            // Somebody watching a call disappear has no way to tell that
+            // from a call that simply ended.
+            //
+            // Read before `leave_call`, which drops the handle this is on.
+            // The card pops itself when the call ends, so the reason has to
+            // go somewhere that outlives it, and the pane's warning line is
+            // where this app says an attempt did not work.
+            let why = self
+                .calls
+                .get(&me)
+                .and_then(|live| live.handle.state().trouble);
             // The same act as pressing hang up, and recorded the same way: a
             // call that ends because nobody came still happened, and a
             // transcript that says nothing about it is a transcript with a
             // hole where somebody tried to reach you.
             if let Some((channel, seq, seconds)) = self.leave_call(me) {
                 let at = self.at_for(me);
+                if let (Some(at), Some(why)) = (at.as_ref(), why) {
+                    self.pane(at).command_trouble = Some(format!("The call ended: {why}"));
+                }
                 self.send_as(
                     at.as_ref(),
                     Cmd::Hangup {

@@ -141,6 +141,18 @@ async fn a_call_that_has_ended_is_not_still_held() {
         "a call that ended is still being held, and whatever it was doing to \
          the microphone it is still doing"
     );
+
+    // **And it says why.** Nothing answers on port 1, so this call ends with
+    // a reason — and `CallState::trouble`, whose own doc is "why the call
+    // ended badly", was read by nothing. The card pops itself when a call
+    // ends, so a failed call vanished exactly like a finished one, and the
+    // only account of it was a `tracing::warn` nobody is looking at.
+    let said = app.trouble_said_for_test(&me);
+    assert!(
+        said.as_deref()
+            .is_some_and(|s| s.starts_with("The call ended:")),
+        "a call that failed said nothing about why: {said:?}"
+    );
 }
 
 /// A call is visible from wherever the reader is, and says whose it is.
