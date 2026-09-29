@@ -926,6 +926,22 @@ impl Shell {
                 // switcher. Leaving is what Back means here, and the platform
                 // is the only thing that can do it.
                 tracing::info!("back: leaving the application");
+                // **And the chooser is not where to come back to.**
+                // `moveTaskToBack` leaves the process alive, so whatever was
+                // drawn is still drawn when the person returns -- and
+                // stepping back off the list *opens* this screen, so the
+                // ordinary way out of sigil is list, chooser, gone. Reopening
+                // then asked which identity they were, with their
+                // conversations nowhere, and the next press dropped them out
+                // again. They were passing through on their way out; they did
+                // not choose to be here.
+                //
+                // Only where an identity is already open. With none there is
+                // nothing behind this screen to go back to, which is what
+                // makes it the opening screen.
+                if self.accounts.active().is_unlocked() {
+                    self.choosing = None;
+                }
                 self.platform.leave();
             } else if !{
                 let moved = self.nav.go_back();

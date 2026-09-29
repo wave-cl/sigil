@@ -718,10 +718,25 @@ fn on_a_phone_back_off_the_opening_screen_leaves_the_application() {
         1,
         "Back on the opening screen did not ask the platform to leave"
     );
-    let seen = said(&h);
+
+    // **And the chooser is not where to come back to.**
+    //
+    // This asserted the opposite -- that the screen was still up -- and the
+    // guard behind that was right: dismissing a screen must not be done
+    // *instead* of leaving, which is the platform's to do and was once
+    // missing. `leaving.asked()` above is that guard, and it still holds.
+    //
+    // What it also locked in was found on the handset. `moveTaskToBack`
+    // leaves the process alive, so what was drawn is still drawn on return
+    // -- and stepping back off the list is what *opens* this screen, so the
+    // ordinary way out of sigil is list, chooser, gone. Reopening then asked
+    // which identity they were, with their conversations nowhere, and the
+    // next press dropped them out again. Three presses looked like a dead
+    // Back button and were three different things.
     assert!(
-        seen.contains("Switch identity"),
-        "and it left the screen as well -- leaving is the platform's to do: {seen}"
+        !said(&h).contains("Switch identity"),
+        "reopening lands on the chooser somebody was only passing through: {}",
+        said(&h)
     );
 }
 
