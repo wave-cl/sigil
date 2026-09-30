@@ -13405,10 +13405,24 @@ impl ChatApp {
                         .domain
                         .clone()
                         .unwrap_or_else(|| self.exchange_label(me, &at.1));
+                    // **An offer, in words, because a phone cannot hover.**
+                    // This drew `@{domain}` -- an at-sign with nothing
+                    // before it -- and put "Claim a name at this exchange"
+                    // in hover text, which a handset never shows. So the
+                    // line said nothing about what it was or that it could
+                    // be pressed, and in every convention sigil borrows the
+                    // shape from, `@trunk.exchange` reads as somebody
+                    // *called* trunk.exchange rather than as a name nobody
+                    // has claimed.
+                    //
+                    // `text_secondary`, not `text_muted`: the muted tier is
+                    // held to the large-text floor on purpose, for words
+                    // nobody has to read, and an offer is not one of those.
                     let row = ui
                         .add(
                             egui::Label::new(
-                                egui::RichText::new(format!("@{domain}")).color(theme.text_muted),
+                                egui::RichText::new(format!("Claim a name at {domain}"))
+                                    .color(theme.text_secondary),
                             )
                             .truncate()
                             .sense(egui::Sense::click()),

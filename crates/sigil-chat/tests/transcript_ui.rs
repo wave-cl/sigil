@@ -12768,6 +12768,30 @@ fn me_card_phone_unnamed() {
     h.snapshot("me_card_phone_unnamed");
 }
 
+/// **The card of somebody who has claimed no name at all.**
+///
+/// `me_card_phone` has a name and a handle; `me_card_phone_unnamed` has a
+/// handle and no name. The third state — no handle either, which is every
+/// account until somebody claims one, and what this handset has been showing
+/// all day — was held by a text assertion and drawn by nothing. It is the
+/// state where the second line is an *offer* rather than a fact, and an
+/// offer that cannot be read is not one.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn me_card_phone_no_name_claimed() {
+    let mut state = a_conversation();
+    state.mine.name = None;
+    state.mine.title = None;
+    state.mine.handle = None;
+    state.domain = Some("trunk.exchange".into());
+    let (mut h, _, _) = harness_phone_measured(state, sigil_chat::Route::Me);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("me_card_phone_no_name_claimed");
+}
+
 /// **SIP-57's timer was in the library and nowhere in the interface.**
 ///
 /// `Chat::set_timer` puts a timer on what this client sends in a channel,
@@ -13191,18 +13215,35 @@ fn the_card_puts_your_name_and_your_domain_at_its_head() {
     );
 }
 
-/// With no name claimed the second line is the domain alone — the domain
-/// the handle *would* have had, from the same field the handle is composed
-/// from, so the two cannot disagree.
+/// With no name claimed the second line offers one, and names the exchange
+/// it would be claimed at — the domain the handle *would* have had, from the
+/// same field the handle is composed from, so the two cannot disagree.
+///
+/// **It used to be `@squic.org`**, an at-sign with nothing before it, and
+/// the only thing saying what it was for was hover text. A phone does not
+/// hover: the line said nothing about what it was or that it could be
+/// pressed, and in every convention this shape is borrowed from it reads as
+/// somebody *called* `squic.org`.
 #[test]
-fn with_no_name_claimed_the_card_says_the_domain_by_itself() {
+fn with_no_name_claimed_the_card_offers_one_and_says_where() {
     let mut state = a_conversation();
     state.mine.handle = None;
     state.domain = Some("squic.org".into());
     let (mut h, _) = me_card(state, three_apps());
     h.run();
     let said = text_of(&h);
-    assert!(said.contains("@squic.org"), "the domain: {said}");
+    assert!(
+        said.contains("squic.org"),
+        "the exchange the name would be claimed at: {said}"
+    );
+    assert!(
+        said.contains("Claim a name"),
+        "and that it is an offer, said where a phone can read it: {said}"
+    );
+    assert!(
+        !said.contains("@squic.org"),
+        "a bare at-sign reads as somebody called squic.org: {said}"
+    );
 }
 
 /// Keys are shown short. A whole base58 key is 41 to 44 characters and
