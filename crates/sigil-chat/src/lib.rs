@@ -6362,6 +6362,15 @@ impl ChatApp {
         let now = self.now();
         let mut open = None;
         egui::ScrollArea::vertical()
+            // **Named, so it is not another pane's.** A scroll offset lives
+            // in egui's memory under this area's id, and an unnamed one is
+            // derived from where it sits in its parent -- which for every
+            // route here is the app's root pane, in the same panel, at the
+            // same place. So they were the same id and shared one offset:
+            // on the handset, scrolling Settings down and opening Devices
+            // showed Devices already scrolled, past the amber line at its
+            // top saying the exchange lists no devices for this account.
+            .id_salt("mail")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (n, item) in state.mail.iter().enumerate() {
@@ -10790,6 +10799,15 @@ impl ChatApp {
 
         let narrow = ui.available_width() < tokens::NARROW_WIDTH;
         egui::ScrollArea::vertical()
+            // **Named, so it is not another pane's.** A scroll offset lives
+            // in egui's memory under this area's id, and an unnamed one is
+            // derived from where it sits in its parent -- which for every
+            // route here is the app's root pane, in the same panel, at the
+            // same place. So they were the same id and shared one offset:
+            // on the handset, scrolling Settings down and opening Devices
+            // showed Devices already scrolled, past the amber line at its
+            // top saying the exchange lists no devices for this account.
+            .id_salt("directory")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for found in &state.found {
@@ -10985,6 +11003,15 @@ impl ChatApp {
         // the same way, which is also what a phone roster is.
         let narrow = ui.available_width() < tokens::NARROW_WIDTH;
         egui::ScrollArea::vertical()
+            // **Named, so it is not another pane's.** A scroll offset lives
+            // in egui's memory under this area's id, and an unnamed one is
+            // derived from where it sits in its parent -- which for every
+            // route here is the app's root pane, in the same panel, at the
+            // same place. So they were the same id and shared one offset:
+            // on the handset, scrolling Settings down and opening Devices
+            // showed Devices already scrolled, past the amber line at its
+            // top saying the exchange lists no devices for this account.
+            .id_salt("members")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for member in &state.members {
@@ -13251,6 +13278,15 @@ impl ChatApp {
             });
         }
         egui::ScrollArea::vertical()
+            // **Named, so it is not another pane's.** A scroll offset lives
+            // in egui's memory under this area's id, and an unnamed one is
+            // derived from where it sits in its parent -- which for every
+            // route here is the app's root pane, in the same panel, at the
+            // same place. So they were the same id and shared one offset:
+            // on the handset, scrolling Settings down and opening Devices
+            // showed Devices already scrolled, past the amber line at its
+            // top saying the exchange lists no devices for this account.
+            .id_salt("me")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.me_head_ui(ctx, at, &state, ui, &theme, &key);
@@ -13921,6 +13957,15 @@ impl ChatApp {
         // directory have had one all along, and this one was simply never
         // given it. The heading stays put above, as theirs do.
         let scrolled = egui::ScrollArea::vertical()
+            // **Named, so it is not another pane's.** A scroll offset lives
+            // in egui's memory under this area's id, and an unnamed one is
+            // derived from where it sits in its parent -- which for every
+            // route here is the app's root pane, in the same panel, at the
+            // same place. So they were the same id and shared one offset:
+            // on the handset, scrolling Settings down and opening Devices
+            // showed Devices already scrolled, past the amber line at its
+            // top saying the exchange lists no devices for this account.
+            .id_salt("devices")
             .auto_shrink([false, false])
             .show(ui, |ui| self.devices_body(ctx, at, &state, ui, &theme));
         scrolled.inner

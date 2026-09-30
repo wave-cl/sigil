@@ -720,6 +720,9 @@ fn harness_phone_measured(
 /// What the app asked the shell for, in the order it asked.
 type Asks = std::rc::Rc<std::cell::RefCell<Vec<sigil::app::AppAction>>>;
 
+/// The route a harness is drawing, swappable between passes.
+type Routing = std::rc::Rc<std::cell::RefCell<std::rc::Rc<dyn std::any::Any>>>;
+
 /// The phone, for a test about what a press asks the *shell* to do -- which
 /// on a phone includes Back, since the shell is what a Back key reaches.
 fn harness_phone_asks(state: ChatState, route: sigil_chat::Route) -> (Harness<'static>, Asks) {
@@ -804,6 +807,33 @@ fn harness_phone_beside(
     std::rc::Rc<std::cell::RefCell<ChatApp>>,
     Drawn,
 ) {
+    let (h, app, drawn, _) = harness_phone_parts(
+        state,
+        route,
+        theme_choice,
+        asks,
+        routes,
+        siblings,
+        text_scale,
+    );
+    (h, app, drawn)
+}
+
+#[allow(clippy::type_complexity)]
+fn harness_phone_parts(
+    state: ChatState,
+    route: sigil_chat::Route,
+    theme_choice: egui::Theme,
+    asks: Asks,
+    routes: Routes,
+    siblings: Vec<sigil::Sibling>,
+    text_scale: f32,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::RefCell<ChatApp>>,
+    Drawn,
+    Routing,
+) {
     let drawn: Drawn = std::rc::Rc::new(std::cell::Cell::new(0.0));
     let width = drawn.clone();
     let mut app = ChatApp::new();
@@ -812,7 +842,11 @@ fn harness_phone_beside(
     let app = std::rc::Rc::new(std::cell::RefCell::new(app));
     let shared = app.clone();
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
-    let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
+    // **Held, not moved.** A test that needs two routes in one `Context` —
+    // the only way to catch two panes sharing a scroll offset — swaps this
+    // between passes; everything else sets it once and never looks again.
+    let route_now: Routing = std::rc::Rc::new(std::cell::RefCell::new(std::rc::Rc::new(route)));
+    let token_src = route_now.clone();
     let h = Harness::builder()
         .with_size(egui::vec2(PHONE_WIDTH, PHONE_HEIGHT))
         // A tap is a press and a release within egui's click duration; at
@@ -820,6 +854,7 @@ fn harness_phone_beside(
         // the two can outlast it. See `with_inset` in the shell's tests.
         .with_step_dt(0.05)
         .build_ui(move |ui| {
+            let token: std::rc::Rc<dyn std::any::Any> = token_src.borrow().clone();
             let mut app = app.borrow_mut();
             let ctx = ui.ctx().clone();
             sigil::Form::install(&ctx, sigil::Form::Phone);
@@ -952,7 +987,7 @@ fn harness_phone_beside(
                 }
             }
         });
-    (h, shared, drawn)
+    (h, shared, drawn, route_now)
 }
 
 /// A finger: the touch event egui-winit would forward, and the pointer it
