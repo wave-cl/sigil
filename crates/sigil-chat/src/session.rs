@@ -3592,31 +3592,59 @@ async fn sync_channels(chat: &mut Chat, desk: &mut Desk) -> Result<(), String> {
 
         // The exchange is authoritative about who administers a channel; the
         // store is what makes that survive being offline.
-        let (admins, given_name, roster) = match chat.info(&m.channel).await {
-            Ok(info) => (
-                info.members
-                    .iter()
-                    .filter(|mem| mem.role == Role::Admin)
-                    .map(|mem| mem.account)
-                    .collect::<Vec<_>>(),
-                info.name,
-                info.members
-                    .iter()
-                    .map(|mem| Member {
-                        account: mem.account,
-                        // Attested by the exchange. This is the one role that
-                        // may be drawn as a role; a SIP-21 title may not.
-                        admin: mem.role == Role::Admin,
-                        // Filled from the transcript when the state is drawn.
-                        muted: false,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Err(_) => (
-                remembered.map(|k| k.admins.clone()).unwrap_or_default(),
-                String::new(),
-                Vec::new(),
-            ),
+        //
+        // **Asked once per channel per session, and then only when told.** The
+        // roster and a public channel's name move only when something says so,
+        // and something does: a SIP-30 `Membership` event marks the channel
+        // `roster_dirty` and `refresh_rosters` re-reads it. Asking on every
+        // rebuild instead cost one `/channel/info` per channel per `BACKSTOP`
+        // -- measured at 34 a minute for sixteen conversations against a live
+        // exchange -- and, for a channel this exchange holds a copy of, a
+        // cross-exchange `/peer/standing` round trip each on top (SIP-43 makes
+        // the origin authoritative for a device's chain position), which is a
+        // round trip on the path a person waits for.
+        //
+        // A roster here is proof `info` already answered this session: nothing
+        // else fills it, and the store has no column for it. So this cannot
+        // skip the first look, which is also what learns where the channel
+        // lives (SIP-43) and what settles its incarnation.
+        let held: Option<(Vec<PubKey>, Vec<Member>)> = desk
+            .channels
+            .get(&m.channel)
+            .filter(|k| !k.members.is_empty())
+            .map(|k| (k.admins.clone(), k.members.clone()));
+        let (admins, given_name, roster) = match held {
+            // Nothing for the name: a public channel's label was written to the
+            // store by the look that did ask, and `remembered` reads it back.
+            Some((admins, members)) => (admins, String::new(), members),
+            None => match chat.info(&m.channel).await {
+                Ok(info) => (
+                    info.members
+                        .iter()
+                        .filter(|mem| mem.role == Role::Admin)
+                        .map(|mem| mem.account)
+                        .collect::<Vec<_>>(),
+                    info.name,
+                    info.members
+                        .iter()
+                        .map(|mem| Member {
+                            account: mem.account,
+                            // Attested by the exchange. This is the one role that
+                            // may be drawn as a role; a SIP-21 title may not.
+                            admin: mem.role == Role::Admin,
+                            // Filled from the transcript when the state is drawn.
+                            muted: false,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                // Left empty rather than filled from the store, so the next
+                // rebuild asks again: an empty roster is how this retries.
+                Err(_) => (
+                    remembered.map(|k| k.admins.clone()).unwrap_or_default(),
+                    String::new(),
+                    Vec::new(),
+                ),
+            },
         };
         let members: Vec<PubKey> = roster.iter().map(|m| m.account).collect();
 

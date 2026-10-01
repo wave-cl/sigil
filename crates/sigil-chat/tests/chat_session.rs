@@ -6156,3 +6156,84 @@ async fn a_group_row_names_whoever_spoke_last() {
     bob.stop();
     carol.stop();
 }
+
+/// **The periodic rebuild asks once, not once per conversation.**
+///
+/// `sync_channels` runs every `BACKSTOP` and used to ask `/channel/info` for
+/// every channel in the list, whether or not anything about it had moved. On
+/// the live estate that was 34 requests a minute for sixteen conversations --
+/// and for a channel the exchange holds a *copy* of, each one costs a
+/// cross-exchange `/peer/standing` on top, because SIP-43 makes the origin
+/// authoritative for a device's chain position. That is a round trip to another
+/// exchange on the path a person waits for, to learn a roster that had not
+/// moved.
+///
+/// It had not moved, and something says so when it does: a SIP-30 `Membership`
+/// event marks the channel and `refresh_rosters` re-reads just that one. What
+/// the *list* needs -- `last`, `read`, `epoch`, `first` per channel -- is
+/// already in the one `/channel/mine` the rebuild was making anyway.
+///
+/// **The window spans a rebuild on purpose.** The test above is careful to stay
+/// clear of one ("it stays clear of the 28-second rebuild, which would add its
+/// own"), which is exactly why this cost sat unmeasured while the per-tick
+/// traffic around it was driven to nothing.
+#[tokio::test]
+async fn the_periodic_rebuild_does_not_ask_about_every_conversation() {
+    // Enough that one request per channel is unmistakable beside the two or
+    // three an idle session makes for its own reasons.
+    const GROUPS: usize = 8;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(61);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| alice.state().me == Some(a_id), 15).await,
+        "the session should come up: {:?}",
+        alice.state().trouble
+    );
+
+    for i in 0..GROUPS {
+        alice.send(Cmd::NewGroup(format!("room {i}")));
+    }
+    assert!(
+        until(|| alice.state().conversations.len() >= GROUPS, 30).await,
+        "all {GROUPS} groups should appear, saw {}",
+        alice.state().conversations.len()
+    );
+
+    let asked = || async {
+        let mut probe = sqnr::Client::connect(addr, &server_pub)
+            .await
+            .expect("the exchange answers a status");
+        let (code, body) = probe.get("/status").await.expect("status");
+        assert_eq!(code, 200);
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        json["requests"].as_u64().expect("a request count")
+    };
+
+    // Settle, so the count below covers a quiet session and not its catch-up.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before = asked().await;
+    // Longer than `BACKSTOP`, so at least one rebuild falls inside it.
+    tokio::time::sleep(Duration::from_secs(35)).await;
+    let after = asked().await;
+
+    // One `/channel/mine` per rebuild, one `/beacon/beat` per thirty seconds,
+    // and nothing else: a handful whatever the phase. One `/channel/info` per
+    // channel per rebuild would be eight more, and two rebuilds can fall in
+    // thirty-five seconds.
+    let spent = after - before - 1; // the probe's own /status
+    assert!(
+        spent <= 6,
+        "an idle session with {GROUPS} conversations spent {spent} requests \
+         across a rebuild; the rebuild should ask `/channel/mine` and nothing \
+         per-channel"
+    );
+
+    alice.stop();
+}
