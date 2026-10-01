@@ -21,6 +21,16 @@ use sqnr_core::PubKey;
 const NOW: u64 = 1_788_004_800;
 const DAY: u64 = 86_400;
 
+/// The version the Settings card draws in these tests.
+///
+/// Pinned for the same reason `NOW` is, and found the same way — by a picture
+/// going stale. `CARGO_PKG_VERSION` moves on every release, so three snapshots
+/// of the Settings card broke on the bump to 0.1.48 and the snapshots job
+/// stayed red until somebody read the diff and found it was the digits. A
+/// layout snapshot must not be able to fail for the version number, any more
+/// than it may fail for the clock.
+const SHOWN_VERSION: &str = "0.1.0";
+
 /// Our own account key.
 ///
 /// **Derived from the seed, not the seed bytes.** `unlocked_for_test` takes a
@@ -330,6 +340,7 @@ fn harness_at_recording(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
@@ -357,6 +368,7 @@ fn harness_at_recording(
 fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(route);
@@ -383,6 +395,7 @@ fn harness_at(state: ChatState, route: sigil_chat::Route) -> Harness<'static> {
 fn harness_at_prefs(state: ChatState, route: sigil_chat::Route, direct: bool) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     accounts.prefs.set_direct_calls(direct);
@@ -411,6 +424,7 @@ fn harness_at_prefs(state: ChatState, route: sigil_chat::Route, direct: bool) ->
 fn harness_with_accounts(state: ChatState, accounts: Vec<Account>) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(accounts);
     Harness::builder()
@@ -444,6 +458,7 @@ fn harness_watching_routes(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
@@ -491,6 +506,7 @@ fn harness_watching_asks(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
@@ -534,6 +550,7 @@ fn harness_showing_exchange(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     for name in extra {
@@ -598,6 +615,7 @@ fn open_exchanges(h: &mut Harness<'static>) {
 fn harness_with(state: ChatState, dark: bool) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
@@ -838,6 +856,7 @@ fn harness_phone_parts(
     let width = drawn.clone();
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let app = std::rc::Rc::new(std::cell::RefCell::new(app));
     let shared = app.clone();
@@ -3754,6 +3773,7 @@ fn harness_recording_commands_phone(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
@@ -3787,6 +3807,7 @@ fn me_card_commands(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
@@ -3818,6 +3839,7 @@ fn harness_recording_commands(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
@@ -3923,6 +3945,7 @@ fn a_page(from: u32, to: u32) -> ChatState {
 fn harness_of(state: std::rc::Rc<std::cell::RefCell<ChatState>>) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     Harness::builder()
         .with_size(egui::vec2(1000.0, 620.0))
@@ -7854,6 +7877,7 @@ fn staged_files_are_shown_removable_and_sent_with_the_words() {
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(the_room());
     app.stage_for_test(me(), "", paths.clone());
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
@@ -7937,6 +7961,7 @@ fn files_alone_are_a_message() {
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(the_room());
     app.stage_for_test(me(), "", vec![p]);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
@@ -7990,6 +8015,7 @@ fn composer_files_dark() {
     ];
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(the_room());
     app.stage_for_test(me(), "", paths);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
@@ -8191,6 +8217,7 @@ fn phone_pictures(n: usize) -> Harness<'static> {
     }
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let margin = sigil::tokens::SPACING_MD;
@@ -8297,6 +8324,7 @@ fn gallery_dark() {
     // tiles are pictures, and this is the snapshot that looks at them.
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let mut h = Harness::builder()
@@ -8333,6 +8361,7 @@ fn gallery_dark() {
 fn reply_preview_dark() {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(with_pictures(1));
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let mut h = Harness::builder()
@@ -8377,6 +8406,7 @@ fn reply_preview_dark() {
 fn rewrite_preview_dark() {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(mine_with_pictures("look at this one", 1));
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let mut h = Harness::builder()
@@ -8431,6 +8461,7 @@ fn reactions_dark() {
     state.lines[n - 2].text = "theirs, reacted to".into();
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let mut h = Harness::builder()
@@ -8513,6 +8544,7 @@ fn reply_to_picture_dark() {
     });
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let mut h = Harness::builder()
@@ -8625,6 +8657,7 @@ fn harness_that_can_be_told(
 ) -> Harness<'static> {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(state);
     if !staged.is_empty() {
         app.stage_for_test(me(), "", staged);
@@ -10158,6 +10191,7 @@ fn on_a_phone_a_named_view_says_its_name_once() {
 fn on_a_desktop_a_view_keeps_its_own_head() {
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(a_conversation());
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
     let token: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(sigil_chat::Route::Devices);
@@ -13735,6 +13769,7 @@ fn a_staged_voice_note_shows_its_waveform_and_its_length() {
 
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(the_room());
     app.stage_for_test(me(), "", vec![path]);
     let mut accounts = sigil::accounts::Accounts::of(vec![account()]);
@@ -14386,6 +14421,7 @@ fn the_card_can_choose_whether_calls_connect_directly() {
     let held = accounts.clone();
     let mut app = ChatApp::new();
     app.set_now_for_test(NOW);
+    sigil_chat::show_version_as(SHOWN_VERSION);
     app.show_state_for_test(a_conversation());
     let siblings = three_apps();
     let mut h = Harness::builder()

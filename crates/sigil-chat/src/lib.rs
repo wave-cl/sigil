@@ -254,6 +254,41 @@ pub fn reset_drawn() {
     DREW.with(|n| n.set(0));
 }
 
+thread_local! {
+    /// The version the Settings card shows, where a test fixed it.
+    ///
+    /// Thread-local for the same reason `DREW` is: kittest runs each test on a
+    /// thread of its own, so this is per-test rather than shared, and nothing
+    /// races over it the way a `OnceLock` would under `cargo test`.
+    static VERSION: std::cell::RefCell<Option<String>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Draw `version` as sigil's own version from this thread on.
+///
+/// **Why this seam exists.** Three pixel snapshots draw the version line, and
+/// `CARGO_PKG_VERSION` moves on every release — so bumping the version broke
+/// them, which is not a thing a layout snapshot should be able to say. It did:
+/// the bump to 0.1.48 put the snapshots job red and it stayed red for seven
+/// hours, reading as a rendering regression. The number is real to a person
+/// looking at the card and noise to a picture asserting where things sit, and
+/// this is the same rule that keeps a generated key and a live clock out of a
+/// snapshot.
+#[doc(hidden)]
+pub fn show_version_as(version: &str) {
+    VERSION.with(|v| *v.borrow_mut() = Some(version.to_string()));
+}
+
+/// What to print as sigil's version: what a test fixed, or this build's.
+fn shown_version() -> String {
+    VERSION.with(|v| {
+        v.borrow()
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+    })
+}
+
 /// Everything about a message that decides how tall it draws.
 ///
 /// A reserved row is a promise that the drawn one would be this tall, so what
@@ -13885,7 +13920,7 @@ impl ChatApp {
             // The package's version too, where there is one: on a phone this
             // line was the only version anybody could read and it named the
             // wrong repository. See `sigil::build`.
-            egui::RichText::new(sigil::build::version_line(env!("CARGO_PKG_VERSION"))).small(),
+            egui::RichText::new(sigil::build::version_line(&shown_version())).small(),
         );
     }
 
