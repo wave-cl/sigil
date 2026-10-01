@@ -171,6 +171,20 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     // All seventeen operations go through these two.
     ("GET", "/admin/challenge", Admin),
     ("POST", "/admin/command", Admin),
+    // SIP-30 §The tail: the operator's live stream of what the exchange is
+    // doing, held open for as long as the watcher stays. `sqex tail` is what
+    // reaches it.
+    //
+    // The console here reads the *audit log* instead, through `Op::AuditTail`
+    // over `/admin/command` above -- a batch of what has already happened,
+    // signed for and finished. The two are different instruments and the
+    // console has no pane that stays open, so this is not the same route
+    // wearing another name.
+    (
+        "POST",
+        "/admin/tail",
+        NotYet("the console reads the finished audit log, not a stream that stays open"),
+    ),
     ("GET", "/status", Admin),
     ("GET", "/health", Admin),
     (
@@ -526,8 +540,10 @@ fn the_coverage_is_what_it_says_it_is() {
 
     // Pinned, so growth is deliberate and a regression is a failure rather
     // than a number nobody looked at.
+    // 130 -> 131 at sqex v0.119.0: SIP-30's `/admin/tail`, the operator's live
+    // stream. Nothing here reaches it, so `reached` below does not move.
     assert_eq!(
-        total, 130,
+        total, 131,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -535,7 +551,7 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 107,
+        client, 108,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
