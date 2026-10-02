@@ -723,6 +723,15 @@ pub struct ChatState {
     /// What happened to the conversation, in the same sequence space as
     /// `lines` so the two interleave.
     pub events: Vec<Happened>,
+    /// SIP-87: whether the conversation on screen is keyed by agreement --
+    /// every member contributing -- rather than by an admin minting one.
+    ///
+    /// Drawn, because a reader cannot tell from anything else and the two
+    /// differ in what an addition means: under SIP-17 an admin can hand the
+    /// key to somebody the member list does not name, and here the key does
+    /// not exist until a commit names them. It also decides which act the
+    /// interface offers, since a channel may not hold both kinds.
+    pub agreed: bool,
     /// Whether the exchange has answered about the conversation on screen
     /// yet, this session.
     ///
@@ -1686,6 +1695,12 @@ pub enum Cmd {
     // ---- making conversations ------------------------------------------
     /// A private group. Its name is a sealed entry, not the exchange's.
     NewGroup(String),
+    /// SIP-87: a private group whose key every member contributes to.
+    ///
+    /// A separate command rather than a setting on the one above, because a
+    /// channel is agreed or admin-keyed from its first commit and MUST NOT
+    /// mix the two -- there is no later point at which it could be decided.
+    NewAgreedGroup(String),
     /// A public channel. Anybody may find and join it, and **nothing in it is
     /// encrypted** — everyone who may join would hold any key it used.
     NewPublic {
@@ -1738,6 +1753,19 @@ pub enum Cmd {
     Dismiss(u64),
     /// Mint a new epoch for everybody present.
     Rotate,
+
+    /// SIP-87: change the key by committing, admitting and removing whom this
+    /// names.
+    ///
+    /// The agreed channel's answer to both `Rotate` and `Invite`: the epoch
+    /// key does not exist until an entry naming the member set is in the log,
+    /// so an addition that did not commit would leave a member who cannot
+    /// read, and a rotation that did not commit would mint the other kind of
+    /// key into a channel that may not hold both.
+    Commit {
+        adds: Vec<PubKey>,
+        removes: Vec<PubKey>,
+    },
     /// Leave. For a direct message this removes only us — leaving a
     /// conversation must not delete the other person's copy.
     Leave(Option<[u8; 32]>),
@@ -6604,6 +6632,24 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         .map(|(_, k)| counted.saturating_sub(k.wanted))
         .unwrap_or(0);
 
+    // SIP-87: whether the conversation on screen is keyed by **agreement** --
+    // a chain every member contributes to -- rather than by an admin minting
+    // thirty-two bytes.
+    //
+    // Asked of the store, where holding a chain for the channel *is* the
+    // answer; SIP-17's amendment fixes which kind a channel is at its first
+    // commit and forbids mixing the two, so this is settled rather than
+    // current. One indexed read per publish, for the open conversation alone.
+    //
+    // Two things want it. The transcript below drops the exchange's own
+    // `added`/`removed`/`rotated` here, because the commit is the better
+    // witness and says the same thing. And the interface has to offer the
+    // right act: `rotate` is SIP-17's and would mint an admin key into a
+    // channel that must not hold both kinds.
+    let agreed = open
+        .map(|(channel, _)| chat.store().agreement(&channel).ok().flatten().is_some())
+        .unwrap_or(false);
+
     // What happened *to* the channel, from the exchange's own signed entries.
     let events: Vec<Happened> = open
         .map(|(_, k)| {
@@ -6633,6 +6679,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                 EVENT_RENAMED,
             ];
             let dm = k.peer.is_some();
+            let agreed_plumbing = [EVENT_ADDED, EVENT_REMOVED, EVENT_ROTATED];
             // From the same point as the messages. An event above the first
             // message drawn would sit at the top of the transcript describing
             // something that happened before anything on screen.
@@ -6655,6 +6702,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                 .events()
                 .filter(|h| h.seq >= first)
                 .filter(|h| !(dm && plumbing.contains(&h.what.event)))
+                .filter(|h| !(agreed && agreed_plumbing.contains(&h.what.event)))
                 .map(|h| {
                     let (actor, subject) = (h.what.actor, h.what.subject);
                     let (who, them) = (named(&actor), named(&subject));
@@ -6810,6 +6858,76 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
                     CALL_MISSED if !mine => Call::Missed,
                     _ => Call::Was,
                 }),
+            });
+        }
+        // SIP-87 commits, onto the same list and for the same reason calls are
+        // on it: something happened *to* the conversation, in the order
+        // everybody saw it.
+        //
+        // This is the question SIP-87 left to an implementation -- "a person
+        // needs to see 'X added Y at 14:02', not a chain of hashes" -- and
+        // until a client draws it the property the document buys is real and
+        // invisible. In an agreed channel this is the only row a membership
+        // change leaves, the exchange's own copies having gone above.
+        //
+        // **What the hover may and may not say.** SIP-87 is explicit that an
+        // implementation MUST NOT describe it as giving forward secrecy: the
+        // epoch keys are kept in order to read history, so a stolen device
+        // yields what it always did. What is true is the contribution and the
+        // ordering, and that is what this says.
+        const KEYED: &str = "Everybody here contributed to this key, and it did not exist \
+                             until this entry was in the log. It does not take back what \
+                             anybody already holds.";
+        for c in k.timeline.commits() {
+            let mine = c.account == me;
+            let a = if mine {
+                "You".to_string()
+            } else {
+                named(&c.account)
+            };
+            // Named in full rather than counted. "added 2 people" is a worse
+            // answer than the two names, and a commit carries at most 64 of
+            // each -- a limit nobody reaches by hand.
+            let list = |who: &[PubKey]| {
+                who.iter()
+                    .map(|k| {
+                        if *k == me {
+                            "you".to_string()
+                        } else {
+                            named(k)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let (adds, removes) = (&c.commit.adds, &c.commit.removes);
+            let said = match (adds.is_empty(), removes.is_empty()) {
+                (true, true) => format!("{a} changed the key"),
+                (false, true) => format!("{a} changed the key, adding {}", list(adds)),
+                (true, false) => format!("{a} changed the key, removing {}", list(removes)),
+                (false, false) => format!(
+                    "{a} changed the key, adding {} and removing {}",
+                    list(adds),
+                    list(removes)
+                ),
+            };
+            events.push(Happened {
+                seq: c.seq,
+                at: c.posted,
+                said,
+                actor: c.account,
+                // `Happened` holds one subject and a commit may name several.
+                // The words above name all of them; this is the key a reader
+                // can reach for, and where there is no single one it is the
+                // committer's -- never a silent first-of-many.
+                subject: match (adds.as_slice(), removes.as_slice()) {
+                    ([one], []) | ([], [one]) => *one,
+                    _ => c.account,
+                },
+                caveat: Some(KEYED),
+                // No clock beside it, as with every other membership change:
+                // a commit is not a thing a reader can act on.
+                call: None,
             });
         }
         // Back into the exchange's own order: the calls were appended and the
@@ -7027,6 +7145,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(my_home, desk.my_home.clone());
         set!(home_moved, desk.home_moved.clone());
         set!(events, events);
+        set!(agreed, agreed);
         set!(earlier, earlier);
         set!(loading, loading);
         set!(synced, synced);
@@ -7489,6 +7608,38 @@ async fn record_home(identity: &std::path::Path, chat: &mut Chat) {
 /// The first eight hex characters of an identifier, for a channel with no name.
 fn hex8(id: &[u8; 32]) -> String {
     id.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+/// SIP-87: change the key, admitting and removing whom this names.
+///
+/// Reached from `Cmd::Commit` and from `Cmd::Invite` in an agreed channel,
+/// where an addition that did not commit would leave a member who can fetch
+/// every entry and open none.
+async fn commit_now(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    channel: [u8; 32],
+    adds: Vec<PubKey>,
+    removes: Vec<PubKey>,
+) {
+    match chat.commit(&channel, &adds, &removes).await {
+        // The epoch *and* what it was for, because a commit that admitted
+        // nobody and one that admitted four would otherwise read the same in a
+        // status line -- and that the two are different facts is the whole of
+        // what this document buys.
+        Ok(epoch) => note(
+            state,
+            match (adds.len(), removes.len()) {
+                (0, 0) => format!("Key changed (epoch {epoch})."),
+                (a, 0) => format!("Key changed (epoch {epoch}), {a} added."),
+                (0, r) => format!("Key changed (epoch {epoch}), {r} removed."),
+                (a, r) => format!("Key changed (epoch {epoch}), {a} added and {r} removed."),
+            },
+        ),
+        Err(e) => trouble(state, e),
+    }
+    desk.dirty.insert(channel);
 }
 
 async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk: &mut Desk) {
@@ -8866,6 +9017,17 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
             Err(e) => trouble(state, e),
         },
+        Cmd::NewAgreedGroup(name) => match chat.create_agreed_group(&name, &[]).await {
+            Ok(channel) => {
+                desk.restructure = true;
+                open(&*chat, desk, state, channel);
+                note(
+                    state,
+                    format!("Created {name}, keyed by agreement. Add somebody to it."),
+                );
+            }
+            Err(e) => trouble(state, e),
+        },
         Cmd::NewPublic { name, topic } => match chat.create_public(&name, &topic).await {
             Ok(channel) => {
                 desk.restructure = true;
@@ -8939,6 +9101,17 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
 
         Cmd::Invite(who) => {
             let Some(channel) = desk.open else { return };
+            // SIP-87: in an agreed channel an addition *is* a commit, and one
+            // that is not leaves a member who can fetch every entry and open
+            // none -- SIP-17's invitation hands over the key in force, and
+            // here there is no key to hand over until an entry says who it is
+            // for.
+            //
+            // Routed here rather than at the two places that offer the field,
+            // so that a third one cannot be written without it.
+            if chat.store().agreement(&channel).ok().flatten().is_some() {
+                return commit_now(chat, state, desk, channel, vec![who], Vec::new()).await;
+            }
             match chat.invite(&channel, &who).await {
                 Ok(()) => {
                     desk.dirty.insert(channel);
@@ -9037,6 +9210,10 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 Ok(epoch) => note(state, format!("New key minted (epoch {epoch}).")),
                 Err(e) => trouble(state, e),
             }
+        }
+        Cmd::Commit { adds, removes } => {
+            let Some(channel) = desk.open else { return };
+            commit_now(chat, state, desk, channel, adds, removes).await;
         }
         Cmd::Leave(which) => {
             // **The one named, or the one open.** Leaving used to be reachable

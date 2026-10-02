@@ -64,6 +64,9 @@ fn a_conversation() -> ChatState {
         me: Some(me()),
         prekeys: None,
         folds: 0,
+        // SIP-87: the fixture is an ordinary SIP-17 channel, so the Settings
+        // card offers minting rather than committing.
+        agreed: false,
         timer_secs: 0,
         devices_known: true,
         join_trouble: None,

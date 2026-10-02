@@ -5845,6 +5845,20 @@ impl ChatApp {
             self.pane(at).dialog = None;
             self.send_as(Some(at), Cmd::NewGroup("New group".into()));
         }
+        // SIP-87. Offered beside the ordinary group rather than as a setting
+        // on it, because which kind a channel is cannot be decided later: it
+        // is fixed at the first commit and the two may not be mixed.
+        const AGREED: &str = "Everybody in it contributes to the key, so no one person \
+                              chooses it, and nobody can be given it without the channel's \
+                              own record saying so. An admin who adds themselves can still \
+                              read what is said after.";
+        if sigil_ui::icon_item(ui, sigil_ui::Icon::Lock, "New group, keyed by everybody")
+            .on_hover_text(AGREED)
+            .clicked()
+        {
+            self.pane(at).dialog = None;
+            self.send_as(Some(at), Cmd::NewAgreedGroup("New group".into()));
+        }
         if sigil_ui::icon_item(ui, sigil_ui::Icon::Public, "New public channel")
             .on_hover_text("Anybody may find and join it, and nothing said in it is encrypted.")
             .clicked()
@@ -11793,11 +11807,36 @@ impl ChatApp {
             // the wrong shape for the one act that cannot be undone.
             const MINTING: &str = "Everybody present is given a new key. Anybody who has \
                                    left keeps what they already had.";
-            if sigil_ui::icon_item(ui, sigil_ui::Icon::Refresh, "Mint a new key")
-                .on_hover_text(MINTING)
+            // SIP-87: the same row, and **not the same act**. In an agreed
+            // channel the key is derived from a chain every member has
+            // contributed to, and minting one would be putting SIP-17's kind
+            // of key into a channel that may not hold both -- so the act is a
+            // commit with nobody added or removed, and the words say what
+            // actually happens rather than borrowing the other one's.
+            const AGREEING: &str = "Everybody here contributes to the next key, and it does \
+                                    not exist until this channel's own record says who it \
+                                    is for. Anybody who has left keeps what they already \
+                                    had.";
+            let (word, hover) = if state.agreed {
+                ("Change the key", AGREEING)
+            } else {
+                ("Mint a new key", MINTING)
+            };
+            if sigil_ui::icon_item(ui, sigil_ui::Icon::Refresh, word)
+                .on_hover_text(hover)
                 .clicked()
             {
-                self.send_as(Some(at), Cmd::Rotate);
+                self.send_as(
+                    Some(at),
+                    if state.agreed {
+                        Cmd::Commit {
+                            adds: Vec::new(),
+                            removes: Vec::new(),
+                        }
+                    } else {
+                        Cmd::Rotate
+                    },
+                );
             }
             // **Drawn on a phone, not hovered.** This row acts on one
             // press and cannot be pressed back: the old epoch is
@@ -11807,8 +11846,26 @@ impl ChatApp {
             // handset it was an unexplained single tap, beside a
             // *destruction* that asks twice.
             if sigil::Form::of(ui.ctx()).is_phone() {
-                ui.colored_label(theme.text_secondary, egui::RichText::new(MINTING).small());
+                ui.colored_label(
+                    theme.text_secondary,
+                    egui::RichText::new(if state.agreed { AGREEING } else { MINTING }).small(),
+                );
             }
+            // SIP-87, said rather than left to be inferred from which words the
+            // row above happens to use. A channel is keyed one way or the other
+            // from its first commit and may not hold both, so this is a fact
+            // about the conversation and not a setting -- which is why it reads
+            // as a sentence and has nothing to press.
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(if state.agreed {
+                    "Everybody here contributes to this channel's key. Nobody can be given \
+                     it without the channel's own record saying who it is for."
+                } else {
+                    "An admin mints this channel's key and hands it out."
+                })
+                .small(),
+            );
 
             // **SIP-42, which was built and had no control.**
             //

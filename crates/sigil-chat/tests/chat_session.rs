@@ -6237,3 +6237,292 @@ async fn the_periodic_rebuild_does_not_ask_about_every_conversation() {
 
     alice.stop();
 }
+
+/// **SIP-87's third question, which only a client can answer**: "a person needs
+/// to see 'X added Y at 14:02', not a chain of hashes. Until a client renders
+/// it, the property this document buys is real and invisible."
+///
+/// So this asserts the row, through the whole path: a group keyed by agreement,
+/// an addition that commits because an addition in such a channel *is* a
+/// commit, and the words the transcript ends up with.
+#[tokio::test]
+async fn an_agreed_group_draws_who_the_key_is_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(21);
+    let (b_signer, b_id) = signer(22);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    alice.send(Cmd::NewAgreedGroup("everybody's key".into()));
+    assert!(
+        until(
+            || {
+                alice
+                    .state()
+                    .conversations
+                    .iter()
+                    .any(|c| c.group && c.public == Some(false))
+            },
+            15,
+        )
+        .await,
+        "the group should appear in its creator's list: {:?}",
+        alice.state().conversations
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.group && c.public == Some(false))
+        .map(|c| c.channel)
+        .unwrap();
+    assert!(
+        until(
+            || alice.state().open == Some(channel) && alice.state().agreed,
+            15
+        )
+        .await,
+        "a channel made this way is keyed by agreement, and says so"
+    );
+
+    // An addition. `Cmd::Invite` is what the interface sends, and in an agreed
+    // channel it must commit rather than hand over a key in force -- there is
+    // no key to hand over until an entry says who it is for.
+    alice.send(Cmd::Invite(b_id));
+    assert!(
+        until(
+            || {
+                alice
+                    .state()
+                    .events
+                    .iter()
+                    .any(|e| e.said.contains("changed the key, adding"))
+            },
+            20,
+        )
+        .await,
+        "the addition should be drawn as a commit: {:?}",
+        alice
+            .state()
+            .events
+            .iter()
+            .map(|e| &e.said)
+            .collect::<Vec<_>>()
+    );
+
+    // **And only once.** The exchange writes `added` and `rotated` for the same
+    // act; the commit is the better witness and the other two are plumbing, so
+    // three entries leave one row.
+    let said: Vec<String> = alice
+        .state()
+        .events
+        .iter()
+        .map(|e| e.said.clone())
+        .collect();
+    assert_eq!(
+        said.iter().filter(|s| s.contains("adding")).count(),
+        1,
+        "one act, one row: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|s| s.contains("added")),
+        "the exchange's own record of the addition should not be drawn beside \
+         the commit: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|s| s.contains("rotated the key")),
+        "nor its rotation, which is the same act again: {said:?}"
+    );
+
+    // A rekey with nobody added or removed reads as what it is.
+    alice.send(Cmd::Commit {
+        adds: Vec::new(),
+        removes: Vec::new(),
+    });
+    assert!(
+        until(
+            || {
+                alice
+                    .state()
+                    .events
+                    .iter()
+                    .any(|e| e.said == "You changed the key")
+            },
+            20,
+        )
+        .await,
+        "a rekey naming nobody says so: {:?}",
+        alice
+            .state()
+            .events
+            .iter()
+            .map(|e| &e.said)
+            .collect::<Vec<_>>()
+    );
+
+    // Bob reads the same channel and derives the same key, which is the point
+    // of the thing being drawn at all.
+    assert!(
+        until(
+            || {
+                bob.state()
+                    .conversations
+                    .iter()
+                    .any(|c| c.channel == channel)
+            },
+            20,
+        )
+        .await,
+        "the invitee learns of a group they could not have guessed: {:?}",
+        bob.state().conversations
+    );
+    bob.send(Cmd::Show(channel));
+    // The welcome carried a chain, not a key, so Bob's side says agreed too --
+    // and a device holding the key without the chain could not derive a single
+    // epoch after the one it was handed.
+    assert!(
+        until(|| bob.state().open == Some(channel), 20).await,
+        "the invitee opens it"
+    );
+    assert!(
+        until(|| bob.state().agreed, 20).await,
+        "the invitee is welcomed into the chain, not merely handed a key: {:?}",
+        bob.state()
+            .events
+            .iter()
+            .map(|e| &e.said)
+            .collect::<Vec<_>>()
+    );
+    alice.send(Cmd::Send("under a key we both made".into()));
+    assert!(
+        until(
+            || {
+                bob.state()
+                    .lines
+                    .iter()
+                    .any(|l| l.text == "under a key we both made")
+            },
+            25,
+        )
+        .await,
+        "the invitee derives the epoch it was admitted at: {:?}",
+        bob.state().lines
+    );
+
+    alice.stop();
+    bob.stop();
+}
+
+/// The control for the filter above, and the half most likely to be wrong.
+///
+/// The commit row is only safe to prefer *in an agreed channel*. A filter
+/// written without this would pass its own test while silently suppressing
+/// every membership event in every SIP-17 channel in the app — which is the
+/// larger number of them, and nothing else would have noticed.
+#[tokio::test]
+async fn an_admin_keyed_group_still_draws_the_exchanges_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+
+    let (a_signer, a_id) = signer(23);
+    let (b_signer, b_id) = signer(24);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    // The same sequence as the test above, differing only in which kind of key
+    // the channel has.
+    alice.send(Cmd::NewGroup("an ordinary room".into()));
+    assert!(
+        until(
+            || {
+                alice
+                    .state()
+                    .conversations
+                    .iter()
+                    .any(|c| c.group && c.public == Some(false))
+            },
+            15,
+        )
+        .await,
+        "the group should appear: {:?}",
+        alice.state().conversations
+    );
+    let channel = alice
+        .state()
+        .conversations
+        .iter()
+        .find(|c| c.group && c.public == Some(false))
+        .map(|c| c.channel)
+        .unwrap();
+    assert!(
+        until(|| alice.state().open == Some(channel), 15).await,
+        "it should open"
+    );
+    assert!(
+        !alice.state().agreed,
+        "a group made the ordinary way is keyed by its admin"
+    );
+
+    alice.send(Cmd::Invite(b_id));
+    assert!(
+        until(
+            || alice
+                .state()
+                .events
+                .iter()
+                .any(|e| e.said.contains("added")),
+            20,
+        )
+        .await,
+        "the exchange's own record of the addition is still drawn: {:?}",
+        alice
+            .state()
+            .events
+            .iter()
+            .map(|e| &e.said)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !alice
+            .state()
+            .events
+            .iter()
+            .any(|e| e.said.contains("changed the key")),
+        "and there is no commit in a channel that has none: {:?}",
+        alice
+            .state()
+            .events
+            .iter()
+            .map(|e| &e.said)
+            .collect::<Vec<_>>()
+    );
+
+    alice.stop();
+    bob.stop();
+}
