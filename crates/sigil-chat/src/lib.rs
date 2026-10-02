@@ -11801,6 +11801,22 @@ impl ChatApp {
             );
 
             ui.add_space(tokens::SPACING_SM);
+            // SIP-87, and **above the row rather than below it**: which kind of
+            // key a channel has is a fact about the conversation, and the row
+            // under it is an act. Said in that order, and said once -- on a
+            // phone the act's own explanation is drawn as well, and two grey
+            // sentences saying nearly the same thing is how a card stops being
+            // read. A channel is keyed one way or the other from its first
+            // commit and may not hold both, so there is nothing here to press.
+            ui.colored_label(
+                theme.text_secondary,
+                egui::RichText::new(if state.agreed {
+                    "Everybody in this conversation contributes to its key."
+                } else {
+                    "An admin mints this conversation's key and hands it out."
+                })
+                .small(),
+            );
             // A row with its mark, the shape everything else pressable in
             // sigil has. **Not the destruction below**, which keeps a
             // button of its own: a row that looks like every other row is
@@ -11851,21 +11867,7 @@ impl ChatApp {
                     egui::RichText::new(if state.agreed { AGREEING } else { MINTING }).small(),
                 );
             }
-            // SIP-87, said rather than left to be inferred from which words the
-            // row above happens to use. A channel is keyed one way or the other
-            // from its first commit and may not hold both, so this is a fact
-            // about the conversation and not a setting -- which is why it reads
-            // as a sentence and has nothing to press.
-            ui.colored_label(
-                theme.text_secondary,
-                egui::RichText::new(if state.agreed {
-                    "Everybody here contributes to this channel's key. Nobody can be given \
-                     it without the channel's own record saying who it is for."
-                } else {
-                    "An admin mints this channel's key and hands it out."
-                })
-                .small(),
-            );
+
 
             // **SIP-42, which was built and had no control.**
             //
