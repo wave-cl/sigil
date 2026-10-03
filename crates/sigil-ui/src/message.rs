@@ -1951,15 +1951,43 @@ fn meta_row(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::
 /// `with_layout`, which would take the rest of the pane -- the bubble is a
 /// frame in a top-down ui, and a frame takes whatever it is given.
 fn meta_row_beneath(ui: &mut egui::Ui, b: &Bubble<'_>, theme: &ColorTheme, quiet: egui::Color32) {
-    let row = egui::vec2(
-        ui.available_width(),
-        ui.text_style_height(&egui::TextStyle::Small),
-    );
-    ui.allocate_ui_with_layout(
-        row,
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| meta_row(ui, b, theme, quiet),
-    );
+    // **A bare picture's bubble is padded to the picture, and this row is not
+    // a picture.** `BARE_PAD` is four points, chosen so the bubble's corner
+    // sits concentric with the image's -- right for the image and far too
+    // tight for a line of text. The time and the delivery tick came out flush
+    // against the bubble's edge with the corner curving in beside them, which
+    // is what it looked like on the handset in `#general`.
+    //
+    // So the row insets itself back to the padding words get. **The bubble
+    // does not change width for it**: a picture is wider than a timestamp by
+    // a wide margin, so this takes space the row already had rather than
+    // asking for more -- which matters, because `fit` computes the width from
+    // the bubble's padding and a row that asked for more than `fit` allowed
+    // would wrap a line it had room for.
+    let pad = if bare_picture(b) {
+        egui::Margin {
+            left: (PAD_X - BARE_PAD) as i8,
+            right: (PAD_X - BARE_PAD) as i8,
+            // Nothing at the top: the picture's own gap to the row is the
+            // layout's item spacing, and doubling it reads as a detached
+            // caption rather than the bubble's own footer.
+            top: 0,
+            bottom: (PAD_Y - BARE_PAD) as i8,
+        }
+    } else {
+        egui::Margin::ZERO
+    };
+    egui::Frame::NONE.inner_margin(pad).show(ui, |ui| {
+        let row = egui::vec2(
+            ui.available_width(),
+            ui.text_style_height(&egui::TextStyle::Small),
+        );
+        ui.allocate_ui_with_layout(
+            row,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| meta_row(ui, b, theme, quiet),
+        );
+    });
 }
 
 /// Text that is quieter than the body but still legible on `over`.
