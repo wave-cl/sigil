@@ -1396,6 +1396,7 @@ fn video_view<'a>(
         preview: &a.preview,
         id: &a.id,
         standing,
+        coming: a.coming,
         position_ms: playing.map(|p| p.player.position_ms()).unwrap_or(0),
         duration_ms: playing
             .map(|p| p.player.duration_ms())
@@ -8934,6 +8935,8 @@ impl ChatApp {
                             held: false,
                             bytes: None,
                             id: format!("sending-{}-{k}", u.token),
+                            // Going up, not coming down.
+                            coming: None,
                         })
                         .collect(),
                     standing: session::Standing::Sound,
@@ -9081,6 +9084,7 @@ impl ChatApp {
                     // Still going up: this line is one of ours that the
                     // exchange has not answered about yet.
                     sending: line.seq >= ECHO_SEQ,
+                    coming: a.coming,
                     waveform: &a.waveform,
                     duration_ms: a.duration_ms,
                 })

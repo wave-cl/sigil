@@ -44,6 +44,19 @@ fn drawn_at(
     Harness<'static>,
     std::rc::Rc<std::cell::Cell<sigil_ui::VideoAction>>,
 ) {
+    drawn_coming(standing, playing, muted, place, None)
+}
+
+fn drawn_coming(
+    standing: sigil_ui::Standing,
+    playing: bool,
+    muted: bool,
+    place: sigil_ui::video::Place,
+    coming: Option<(u64, u64)>,
+) -> (
+    Harness<'static>,
+    std::rc::Rc<std::cell::Cell<sigil_ui::VideoAction>>,
+) {
     let did = std::rc::Rc::new(std::cell::Cell::new(sigil_ui::VideoAction::default()));
     let seen = did.clone();
     let mut h = Harness::builder()
@@ -58,6 +71,7 @@ fn drawn_at(
                 preview: empty,
                 id: "clip",
                 standing,
+                coming,
                 position_ms: 65_000,
                 duration_ms: 449_000,
                 playing,
@@ -230,4 +244,54 @@ fn a_playing_video_can_be_paused_muted_enlarged_and_scrubbed() {
     h.run();
     assert!(h.query_by_label("Unmute").is_some());
     assert!(h.query_by_label("Mute").is_none());
+}
+
+/// A clip coming down draws a ring in the play mark's place, and the ring
+/// grows with the download.
+///
+/// **A clip is the file this matters most for.** Forty megabytes on a
+/// phone's downlink is minutes, and the word "fetching…" under a play mark
+/// said nothing about how many of them were left -- which after ten seconds
+/// is indistinguishable from nothing happening. The mark goes with it: a
+/// control saying "press me" over a measure saying "wait" is two
+/// instructions at once, and there is nothing to play until it is here.
+#[test]
+fn a_clip_coming_down_draws_a_ring_where_the_play_mark_was() {
+    let accents = [theme::light().accent, theme::dark().accent];
+    let arc = |image: &image::RgbaImage| {
+        image
+            .pixels()
+            .filter(|p| {
+                let [r, g, b, a] = p.0;
+                a > 200
+                    && accents.iter().any(|c| {
+                        let near = |x: u8, y: u8| x.abs_diff(y) <= 24;
+                        near(r, c.r()) && near(g, c.g()) && near(b, c.b())
+                    })
+            })
+            .count()
+    };
+    let at = |done: u64| {
+        let (mut h, _) = drawn_coming(
+            sigil_ui::Standing::Fetching,
+            false,
+            false,
+            sigil_ui::video::Place::Bubble,
+            Some((done, 48_000_000)),
+        );
+        let drew = arc(&h.render().expect("a renderer"));
+        (drew, said(&h))
+    };
+    let (little, words) = at(4_800_000);
+    let (most, _) = at(36_000_000);
+    assert!(little > 0, "no ring was drawn over a clip coming down");
+    assert!(
+        most > little * 2,
+        "three quarters down drew {most} against {little} at a tenth: the \
+         ring does not grow with the download"
+    );
+    assert!(
+        !words.contains("fetching"),
+        "the measureless word is still there beside the measure: {words}"
+    );
 }

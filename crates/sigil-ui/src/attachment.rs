@@ -125,6 +125,14 @@ pub struct Attachment<'a> {
     /// sending a clip over a phone's uplink takes long enough that nothing
     /// on screen saying so reads as nothing happening.
     pub sending: bool,
+    /// This one is coming down: bytes here, and bytes in all. Drawn as a
+    /// [`coming_ring`] in the middle of whatever pane the file occupies --
+    /// over the thumbnail for a picture or a clip, in the play control's
+    /// place for a voice note.
+    ///
+    /// `None` for anything not being fetched this moment, which is almost
+    /// everything: the session fetches one file at a time.
+    pub coming: Option<(u64, u64)>,
 }
 
 /// A voice note being played, as the row needs it.
@@ -242,6 +250,134 @@ pub fn sending_mark(ui: &mut egui::Ui, rect: egui::Rect) {
     let at = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
     let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(at).id_salt("sending"));
     inner.add(egui::Spinner::new().size(side).color(egui::Color32::WHITE));
+}
+
+/// How wide the stroke of a [`coming_ring`] is, and the smallest ring worth
+/// drawing one in.
+const RING_STROKE: f32 = 3.0;
+const RING_MIN: f32 = 28.0;
+/// How large a ring is drawn against the pane it is centred in: a measure
+/// somebody can read across a room, and not so large it hides the picture
+/// underneath it.
+const RING_OF_PANE: f32 = 0.34;
+const RING_MAX: f32 = 84.0;
+
+/// A determinate ring over the middle of a content pane: how much of a file
+/// is here, and how big it is.
+///
+/// # Why a ring rather than a spinner
+///
+/// A spinner says "something is happening". Over a picture that will be here
+/// in a moment that is the whole truth, and over a forty-megabyte clip on a
+/// phone's downlink it is the same sentence for three minutes -- which is
+/// indistinguishable from nothing happening, and is what a reader decides
+/// after ten seconds of it. SIP-18 serves a blob in counted chunks and
+/// `download_reporting` reports each one, so the real number is available and
+/// there is no reason to show a shrug instead.
+///
+/// # What is drawn
+///
+/// A dim full circle, the filled arc over it from twelve o'clock clockwise,
+/// and two lines in the middle: the percentage, and how large the file is.
+/// The size rather than "3.2 of 40 MiB", because the second number is the one
+/// somebody is deciding about -- whether to wait -- and the arc already says
+/// how far along it is. On a scrim, because this is drawn over a thumbnail
+/// and white figures on an unknown photograph are figures nobody can read.
+///
+/// `done` past `all`, and `all` of nought, are both drawn rather than
+/// refused: a progress bar is the wrong place to panic, and a fetch whose
+/// size the sender understated should show a full ring, not none.
+pub fn coming_ring(ui: &mut egui::Ui, rect: egui::Rect, done: u64, all: u64) {
+    let side = (rect.width().min(rect.height()) * RING_OF_PANE).clamp(RING_MIN, RING_MAX);
+    // The scrim, so the figures read over whatever is beneath them.
+    ui.painter().rect_filled(
+        rect,
+        tokens::RADIUS_MD,
+        egui::Color32::from_black_alpha(120),
+    );
+    let part = coming_arc(ui, rect.center(), side, RING_STROKE, done, all);
+
+    // The two lines, inside the ring. `per_cent` is floored so that a file
+    // one chunk short of done does not read as finished -- which, over a
+    // ring that is about to disappear anyway, is the one lie it could tell.
+    let per_cent = (part * 100.0).floor() as u32;
+    let big = (side * 0.26).max(9.0);
+    let painter = ui.painter();
+    painter.text(
+        rect.center() - egui::vec2(0.0, big * 0.55),
+        egui::Align2::CENTER_CENTER,
+        format!("{per_cent}%"),
+        egui::FontId::proportional(big),
+        egui::Color32::WHITE,
+    );
+    painter.text(
+        rect.center() + egui::vec2(0.0, big * 0.6),
+        egui::Align2::CENTER_CENTER,
+        human(all),
+        egui::FontId::proportional(big * 0.72),
+        egui::Color32::from_white_alpha(200),
+    );
+}
+
+/// The ring alone, at a given size, with no scrim and no figures. Says what
+/// fraction it drew, nought to one.
+///
+/// **Its own function because a voice note's row has no room for the
+/// figures.** The control there is `ICON_SM` across, where a percentage and
+/// a size would be three-pixel type; the numbers go in the clock beside it
+/// instead, which is already where that row says how long or how large the
+/// note is. Both shapes are the same arc so that one fetch does not look
+/// like two different things in two bubbles.
+///
+/// `done` past `all`, and `all` of nought, are both drawn rather than
+/// refused: a progress bar is the wrong place to panic, and a fetch whose
+/// size the sender understated should show a full ring, not none.
+pub fn coming_arc(
+    ui: &mut egui::Ui,
+    middle: egui::Pos2,
+    side: f32,
+    stroke: f32,
+    done: u64,
+    all: u64,
+) -> f32 {
+    let theme = ColorTheme::current(ui.ctx());
+    let painter = ui.painter();
+    let radius = ((side - stroke) / 2.0).max(1.0);
+    // **The whole circle first.** Without it a ring at four per cent is a
+    // tick mark floating in the dark, which reads as a glyph rather than as
+    // a measure with a long way to go.
+    painter.circle_stroke(
+        middle,
+        radius,
+        egui::Stroke::new(stroke, egui::Color32::from_white_alpha(60)),
+    );
+
+    let part = if all == 0 {
+        0.0
+    } else {
+        (done as f64 / all as f64).clamp(0.0, 1.0) as f32
+    };
+    // Drawn as a run of short segments rather than one shape: egui has no
+    // arc, and a path of this many points is smooth at every size this is
+    // ever drawn at.
+    const STEPS: usize = 72;
+    if part > 0.0 {
+        let steps = ((STEPS as f32 * part).round() as usize).max(1);
+        let arc: Vec<egui::Pos2> = (0..=steps)
+            .map(|i| {
+                // From twelve o'clock, clockwise, which is the direction
+                // every other ring on every other screen turns.
+                let turn =
+                    std::f32::consts::TAU * (i as f32 / STEPS as f32) - std::f32::consts::FRAC_PI_2;
+                middle + egui::vec2(turn.cos(), turn.sin()) * radius
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            arc,
+            egui::Stroke::new(stroke, theme.accent),
+        ));
+    }
+    part
 }
 
 /// How large a picture is drawn in a transcript.
@@ -529,6 +665,15 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     if a.sending {
                         sending_mark(ui, at);
                     }
+                    // **Over the thumbnail, not over the picture.** `whole`
+                    // is the real file, and a ring over a picture that has
+                    // arrived would be a measure of nothing. What is drawn
+                    // under this is the sender's 96-pixel preview scaled to
+                    // the room the real one will take, which is exactly the
+                    // pane the ring should be centred in.
+                    if let Some((done, all)) = a.coming.filter(|_| !whole) {
+                        coming_ring(ui, at, done, all);
+                    }
                     if response.clicked() {
                         action.open = true;
                     }
@@ -568,11 +713,20 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                                     action.fetch = true;
                                 }
                             } else {
-                                ui.colored_label(
-                                    quiet,
-                                    egui::RichText::new("preview — fetching the full image")
-                                        .small(),
-                                );
+                                // **The same fact in words.** The ring over
+                                // the thumbnail is the measure; this is what
+                                // anything that reads rather than looks gets,
+                                // and it is also the line for a picture
+                                // waiting its turn -- one file comes down at
+                                // a time, so most of them have no numbers
+                                // yet.
+                                let said = match a.coming {
+                                    Some((done, all)) => {
+                                        format!("preview — {} of {}", human(done), human(all))
+                                    }
+                                    None => "preview — fetching the full image".to_string(),
+                                };
+                                ui.colored_label(quiet, egui::RichText::new(said).small());
                             }
                         });
                     }
@@ -633,6 +787,12 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     action.retry = true;
                 }
             });
+        } else if let Some((done, all)) = a.coming {
+            // **No thumbnail at all**, so the ring is not over a picture --
+            // it is the whole of what there is to look at, in the empty box
+            // the picture will fill. Centred in `rect`, which is the room
+            // already reserved for it.
+            coming_ring(ui, rect, done, all);
         } else {
             inside(ui, &mut |ui| {
                 ui.colored_label(quiet, egui::RichText::new("fetching…").small());
@@ -669,12 +829,21 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     // somebody wants before pressing and after it stops.
                     let voice = a.voice.unwrap_or_default();
                     let whole = a.duration_ms.map(crate::video::clock);
-                    let said = match (&whole, voice.playing) {
-                        (Some(whole), true) => {
+                    let said = match (&whole, voice.playing, a.coming) {
+                        // **Coming down beats the length.** The seconds a
+                        // note runs for are in the message and were on
+                        // screen before anybody pressed anything; what the
+                        // reader is waiting on now is the bytes, so the
+                        // clock says those while they are arriving and goes
+                        // back to the length when they are here.
+                        (_, _, Some((done, all))) => {
+                            format!("{} / {}", human(done), human(all))
+                        }
+                        (Some(whole), true, _) => {
                             format!("{} / {whole}", crate::video::clock(voice.position_ms))
                         }
-                        (Some(whole), false) => whole.clone(),
-                        (None, _) => human(a.size),
+                        (Some(whole), false, _) => whole.clone(),
+                        (None, _, _) => human(a.size),
                     };
                     let clock = egui::WidgetText::from(&said).into_galley(
                         ui,
@@ -685,8 +854,15 @@ pub fn attachment(ui: &mut egui::Ui, a: &Attachment<'_>, over: egui::Color32) ->
                     // **The control, then the shape, then the clock.**
                     // Going up: a spinner where the play button will be,
                     // because there is nothing to play until the exchange
-                    // has it. Coming down: the same, while it is fetched.
-                    if a.sending || voice.fetching {
+                    // has it. Coming down: a ring in the same place, which
+                    // is the one that can say how far along it is.
+                    if let Some((done, all)) = a.coming.filter(|_| !a.sending) {
+                        let (at, _) = ui.allocate_exact_size(
+                            egui::Vec2::splat(tokens::ICON_SM),
+                            egui::Sense::hover(),
+                        );
+                        coming_arc(ui, at.center(), tokens::ICON_SM, 2.0, done, all);
+                    } else if a.sending || voice.fetching {
                         ui.add(egui::Spinner::new().size(tokens::ICON_SM));
                     } else if let Some(why) = voice.trouble {
                         ui.colored_label(theme.warning, egui::RichText::new("!").strong())

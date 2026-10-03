@@ -53,6 +53,7 @@ fn tall(bytes: Option<std::sync::Arc<[u8]>>, height: Option<f32>) -> f32 {
                             size: 0,
                             video: None,
                             sending: false,
+                            coming: None,
                             waveform: &[],
                             duration_ms: None,
                             voice: None,
@@ -91,6 +92,7 @@ fn drawn(bytes: std::sync::Arc<[u8]>) -> Harness<'static> {
                     size: 0,
                     video: None,
                     sending: false,
+                    coming: None,
                     waveform: &[],
                     duration_ms: None,
                     voice: None,
@@ -387,6 +389,7 @@ fn a_picture_reserves_what_it_took_last_time() {
                             size: 0,
                             video: None,
                             sending: false,
+                            coming: None,
                             waveform: &[],
                             duration_ms: None,
                             voice: None,
@@ -462,6 +465,7 @@ fn the_thumbnail_stays_up_while_the_picture_decodes() {
                     size: 0,
                     video: None,
                     sending: false,
+                    coming: None,
                     waveform: &[],
                     duration_ms: None,
                     voice: None,
@@ -517,6 +521,7 @@ fn captioned(
                     size: 4_300_000,
                     video: None,
                     sending: false,
+                    coming: None,
                     waveform: &[],
                     duration_ms: None,
                     voice: None,
@@ -709,6 +714,7 @@ fn voice(levels: &'static [u8], duration_ms: Option<u64>, wide: f32) -> (usize, 
                                 size: 40_000,
                                 video: None,
                                 sending: false,
+                                coming: None,
                                 waveform: levels,
                                 duration_ms,
                                 voice: None,
@@ -853,6 +859,13 @@ fn a_note_that_will_not_decode_says_so() {
 
 /// A voice row with a player attached to it.
 fn a_note_row(voice: sigil_ui::attachment::Voice) -> Harness<'static> {
+    a_note_row_coming(voice, None)
+}
+
+fn a_note_row_coming(
+    voice: sigil_ui::attachment::Voice,
+    coming: Option<(u64, u64)>,
+) -> Harness<'static> {
     Harness::builder()
         .with_size(egui::vec2(360.0, 200.0))
         .build_ui(move |ui| {
@@ -875,6 +888,7 @@ fn a_note_row(voice: sigil_ui::attachment::Voice) -> Harness<'static> {
                             size: 40_000,
                             video: None,
                             sending: false,
+                            coming,
                             waveform: &[0, 40, 120, 200, 255, 200, 120, 40],
                             duration_ms: Some(12_000),
                             voice: Some(voice),
@@ -885,4 +899,165 @@ fn a_note_row(voice: sigil_ui::attachment::Voice) -> Harness<'static> {
                 },
             );
         })
+}
+
+/// A picture coming down, drawn at a given fraction of the way through.
+fn coming_at(done: u64, all: u64) -> Harness<'static> {
+    let preview: std::sync::Arc<[u8]> = png_of(40, 40).into();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(400.0, 400.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            sigil_ui::install_loaders(&ctx);
+            sigil_ui::attachment(
+                ui,
+                &sigil_ui::Attachment {
+                    kind: sigil_ui::attachment::IMAGE,
+                    described: "[image, 4.1 MiB]",
+                    preview: &preview,
+                    bytes: None,
+                    missing: false,
+                    held: false,
+                    size: all,
+                    video: None,
+                    sending: false,
+                    coming: Some((done, all)),
+                    waveform: &[],
+                    duration_ms: None,
+                    voice: None,
+                    id: "coming",
+                },
+                sigil::ColorTheme::current(&ctx).surface_elevated,
+            );
+        });
+    // Twice: the thumbnail is not a texture on the pass that asks for it,
+    // and the ring is drawn over where it lands.
+    h.run();
+    h.run();
+    h
+}
+
+/// How much of the frame the ring's own colour covers.
+///
+/// The arc is the accent and nothing else drawn here is, so counting those
+/// pixels counts the arc -- which is a measure of how far round it went,
+/// without needing to know where egui laid the picture out.
+fn arc_pixels(image: &image::RgbaImage) -> usize {
+    let accents = [theme::light().accent, theme::dark().accent];
+    image
+        .pixels()
+        .filter(|p| {
+            let [r, g, b, a] = p.0;
+            a > 200
+                && accents.iter().any(|c| {
+                    let near = |x: u8, y: u8| x.abs_diff(y) <= 24;
+                    near(r, c.r()) && near(g, c.g()) && near(b, c.b())
+                })
+        })
+        .count()
+}
+
+/// The ring over a thumbnail is a **measure**, not a mark: a quarter of the
+/// way through and three quarters of the way through are different pictures.
+///
+/// # What this is really testing
+///
+/// That the arc is drawn *from the fraction*. A ring drawn always-full, or
+/// always-empty, or from a constant, would satisfy "there is a ring over the
+/// thumbnail" and say nothing at all about the download -- which is the only
+/// reason the ring exists. So the assertion is on how much of the accent is
+/// on screen, which is how far round the arc went and nothing else.
+///
+/// `sqex`'s `a_download_says_how_far_along_it_is` is the other half of this,
+/// and proves the numbers reaching it are real.
+#[test]
+fn the_ring_over_a_coming_picture_is_drawn_from_how_far_along_it_is() {
+    let all = 4_300_000u64;
+    let nothing = arc_pixels(&coming_at(0, all).render().expect("a renderer"));
+    let quarter = arc_pixels(&coming_at(all / 4, all).render().expect("a renderer"));
+    let most = arc_pixels(&coming_at(all * 3 / 4, all).render().expect("a renderer"));
+
+    assert!(
+        quarter > 0,
+        "no arc was drawn at all for a picture a quarter of the way down"
+    );
+    assert!(
+        most > quarter * 2,
+        "three quarters of the way down drew {most} arc pixels against \
+         {quarter} at a quarter: the arc does not grow with the fraction"
+    );
+    // **Nought draws no arc.** The dim full circle is still there -- it is
+    // not the accent -- so this is the arc alone, and an arc with a floor
+    // under it would show a sliver of accent for a fetch that has not
+    // started.
+    assert!(
+        nothing < quarter / 4,
+        "a fetch at nought per cent drew {nothing} arc pixels against \
+         {quarter} at a quarter: the arc has a floor under it"
+    );
+}
+
+/// The words beside the ring say both numbers, so anything that reads
+/// rather than looks gets the same fact.
+#[test]
+fn a_coming_picture_says_how_much_of_it_is_here() {
+    let words = said(&coming_at(1024 * 1024, 4 * 1024 * 1024));
+    assert!(
+        words.contains("1.0 MiB of 4.0 MiB"),
+        "the caption should say how much of how much: {words}"
+    );
+    // Not the old sentence, which said nothing about either number and is
+    // what this replaced.
+    assert!(
+        !words.contains("fetching the full image"),
+        "a picture with a measure on it still says the measureless thing: {words}"
+    );
+}
+
+/// A voice note coming down says how much of it is here, in the clock --
+/// which is where that row says how long or how large it is otherwise.
+///
+/// **The length is the wrong number while it is arriving.** Twelve seconds
+/// was on screen before anybody pressed anything; what a reader is waiting
+/// on after pressing is the bytes. The control beside it is a ring rather
+/// than a spinner, so the row has a measure too and not only words.
+#[test]
+fn a_voice_note_coming_down_counts_bytes_in_the_clock() {
+    let mut h = a_note_row_coming(
+        sigil_ui::attachment::Voice {
+            fetching: true,
+            ..Default::default()
+        },
+        Some((10_240, 40_960)),
+    );
+    h.run_steps(2);
+    let words = said(&h);
+    assert!(
+        words.contains("10 KiB / 40 KiB"),
+        "the clock should count the bytes while they arrive: {words}"
+    );
+    assert!(
+        !words.contains("0:12"),
+        "the length is still where the progress should be: {words}"
+    );
+    // Nothing to play yet, and the ring is not a button.
+    assert!(h.query_by_label("Play").is_none());
+    assert!(h.query_by_label("Pause").is_none());
+    // The arc is drawn, which a spinner in its place would not be: a
+    // quarter of the way round draws accent where a whole one draws more.
+    let quarter = arc_pixels(&h.render().expect("a renderer"));
+    let mut whole = a_note_row_coming(
+        sigil_ui::attachment::Voice {
+            fetching: true,
+            ..Default::default()
+        },
+        Some((40_960, 40_960)),
+    );
+    whole.run_steps(2);
+    assert!(
+        quarter > 0 && arc_pixels(&whole.render().expect("a renderer")) > quarter,
+        "the control beside the clock is not a ring that grows: {quarter} \
+         pixels of accent at a quarter"
+    );
 }

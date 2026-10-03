@@ -185,6 +185,7 @@ fn a_conversation() -> ChatState {
                     shape: None,
                     waveform: Default::default(),
                     id: "abc123".into(),
+                    coming: None,
                 }],
                 standing: Default::default(),
                 mentions: Vec::new(),
@@ -3540,6 +3541,7 @@ fn a_picture_the_session_has_put_down_is_forgotten_by_the_interface() {
             shape: None,
             waveform: Default::default(),
             id: "putdown".into(),
+            coming: None,
         }];
         state
     };
@@ -4425,6 +4427,7 @@ fn mine_dark() {
         shape: None,
         waveform: Default::default(),
         id: "mine123".into(),
+        coming: None,
     }];
     let mut h = harness_with(state, true);
     h.run();
@@ -7308,6 +7311,7 @@ fn a_picture_is_not_captioned_with_its_own_size() {
         shape: None,
         waveform: Default::default(),
         id: "captioned".into(),
+        coming: None,
     }];
     let mut h = harness_with(state, true);
     h.run();
@@ -7615,6 +7619,7 @@ fn a_video_is_fetched_when_its_play_mark_is_pressed() {
         shape: Some((1280, 720)),
         waveform: Default::default(),
         id: "clip".into(),
+        coming: None,
     }];
     let seq = state.lines[n - 1].seq;
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -7666,6 +7671,7 @@ fn a_portrait_video_gets_a_bubble_its_own_width() {
         shape: Some((720, 1280)),
         waveform: Default::default(),
         id: "tall".into(),
+        coming: None,
     }];
     // The bubble's time label, in whatever zone the test runs in.
     let stamp = sigil_ui::clock(state.lines[n - 1].at);
@@ -8111,6 +8117,7 @@ fn with_pictures(n: usize) -> ChatState {
             shape: Some((4, 4)),
             waveform: Default::default(),
             id: format!("pic{i}"),
+            coming: None,
         })
         .collect();
     state
@@ -13101,6 +13108,7 @@ fn a_voice_note_saying(duration_ms: Option<u64>) -> String {
         shape: None,
         waveform: std::sync::Arc::from(vec![0u8, 40, 120, 200, 255].into_boxed_slice()),
         id: "voice123".into(),
+        coming: None,
     }];
     let mut h = harness_with(state, true);
     h.run();
@@ -13164,6 +13172,7 @@ fn voice_note_phone() {
         shape: None,
         waveform: std::sync::Arc::from(levels.into_boxed_slice()),
         id: "voice123".into(),
+        coming: None,
     }];
     let (mut h, _app) = harness_phone_with(state, sigil_chat::Route::Conversations);
     h.run();
@@ -13595,6 +13604,7 @@ fn pressing_play_on_a_voice_note_asks_the_exchange_for_it() {
         shape: None,
         waveform: std::sync::Arc::from(vec![0u8, 40, 120, 200, 255].into_boxed_slice()),
         id: "voice123".into(),
+        coming: None,
     }];
     let mut h = harness_recording_commands_phone(state, asked.clone());
     h.run();

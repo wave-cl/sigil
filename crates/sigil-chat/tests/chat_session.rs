@@ -6526,3 +6526,182 @@ async fn an_admin_keyed_group_still_draws_the_exchanges_record() {
     alice.stop();
     bob.stop();
 }
+
+/// A file coming down says how much of it is here, and says it about the
+/// file it is actually fetching.
+///
+/// # What this is for
+///
+/// The measure a reader sees. Before this the session had two states to
+/// show -- "fetching…" and the picture -- and for a clip on a phone's
+/// downlink the first of them lasted minutes and said nothing. `sqex`'s
+/// `a_download_says_how_far_along_it_is` proves the reports move, are
+/// monotonic and end exactly at the file's size; what this proves is the
+/// wiring: that a report reaches `Attached::coming` on the right attachment
+/// and that it is cleared when the bytes land.
+///
+/// **Unasked.** No `Cmd::Fetch` anywhere in this test. A picture under
+/// `AUTO_FETCH_MAX` is fetched for being on screen, which is how most files
+/// in most conversations arrive, and a measure that only appeared for a
+/// pressed file would miss them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_coming_down_says_how_much_of_it_is_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(61);
+    let (b_signer, b_id) = signer(62);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    alice.send(Cmd::OpenDm(b_id));
+    bob.send(Cmd::OpenDm(a_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open: {:?}",
+        alice.state().trouble
+    );
+
+    // **Several chunks of it.** SIP-18 serves a blob in 256 KiB chunks and
+    // the report is per chunk, so a file inside one chunk has exactly one
+    // report and could not tell a measure from a mark. Noise rather than a
+    // gradient, so the PNG does not compress to something small.
+    let picture = dir.path().join("big.png");
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    image::RgbImage::from_fn(1200, 900, |_, _| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let b = seed.to_le_bytes();
+        image::Rgb([b[0], b[1], b[2]])
+    })
+    .save(&picture)
+    .unwrap();
+    let on_disc = std::fs::metadata(&picture).unwrap().len();
+    assert!(
+        on_disc > 4 * 256 * 1024,
+        "the fixture is {on_disc} bytes, which is too few chunks to measure \
+         anything: a one-chunk file reports once and proves nothing"
+    );
+    alice.send(Cmd::SendFile(picture));
+
+    // Bob's side of it: the message first, then the bytes. In between is
+    // the window this test is about.
+    let picture_of = |h: &ChatHandle| -> Option<session::Attached> {
+        h.state()
+            .lines
+            .iter()
+            .flat_map(|l| l.attachments.iter())
+            .find(|a| a.kind == sigil_ui::attachment::IMAGE)
+            .cloned()
+    };
+    assert!(
+        until(|| picture_of(&bob).is_some(), 40).await,
+        "the picture never reached Bob at all: {:?}",
+        bob.state().trouble
+    );
+
+    // **Woken by the session, not polled on a clock.** Every chunk that
+    // lands publishes the state, so waiting on the watch channel is woken
+    // once per chunk; a `sleep` between reads samples instead, and a sample
+    // can miss the whole download. It is also what makes the assertion
+    // below -- that the measure *moves* -- hold rather than hope.
+    let mut watching = bob.watch();
+    let mut seen: Vec<(u64, u64)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut arrived = false;
+    while tokio::time::Instant::now() < deadline {
+        {
+            let state = watching.borrow_and_update();
+            for line in &state.lines {
+                for a in &line.attachments {
+                    if let Some(at) = a.coming {
+                        assert_eq!(
+                            a.kind,
+                            sigil_ui::attachment::IMAGE,
+                            "something that is not the picture is being \
+                             reported as coming down"
+                        );
+                        if seen.last() != Some(&at) {
+                            seen.push(at);
+                        }
+                    }
+                }
+            }
+            if state
+                .lines
+                .iter()
+                .flat_map(|l| l.attachments.iter())
+                .any(|a| a.kind == sigil_ui::attachment::IMAGE && a.bytes.is_some())
+            {
+                arrived = true;
+                break;
+            }
+        }
+        if tokio::time::timeout(Duration::from_secs(10), watching.changed())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    assert!(
+        arrived,
+        "the picture never arrived, so there was no download to measure: {:?}",
+        bob.state().trouble
+    );
+    assert!(
+        !seen.is_empty(),
+        "a {on_disc}-byte picture came down with nothing ever said about how \
+         far along it was: `coming` was never set, so the ring never draws"
+    );
+    // **It moved.** A measure set once when the fetch starts and never
+    // again is a ring frozen at nought for the whole download -- which is
+    // worse than the spinner it replaced, because it looks like a fetch
+    // that has stalled. The chunks are what move it, so this is the
+    // assertion that the reports are reaching the state at all; without it
+    // the `(0, size)` the fetch is armed with satisfies everything above.
+    assert!(
+        seen.iter().any(|(done, _)| *done > 0),
+        "the only thing ever said about a {on_disc}-byte download was {:?}: \
+         the ring is armed and never moves",
+        seen
+    );
+    // The size is the file's, so the caption under the ring is a number
+    // somebody can decide about.
+    let size = picture_of(&bob).expect("the picture, asserted above").size;
+    for (done, all) in &seen {
+        assert_eq!(
+            *all, size,
+            "a report measured the download against {all} and the attachment \
+             says it is {size} bytes"
+        );
+        assert!(
+            *done <= *all,
+            "a download reported {done} of {all}: past the end of the file"
+        );
+    }
+    // Over, so nothing is drawn: a ring left on a picture that has arrived
+    // is a measure of nothing sitting on top of what it was measuring.
+    assert!(
+        picture_of(&bob).and_then(|a| a.coming).is_none(),
+        "the picture is here and still says it is coming down"
+    );
+    alice.stop();
+    bob.stop();
+}

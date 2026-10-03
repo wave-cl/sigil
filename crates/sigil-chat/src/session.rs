@@ -1069,6 +1069,18 @@ pub struct Attached {
     /// A name for the blob, stable across passes, so the interface can key a
     /// texture on it.
     pub id: String,
+    /// Coming down right now: bytes of it here, and bytes in all.
+    ///
+    /// **A determinate measure, not a spinner.** A spinner says "something
+    /// is happening", which over a forty-megabyte clip on a phone's
+    /// downlink is the same thing it says over a picture that will be here
+    /// in a moment. This is the exchange's own chunk count, reported as each
+    /// one lands (see [`Coming`]), so a reader can see both how big the file
+    /// is and how much of it is left.
+    ///
+    /// `None` for anything not being fetched, which is almost everything:
+    /// one file comes down at a time.
+    pub coming: Option<(u64, u64)>,
 }
 
 /// How long a SIP-39 ring is shown for, nobody having answered or refused
@@ -2761,6 +2773,8 @@ async fn run(
     // Where a parked fetch hands back what it found. See [`Parked`].
     let (arrived_tx, mut arrived_rx) = mpsc::unbounded_channel::<Arrived>();
     let mut parked: Option<Parked> = None;
+    // Where a file coming down reports itself. See [`Coming`].
+    let (chunked_tx, mut chunked_rx) = mpsc::unbounded_channel::<Chunked>();
     // What was last handed out to be called on. See `ChatHandle::connection`.
     // `Retrying` rather than `Up`, so the first pass writes the connection this
     // session has just made instead of thinking it already had.
@@ -2794,7 +2808,7 @@ async fn run(
         // conversation. Commands are still answered between them: the fetch
         // attends to them before it asks the exchange for anything.
         if more {
-            let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+            let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds, &chunked_tx).await;
             more = did.more;
             if did.landed && publish(&chat, &state, &desk, me) {
                 (wake)();
@@ -2862,7 +2876,7 @@ async fn run(
                 // not on the next backstop: that was five seconds of
                 // thumbnail after pressing Fetch, and after sending one.
                 {
-                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds, &chunked_tx).await;
                     more = did.more;
                     if did.landed && publish(&chat, &state, &desk, me) {
                         (wake)();
@@ -2887,7 +2901,7 @@ async fn run(
                         // to ten seconds from message to picture before
                         // this, of which the fetch itself was under two.
                         {
-                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds, &chunked_tx).await;
                     more = did.more;
                     if did.landed && publish(&chat, &state, &desk, me) {
                         (wake)();
@@ -2896,6 +2910,27 @@ async fn run(
                     }
                     Arrived::Trouble(channel) => {
                         desk.dirty.insert(channel);
+                    }
+                }
+            }
+            // **A file coming down, saying where it is.** See [`Coming`]:
+            // the waiting happens in a task, and this is the only place its
+            // chunks are counted or opened.
+            Some(said) = chunked_rx.recv() => {
+                let over = matches!(said, Chunked::Done(..));
+                if absorb_chunked(&mut chat, &mut desk, said).await
+                    && publish(&chat, &state, &desk, me)
+                {
+                    (wake)();
+                }
+                // Finished or failed, so the next file starts now rather
+                // than on the next backstop -- which for a conversation of
+                // pictures was five seconds between each of them.
+                if over {
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds, &chunked_tx).await;
+                    more = did.more;
+                    if did.landed && publish(&chat, &state, &desk, me) {
+                        (wake)();
                     }
                 }
             }
@@ -2925,7 +2960,7 @@ async fn run(
                 // this they would come in one per backstop, five seconds
                 // apart, however fast the exchange was.
                 {
-                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds, &chunked_tx).await;
                     more = did.more;
                     if did.landed && publish(&chat, &state, &desk, me) {
                         (wake)();
@@ -3048,7 +3083,7 @@ async fn run(
                 // whether anything had been said.
                 moved |= refresh(&mut chat, &state, &mut desk, me, &mut cmds).await;
                 {
-                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds).await;
+                    let did = fetch_files(&mut chat, &state, &mut desk, &mut cmds, &chunked_tx).await;
                     more = did.more;
                     if did.landed && publish(&chat, &state, &desk, me) {
                         (wake)();
@@ -3389,6 +3424,13 @@ struct Desk {
     /// fetched last time -- needs no entry here: the store is asked directly,
     /// because what the cap guards is the *network*.
     wanted: HashSet<[u8; 32]>,
+    /// The one file coming down from the exchange right now, if any.
+    ///
+    /// See [`Coming`]. One at a time, which is the pacing [`fetch_files`]
+    /// has always kept; what changed is that the waiting happens in a task
+    /// rather than in this loop, so the bytes can be counted as they land
+    /// and a reader can be told how far along it is.
+    coming: Option<Coming>,
     /// When the list was last rebuilt. See [`BACKSTOP`].
     ///
     /// A backstop, not the mechanism. Events are what make this responsive,
@@ -3439,6 +3481,7 @@ impl Default for Desk {
             fetched: Vec::new(),
             unfetchable: HashMap::new(),
             wanted: HashSet::new(),
+            coming: None,
             // The first tick has nothing yet, so it rebuilds.
             restructure: true,
             synced: false,
@@ -4340,6 +4383,64 @@ enum Arrived {
 fn unpark(parked: &mut Option<Parked>) {
     if let Some(p) = parked.take() {
         p.task.abort();
+    }
+}
+
+/// One file on its way down from the exchange, counted as it arrives.
+///
+/// # Why it is not fetched on the loop
+///
+/// `Chat::download` is one `await` that takes as long as the file takes --
+/// one was measured at two and a half seconds for a third of a megabyte, and
+/// a forty-megabyte clip is minutes -- and all of it is time this loop
+/// cannot answer anybody in. [`fetch_files`] paced around that by fetching
+/// one file a pass and attending to commands between passes, which keeps the
+/// app responsive but can say nothing about the file in hand: the only two
+/// states a reader could be shown were "fetching…" and the picture.
+///
+/// So the network half runs in a task. `sqex_chat::attach::fetch_sealed`
+/// needs a `sqnr::Requests` and nothing else -- no `&mut Chat` -- and each
+/// request it makes is its own stream on the connection this client already
+/// holds, so the task competes with the loop for the link and not for the
+/// client. It reports each chunk, and the loop turns throughout.
+///
+/// **The opening stays here.** The hash check, the store write and the
+/// decryption want `&mut Chat`, so they happen on this loop when the chunks
+/// arrive, through `Chat::open_fetched`. They are microseconds of CPU against
+/// seconds of network, and keeping them here means a blob is only ever
+/// written to the store by the task that owns the store.
+struct Coming {
+    /// What is being fetched, kept so the chunks can be opened when they
+    /// are all here.
+    a: sqex_proto::blob::Attachment,
+    /// Bytes of the finished file so far, and bytes in all. Both the
+    /// exchange's answer and the caption a reader sees.
+    at: (u64, u64),
+    /// Aborted when the conversation closes, so a clip nobody is looking at
+    /// any more stops costing bandwidth.
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// What a [`Coming`] fetch has to say.
+enum Chunked {
+    /// Bytes of the finished file so far, and bytes in all.
+    At([u8; 32], u64, u64),
+    /// Every sealed chunk, still to be opened -- or `None`, for a fetch
+    /// that failed. Boxed because the other variant is three words and this
+    /// one is the file.
+    Done([u8; 32], Box<Option<Vec<Vec<u8>>>>),
+}
+
+/// Stop fetching a file nobody is waiting for any more.
+///
+/// The chunks already down are dropped with it. Nothing is lost that was
+/// worth keeping: `fetch_sealed` writes nothing to the store -- the store
+/// write is in `open_fetched`, which only runs once every chunk is in hand
+/// -- so an abandoned fetch leaves no half a file on the disc to be
+/// mistaken for a whole one.
+fn stop_coming(coming: &mut Option<Coming>) {
+    if let Some(c) = coming.take() {
+        c.task.abort();
     }
 }
 
@@ -5458,13 +5559,21 @@ async fn fetch_files(
     state: &watch::Sender<ChatState>,
     desk: &mut Desk,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+    chunked: &mpsc::UnboundedSender<Chunked>,
 ) -> Fetching {
     let none = Fetching {
         more: false,
         landed: false,
     };
-    let Some(open) = desk.open else { return none };
+    let Some(open) = desk.open else {
+        // Nothing on screen, so nothing worth bandwidth. A clip left
+        // coming down for a conversation that has been closed is the one
+        // case where a fetch should be given up rather than finished.
+        stop_coming(&mut desk.coming);
+        return none;
+    };
     let Some(known) = desk.channels.get(&open) else {
+        stop_coming(&mut desk.coming);
         return none;
     };
     // Each with whether it is already on the disc, which decides both
@@ -5499,6 +5608,7 @@ async fn fetch_files(
         .map(|(a, on_disc)| (a.clone(), on_disc))
         .collect();
     if wanted.is_empty() {
+        stop_coming(&mut desk.coming);
         return none;
     }
 
@@ -5507,10 +5617,10 @@ async fn fetch_files(
     // A picture already here costs a read and an open -- milliseconds --
     // and there is nothing to wait behind, so a conversation opened for the
     // second time gets all of its pictures in one pass rather than one per
-    // pass with a wait between. One from the network a pass, because that
-    // one takes as long as it takes -- one was measured at two and a half
-    // seconds -- and the whole of that is time the task cannot answer
-    // anybody in; the caller comes straight back round for the next.
+    // pass with a wait between. One from the network at a time, because
+    // that one takes as long as it takes -- one was measured at two and a
+    // half seconds, and a clip is minutes -- and because a reader watching
+    // a ring fill wants the bandwidth going to the file they pressed.
     let mut landed = false;
     let mut land = |desk: &mut Desk, blob: [u8; 32], bytes: Vec<u8>| {
         if desk.files.insert(blob, bytes.into()).is_none() {
@@ -5531,7 +5641,25 @@ async fn fetch_files(
             land(desk, a.blob, bytes);
         }
     }
-    let waiting = from_the_exchange.len();
+    // **A fetch in flight for something nobody wants any more.** The
+    // conversation moved on, the reader pressed something else, or it came
+    // down some other way while this one was going. Given up rather than
+    // finished: the ring would go on filling for a file that is not on
+    // screen, over a link somebody else is waiting for.
+    if let Some(c) = &desk.coming
+        && !from_the_exchange.iter().any(|a| a.blob == c.a.blob)
+    {
+        stop_coming(&mut desk.coming);
+    }
+    // One from the network at a time. `Chunked::Done` is what asks for the
+    // next, so `more` is false while one is in flight -- a pass that said
+    // otherwise would spin the loop against a task it cannot hurry.
+    if desk.coming.is_some() {
+        return Fetching {
+            more: false,
+            landed,
+        };
+    }
     let Some(a) = from_the_exchange.into_iter().next() else {
         return Fetching {
             more: false,
@@ -5545,22 +5673,121 @@ async fn fetch_files(
     if !cmds.is_empty() {
         return Fetching { more: true, landed };
     }
-    match chat.download(&a).await {
-        Ok(bytes) => land(desk, a.blob, bytes),
-        // **Ask what actually happened.** A fetch that failed because the
-        // blob is gone and one that failed because the link blinked arrive
-        // here as the same `Err`, and treating them alike meant a picture
-        // lost to one dropped packet read as "no longer at the exchange" for
-        // the rest of the session. `/blob/head` is the difference (SIP-18).
-        Err(_) => {
-            let head = chat.head(&a.blob).await.ok().map(|h| h.found);
-            let trouble = after_a_failed_fetch(head, std::time::Instant::now());
-            desk.unfetchable.insert(a.blob, trouble);
-        }
-    }
+    // **The request handle, not the client.** See [`Coming`]: this is the
+    // one piece of the client the network half needs, it is cloneable, and
+    // every request made on it is its own stream on the connection this
+    // session already holds. `None` is a link that is not up, which is not
+    // this function's problem -- the tick that finds the link down redials,
+    // and the next pass starts the fetch.
+    let Some(handle) = chat.requests() else {
+        return Fetching {
+            more: false,
+            landed,
+        };
+    };
+    let say = chunked.clone();
+    let blob = a.blob;
+    let fetching = a.clone();
+    let task = tokio::spawn(async move {
+        let along = {
+            let say = say.clone();
+            move |done, all| {
+                // A send that fails is a loop that has gone, and this task is
+                // about to be aborted with it.
+                let _ = say.send(Chunked::At(blob, done, all));
+            }
+        };
+        // `.ok()` here and the reason asked for on the loop: telling a
+        // blob that is gone from a link that blinked costs a `/blob/head`,
+        // which wants the client.
+        let got = sqex_chat::attach::fetch_sealed(&handle, &fetching, &along)
+            .await
+            .ok();
+        let _ = say.send(Chunked::Done(blob, Box::new(got)));
+    });
+    // Nought of however many, so the ring and its caption are on screen
+    // before the first chunk lands rather than after it.
+    let at = (0, a.size);
+    desk.coming = Some(Coming { a, at, task });
     Fetching {
-        more: waiting > 1,
+        more: false,
         landed,
+    }
+}
+
+/// What the loop does with a [`Coming`] fetch's report.
+///
+/// Returns whether the state wants publishing. A chunk landing is a ring
+/// that has moved, which is a repaint; so is a fetch that finished or
+/// failed.
+async fn absorb_chunked(chat: &mut Chat, desk: &mut Desk, said: Chunked) -> bool {
+    match said {
+        Chunked::At(blob, done, all) => {
+            // **Only for the fetch in flight.** A report from a task that
+            // was aborted can still be in the channel behind the abort, and
+            // moving the ring for a file nobody is fetching any more is a
+            // bar that fills for nothing.
+            let Some(c) = desk.coming.as_mut() else {
+                return false;
+            };
+            if c.a.blob != blob {
+                return false;
+            }
+            c.at = (done, all);
+            true
+        }
+        Chunked::Done(blob, sealed) => {
+            // Taken, so the next pass starts the next file whatever happens
+            // to this one. The task is over, so there is nothing to abort.
+            match desk.coming.take() {
+                Some(c) if c.a.blob == blob => {
+                    let a = c.a;
+                    match *sealed {
+                        // The half that wants the client: the hash check,
+                        // the store, and the key. See [`Coming`].
+                        Some(sealed) => match chat.open_fetched(&a, sealed) {
+                            Ok(bytes) => {
+                                if desk.files.insert(a.blob, bytes.into()).is_none() {
+                                    desk.fetched.push(a.blob);
+                                }
+                                put_down_what_is_not_wanted(desk);
+                            }
+                            // Served and would not open: the bytes hashed
+                            // to another name, or the key does not fit.
+                            // Final, and not the link's fault.
+                            Err(_) => {
+                                desk.unfetchable.insert(
+                                    a.blob,
+                                    after_a_failed_fetch(Some(false), std::time::Instant::now()),
+                                );
+                            }
+                        },
+                        // **Ask what actually happened.** A fetch that
+                        // failed because the blob is gone and one that
+                        // failed because the link blinked arrive here as
+                        // the same nothing, and treating them alike meant a
+                        // picture lost to one dropped packet read as "no
+                        // longer at the exchange" for the rest of the
+                        // session. `/blob/head` is the difference (SIP-18).
+                        None => {
+                            let head = chat.head(&a.blob).await.ok().map(|h| h.found);
+                            desk.unfetchable.insert(
+                                a.blob,
+                                after_a_failed_fetch(head, std::time::Instant::now()),
+                            );
+                        }
+                    }
+                    true
+                }
+                // An answer for a fetch that was given up. The `Coming` it
+                // belonged to is gone and whatever came down with it is
+                // dropped; nothing was written to the store.
+                other => {
+                    desk.coming = other;
+                    false
+                }
+            }
+        }
     }
 }
 
@@ -6451,6 +6678,11 @@ fn lines_of(
                     } else {
                         bs58::encode(a.blob).into_string()
                     },
+                    coming: desk
+                        .coming
+                        .as_ref()
+                        .filter(|c| c.a.blob == a.blob)
+                        .map(|c| c.at),
                 })
                 .collect(),
             standing: standing.get(&m.seq).copied().unwrap_or_default(),

@@ -32,6 +32,11 @@ pub struct Video<'a> {
     /// A stable name, for the thumbnail's texture.
     pub id: &'a str,
     pub standing: Standing,
+    /// Coming down right now: bytes here, bytes in all. Drawn as a ring in
+    /// the middle, in the play mark's place -- there is nothing to play
+    /// until it is here, and the mark where the ring would be is the one
+    /// thing that would make the ring hard to read.
+    pub coming: Option<(u64, u64)>,
     pub position_ms: u64,
     /// Zero when unknown.
     pub duration_ms: u64,
@@ -157,7 +162,14 @@ pub fn video(ui: &mut egui::Ui, v: &Video<'_>, wide: f32, tall_max: f32) -> Vide
     // **The play mark, big, in the middle**, whenever nothing is playing:
     // the one control everybody looks for first. Dimmed ground behind it so
     // it reads on a bright frame.
-    if idle && v.trouble.is_none() {
+    if let Some((done, all)) = v.coming.filter(|_| idle && v.trouble.is_none()) {
+        // **The ring in the play mark's place.** There is nothing to play
+        // until the clip is here, and a mark saying "press me" over a ring
+        // saying "wait" is two instructions at once. A clip is the file
+        // this matters most for: forty megabytes on a phone's downlink is
+        // minutes, and "fetching…" said nothing about how many.
+        crate::attachment::coming_ring(ui, rect, done, all);
+    } else if idle && v.trouble.is_none() {
         let r = (rect.width().min(rect.height()) * 0.18).max(18.0);
         let c = rect.center();
         ui.painter()
