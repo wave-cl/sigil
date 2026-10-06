@@ -153,6 +153,25 @@ async fn a_call_that_has_ended_is_not_still_held() {
             .is_some_and(|s| s.starts_with("The call ended:")),
         "a call that failed said nothing about why: {said:?}"
     );
+
+    // **And it does not stay there.** This sentence had no clock of its own:
+    // `command_trouble` was cleared only by whichever later action happened
+    // to clear it, so a call that failed at breakfast was still being
+    // explained in red over the composer at lunch, with the next real
+    // refusal arriving behind it. See `ChatApp::forget_stale_troubles` and
+    // `session::TROUBLE_SECS`.
+    //
+    // The control is the assertion above: it was there, and this app has no
+    // exchange and no keyboard input, so nothing else in these frames
+    // touches that field — only the clock can take it off.
+    tokio::time::sleep(Duration::from_secs(sigil_chat::session::TROUBLE_SECS + 2)).await;
+    pass(&mut app, &mut accounts, &egui_ctx);
+    assert_eq!(
+        app.trouble_said_for_test(&me),
+        None,
+        "a failed call is still being explained {}s after it ended",
+        sigil_chat::session::TROUBLE_SECS + 2
+    );
 }
 
 /// A call is visible from wherever the reader is, and says whose it is.

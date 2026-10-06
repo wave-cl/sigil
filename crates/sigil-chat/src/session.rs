@@ -415,6 +415,89 @@ pub struct Note {
     pub at: u64,
 }
 
+/// How long a failure stays on screen.
+///
+/// Longer than [`NOTE_SECS`]: an error takes longer to read than a
+/// confirmation, and usually names a file, a person or a reason. Still a
+/// moment rather than a session, for exactly the argument `NOTE_SECS` makes.
+/// A refusal still on screen ten minutes later is telling nobody anything --
+/// it is furniture, and the next real one arrives behind it unread.
+pub const TROUBLE_SECS: u64 = 12;
+
+/// Something that went wrong, and when it was said -- or that it stays.
+///
+/// The moment is carried with the words for the reason [`Note`] gives. `at`
+/// is `None` for a **standing** refusal: moved elsewhere, not admitted, or
+/// the session task gone. Those did not happen once, they are the state of a
+/// window that can do nothing.
+///
+/// **Belt and braces today, and said so rather than claimed.** All three of
+/// those cases leave no loop running to expire anything -- two park and one
+/// is the task returning -- so `None` changes nothing now on screen. It is
+/// here so that a standing refusal raised from a *live* session, which is
+/// the obvious next one, does not quietly fade out from under a window that
+/// can do nothing else.
+///
+/// Derefs to its words, because a bother *is* its words everywhere except in
+/// the one place that expires it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bother {
+    pub said: String,
+    /// Unix seconds, or `None` to stay. See [`TROUBLE_SECS`].
+    pub at: Option<u64>,
+}
+
+impl Bother {
+    /// A failure that has just happened. Gone after [`TROUBLE_SECS`].
+    pub fn now(said: impl Into<String>) -> Self {
+        Self {
+            said: said.into(),
+            at: Some(unix_now()),
+        }
+    }
+
+    /// A refusal that is the state of this session rather than an event:
+    /// stays until something else changes it.
+    pub fn stays(said: impl Into<String>) -> Self {
+        Self {
+            said: said.into(),
+            at: None,
+        }
+    }
+
+    /// Whether it has been on screen long enough to go. A standing one
+    /// never has.
+    pub fn stale(&self, now: u64) -> bool {
+        self.at
+            .is_some_and(|at| now.saturating_sub(at) >= TROUBLE_SECS)
+    }
+}
+
+impl std::fmt::Display for Bother {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.said)
+    }
+}
+
+impl std::ops::Deref for Bother {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.said
+    }
+}
+
+impl From<String> for Bother {
+    fn from(said: String) -> Self {
+        Self::now(said)
+    }
+}
+
+impl From<&str> for Bother {
+    fn from(said: &str) -> Self {
+        Self::now(said)
+    }
+}
+
 /// How far a message is known to have got.
 ///
 /// **Under-claiming is the only safe direction.** `Read` means *everybody* in
@@ -622,11 +705,14 @@ pub struct ChatState {
     /// Why a join from the public-channels pane was refused, if one was.
     ///
     /// **Its own field, because the pane drew the general `trouble`.** That
-    /// field is set by *any* failing command and cleared by none, so a call
-    /// that could not be placed hours earlier was still being drawn in red
-    /// above a directory listing that had just answered perfectly -- where
-    /// it reads as "this pane is not connected", which it was not.
-    pub join_trouble: Option<String>,
+    /// field is set by *any* failing command, so a call that could not be
+    /// placed hours earlier was still being drawn in red above a directory
+    /// listing that had just answered perfectly -- where it reads as "this
+    /// pane is not connected", which it was not. The "hours earlier" half of
+    /// that is fixed at the source now ([`TROUBLE_SECS`]) and this is still
+    /// its own field, because a refused join belongs beside the list it was
+    /// refused from and not under the conversation.
+    pub join_trouble: Option<Bother>,
     /// SIP-24: this exchange does not admit this account, named as this
     /// client reaches it.
     ///
@@ -667,15 +753,16 @@ pub struct ChatState {
     /// Up, retrying, or gone. Drawn with the *word* beside the colour: a
     /// colour on its own is not a message.
     pub link: LinkState,
-    /// The last thing that went wrong, until the link comes back.
+    /// The last thing that went wrong, for as long as it is worth saying.
     ///
     /// **Not republished like everything else here**, because nothing
-    /// computes it: it is raised where a failure happens and would otherwise
-    /// stay for the session. `publish` clears it when the link returns, so a
-    /// blip does not leave a red sentence under a conversation that is
-    /// working again; a standing refusal is raised where the link never
-    /// comes up, and stays.
-    pub trouble: Option<String>,
+    /// computes it: it is raised where a failure happens. So it carries the
+    /// moment it was raised and the loop drops it after [`TROUBLE_SECS`] --
+    /// otherwise one refused send stays under the conversation for the rest
+    /// of the session. `publish` also clears it when the link returns, which
+    /// takes a blip off sooner than the clock would; and a standing refusal
+    /// is raised with [`Bother::stays`] and does neither.
+    pub trouble: Option<Bother>,
     /// What became of the last message sent from the composer; see
     /// [`Posted`].
     pub posted: Option<Posted>,
@@ -2277,7 +2364,9 @@ pub fn start_every(
         )
         .await
         {
-            state_tx.send_modify(|s| s.trouble = Some(e));
+            // **Stays.** The task is over: nothing is going to clear this,
+            // and a window whose session has ended must keep saying so.
+            state_tx.send_modify(|s| s.trouble = Some(Bother::stays(e)));
             (wake)();
         }
     });
@@ -2710,9 +2799,11 @@ async fn run(
             state.send_modify(|s| {
                 s.moved_to = key.map(|k| (k, domain_there.clone()));
                 s.link = LinkState::Gone;
-                s.trouble = Some(format!(
+                // Stays: the session is parked, and this sentence is the
+                // only thing on screen that says why.
+                s.trouble = Some(Bother::stays(format!(
                     "this identity lives at {there}; {here} hands its services off there"
-                ));
+                )));
             });
             (wake)();
             return Ok(());
@@ -2744,7 +2835,9 @@ async fn run(
             state.send_modify(|s| {
                 s.link = LinkState::Gone;
                 s.not_admitted = Some(here.clone());
-                s.trouble = Some(format!("{here} does not admit this account"));
+                // Stays, as above: parked, with the ask-to-be-let-in offer
+                // drawn under these words.
+                s.trouble = Some(Bother::stays(format!("{here} does not admit this account")));
             });
             (wake)();
             return Ok(());
@@ -2833,7 +2926,18 @@ async fn run(
             || desk.restructure
             || still_live(&desk).is_some()
             || desk.siblings.live.is_some()
-            || state.borrow().note.is_some();
+            || state.borrow().note.is_some()
+            // A fading trouble, for the reason a note is here: at the quiet
+            // interval it would be on screen up to `QUIET_MS` past its
+            // welcome. A *standing* one is excluded deliberately -- it never
+            // expires, and a phone held at [`TICK_MS`] for the rest of the
+            // session because an exchange refused it once is a flat battery.
+            || {
+                let s = state.borrow();
+                [&s.trouble, &s.join_trouble]
+                    .into_iter()
+                    .any(|t| t.as_ref().is_some_and(|t| t.at.is_some()))
+            };
         let want = if quick { busy } else { every };
         let until = want.saturating_sub(ticked.elapsed());
 
@@ -3031,6 +3135,27 @@ async fn run(
                     state.send_modify(|s| s.note = None);
                     moved = true;
                 }
+                // And a failure, the same way and for the same reason -- see
+                // [`TROUBLE_SECS`]. `publish` clears it on the link coming
+                // back, which catches a blip; this catches everything else,
+                // which is most of them: a refused send, a name already
+                // taken, a profile that would not read. A standing refusal
+                // says `at: None` and is not stale at any `now`.
+                if state.borrow().trouble.as_ref().is_some_and(|t| t.stale(now)) {
+                    state.send_modify(|s| s.trouble = None);
+                    moved = true;
+                }
+                // And a refused join, which had the same hole in the same
+                // shape: cleared only by a join that worked.
+                if state
+                    .borrow()
+                    .join_trouble
+                    .as_ref()
+                    .is_some_and(|t| t.stale(now))
+                {
+                    state.send_modify(|s| s.join_trouble = None);
+                    moved = true;
+                }
                 if desk.restructure {
                     // **Cleared only on success.** Clearing it first meant a
                     // rebuild that failed -- which is what every rebuild does
@@ -3045,7 +3170,7 @@ async fn run(
                             desk.synced_at = std::time::Instant::now();
                         }
                         Err(e) => {
-                            state.send_modify(|s| s.trouble = Some(e));
+                            state.send_modify(|s| s.trouble = Some(Bother::now(e)));
                             moved = true;
                         }
                     }
@@ -5465,10 +5590,10 @@ async fn set_profile_now(
         Ok(got) => got.record.map(|r| r.profile),
         Err(e) => {
             state.send_modify(|s| {
-                s.trouble = Some(format!(
+                s.trouble = Some(Bother::now(format!(
                     "Could not read your profile to change it, so nothing was \
                              published: {e}"
-                ))
+                )))
             });
             return;
         }
@@ -5487,7 +5612,7 @@ async fn set_profile_now(
         // else will see, not what we asked for.
         Ok(()) => desk.restale.insert(chat.me),
         Err(e) => {
-            state.send_modify(|s| s.trouble = Some(e.to_string()));
+            state.send_modify(|s| s.trouble = Some(Bother::now(e.to_string())));
             false
         }
     };
@@ -7973,7 +8098,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                 }
                 open(&*chat, desk, state, channel);
             }
-            Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
+            Err(e) => state.send_modify(|s| s.trouble = Some(Bother::now(e.to_string()))),
         },
         Cmd::Show(channel) => {
             open(&*chat, desk, state, channel);
@@ -8321,7 +8446,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     }
                     _ => e.to_string(),
                 };
-                state.send_modify(|s| s.trouble = Some(said));
+                state.send_modify(|s| s.trouble = Some(Bother::now(said)));
             } else {
                 desk.dirty.insert(channel);
             }
@@ -8380,7 +8505,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     };
                     note(state, said);
                 }
-                Err(e) => state.send_modify(|s| s.trouble = Some(e.to_string())),
+                Err(e) => state.send_modify(|s| s.trouble = Some(Bother::now(e.to_string()))),
             }
         }
         Cmd::ReleaseName(name) => match chat.release_name(&name).await {
@@ -9327,7 +9452,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             Err(e) => {
                 let why = e.to_string();
                 trouble(state, e);
-                state.send_modify(|s| s.join_trouble = Some(why));
+                state.send_modify(|s| s.join_trouble = Some(Bother::now(why)));
             }
         },
 
@@ -9663,7 +9788,7 @@ fn note(state: &watch::Sender<ChatState>, said: String) {
 }
 
 /// The wall clock, in Unix seconds.
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -9671,7 +9796,7 @@ fn unix_now() -> u64 {
 }
 
 fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {
-    state.send_modify(|s| s.trouble = Some(e.to_string()));
+    state.send_modify(|s| s.trouble = Some(Bother::now(e.to_string())));
 }
 
 /// Say what became of a draft; see [`Posted`].

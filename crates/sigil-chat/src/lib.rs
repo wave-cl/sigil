@@ -10,10 +10,11 @@ pub mod session;
 pub mod siblings;
 
 use session::RING_WINDOW;
+use session::unix_now;
 pub use session::{
-    Attached, Backup, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Face, Found, Happened,
-    HeldBackup, Hit, Line, LinkState, Linked, Member, Note, Person, Posted, Quoted, Receipt,
-    Report, Ring, Standing, Stranded, Succession, Summary, Thumb, Trouble,
+    Attached, Backup, Bother, ChatHandle, ChatState, Closing, Cmd, CrossRing, Draft, Face, Found,
+    Happened, HeldBackup, Hit, Line, LinkState, Linked, Member, Note, Person, Posted, Quoted,
+    Receipt, Report, Ring, Standing, Stranded, Succession, Summary, Thumb, Trouble,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -1768,10 +1769,12 @@ struct Pane {
     /// What the threads that decode staged files found, by path.
     previews: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Scanned)>>,
     previews_tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, Scanned)>>,
-    /// Why not every file picked was staged.
-    staging_trouble: Option<String>,
-    /// Why the last line typed as a command did nothing.
-    command_trouble: Option<String>,
+    /// Why not every file picked was staged. Goes by itself; see
+    /// [`ChatApp::forget_stale_troubles`].
+    staging_trouble: Option<Bother>,
+    /// Why the last line typed as a command did nothing, or why a call this
+    /// pane was carrying ended badly. Goes by itself, as above.
+    command_trouble: Option<Bother>,
     /// The verify dialog's checkbox: lodge the SIP-27 claim as well.
     attest_too: bool,
     /// Which row of the mention list the keyboard is on.
@@ -1783,7 +1786,9 @@ struct Pane {
     field: Option<egui::Id>,
     /// The key being added as a contact.
     adding: String,
-    add_trouble: Option<String>,
+    /// Why the key, name or exchange somebody typed was not added. Goes by
+    /// itself, as above, and takes `add_duplicate` with it.
+    add_trouble: Option<Bother>,
     /// The exchange this identity already has, when adding it was refused
     /// for that reason -- so the refusal can offer to undo itself.
     add_duplicate: Option<String>,
@@ -2451,6 +2456,55 @@ impl ChatApp {
         self.sessions.get(&(*me, String::new())).map(|s| s.state())
     }
 
+    /// Take a pane's failures off the screen once they have been there long
+    /// enough to read.
+    ///
+    /// The session loop does this for the exchange's own `trouble` (see
+    /// [`session::TROUBLE_SECS`], whose doc gives the argument). These are
+    /// the panes' own — raised by something typed rather than by a server —
+    /// and had no clock at all: each was cleared only by whichever later
+    /// action happened to clear it. So "that is not a key" sat over the add
+    /// box until somebody typed a key, a refused file stayed above the
+    /// composer until another was picked, and "The call ended: …" outlived
+    /// the call by as long as the window stayed open.
+    ///
+    /// **Every pane, not the open one.** A clock that runs only while
+    /// somebody is looking at that pane is not a clock, and these panes are
+    /// one `(identity, exchange)` switch apart.
+    fn forget_stale_troubles(&mut self, egui_ctx: &egui::Context) {
+        let now = unix_now();
+        let mut soonest: Option<u64> = None;
+        for pane in self.panes.values_mut() {
+            // The offer to undo a duplicate exchange is drawn inside
+            // `add_trouble`'s block and belongs to that refusal, so it goes
+            // with it rather than waiting for a draw that never comes.
+            if pane.add_trouble.as_ref().is_some_and(|t| t.stale(now)) {
+                pane.add_duplicate = None;
+            }
+            for slot in [
+                &mut pane.staging_trouble,
+                &mut pane.command_trouble,
+                &mut pane.add_trouble,
+            ] {
+                let Some(said) = slot.as_ref() else { continue };
+                if said.stale(now) {
+                    *slot = None;
+                } else if let Some(at) = said.at {
+                    let left = session::TROUBLE_SECS.saturating_sub(now.saturating_sub(at));
+                    soonest = Some(soonest.map_or(left, |s: u64| s.min(left)));
+                }
+            }
+        }
+        // **A frame has to come for it to go.** egui paints on demand, so
+        // without this the sentence stays until something else asks for a
+        // repaint — and on a phone left alone with a still screen, nothing
+        // does. A second past the earliest deadline, so the frame that
+        // arrives finds it stale rather than a tick short of it.
+        if let Some(left) = soonest {
+            egui_ctx.request_repaint_after(std::time::Duration::from_secs(left + 1));
+        }
+    }
+
     /// What the pane is warning about, if anything — where a call that
     /// ended badly says so.
     #[doc(hidden)]
@@ -2458,7 +2512,7 @@ impl ChatApp {
         self.panes
             .iter()
             .find(|(at, _)| at.0 == *me)
-            .and_then(|(_, pane)| pane.command_trouble.clone())
+            .and_then(|(_, pane)| pane.command_trouble.as_ref().map(|t| t.said.clone()))
     }
 
     /// Whether every session this app holds has ended.
@@ -3430,6 +3484,7 @@ impl App for ChatApp {
 
     fn update(&mut self, ctx: &mut AppContext<'_>, egui_ctx: &egui::Context) {
         self.reconcile(ctx, egui_ctx);
+        self.forget_stale_troubles(egui_ctx);
         self.take_choices(egui_ctx);
         if self.quiet != ctx.accounts.quiet {
             self.quiet = ctx.accounts.quiet.clone();
@@ -4156,7 +4211,7 @@ impl ChatApp {
             }
             None => {
                 if let Some(trouble) = &state.trouble {
-                    ui.colored_label(theme.destructive, trouble);
+                    ui.colored_label(theme.destructive, &trouble.said);
                 }
                 // **SIP-24, which had no way to ask.** An exchange running
                 // a whitelist refuses every gated route, so a session there
@@ -5796,11 +5851,11 @@ impl ChatApp {
                         },
                     );
                 } else {
-                    self.pane(at).add_trouble = Some(format!(
+                    self.pane(at).add_trouble = Some(Bother::now(format!(
                         "{domain} is another exchange: write to people there from your \
                          home, not from {}.",
                         at.1
-                    ));
+                    )));
                 }
                 return;
             }
@@ -5824,14 +5879,15 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::OpenByName(typed));
                 }
                 Err(e) => {
-                    self.pane(at).add_trouble =
-                        Some(format!("not a key, and not a name@domain: {e}"))
+                    self.pane(at).add_trouble = Some(Bother::now(format!(
+                        "not a key, and not a name@domain: {e}"
+                    )))
                 }
             }
         }
         // Refused where it was typed, rather than swallowed.
         if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
-            ui.colored_label(theme.destructive, trouble);
+            ui.colored_label(theme.destructive, trouble.said);
         }
 
         ui.add_space(tokens::SPACING_MD);
@@ -7037,7 +7093,7 @@ impl ChatApp {
             }
         }
         if let Some(trouble) = self.panes.get(at).and_then(|p| p.add_trouble.clone()) {
-            ui.colored_label(theme.destructive, trouble);
+            ui.colored_label(theme.destructive, trouble.said);
             // **A refusal that offers the way out of itself.** Removing an
             // exchange lives as a small cross in the title strip's
             // dropdown, which is not where somebody who has just tried to
@@ -7129,9 +7185,9 @@ impl ChatApp {
                     .as_deref()
                     .is_some_and(|h| h.eq_ignore_ascii_case(&named))
                 {
-                    self.pane(at).add_trouble = Some(format!(
+                    self.pane(at).add_trouble = Some(Bother::now(format!(
                         "{named} is your home; it carries connections to other exchanges."
-                    ));
+                    )));
                 } else if ctx.accounts.add_exchange(which, &named, via) {
                     let pane = self.pane(at);
                     pane.exchange.clear();
@@ -7147,11 +7203,11 @@ impl ChatApp {
                     // `false` for an empty name and for one already held, and
                     // this dropped both on the floor: the dialog stayed open
                     // with the text still in it and nothing said why.
-                    self.pane(at).add_trouble = Some(if named.is_empty() {
+                    self.pane(at).add_trouble = Some(Bother::now(if named.is_empty() {
                         "Name an exchange — a domain, or host:port.".to_string()
                     } else {
                         format!("This identity is already connected to {named}.")
-                    });
+                    }));
                     self.pane(at).add_duplicate = (!named.is_empty()).then(|| named.clone());
                 }
             }
@@ -9642,7 +9698,7 @@ impl ChatApp {
             said.push(format!("Not a file: {}.", not_files.join(", ")));
         }
         if !said.is_empty() {
-            pane.staging_trouble = Some(said.join(" "));
+            pane.staging_trouble = Some(Bother::now(said.join(" ")));
         }
     }
 
@@ -9670,7 +9726,12 @@ impl ChatApp {
         if self.pane(at).staged.is_empty() {
             // Nothing staged can still have something to say -- "not a
             // file" is about what was refused, not about what is there.
-            if let Some(why) = self.pane(at).staging_trouble.clone() {
+            if let Some(why) = self
+                .pane(at)
+                .staging_trouble
+                .as_ref()
+                .map(|t| t.said.clone())
+            {
                 ui.colored_label(theme.warning, egui::RichText::new(why).small());
                 ui.add_space(tokens::SPACING_XS);
             }
@@ -9796,7 +9857,12 @@ impl ChatApp {
             // Room was made; what was said about there being none is stale.
             pane.staging_trouble = None;
         }
-        if let Some(why) = self.pane(at).staging_trouble.clone() {
+        if let Some(why) = self
+            .pane(at)
+            .staging_trouble
+            .as_ref()
+            .map(|t| t.said.clone())
+        {
             ui.colored_label(theme.warning, egui::RichText::new(why).small());
         }
         ui.add_space(tokens::SPACING_XS);
@@ -9946,7 +10012,7 @@ impl ChatApp {
                         // gives it its waveform (`preview_of`) and lets
                         // somebody put words beside it before it goes.
                         Ok(path) => self.stage(at, vec![path], &ctx),
-                        Err(why) => self.pane(at).command_trouble = Some(why),
+                        Err(why) => self.pane(at).command_trouble = Some(Bother::now(why)),
                     }
                 }
                 // Nothing was heard: a press and a release, or a
@@ -10254,7 +10320,12 @@ impl ChatApp {
                 }
             }
         }
-        if let Some(why) = self.pane(at).command_trouble.clone() {
+        if let Some(why) = self
+            .pane(at)
+            .command_trouble
+            .as_ref()
+            .map(|t| t.said.clone())
+        {
             ui.colored_label(theme.warning, egui::RichText::new(why).small());
         }
 
@@ -10463,14 +10534,14 @@ impl ChatApp {
                 field.request_focus();
             }
             if let Some(why) = trouble {
-                self.pane(at).command_trouble = Some(why);
+                self.pane(at).command_trouble = Some(Bother::now(why));
             }
             if let Some(cmd) = run.take() {
                 let pane = self.pane(at);
                 pane.composing.clear();
                 pane.command_trouble = None;
                 if let Err(why) = self.run_command(ctx, at, state, cmd, ui.ctx()) {
-                    self.pane(at).command_trouble = Some(why);
+                    self.pane(at).command_trouble = Some(Bother::now(why));
                 }
                 field.request_focus();
             }
@@ -10832,7 +10903,7 @@ impl ChatApp {
         // earlier was still shown here, in red, above a listing that had
         // just answered, where it reads as "this pane is not connected".
         if let Some(trouble) = &state.join_trouble {
-            ui.colored_label(theme.destructive, trouble);
+            ui.colored_label(theme.destructive, &trouble.said);
             ui.add_space(tokens::SPACING_SM);
         }
 
@@ -11028,7 +11099,10 @@ impl ChatApp {
                         self.pane(at).inviting.clear();
                         self.send_as(Some(at), Cmd::Invite(who));
                     }
-                    Err(e) => self.pane(at).add_trouble = Some(format!("that is not a key: {e}")),
+                    Err(e) => {
+                        self.pane(at).add_trouble =
+                            Some(Bother::now(format!("that is not a key: {e}")))
+                    }
                 }
             }
             // Inviting grants the history, and that is a decision rather than
@@ -12176,10 +12250,10 @@ impl ChatApp {
         // lasted is one to stop waiting on, and to say so about.
         if asked.elapsed() > RING_WINDOW {
             self.calling_elsewhere = None;
-            self.pane(&at).command_trouble = Some(format!(
+            self.pane(&at).command_trouble = Some(Bother::now(format!(
                 "Could not open this conversation at {} to call from there.",
                 at.1
-            ));
+            )));
             return;
         }
         let Some(session) = self.sessions.get(&at) else {
@@ -12312,7 +12386,8 @@ impl ChatApp {
             if let Some((channel, seq, seconds)) = self.leave_call(me) {
                 let at = self.at_for(me);
                 if let (Some(at), Some(why)) = (at.as_ref(), why) {
-                    self.pane(at).command_trouble = Some(format!("The call ended: {why}"));
+                    self.pane(at).command_trouble =
+                        Some(Bother::now(format!("The call ended: {why}")));
                 }
                 self.send_as(
                     at.as_ref(),
@@ -14352,7 +14427,10 @@ impl ChatApp {
                         self.pane(at).linking.clear();
                         self.send_as(Some(at), Cmd::LinkDevice { device, days: 90 });
                     }
-                    Err(e) => self.pane(at).add_trouble = Some(format!("that is not a key: {e}")),
+                    Err(e) => {
+                        self.pane(at).add_trouble =
+                            Some(Bother::now(format!("that is not a key: {e}")))
+                    }
                 }
             }
         }
@@ -14449,7 +14527,7 @@ impl ChatApp {
                     }
                     self.pane(at).claim_pending = Some(owner);
                 }
-                Err(why) => self.pane(at).add_trouble = Some(why),
+                Err(why) => self.pane(at).add_trouble = Some(Bother::now(why)),
             }
         }
         // **"Asking…" is only true while it is being asked.**
@@ -14819,7 +14897,7 @@ impl ChatApp {
                 let typed = self.pane(at).successor.trim().to_string();
                 match typed.parse::<PubKey>() {
                     Ok(key) => self.send_as(Some(at), Cmd::WriteWill(key)),
-                    Err(_) => self.pane(at).add_trouble = Some("that is not a key".into()),
+                    Err(_) => self.pane(at).add_trouble = Some(Bother::now("that is not a key")),
                 }
             }
             if let Some(will) = &su.will {
@@ -14931,7 +15009,7 @@ impl ChatApp {
                         }
                         pane.guardian.clear();
                     }
-                    Err(_) => self.pane(at).add_trouble = Some("that is not a key".into()),
+                    Err(_) => self.pane(at).add_trouble = Some(Bother::now("that is not a key")),
                 }
             }
             let named = self.pane(at).guardians.clone();
@@ -15108,7 +15186,7 @@ impl ChatApp {
                 (Ok(account), Ok(successor)) => {
                     self.send_as(Some(at), Cmd::Vouch { account, successor })
                 }
-                _ => self.pane(at).add_trouble = Some("both have to be keys".into()),
+                _ => self.pane(at).add_trouble = Some(Bother::now("both have to be keys")),
             }
         }
         if let Some(v) = &su.vouch {
@@ -15162,7 +15240,7 @@ impl ChatApp {
             }
         }
         if let Some(t) = self.pane(at).add_trouble.clone() {
-            ui.colored_label(theme.destructive, t);
+            ui.colored_label(theme.destructive, t.said);
         }
     }
 

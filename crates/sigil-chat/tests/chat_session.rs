@@ -6705,3 +6705,77 @@ async fn a_file_coming_down_says_how_much_of_it_is_here() {
     alice.stop();
     bob.stop();
 }
+
+/// A failure takes itself off the screen.
+///
+/// `trouble` was cleared in exactly one place -- the link coming back -- so a
+/// refusal raised while the link stayed up, which is nearly all of them (a
+/// send the exchange would not take, a name already claimed, a profile that
+/// would not read), sat under the conversation for the rest of the session.
+/// The next real one arrived behind it and read as the same one.
+#[tokio::test]
+async fn a_failure_takes_itself_off_the_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (first_signer, first) = signer(61);
+    let (second_signer, second) = signer(62);
+    let one = start_at(endpoint, first_signer, &dir.path().join("one.db"));
+    let two = start_at(endpoint, second_signer, &dir.path().join("two.db"));
+    assert!(
+        until(
+            || one.state().me == Some(first) && two.state().me == Some(second),
+            15
+        )
+        .await,
+        "both should come up"
+    );
+
+    // A refusal that is nobody's standing state: this device is not
+    // registered on that account, which is a thing the account could change
+    // a second later. Borrowed from
+    // `a_device_named_by_its_sibling_claims_the_account_by_name_alone`,
+    // where it is the control.
+    two.send(Cmd::ClaimAccount(first.to_string()));
+    assert!(
+        until(|| two.state().trouble.is_some(), 20).await,
+        "the claim neither succeeded nor failed: {:?}",
+        two.state().note
+    );
+    let said = two.state().trouble.unwrap();
+    assert!(
+        said.contains("has not registered this device"),
+        "not the refusal this test is about: {said}"
+    );
+    assert!(
+        said.at.is_some(),
+        "a one-off failure has to carry the moment it was raised, or nothing \
+         can expire it: {said:?}"
+    );
+
+    // **The control.** Two thirds of the way through the window it is still
+    // there -- so what the assertion below sees is the clock running out and
+    // not some unrelated pass wiping the field, which is how this read as
+    // working before the clock existed. The link is up throughout, so
+    // `link_came_back` cannot be what clears it either.
+    tokio::time::sleep(Duration::from_secs(session::TROUBLE_SECS * 2 / 3)).await;
+    assert_eq!(
+        two.state().link,
+        LinkState::Up,
+        "the link flapped, so this proves nothing about the clock"
+    );
+    assert!(
+        two.state().trouble.is_some(),
+        "gone two thirds of the way through the window, before anybody could \
+         have read it"
+    );
+
+    assert!(
+        until(|| two.state().trouble.is_none(), session::TROUBLE_SECS).await,
+        "a failure nobody acted on is still under the conversation: {:?}",
+        two.state().trouble
+    );
+}
