@@ -494,22 +494,19 @@ pub fn grave_small(ui: &mut egui::Ui, text: &str) -> egui::Response {
 /// the screen; there was simply no rhythm to read it by, which is most of
 /// what "well spaced" means.
 ///
-/// Nothing above the rule and nothing below the caption: the spacing a group
-/// wants is the spacing `SPACING_LG` gives it at the *end* of the group
-/// before, where a caller can see both halves. See [`end_section`].
+/// **The gap belongs to the section, above its own rule**, and not to the
+/// group before it. Written the other way round — each group closing with a
+/// `SPACING_LG` of its own — two of them land back to back whenever the
+/// group between draws nothing, which on a *direct message's* settings is
+/// every time: there is no name, no topic, no picture and no replica to
+/// show, so "On this device" and "Messages" sat 46 points apart where every
+/// other pair sat 16. A gap that belongs to what follows cannot double,
+/// because only one thing follows.
 pub fn section(ui: &mut egui::Ui, named: &str) {
     let theme = sigil::ColorTheme::current(ui.ctx());
+    ui.add_space(sigil::tokens::SPACING_LG);
     ui.separator();
     ui.colored_label(theme.text_muted, egui::RichText::new(named).small());
-}
-
-/// The room a group leaves after itself, before the next [`section`].
-///
-/// Its own call rather than a `SPACING_LG` written out at each of them, so
-/// that the gap between every two groups is one number in one place — which
-/// is the thing that was not true.
-pub fn end_section(ui: &mut egui::Ui) {
-    ui.add_space(sigil::tokens::SPACING_LG);
 }
 
 /// A menu's width: wide enough to aim at, no wider than it needs.

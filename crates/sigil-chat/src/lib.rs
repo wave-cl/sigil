@@ -11649,7 +11649,6 @@ impl ChatApp {
             {
                 ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
             }
-            sigil_ui::end_section(ui);
         }
 
         if !state.i_am_admin {
@@ -11657,7 +11656,6 @@ impl ChatApp {
                 theme.text_secondary,
                 "Only an admin can change these. You can still leave.",
             );
-            sigil_ui::end_section(ui);
         }
 
         ui.add_enabled_ui(state.i_am_admin, |ui| {
@@ -11715,7 +11713,6 @@ impl ChatApp {
                 // as channel metadata, and was built with nothing to send
                 // it. A room only: a direct message is drawn as the person
                 // in it, whose picture is their profile's (SIP-21).
-                sigil_ui::end_section(ui);
                 sigil_ui::section(ui, "Picture");
                 // **Two rows, not one.** `icon_item` is a full-width row, and
                 // two of them in a `horizontal` put the second one past the
@@ -11738,7 +11735,6 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::SetChannelAvatar(None));
                 }
 
-                sigil_ui::end_section(ui);
                 sigil_ui::section(ui, "Copies");
                 ui.label("Let another exchange carry a copy");
                 let width = ui.available_width();
@@ -11804,7 +11800,6 @@ impl ChatApp {
                 }
             }
 
-            sigil_ui::end_section(ui);
             sigil_ui::section(ui, "Messages");
             // **A word where there is no pointer.** The tick is named for a
             // screen reader and hovers on a desktop, and a phone has neither
@@ -11916,7 +11911,6 @@ impl ChatApp {
                 .small(),
             );
 
-            sigil_ui::end_section(ui);
             sigil_ui::section(ui, "This conversation's key");
             // SIP-87, and **above the row rather than below it**: which kind of
             // key a channel has is a fact about the conversation, and the row
@@ -12017,7 +12011,6 @@ impl ChatApp {
             }
         });
 
-        sigil_ui::end_section(ui);
         sigil_ui::section(ui, "Leaving");
 
         // Leaving and destroying are not the same control and must not look
