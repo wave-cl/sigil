@@ -819,9 +819,23 @@ fn item(
     let room = (ui.available_width() - tokens::BUTTON_MD - gap - pill.x - gap).max(0.0);
     let galley = ui.painter().layout(text.to_owned(), font, ink, room);
     let height = tokens::BUTTON_MD.max(galley.size().y);
-    let width = ui
-        .available_width()
-        .max(tokens::BUTTON_MD + gap + galley.size().x + pill.x + gap);
+    // **A menu is as wide as its rows, not as wide as the room it is given.**
+    // Taking the room is right inside a card, where the whole row being the
+    // target is the point; inside a popup the room is `MENU_MAX` whatever is
+    // in it, so the chats menu -- one row saying "Public channels" -- was 260
+    // points of a 360-point phone with 110 of them empty. egui opens a popup
+    // with a *sizing pass* (`Popup` sets one on the frame the menu appears),
+    // and a sizing pass is where a widget says what it wants rather than what
+    // it can have. So: the natural width there, the room everywhere else.
+    // The popup shrinks to its content on the next frame and every card is
+    // untouched, because nothing lays a card out in a sizing pass.
+    // `menu_width`'s `MENU_MIN` is what keeps the result aimable.
+    let natural = tokens::BUTTON_MD + gap + galley.size().x + pill.x + gap;
+    let width = if ui.is_sizing_pass() {
+        natural
+    } else {
+        ui.available_width().max(natural)
+    };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     // The word, not the shape: an icon's `word()` is what it means in general
     // and this says what it does here.

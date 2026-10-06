@@ -11575,6 +11575,29 @@ impl ChatApp {
             });
         }
 
+        // **The rest of it scrolls.** Six groups, their captions and the
+        // sentences under each reach past a phone's screen -- and this pane
+        // was close to it before them, at 692 points of 804 with nothing
+        // more exotic than a long topic needed to pass it. Devices was
+        // given one for exactly this; its comment says why the salt is
+        // named, and the same reasoning puts a name on this one.
+        egui::ScrollArea::vertical()
+            .id_salt("settings")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.settings_body(ctx, at, &state, ui, &theme));
+        AppResponse::default()
+    }
+
+    /// Everything under the Conversation settings heading. Split out so the
+    /// heading stays put above it, as Devices' does.
+    fn settings_body(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        state: &ChatState,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
         // **A direct message is not a channel with two people in it.** It
         // has no name and no topic to set -- the transcript's own heading
         // has refused to rename one since it was written (`may_rename`) --
@@ -11582,11 +11605,12 @@ impl ChatApp {
         // the other person's name.
         let dm = state.open_is_direct();
 
-        Self::note_ui(&state, ui, &theme);
+        Self::note_ui(state, ui, theme);
 
         // Yours, whatever your standing here: what this machine says out
         // loud about the conversation.
         if let Some(channel) = state.open {
+            sigil_ui::section(ui, "On this device");
             let muted = ctx.accounts.quiet.is_muted(&at.1, &channel);
             // **The same control as every other switch here.** This was an
             // `egui::checkbox`, the only one on the screen: a small circle
@@ -11615,7 +11639,7 @@ impl ChatApp {
             {
                 ctx.accounts.quiet.set_muted(&at.1, &channel, !muted);
             }
-            ui.add_space(tokens::SPACING_SM);
+            sigil_ui::end_section(ui);
         }
 
         if !state.i_am_admin {
@@ -11623,11 +11647,12 @@ impl ChatApp {
                 theme.text_secondary,
                 "Only an admin can change these. You can still leave.",
             );
+            sigil_ui::end_section(ui);
         }
 
-        ui.add_space(tokens::SPACING_SM);
         ui.add_enabled_ui(state.i_am_admin, |ui| {
             if !dm {
+                sigil_ui::section(ui, "This channel");
                 let (_, set_name) = sigil_ui::labelled_field(
                     ui,
                     "Name",
@@ -11680,7 +11705,8 @@ impl ChatApp {
                 // as channel metadata, and was built with nothing to send
                 // it. A room only: a direct message is drawn as the person
                 // in it, whose picture is their profile's (SIP-21).
-                ui.add_space(tokens::SPACING_MD);
+                sigil_ui::end_section(ui);
+                sigil_ui::section(ui, "Picture");
                 // **Two rows, not one.** `icon_item` is a full-width row, and
                 // two of them in a `horizontal` put the second one past the
                 // right edge: on a 360-point phone "Remove it" was drawn at
@@ -11702,7 +11728,8 @@ impl ChatApp {
                     self.send_as(Some(at), Cmd::SetChannelAvatar(None));
                 }
 
-                ui.add_space(tokens::SPACING_MD);
+                sigil_ui::end_section(ui);
+                sigil_ui::section(ui, "Copies");
                 ui.label("Let another exchange carry a copy");
                 let width = ui.available_width();
                 sigil_ui::field(
@@ -11767,7 +11794,8 @@ impl ChatApp {
                 }
             }
 
-            ui.add_space(tokens::SPACING_MD);
+            sigil_ui::end_section(ui);
+            sigil_ui::section(ui, "Messages");
             // **A word where there is no pointer.** The tick is named for a
             // screen reader and hovers on a desktop, and a phone has neither
             // -- so the control that applies a change which *deletes
@@ -11878,7 +11906,8 @@ impl ChatApp {
                 .small(),
             );
 
-            ui.add_space(tokens::SPACING_SM);
+            sigil_ui::end_section(ui);
+            sigil_ui::section(ui, "This conversation's key");
             // SIP-87, and **above the row rather than below it**: which kind of
             // key a channel has is a fact about the conversation, and the row
             // under it is an act. Said in that order, and said once -- on a
@@ -11978,9 +12007,8 @@ impl ChatApp {
             }
         });
 
-        ui.add_space(tokens::SPACING_LG);
-        ui.separator();
-        ui.add_space(tokens::SPACING_SM);
+        sigil_ui::end_section(ui);
+        sigil_ui::section(ui, "Leaving");
 
         // Leaving and destroying are not the same control and must not look
         // like one. One takes you out; the other ends it for everybody.
@@ -12042,7 +12070,6 @@ impl ChatApp {
                 }
             });
         }
-        AppResponse::default()
     }
 }
 
@@ -13806,11 +13833,7 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
     ) {
-        ui.separator();
-        ui.colored_label(
-            theme.text_muted,
-            egui::RichText::new("This identity").small(),
-        );
+        sigil_ui::section(ui, "This identity");
         // **SIP-59: where this account lives, said plainly.** It was reachable
         // only as an error when opening a cross-exchange conversation failed,
         // so the one fact that explains where a conversation is ordered -- and
@@ -13973,8 +13996,7 @@ impl ChatApp {
             self.switching = true;
         }
 
-        ui.separator();
-        ui.colored_label(theme.text_muted, egui::RichText::new("Everywhere").small());
+        sigil_ui::section(ui, "Everywhere");
         // Not this identity's: quiet is the person's, and it covers every
         // identity this window holds and every ring on any of them.
         let dnd = ctx.accounts.quiet.dnd;

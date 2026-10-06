@@ -2533,27 +2533,17 @@ fn the_foot_of_the_devices_pane_can_be_reached_on_a_phone() {
     );
 }
 
-/// **Settings fits the screen, and has nothing to scroll if it stops.**
-///
-/// Devices reached 1825 points on an 804-point screen with nothing to
-/// scroll, and its backup words were simply unreachable. Settings is the
-/// other pane with no scroll area, and today it fits -- 692 points with the
-/// longest name and topic, as an admin, with the destroy confirmation open,
-/// which is everything it can show at once.
-///
-/// So this is not a fix, it is the tripwire: the day it stops fitting, the
-/// failure is silent and identical to Devices', and the answer is the same
-/// scroll area. Measured against everything showing rather than the ordinary
-/// case, because the ordinary case has a hundred points of slack and would
-/// go quiet long before somebody with a long topic noticed.
-/// The same tripwire, for a **room**.
+/// **The move is above the fold.**
 ///
 /// `a_conversation()` is a direct message, so the whole `!dm` half of the
 /// settings pane — the name, the topic, authorising a replica, and moving
-/// where the conversation lives — was drawn by no test at all. That half is
-/// the taller one, and the move is the newest thing in it.
+/// where the conversation lives — is drawn by no other test at all. That
+/// half is the taller one, and the move is the newest thing in it: it is
+/// also the row that can strand messages, so it must be on the screen to be
+/// read rather than merely reachable. The pane scrolls now, which makes
+/// "reachable" cheap and this the stronger claim of the two.
 #[test]
-fn the_settings_pane_fits_a_phone_for_a_room_too() {
+fn the_settings_pane_shows_the_move_without_scrolling() {
     let mut state = a_long_conversation();
     state.i_am_admin = true;
     // A room: no peer, so the admin half draws.
@@ -2567,8 +2557,6 @@ fn the_settings_pane_fits_a_phone_for_a_room_too() {
     let mut h = harness_phone(state, sigil_chat::Route::Settings);
     h.run();
     h.run();
-    // The control this exists for: it is the newest row on the pane and the
-    // one that can strand messages, so it must be on the screen to be read.
     let moved = h
         .get_all_by_label_contains("Move where this conversation lives")
         .next()
@@ -2583,42 +2571,91 @@ fn the_settings_pane_fits_a_phone_for_a_room_too() {
     );
 }
 
+/// **The foot of Settings can be got to.**
+///
+/// This was "Settings fits a phone, or needs what Devices needed": a
+/// tripwire, because the pane had no scroll area and 112 points of slack --
+/// 692 of 804 with the longest name and topic, as an admin, with the destroy
+/// confirmation open -- and the day it stopped fitting the failure would be
+/// silent and identical to Devices'. Giving the pane its groups and their
+/// captions spent that slack, so the answer the tripwire named has been
+/// taken: it has the scroll area, and the property to ask is Devices' one.
+/// Not that the pane fits, which it need not, but that the bottom of it can
+/// be reached.
+///
+/// The bottom is Destroy, which is also the thing down there somebody is
+/// most likely to be looking for.
 #[test]
-fn the_settings_pane_still_fits_a_phone_or_needs_what_devices_needed() {
+fn the_foot_of_the_settings_pane_can_be_reached_on_a_phone() {
     let mut state = a_long_conversation();
     state.i_am_admin = true;
+    // A room: the admin half -- the name, the topic, the picture, the
+    // copies and the move -- is the taller one, and a direct message draws
+    // none of it.
+    if let Some(open) = state.open
+        && let Some(s) = state.conversations.iter_mut().find(|c| c.channel == open)
+    {
+        s.peer = None;
+        s.group = true;
+        s.label = "the square".into();
+    }
     let mut h = harness_phone(state, sigil_chat::Route::Settings);
     h.run();
     h.run();
-    // The destroy confirmation, which is the tallest this pane gets.
-    let at = h
-        .get_all_by_label_contains("Destroy")
-        .next()
-        .map(|b| b.rect().center());
-    let at = at.expect("an admin is offered Destroy");
-    press_at(&mut h, at);
-    h.run();
-    h.run();
+    let last = "Destroy";
+    let on_screen = |h: &Harness<'static>| {
+        h.get_all_by_label_contains(last)
+            .any(|n| n.rect().bottom() <= PHONE_HEIGHT && n.rect().top() >= 0.0)
+    };
     assert!(
-        text_of(&h).contains("Yes, destroy it"),
-        "the confirmation did not open, so this is not the tallest the pane gets"
+        h.get_all_by_label_contains(last).next().is_some(),
+        "an admin is not offered Destroy at all, so this says nothing about \
+         reaching it"
+    );
+    // The control, borrowed from Devices': without it this test passes on a
+    // pane that fits, which is the thing it is no longer about.
+    assert!(
+        !on_screen(&h),
+        "Destroy is already on screen without scrolling, so this is not a \
+         pane taller than its screen any more"
     );
 
-    fn deepest(node: egui_kittest::Node<'_>, ppp: f64, out: &mut f64) {
-        if let Some(b) = node.accesskit_node().bounding_box() {
-            *out = out.max(b.y1 / ppp);
-        }
-        for c in node.children() {
-            deepest(c, ppp, out);
-        }
+    let before = h
+        .get_all_by_label_contains(last)
+        .next()
+        .map(|n| n.rect().top())
+        .unwrap_or(0.0);
+    for _ in 0..12 {
+        // The wheel goes to whatever is under the pointer, so the pointer
+        // has to be in the pane.
+        h.input_mut()
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(
+                PHONE_WIDTH / 2.0,
+                PHONE_HEIGHT / 2.0,
+            )));
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
     }
-    let mut bottom = 0.0;
-    deepest(h.root(), h.ctx.pixels_per_point() as f64, &mut bottom);
+    let after = h
+        .get_all_by_label_contains(last)
+        .next()
+        .map(|n| n.rect().top())
+        .unwrap_or(0.0);
     assert!(
-        bottom <= PHONE_HEIGHT as f64,
-        "Settings reaches {bottom:.0} of {PHONE_HEIGHT} and has no scroll \
-         area, so the foot of it cannot be got to -- give it the one Devices \
-         was given"
+        after < before,
+        "nothing moved: Destroy was at {before} and is at {after}, so this \
+         pane does not scroll at all"
+    );
+    assert!(
+        on_screen(&h),
+        "scrolling never brought Destroy into view: the foot of this pane \
+         cannot be reached on a phone"
     );
 }
 
@@ -14178,6 +14215,19 @@ fn a_menu_is_no_wider_than_a_menu() {
         "{}",
         row.width()
     );
+    // **And no wider than what is in it.** The bound above was the only one,
+    // and `MENU_MAX` satisfied it exactly: an `icon_item` takes the room it
+    // is given, the room inside a popup is `MENU_MAX` whatever is in it, so
+    // this one-row menu was 260 points of a 360-point phone -- 110 of them
+    // empty, hanging over three quarters of the list behind it. "Public
+    // channels" is shorter than `MENU_MIN`, so the floor above is where this
+    // menu should land and the ceiling should have nothing to do.
+    assert!(
+        row.width() <= sigil::tokens::MENU_MIN + 1.0,
+        "a menu of one short phrase is {} points wide on a {PHONE_WIDTH}-point \
+         phone, which is the width of the widest menu there could be",
+        row.width()
+    );
 }
 
 /// **Delete is offered only to somebody who may delete.**
@@ -16274,7 +16324,10 @@ fn a_confirmation_colours_the_grave_half_and_not_the_other() {
                 _ => {}
             }
         }
-        h.run();
+        // `run_steps`, not `run`: a scroll area that has just been flicked
+        // goes on asking for frames while its velocity decays, and `run`
+        // reads that as a ui that will never settle.
+        h.run_steps(2);
         let mut found = None;
         for shape in &h.output().shapes {
             walk(&shape.shape, word, &mut found);
@@ -16286,6 +16339,28 @@ fn a_confirmation_colours_the_grave_half_and_not_the_other() {
     h.run();
     h.get_by_label("Destroy this conversation").click();
     h.run_steps(3);
+    // **Scrolled to, because this reads the paint list.** The pane has a
+    // scroll area now (see
+    // `the_foot_of_the_settings_pane_can_be_reached_on_a_phone`), and a
+    // scroll area does not paint what is outside it -- so the two words
+    // this test is about were in the accessibility tree, where the click
+    // above found them, and in no shape at all. The colour is the thing
+    // being asked about, and a colour exists only where something is drawn.
+    for _ in 0..12 {
+        h.input_mut()
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(
+                PHONE_WIDTH / 2.0,
+                PHONE_HEIGHT / 2.0,
+            )));
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
 
     let theme = sigil::theme::dark();
     let grave = coloured(&mut h, "Yes, destroy it").expect("the confirming press is on screen");

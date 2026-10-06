@@ -482,9 +482,50 @@ pub fn grave_small(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(egui::RichText::new(text).color(theme.destructive)).small())
 }
 
+/// The break between one group of settings and the next: a rule, and what
+/// the group is.
+///
+/// **One idiom, because a card with none is a column.** The Me card already
+/// drew exactly this — a separator and a muted `small()` caption — twice by
+/// hand, and the conversation's own settings drew neither: eleven controls,
+/// their captions in body text indistinguishable from the sentences
+/// explaining them, separated by whichever of `SPACING_SM`, `_MD` and `_LG`
+/// the last edit happened to leave. Nothing was broken and nothing was off
+/// the screen; there was simply no rhythm to read it by, which is most of
+/// what "well spaced" means.
+///
+/// Nothing above the rule and nothing below the caption: the spacing a group
+/// wants is the spacing `SPACING_LG` gives it at the *end* of the group
+/// before, where a caller can see both halves. See [`end_section`].
+pub fn section(ui: &mut egui::Ui, named: &str) {
+    let theme = sigil::ColorTheme::current(ui.ctx());
+    ui.separator();
+    ui.colored_label(theme.text_muted, egui::RichText::new(named).small());
+}
+
+/// The room a group leaves after itself, before the next [`section`].
+///
+/// Its own call rather than a `SPACING_LG` written out at each of them, so
+/// that the gap between every two groups is one number in one place — which
+/// is the thing that was not true.
+pub fn end_section(ui: &mut egui::Ui) {
+    ui.add_space(sigil::tokens::SPACING_LG);
+}
+
+/// A menu's width: wide enough to aim at, no wider than it needs.
+///
+/// **`set_max_width` is not a clamp.** It sets the width outright and grows a
+/// ui as readily as it shrinks one — so this took a popup that had just
+/// measured itself at its content's width and put it straight back to
+/// `MENU_MAX`, where the justified layout a menu uses stretched every row to
+/// fill it. The chats menu, whose whole content is "Public channels", was
+/// 260 points of a 360-point phone with 108 of them empty, hanging over
+/// three quarters of the list behind it. Taking the smaller of the two is
+/// what was meant all along; `MENU_MIN` keeps the result something a thumb
+/// can be aimed at.
 pub fn menu_width(ui: &mut egui::Ui) {
+    ui.set_max_width(ui.max_rect().width().min(sigil::tokens::MENU_MAX));
     ui.set_min_width(sigil::tokens::MENU_MIN);
-    ui.set_max_width(sigil::tokens::MENU_MAX);
 }
 
 pub use call_card::{Call, CallPress, Mic, call_card, call_control};
