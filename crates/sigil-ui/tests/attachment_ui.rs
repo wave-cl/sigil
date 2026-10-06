@@ -1061,3 +1061,90 @@ fn a_voice_note_coming_down_counts_bytes_in_the_clock() {
          pixels of accent at a quarter"
     );
 }
+
+/// A phone-wide pane holding the bar for a file going up, and what it said.
+fn going(name: &str, done: u64, all: u64) -> (String, f32) {
+    const PHONE: f32 = 360.0;
+    let words = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    let width = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
+    let (out, took) = (words.clone(), width.clone());
+    let name = name.to_string();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(PHONE, 120.0))
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            theme::install(&ctx, theme::light(), theme::dark());
+            ctx.set_theme(egui::Theme::Dark);
+            sigil_ui::going_bar(ui, &name, done, all);
+            took.set(ui.min_rect().width());
+        });
+    h.run();
+    h.run();
+    // **This file's own `said`, not a second walk.** A plain `Label` reports
+    // its words as the node's *value* and leaves its label empty, so a walk
+    // that reads only labels comes back with nothing and the test fails
+    // saying the bar drew no words — which it had.
+    *out.borrow_mut() = said(&h);
+    let text = words.borrow().clone();
+    (text, width.get())
+}
+
+/// **A file going up says how far along it is**, which is the whole reason
+/// the bar exists: "Sending clip.mp4…" is the same sentence for a minute
+/// over a video on a phone's uplink.
+#[test]
+fn a_file_going_up_says_how_far_along_it_is() {
+    let (said, _) = going("clip.mp4", 3 * 1024 * 1024, 12 * 1024 * 1024);
+    assert!(
+        said.contains("clip.mp4"),
+        "it does not say what is going: {said}"
+    );
+    assert!(
+        said.contains("25%"),
+        "it does not say how far along it is: {said}"
+    );
+    assert!(
+        said.contains("12.0 MiB"),
+        "it does not say how big the file is, which is what somebody \
+         deciding whether to wait is deciding about: {said}"
+    );
+}
+
+/// **Floored, not rounded.** A file one chunk short of done must not read as
+/// finished: over a bar that is about to vanish, that is the one lie it
+/// could tell. The ring on an arriving file floors for the same reason.
+#[test]
+fn a_file_all_but_done_does_not_say_it_is_finished() {
+    let (said, _) = going("clip.mp4", 9_999, 10_000);
+    assert!(
+        said.contains("99%"),
+        "a file one chunk short read as finished: {said}"
+    );
+}
+
+/// **A file name is not a licence to widen the pane.** A ui grows to what is
+/// drawn in it, so a bar measured off the words rather than the room would
+/// take the strip — and the composer with it — off the side of a phone.
+#[test]
+fn a_long_name_does_not_widen_the_strip() {
+    const PHONE: f32 = 360.0;
+    let (_, wide) = going(
+        "a recording of the whole afternoon, named at length.mp4",
+        1,
+        2,
+    );
+    assert!(wide > 0.0, "it drew nothing, so this proves nothing");
+    assert!(
+        wide <= PHONE + 1.0,
+        "the strip draws {wide} points wide in a {PHONE}-point pane"
+    );
+}
+
+/// **Nought of nought is drawn, not refused.** A progress bar is the wrong
+/// place to panic, and a sender that understated its own size should show a
+/// full bar rather than none.
+#[test]
+fn a_file_of_no_size_draws_rather_than_panicking() {
+    let (said, _) = going("empty.bin", 0, 0);
+    assert!(said.contains("100%"), "nought of nought drew {said}");
+}

@@ -25,7 +25,7 @@ pub use attachment::{Attachment, AttachmentAction, GalleryAction, attachment, ga
 // and the mailbox each printed a raw byte count instead, and the desktop's
 // downloader grew a third one. Named here so the next screen that has bytes
 // to show has somewhere obvious to look.
-pub use attachment::human;
+pub use attachment::{going_bar, human};
 pub use clock::{brief, clock, day_label, day_of, deadline, stamp};
 pub use conversation_row::{ConversationRow, conversation_row, one_line};
 pub use dot::{dot, state_icon};

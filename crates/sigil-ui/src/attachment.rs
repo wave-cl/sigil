@@ -1321,3 +1321,71 @@ mod extension_tests {
         assert_eq!(extension(b"\x89PNH\r\n\x1a\n"), "bin");
     }
 }
+
+/// How tall the bar a file going up is drawn in. A hair, not a trough: it
+/// sits under a line of words and is read as the progress of *that* line.
+const GOING_BAR: f32 = 4.0;
+
+/// A file going up: what it is called, how far along, and how big — with a
+/// determinate bar under the words.
+///
+/// **The outgoing twin of [`coming_ring`], in the shape its place allows.**
+/// A ring goes on an arriving file because there is a thumbnail to put it
+/// on; a file going up is named in a strip above the composer, where a
+/// full-width bar reads as the progress of the sentence over it and a ring
+/// would be a lone circle in a line of text.
+///
+/// The percentage is floored, as the ring's is, so that a file one chunk
+/// short of done does not read as finished — over a bar about to vanish,
+/// that is the one lie it could tell.
+///
+/// `done` past `all`, and `all` of nought, are drawn rather than refused:
+/// a progress bar is the wrong place to panic.
+pub fn going_bar(ui: &mut egui::Ui, name: &str, done: u64, all: u64) {
+    let theme = ColorTheme::current(ui.ctx());
+    let part = if all == 0 {
+        1.0
+    } else {
+        (done as f32 / all as f32).clamp(0.0, 1.0)
+    };
+    let per_cent = (part * 100.0).floor() as u32;
+
+    // The words first: what is going, and how far. The size is on the same
+    // line because it is the number somebody is deciding about — whether
+    // this is worth waiting for — exactly as the ring's second line is.
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("Sending {name}"))
+                    .small()
+                    .color(theme.text_secondary),
+            )
+            .truncate(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!("{per_cent}% of {}", human(all))).small(),
+            );
+        });
+    });
+
+    // **Allocated at the width there is**, so the bar is the pane's width
+    // and not whatever the words came out as. A ui grows to what is drawn
+    // in it, and a bar measured off a long file name would widen the strip
+    // it sits in.
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), GOING_BAR),
+        egui::Sense::hover(),
+    );
+    let radius = GOING_BAR / 2.0;
+    ui.painter()
+        .rect_filled(rect, radius, theme.surface_secondary);
+    if part > 0.0 {
+        let filled = egui::Rect::from_min_size(
+            rect.min,
+            egui::vec2((rect.width() * part).max(GOING_BAR), rect.height()),
+        );
+        ui.painter().rect_filled(filled, radius, theme.accent);
+    }
+}

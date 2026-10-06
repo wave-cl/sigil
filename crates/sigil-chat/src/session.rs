@@ -862,6 +862,22 @@ pub struct ChatState {
     /// conversation and is rebuilt by every refresh. Merged, every
     /// confirmation would be on screen for less than a tick.
     pub note: Option<Note>,
+    /// The file going up right now: what it is called, bytes of it gone,
+    /// and bytes in all.
+    ///
+    /// **The twin of a message's `coming`, and determinate for the same
+    /// reason.** A file arriving draws a ring that says how far down it is;
+    /// a file going up said only "Sending clip.mp4…", which over a video on
+    /// a phone's uplink is the same sentence for a minute and tells nobody
+    /// whether anything is moving. SIP-18 chunks an upload exactly as it
+    /// chunks a download, so the count was always there to be reported.
+    ///
+    /// Written from inside the upload by `upload_reporting`'s callback — a
+    /// `watch::Sender` is `Sync`, so it publishes as each chunk lands rather
+    /// than waiting for the session loop, which is held by the upload's own
+    /// await. `None` whenever nothing is going up, which is almost always:
+    /// one file at a time, the way one comes down at a time.
+    pub going: Option<(String, u64, u64)>,
     /// Who is in the open conversation.
     pub members: Vec<Member>,
     /// Whether the people you talk to are there, by SIP-4 beacon: the
@@ -5202,11 +5218,26 @@ async fn attach_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    note(state, format!("Sending {name}…"));
-    let mut attachment = chat
-        .upload(channel, &prepared)
-        .await
-        .map_err(|e| e.to_string())?;
+    // **No "Sending…" note**: `going` below carries the name *and* how far
+    // along it is, and a strip saying both would be one screen saying one
+    // thing twice.
+    //
+    // **Said as it goes, not when it is done.** `upload_reporting` is the
+    // twin of the `download_reporting` a fetch already uses, and this
+    // callback is why it exists: a `watch::Sender` is `Sync`, so each chunk
+    // publishes straight to whoever is drawing rather than waiting for the
+    // session loop -- which cannot help, being held by the await below.
+    //
+    // Cleared on both ways out, success and failure alike. A bar left on
+    // screen after an upload stopped is a bar that lies about the only
+    // thing it is for.
+    let going = |done: u64, all: u64| {
+        let name = name.clone();
+        state.send_modify(|s| s.going = Some((name, done, all)));
+    };
+    let uploaded = chat.upload_reporting(channel, &prepared, &going).await;
+    state.send_modify(|s| s.going = None);
+    let mut attachment = uploaded.map_err(|e| e.to_string())?;
     // The field SIP-18 has always had and the terminal client always left
     // empty: "rendering one means decoding the image, and a terminal client
     // has nothing to show it on. The field exists for a client that does."

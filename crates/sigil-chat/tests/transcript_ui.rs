@@ -64,6 +64,8 @@ fn a_conversation() -> ChatState {
         me: Some(me()),
         prekeys: None,
         folds: 0,
+        // Nothing going up: the cases that want the bar set it themselves.
+        going: None,
         // SIP-87: the fixture is an ordinary SIP-17 channel, so the Settings
         // card offers minting rather than committing.
         agreed: false,
@@ -16573,4 +16575,58 @@ fn answer_and_decline_are_kept_apart() {
          opposite meanings within a thumb's slip of each other",
         sigil::tokens::SPACING_LG
     );
+}
+
+/// **A file going up is said on the screen somebody is looking at.**
+///
+/// The bar is a widget in `sigil-ui` and is tested there; this is the wiring
+/// — that `ChatState::going` reaches the pane at all. The two halves failed
+/// separately once before on this app: a value the session filled in and no
+/// view ever read.
+#[test]
+fn a_file_going_up_is_drawn_on_the_conversation() {
+    let mut state = a_conversation();
+    state.going = Some(("clip.mp4".into(), 3 * 1024 * 1024, 12 * 1024 * 1024));
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let seen = text_of(&h);
+    assert!(
+        seen.contains("Sending clip.mp4"),
+        "the pane does not say what is going up: {seen}"
+    );
+    assert!(
+        seen.contains("25%"),
+        "the pane does not say how far along it is: {seen}"
+    );
+}
+
+/// And with nothing going up there is no bar — a strip that is always there
+/// is furniture, not an answer.
+#[test]
+fn nothing_going_up_draws_no_bar() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let seen = text_of(&h);
+    assert!(
+        !seen.contains("Sending"),
+        "a bar for a file nobody is sending: {seen}"
+    );
+}
+
+/// **A picture of a file going up.** The words say it is there; only looking
+/// says whether the bar reads as progress rather than as a rule under a line
+/// of text, and whether the strip sits with room around it.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_sending_a_file() {
+    let mut state = a_conversation();
+    state.going = Some(("clip.mp4".into(), 3 * 1024 * 1024, 12 * 1024 * 1024));
+    let mut h = harness_phone(state, sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_sending_a_file");
 }

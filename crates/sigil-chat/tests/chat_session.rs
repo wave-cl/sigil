@@ -6779,3 +6779,108 @@ async fn a_failure_takes_itself_off_the_screen() {
         two.state().trouble
     );
 }
+
+/// **A file going up says so while it is still going.**
+///
+/// `ChatState::going` is written from inside the upload, by the callback
+/// `upload_reporting` calls as each chunk lands. The bar that draws it is
+/// tested in `sigil-ui` and the pane that reads it in `transcript_ui` — both
+/// against a value put there by hand. So this is the link neither of them
+/// crosses: whether the session ever writes one. A value the session fills
+/// in that no view reads, and a view that reads a value nothing fills in,
+/// look identical from either end, and this app has had one of each.
+#[tokio::test]
+async fn a_file_going_up_is_reported_while_it_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, a_id) = signer(71);
+    let (b_signer, b_id) = signer(72);
+    let alice = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let bob = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || alice.state().me == Some(a_id) && bob.state().me == Some(b_id),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        alice.state().trouble
+    );
+    bob.send(Cmd::OpenDm(a_id));
+    alice.send(Cmd::OpenDm(b_id));
+    assert!(
+        until(
+            || alice.state().open.is_some() && bob.state().open.is_some(),
+            15
+        )
+        .await,
+        "both should have the conversation open"
+    );
+
+    // **Sixteen chunks**, so there are sixteen reports and catching one is
+    // not a race worth losing. SIP-18 chunks at 256 KiB. Not a `.png`: an
+    // image is fetched by the far side without being asked, and what that
+    // draws is the *other* progress indicator.
+    const CHUNKS: usize = 16;
+    const CHUNK: usize = 256 * 1024;
+    let big = dir.path().join("a-recording.bin");
+    std::fs::write(&big, vec![7u8; CHUNKS * CHUNK]).unwrap();
+
+    // **Watched, not polled.** `going` is put back to `None` the moment the
+    // upload returns, so a loop sampling `state()` every 50 ms is a loop
+    // that can miss the whole of it and report that as a pass -- the shape
+    // of test that passes whether or not the thing it is about happens.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mine = seen.clone();
+    let mut rx = alice.watch();
+    let watcher = tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let going = rx.borrow_and_update().going.clone();
+            if let Some(going) = going {
+                mine.lock().unwrap().push(going);
+            }
+        }
+    });
+
+    alice.send(Cmd::SendFile(big));
+    assert!(
+        until(
+            || bob.state().lines.iter().any(|l| !l.attachments.is_empty()),
+            60
+        )
+        .await,
+        "the file never arrived, so nothing was uploaded to report on: {:?}",
+        alice.state().trouble
+    );
+    watcher.abort();
+
+    let seen = seen.lock().unwrap().clone();
+    let (name, _, all) = seen
+        .first()
+        .expect("an upload of sixteen chunks reported nothing at all");
+    assert_eq!(
+        name, "a-recording.bin",
+        "the report names something other than the file going up"
+    );
+    assert_eq!(
+        *all as usize,
+        CHUNKS * CHUNK,
+        "the report's total is not the size of the file"
+    );
+    assert!(
+        seen.iter().all(|(_, done, all)| done <= all),
+        "a report claims more has gone than there is: {seen:?}"
+    );
+
+    // And it is put away. A bar left up after the upload ended is a bar
+    // that lies about the only thing it is for.
+    assert_eq!(
+        alice.state().going,
+        None,
+        "the file finished and the pane is still saying it is going up"
+    );
+}

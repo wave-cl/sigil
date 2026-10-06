@@ -8461,6 +8461,16 @@ impl ChatApp {
     /// looking at. Pressing "Mint a new key" and being told nothing is how
     /// this was found.
     fn note_ui(state: &ChatState, ui: &mut egui::Ui, theme: &ColorTheme) {
+        // **A file going up, before anything that was already done.** This
+        // is the one note that is not an answer but a wait, and it is drawn
+        // determinate: "Sending clip.mp4…" is the same sentence for a minute
+        // over a video on a phone's uplink, and says nothing about whether
+        // it is moving. The words are in the bar, so the note that used to
+        // carry them is gone rather than repeated beside it.
+        if let Some((name, done, all)) = &state.going {
+            sigil_ui::going_bar(ui, name, *done, *all);
+            ui.add_space(tokens::SPACING_XS);
+        }
         if let Some(note) = &state.note {
             ui.add(
                 egui::Label::new(egui::RichText::new(&note.said).small().color(theme.success))
