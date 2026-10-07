@@ -16912,3 +16912,95 @@ fn a_members_row_offers_the_way_to_their_feed() {
         text_of(&h)
     );
 }
+
+/// **A picture of the timeline.** The words say the posts are there; only
+/// looking says whether a feed reads as a feed — whether the author, the
+/// time and the words sit apart, whether the composer's warning is legible
+/// rather than a grey smear, and whether two posts are told apart at a
+/// glance.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_timeline() {
+    let mut state = a_timeline();
+    state.timeline[0].cites = Some((me(), sigil_chat::feed::Serial(4)));
+    state.citations = vec![(
+        me(),
+        sigil_chat::feed::Serial(4),
+        sigil_chat::feed::Citation::Got {
+            who: me(),
+            name: Some("Bram".into()),
+            text: "the post being carried into somebody else's".into(),
+            serial: sigil_chat::feed::Serial(4),
+        },
+    )];
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_timeline");
+}
+
+/// And one person's feed, with the follow control and the key that is the
+/// feed.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_one_feed() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_one_feed");
+}
+
+/// A post whose body is gone, both ways, in one picture: the two must not
+/// read alike, and a picture is where "must not read alike" is actually
+/// settled.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_feed_absences() {
+    let mut state = a_timeline();
+    state.timeline[0].gone = Some(sigil_chat::feed::Gone::Withdrawn);
+    state.timeline[0].text = String::new();
+    state.timeline[1].gone = Some(sigil_chat::feed::Gone::Removed);
+    state.timeline[1].text = String::new();
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_feed_absences");
+}
+
+/// **A feed is headed by whoever's it is, by the name its own posts carry.**
+///
+/// A feed is reached by a key and nothing else, so the first person somebody
+/// opens one for is often one this client holds no profile for — and the
+/// posts themselves carry the name the session resolved when it read them.
+/// Reading only the profile map put the short key in the heading while every
+/// post under it said the name, which is the way round that leaves a wrong
+/// heading unnoticed.
+#[test]
+fn a_feed_is_headed_by_the_name_its_posts_carry() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Ada"),
+        "the feed is not headed by whoever's it is: {said}"
+    );
+    // And a feed with nothing to go on still says something true: the key,
+    // which is what the feed actually is.
+    let mut bare = a_timeline();
+    bare.timeline.clear();
+    bare.people.clear();
+    let mut h = harness_phone(bare, sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains(&sigil_ui::short(&them().to_string())),
+        "a feed this client knows nothing about is headed by nothing at all"
+    );
+}

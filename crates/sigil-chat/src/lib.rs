@@ -11664,12 +11664,41 @@ impl ChatApp {
         AppResponse::default()
     }
 
-    /// What this client calls whoever's feed this is. The key where it knows
-    /// nothing, which is never wrong and is what the feed actually is.
+    /// What this client calls whoever's feed this is.
+    ///
+    /// **A profile first, then what a post of theirs carried, then the key.**
+    /// The middle step is not redundant: a feed is reached by a key and
+    /// nothing else, so the first person somebody opens a feed for is often
+    /// one this client has no profile for at all -- and the posts themselves
+    /// carry the name the session resolved when it read them. Without it the
+    /// heading over somebody's own feed was their short key while every post
+    /// under it said their name.
+    ///
+    /// The key where it knows nothing, which is never wrong and is what the
+    /// feed actually is.
     fn feed_label(&self, who: &PubKey) -> String {
-        self.sessions
-            .values()
-            .find_map(|s| s.state().people.get(who).and_then(|p| p.name.clone()))
+        let named = |state: &ChatState| {
+            state
+                .people
+                .get(who)
+                .and_then(|p| p.name.clone())
+                .or_else(|| {
+                    state
+                        .timeline
+                        .iter()
+                        .find(|p| p.who == *who)
+                        .and_then(|p| p.name.clone())
+                })
+        };
+        // `self.fixed` first, for the same reason `state_of` reads it first:
+        // a test's state is the whole of what the app knows, and a lookup
+        // that walked only the live sessions answered the key in every test
+        // while answering the name in the app -- which is the way round that
+        // leaves a wrong heading unseen.
+        self.fixed
+            .as_ref()
+            .and_then(named)
+            .or_else(|| self.sessions.values().find_map(|s| named(&s.state())))
             .unwrap_or_else(|| sigil_ui::short(&who.to_string()))
     }
 
@@ -11964,8 +11993,14 @@ impl ChatApp {
                 .map(|(_, _, what)| what.clone())
         });
         let key = post.who.to_string();
-        let at_said = sigil_ui::stamp(post.at);
-        let claimed = post.claimed.map(sigil_ui::stamp);
+        // **Brief, as every other list in this app is.** `stamp` is the whole
+        // moment -- day, year, seconds, zone -- and its own doc says it is
+        // what belongs behind a pointer; drawn inline it put "Saturday, 29
+        // August 2026 at 11:59:00 UTC" over every post in the timeline, which
+        // is longer than most of the posts.
+        let now = self.now();
+        let at_said = sigil_ui::brief(post.at, now);
+        let claimed = post.claimed.map(|c| sigil_ui::brief(c, now));
         let cited = post.cites.map(|_| {
             let what = found.clone().unwrap_or(crate::feed::Citation::Asking);
             match what {
