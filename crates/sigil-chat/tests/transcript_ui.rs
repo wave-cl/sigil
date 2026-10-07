@@ -17097,3 +17097,77 @@ fn a_feed_serial_does_not_resolve_against_a_channel() {
         "a channel message at seq {SHARED} was drawn in the feed at serial {SHARED}: {feed}"
     );
 }
+
+/// **A picture of the timeline on a desktop**, which until now nobody had
+/// looked at: every feed render was a 360-point phone. A thousand-point pane
+/// is not a wide phone — a line of text that runs the width of one is a line
+/// nobody can read back to the start of, and a composer that spans it looks
+/// like a search box.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn timeline_desktop() {
+    let mut state = a_timeline();
+    state.timeline[0].cites = Some((me(), sigil_chat::feed::Serial(4)));
+    state.citations = vec![(
+        me(),
+        sigil_chat::feed::Serial(4),
+        sigil_chat::feed::Citation::Got {
+            who: me(),
+            name: Some("Bram".into()),
+            text: "the post being carried into somebody else's".into(),
+            serial: sigil_chat::feed::Serial(4),
+        },
+    )];
+    let mut h = harness_at(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("timeline_desktop");
+}
+
+/// **A feed is read in a column, not across the whole window.**
+///
+/// Every feed render was a 360-point phone until a desktop one was finally
+/// looked at, and on a thousand-point pane the words ran the full width, the
+/// separators ran with them, and each post's one control sat alone at the far
+/// left of all of it. A line of text a thousand points long is a line nobody
+/// can find the start of again.
+///
+/// Asked as a position rather than as "is there a column": on a wide pane the
+/// posts begin well inside it, and on a phone they do not, because there is
+/// nothing to centre.
+#[test]
+fn a_timeline_is_a_column_on_a_desktop_and_the_whole_pane_on_a_phone() {
+    let left_edge = |h: &Harness<'static>| -> f32 {
+        h.get_all_by_label_contains("Ada")
+            .filter_map(|n| n.accesskit_node().bounding_box())
+            .map(|b| b.x0 as f32)
+            .fold(f32::MAX, f32::min)
+    };
+
+    let mut wide = harness_at(a_timeline(), sigil_chat::Route::Feed);
+    wide.run();
+    wide.run();
+    let on_desktop = left_edge(&wide);
+    assert!(
+        on_desktop < f32::MAX,
+        "no post was drawn on the desktop pane, so this proves nothing"
+    );
+    assert!(
+        on_desktop > 100.0,
+        "on a 1000-point pane the posts start at x={on_desktop:.0}, so they are not \
+         in a column at all"
+    );
+
+    let mut phone = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    phone.run();
+    phone.run();
+    let on_phone = left_edge(&phone);
+    assert!(
+        on_phone < 80.0,
+        "on a 360-point phone the posts start at x={on_phone:.0}: the column is \
+         being centred where there is nothing to centre, and a phone has no width \
+         to give away"
+    );
+}

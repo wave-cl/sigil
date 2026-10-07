@@ -47,6 +47,19 @@ pub const AVATAR_XL: f32 = 80.0;
 /// of buttons in a desert. Centred in the pane, capped here.
 pub const CARD_MAX_WIDTH: f32 = 480.0;
 
+/// How wide a column of prose gets to be, whatever the window is.
+///
+/// **A feed is read rather than scanned**, and a line of text a thousand
+/// points long is a line nobody can find the start of again. Typography has
+/// one number for this and it is about sixty to eighty characters; at this
+/// app's body size that is roughly here.
+///
+/// Wider than [`CARD_MAX_WIDTH`], which is the measure for a card of
+/// *controls* and too narrow for sentences. A conversation does not need one
+/// because a message is already bounded by its bubble; a feed post is not
+/// bounded by anything.
+pub const READING_MAX: f32 = 640.0;
+
 /// A text field's height.
 ///
 /// Bigger than a line of text on purpose: a field the height of its own

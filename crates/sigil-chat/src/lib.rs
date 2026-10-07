@@ -11664,6 +11664,31 @@ impl ChatApp {
         AppResponse::default()
     }
 
+    /// A column of posts, capped to a readable measure and centred.
+    ///
+    /// Every feed render until now was a 360-point phone, where this does
+    /// nothing. On a thousand-point desktop pane it is the difference
+    /// between a feed and a wall: the words ran the full width, the
+    /// separators ran with them, and a post's one control sat alone at the
+    /// far left of all of it.
+    fn reading_column<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let room = ui.available_width();
+        let column = room.min(tokens::READING_MAX);
+        // A shrink and never a growth: `set_max_width` sets the width
+        // outright, so handing it a number above the room is how a pane ends
+        // up wider than its window.
+        let pad = ((room - column) / 2.0).max(0.0);
+        ui.horizontal(|ui| {
+            ui.add_space(pad);
+            ui.vertical(|ui| {
+                ui.set_max_width(column);
+                add(ui)
+            })
+            .inner
+        })
+        .inner
+    }
+
     /// What this client calls whoever's feed this is.
     ///
     /// **A profile first, then what a post of theirs carried, then the key.**
@@ -11733,7 +11758,9 @@ impl ChatApp {
             });
         }
         Self::note_ui(&state, ui, &theme);
-        self.feed_composer_ui(ctx, at, ui, &theme);
+        // The composer takes the same measure as the posts under it, so the
+        // box, the warning and the words all share one left edge.
+        Self::reading_column(ui, |ui| self.feed_composer_ui(ctx, at, ui, &theme));
 
         // **What the poll could not find out, said before the posts.** A
         // reader looking at a timeline that has stopped filling has no way to
@@ -11786,19 +11813,21 @@ impl ChatApp {
             .id_salt("timeline")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if state.timeline.is_empty() {
-                    ui.add_space(tokens::SPACING_LG);
-                    ui.colored_label(
-                        theme.text_secondary,
-                        "Nothing yet from the feeds you follow.",
-                    );
-                    return;
-                }
-                for post in &state.timeline {
-                    if let Some(press) = self.post_ui(ctx, at, post, ui) {
-                        self.act_on_post(ctx, at, post, press);
+                Self::reading_column(ui, |ui| {
+                    if state.timeline.is_empty() {
+                        ui.add_space(tokens::SPACING_LG);
+                        ui.colored_label(
+                            theme.text_secondary,
+                            "Nothing yet from the feeds you follow.",
+                        );
+                        return;
                     }
-                }
+                    for post in &state.timeline {
+                        if let Some(press) = self.post_ui(ctx, at, post, ui) {
+                            self.act_on_post(ctx, at, post, press);
+                        }
+                    }
+                })
             });
         AppResponse::default()
     }
@@ -11871,27 +11900,29 @@ impl ChatApp {
             .id_salt("one-feed")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if posts.is_empty() {
-                    ui.add_space(tokens::SPACING_LG);
-                    // **One answer for several facts, and said as one.** A
-                    // feed that is absent, withheld, or whose owner has
-                    // blocked this reader all answer `found: 0`, and SIP-21
-                    // forbids a client presenting a guess at which.
-                    ui.colored_label(
-                        theme.text_secondary,
-                        "Nothing here. Either they have published nothing, or this \
+                Self::reading_column(ui, |ui| {
+                    if posts.is_empty() {
+                        ui.add_space(tokens::SPACING_LG);
+                        // **One answer for several facts, and said as one.** A
+                        // feed that is absent, withheld, or whose owner has
+                        // blocked this reader all answer `found: 0`, and SIP-21
+                        // forbids a client presenting a guess at which.
+                        ui.colored_label(
+                            theme.text_secondary,
+                            "Nothing here. Either they have published nothing, or this \
                          exchange has nothing of theirs to serve.",
-                    );
-                    return;
-                }
-                for post in &posts {
-                    if let Some(press) = self.post_ui(ctx, at, post, ui) {
-                        self.act_on_post(ctx, at, post, press);
+                        );
+                        return;
                     }
-                }
-                if ui.button("Earlier").clicked() {
-                    self.send_as(Some(at), Cmd::EarlierInFeed(who));
-                }
+                    for post in &posts {
+                        if let Some(press) = self.post_ui(ctx, at, post, ui) {
+                            self.act_on_post(ctx, at, post, press);
+                        }
+                    }
+                    if ui.button("Earlier").clicked() {
+                        self.send_as(Some(at), Cmd::EarlierInFeed(who));
+                    }
+                })
             });
         AppResponse::default()
     }
@@ -12014,12 +12045,18 @@ impl ChatApp {
                 other => (None, None, other.instead()),
             }
         });
+        // **The author's own picture where they have published one** (SIP-21).
+        // It is drawn and never trusted: the subject chooses these bytes, and
+        // nothing on the way here checks them. Decoded once per picture by
+        // `person_picture`, not once a frame.
+        let face = state.people.get(&post.who).and_then(|p| p.picture.clone());
+        let picture = self.person_picture(at, ui.ctx(), post.who, face.as_ref());
         let drawn = ui.scope(|ui| {
             sigil_ui::feed_post(
                 ui,
                 &sigil_ui::FeedPost {
                     key: &key,
-                    picture: None,
+                    picture: picture.as_ref(),
                     named: post.name.as_deref(),
                     mine: post.mine,
                     at: &at_said,
