@@ -1795,6 +1795,9 @@ struct Pane {
     composing_post: String,
     /// SIP-89: the post being carried into the next one published, if any.
     citing: Option<(PubKey, crate::feed::Serial)>,
+    /// Citations this pane has already asked the session to look up, so a
+    /// page of posts asks once rather than once a frame.
+    cited_asked: std::collections::HashSet<(PubKey, crate::feed::Serial)>,
     /// Why not every file picked was staged. Goes by itself; see
     /// [`ChatApp::forget_stale_troubles`].
     staging_trouble: Option<Bother>,
@@ -2050,6 +2053,7 @@ impl Default for Pane {
         Pane {
             composing_post: String::new(),
             citing: None,
+            cited_asked: std::collections::HashSet::new(),
             pairing: String::new(),
             exchange_via: false,
             report_reason: 1,
@@ -11904,6 +11908,19 @@ impl ChatApp {
     }
 
     /// Draw one post, with whatever its citation resolved to.
+    ///
+    /// **Resolution is asked for on display and only on display.** SIP-89
+    /// §Security considerations: resolving discloses the reader to an
+    /// exchange they have no relationship with, and one post in a widely read
+    /// feed would otherwise tell that exchange the whole audience of whoever
+    /// quoted it. So the ask happens after the row is drawn, for a row that
+    /// was actually on the screen, once.
+    ///
+    /// **One level and no further.** `QUOTE_DEPTH` is 2 and the unasked
+    /// budget is 1; this resolves the citation on a post it draws and never
+    /// the citation on the post that came back, so the depth is 1. A chain
+    /// is collapsed to the post this one names, which is what SIP-89
+    /// §Recursion asks for anyway.
     fn post_ui(
         &mut self,
         ctx: &mut AppContext<'_>,
@@ -11911,38 +11928,70 @@ impl ChatApp {
         post: &crate::feed::Posted,
         ui: &mut egui::Ui,
     ) -> Option<sigil_ui::PostPress> {
-        let _ = (ctx, at);
+        let _ = ctx;
+        let state = self.state_of(Some(at));
+        let found = post.cites.and_then(|(who, serial)| {
+            state
+                .citations
+                .iter()
+                .find(|(w, s, _)| *w == who && *s == serial)
+                .map(|(_, _, what)| what.clone())
+        });
         let key = post.who.to_string();
         let at_said = sigil_ui::stamp(post.at);
         let claimed = post.claimed.map(sigil_ui::stamp);
-        sigil_ui::feed_post(
-            ui,
-            &sigil_ui::FeedPost {
-                key: &key,
-                picture: None,
-                named: post.name.as_deref(),
-                mine: post.mine,
-                at: &at_said,
-                claimed: claimed.as_deref(),
-                text: &post.text,
-                edited: post.edited,
-                absent: post.gone.map(|g| match g {
-                    crate::feed::Gone::Withdrawn => sigil_ui::Absent::Withdrawn,
-                    crate::feed::Gone::Removed => sigil_ui::Absent::Removed,
-                }),
-                unknown: post.unknown,
-                // SIP-89 resolution is not built yet, and a citation is drawn
-                // as the labelled reference it is rather than as nothing.
-                cites: post.cites.map(|_| sigil_ui::Cited {
-                    named: None,
-                    text: None,
-                    instead: Some(
-                        "This carries somebody else's post. Opening it is not \
-                                   built yet.",
-                    ),
-                }),
-            },
-        )
+        let cited = post.cites.map(|_| {
+            let what = found.clone().unwrap_or(crate::feed::Citation::Asking);
+            match what {
+                crate::feed::Citation::Got {
+                    name, text, who, ..
+                } => (
+                    Some(name.unwrap_or_else(|| sigil_ui::short(&who.to_string()))),
+                    Some(text),
+                    None,
+                ),
+                other => (None, None, other.instead()),
+            }
+        });
+        let drawn = ui.scope(|ui| {
+            sigil_ui::feed_post(
+                ui,
+                &sigil_ui::FeedPost {
+                    key: &key,
+                    picture: None,
+                    named: post.name.as_deref(),
+                    mine: post.mine,
+                    at: &at_said,
+                    claimed: claimed.as_deref(),
+                    text: &post.text,
+                    edited: post.edited,
+                    absent: post.gone.map(|g| match g {
+                        crate::feed::Gone::Withdrawn => sigil_ui::Absent::Withdrawn,
+                        crate::feed::Gone::Removed => sigil_ui::Absent::Removed,
+                    }),
+                    unknown: post.unknown,
+                    cites: cited
+                        .as_ref()
+                        .map(|(named, text, instead)| sigil_ui::Cited {
+                            named: named.as_deref(),
+                            text: text.as_deref(),
+                            instead: *instead,
+                        }),
+                },
+            )
+        });
+        // Asked after drawing, for a row the clip rectangle actually
+        // contained: a timeline lays out two hundred posts and shows a
+        // handful, and asking for the rest is the amplification SIP-89
+        // bounds.
+        if let Some((who, serial)) = post.cites
+            && found.is_none()
+            && ui.clip_rect().intersects(drawn.response.rect)
+            && self.pane(at).cited_asked.insert((who, serial))
+        {
+            self.send_as(Some(at), Cmd::Cite(who, serial));
+        }
+        drawn.inner
     }
 
     /// What a press on a post does.

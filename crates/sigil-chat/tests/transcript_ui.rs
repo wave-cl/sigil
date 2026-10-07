@@ -74,6 +74,7 @@ fn a_conversation() -> ChatState {
         feeds_unasked: Vec::new(),
         feeds_silent: Vec::new(),
         feeds_truncated: Vec::new(),
+        citations: Vec::new(),
         // SIP-87: the fixture is an ordinary SIP-17 channel, so the Settings
         // card offers minting rather than committing.
         agreed: false,
@@ -16803,5 +16804,77 @@ fn a_feed_shows_the_key_that_is_the_feed() {
     assert!(
         text_of(&h).contains(&them().to_string()),
         "the account key, which is the whole identifier, is not on the screen"
+    );
+}
+
+/// **A resolved citation is drawn under the post that carries it.**
+///
+/// The states are tested in `sigil-ui` against values put there by hand, and
+/// the resolution against a real exchange in `feed_session`. This is the
+/// join: that what the session resolved reaches the row. It is the half that
+/// has failed on its own before here.
+#[test]
+fn a_resolved_citation_is_drawn_under_the_post_carrying_it() {
+    let mut state = a_timeline();
+    state.timeline[0].cites = Some((me(), sigil_chat::feed::Serial(4)));
+    state.citations = vec![(
+        me(),
+        sigil_chat::feed::Serial(4),
+        sigil_chat::feed::Citation::Got {
+            who: me(),
+            name: Some("Bram".into()),
+            text: "the post being carried".into(),
+            serial: sigil_chat::feed::Serial(4),
+        },
+    )];
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("the post being carried"),
+        "the cited post's words are not on the screen: {said}"
+    );
+    assert!(
+        said.contains("Bram"),
+        "and the cited author is not named: {said}"
+    );
+}
+
+/// **And one that did not resolve says which way it failed.**
+///
+/// SIP-89 §When it cannot be resolved: the reader is told, and "none of them
+/// is silence". The control is that two different failures do not produce the
+/// same sentence — a client that drew one apology for all of them would pass
+/// a test that only checked something was said.
+#[test]
+fn two_citations_that_failed_differently_do_not_read_the_same() {
+    let drawn = |what: sigil_chat::feed::Citation| {
+        let mut state = a_timeline();
+        state.timeline[0].cites = Some((me(), sigil_chat::feed::Serial(4)));
+        state.citations = vec![(me(), sigil_chat::feed::Serial(4), what)];
+        let mut h = harness_phone(state, sigil_chat::Route::Feed);
+        h.run();
+        h.run();
+        text_of(&h)
+    };
+    let withdrawn = drawn(sigil_chat::feed::Citation::Withdrawn);
+    let evicted = drawn(sigil_chat::feed::Citation::Evicted);
+    let missing = drawn(sigil_chat::feed::Citation::NoFeed);
+    assert_ne!(
+        withdrawn, evicted,
+        "a post its author took down and one the feed no longer holds read the same"
+    );
+    assert_ne!(
+        evicted, missing,
+        "a post no longer held and a feed that could not be found read the same"
+    );
+    assert!(
+        withdrawn.contains("took this post down"),
+        "a withdrawal does not say whose act it was: {withdrawn}"
+    );
+    assert!(
+        evicted.contains("no longer holds"),
+        "an eviction is not said as one: {evicted}"
     );
 }

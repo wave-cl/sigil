@@ -284,3 +284,133 @@ async fn a_withdrawn_post_keeps_its_place_and_loses_its_words() {
          withdraw it would be drawn"
     );
 }
+
+/// **A quote resolves to the post it names, and to nothing else.**
+///
+/// SIP-89's whole design rests on this working without trusting anybody: the
+/// citation carries a key and a number, the key is both the locator and the
+/// verifying key, and what comes back is checked under a key this client
+/// already holds. A citer who lies produces something that does not resolve
+/// rather than a false attribution — which is the property this test would
+/// lose if resolution were ever replaced by a copy carried in the part.
+#[tokio::test]
+async fn a_quote_resolves_to_the_post_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, author) = signer(86);
+    let (b_signer, quoter) = signer(87);
+    let first = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let second = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || first.state().me == Some(author) && second.state().me == Some(quoter),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    first.send(Cmd::Publish {
+        text: "the post being carried".into(),
+        cites: None,
+    });
+    assert!(
+        until(|| first.state().my_feed > Serial(0), 20).await,
+        "nothing was published: {:?}",
+        first.state().trouble
+    );
+
+    // The second account carries it into their own feed, with words of their
+    // own. Nothing of the first post travels: forty bytes naming a key and a
+    // number.
+    second.send(Cmd::Publish {
+        text: "look at this".into(),
+        cites: Some((author, Serial(1))),
+    });
+    assert!(
+        until(|| second.state().my_feed > Serial(0), 20).await,
+        "the quote was not published: {:?}",
+        second.state().trouble
+    );
+    second.send(Cmd::Follow(quoter));
+    assert!(
+        until(|| !second.state().timeline.is_empty(), 20).await,
+        "the quoter cannot see their own post"
+    );
+    let posted = second.state().timeline;
+    assert_eq!(
+        posted[0].cites,
+        Some((author, Serial(1))),
+        "the published post does not carry the citation: {posted:?}"
+    );
+
+    // **The control.** Before it is asked for, nothing is known about the
+    // cited post — so what the assertion below sees is a resolution and not
+    // a copy that travelled in the part.
+    assert!(
+        second.state().citations.is_empty(),
+        "something is already known about the cited post without asking: {:?}",
+        second.state().citations
+    );
+
+    second.send(Cmd::Cite(author, Serial(1)));
+    assert!(
+        until(|| !second.state().citations.is_empty(), 20).await,
+        "the citation was never resolved: {:?}",
+        second.state().trouble
+    );
+    let (who, serial, what) = second.state().citations[0].clone();
+    assert_eq!(who, author);
+    assert_eq!(serial, Serial(1));
+    match what {
+        sigil_chat::feed::Citation::Got { text, .. } => {
+            assert_eq!(text, "the post being carried", "the wrong post came back")
+        }
+        other => panic!("the citation did not resolve: {other:?}"),
+    }
+}
+
+/// **A citation naming a post that does not exist says so, and names
+/// nobody.**
+///
+/// Forty-one bytes cost nothing to fabricate. SIP-89 keeps the surface before
+/// resolution as small as it can be — a key and a number, with no name, no
+/// time and no words — so that there is nothing to put in front of a reader
+/// that looks like the quoted person speaking.
+#[tokio::test]
+async fn a_citation_of_nothing_resolves_to_a_reason_and_not_to_a_post() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, me) = signer(88);
+    let app = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| app.state().me == Some(me), 15).await,
+        "the session should come up"
+    );
+
+    // An account that has never published anything, cited at serial 1.
+    let nobody = PubKey::new([0x5a; 32]);
+    app.send(Cmd::Cite(nobody, Serial(1)));
+    assert!(
+        until(|| !app.state().citations.is_empty(), 20).await,
+        "the citation was never answered at all: {:?}",
+        app.state().trouble
+    );
+    let (_, _, what) = app.state().citations[0].clone();
+    assert!(
+        !matches!(what, sigil_chat::feed::Citation::Got { .. }),
+        "a citation of a feed nobody has written to came back with a post: {what:?}"
+    );
+    assert!(
+        what.instead().is_some(),
+        "it resolved to nothing a reader could be told: {what:?}"
+    );
+}

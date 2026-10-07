@@ -167,6 +167,74 @@ pub fn timeline(mut posts: Vec<Posted>) -> Vec<Posted> {
     posts
 }
 
+/// What a SIP-89 citation resolved to, in the words a reader is given.
+///
+/// **Each state is its own variant and a caller cannot collapse them.**
+/// SIP-89 §When it cannot be resolved lists eleven outcomes and says a reader
+/// MUST NOT collapse them, because "withdrawn by its author", "no longer
+/// held" and "could not be reached" are facts about different things and
+/// somebody acts differently on each. An error and a comment would have let
+/// a caller fold them by accident; variants do not.
+///
+/// **Seven, where the specification names eleven**, and the shortfall is
+/// recorded rather than hidden. `sqex-chat` cannot today distinguish *removed
+/// by the exchange* from *withdrawn by its author*, *unverifiable after a
+/// revocation* from *forged*, or the successor and depth cases at all — so
+/// four of SIP-89's rows are folded into neighbours here. The folding is in
+/// the library and closing it belongs there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Citation {
+    /// Asked for and not answered yet. Drawn as a labelled reference, never
+    /// as absence: a citation nobody has looked up yet is not a citation that
+    /// failed.
+    Asking,
+    /// Fetched, its signature holds, and these are its words.
+    Got {
+        who: PubKey,
+        name: Option<String>,
+        text: String,
+        serial: Serial,
+    },
+    /// Its author took it off, or it passed its own timer.
+    Withdrawn,
+    /// Below the feed's oldest: no longer held, and that is not the same as
+    /// deleted by anybody or as never having existed.
+    Evicted,
+    /// Absent, withheld, or its owner has blocked this reader. **One answer
+    /// for all three**, and SIP-21 forbids presenting a guess at which.
+    NoFeed,
+    /// Fetched and the signature does not hold under the device it names.
+    Forged,
+    /// The feed lives at an exchange this client is not connected to. Not a
+    /// failure: the home was found and named, and resolving it needs a
+    /// connection this session does not have.
+    Elsewhere { domain: String },
+    /// Nothing could be asked: the home is unreachable, or unknown.
+    Unresolved,
+}
+
+impl Citation {
+    /// The sentence a reader is shown where there are no words to show.
+    ///
+    /// Written to read as facts about the post rather than as faults in the
+    /// program, which is what SIP-89's own table does and what its reference
+    /// implementation records as never having been tried on anybody.
+    pub fn instead(&self) -> Option<&'static str> {
+        match self {
+            Citation::Got { .. } => None,
+            Citation::Asking => Some("Looking for the post this carries…"),
+            Citation::Withdrawn => Some("Its author took this post down."),
+            Citation::Evicted => Some("That feed no longer holds this post."),
+            Citation::NoFeed => Some("That feed could not be found."),
+            Citation::Forged => Some("This does not verify as that author's, so it is not shown."),
+            Citation::Elsewhere { .. } => {
+                Some("That feed lives at another exchange, which this client did not ask.")
+            }
+            Citation::Unresolved => Some("That feed could not be reached."),
+        }
+    }
+}
+
 /// Read a page of a feed into what a reader draws.
 ///
 /// Four things happen here that cannot happen post by post, which is why this
@@ -353,6 +421,14 @@ pub struct Feeds {
     /// of reading closes. SIP-88 requires the reader be told rather than
     /// shown the remainder as though it were the whole.
     pub truncated: Vec<PubKey>,
+    /// SIP-89: what each citation seen so far resolved to.
+    ///
+    /// Kept so that a page of posts does not ask the same exchange the same
+    /// question once per frame. SIP-89 §Reference implementation records the
+    /// absence of exactly this cache as an open question -- "every citation
+    /// on a page is a fresh read, resolved eagerly as the page is printed"
+    /// -- and a scrolling client is what makes it due.
+    cited: std::collections::HashMap<(PubKey, Serial), Citation>,
 }
 
 impl Feeds {
@@ -419,6 +495,33 @@ impl Feeds {
     /// empty" from "not read yet".
     pub fn knows(&self, account: &PubKey) -> bool {
         self.held.contains_key(account)
+    }
+
+    /// What a citation resolved to, if it has been asked about.
+    pub fn cited(&self, who: &PubKey, serial: Serial) -> Option<&Citation> {
+        self.cited.get(&(*who, serial))
+    }
+
+    /// Note that a citation is being looked up, so the next frame does not
+    /// ask again. Returns false where it was already asked.
+    pub fn asking(&mut self, who: PubKey, serial: Serial) -> bool {
+        self.cited.insert((who, serial), Citation::Asking).is_none()
+    }
+
+    /// Note what a citation resolved to.
+    pub fn resolved(&mut self, who: PubKey, serial: Serial, what: Citation) {
+        self.cited.insert((who, serial), what);
+    }
+
+    /// Every citation resolved so far, for the published snapshot.
+    pub fn citations(&self) -> Vec<(PubKey, Serial, Citation)> {
+        let mut out: Vec<(PubKey, Serial, Citation)> = self
+            .cited
+            .iter()
+            .map(|((who, serial), what)| (*who, *serial, what.clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then(a.1.cmp(&b.1)));
+        out
     }
 }
 

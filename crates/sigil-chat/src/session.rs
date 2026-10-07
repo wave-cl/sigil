@@ -892,6 +892,8 @@ pub struct ChatState {
     /// amount of reading closes, which a reader is shown rather than left to
     /// read the remainder as though it were the whole.
     pub feeds_truncated: Vec<PubKey>,
+    /// SIP-89: what each citation this client has looked up resolved to.
+    pub citations: Vec<(PubKey, crate::feed::Serial, crate::feed::Citation)>,
     /// The file going up right now: what it is called, bytes of it gone,
     /// and bytes in all.
     ///
@@ -1766,6 +1768,15 @@ pub enum Cmd {
     ReadFeed(PubKey),
     /// Read further back in one account's feed, from the oldest held.
     EarlierInFeed(PubKey),
+    /// SIP-89: look up the post a citation names.
+    ///
+    /// **Asked by the view, on display.** SIP-89 §Security considerations:
+    /// resolving discloses the reader to an exchange they have no
+    /// relationship with, so a client SHOULD resolve on display and SHOULD
+    /// NOT resolve for posts it is not showing. A session that resolved
+    /// every citation it held would tell an author's home the whole audience
+    /// of whoever quoted them.
+    Cite(PubKey, crate::feed::Serial),
     /// Remember somebody, so they appear in the list before they write.
     AddContact(PubKey, String),
     /// Redial now, whatever the backoff had planned.
@@ -7626,6 +7637,7 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(feeds_unasked, desk.feeds.unasked.clone());
         set!(feeds_silent, desk.feeds.silent.clone());
         set!(feeds_truncated, desk.feeds.truncated.clone());
+        set!(citations, desk.feeds.citations());
         set!(
             follows,
             chat.store()
@@ -8697,6 +8709,37 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::RefreshFeeds => refresh_feeds(chat, state, desk).await,
         Cmd::ReadFeed(account) => read_one_feed(chat, state, desk, account).await,
         Cmd::EarlierInFeed(account) => earlier_in_feed(chat, state, desk, account).await,
+        Cmd::Cite(who, serial) => {
+            use crate::feed::Citation;
+            let found = match chat.resolve_quote(&who, serial.0).await {
+                sqex_chat::feed::Cited::Got(stored) => {
+                    let name = Chat::display_name(chat, &stored.post.account);
+                    let me = chat.me;
+                    let named = |k: &PubKey| Chat::display_name(chat, k);
+                    // Read through the same path a page is, so a citation of
+                    // a withdrawn or unreadable post says what the timeline
+                    // would say about it rather than a second thing.
+                    let read = crate::feed::read_page(std::slice::from_ref(&stored), &me, &named);
+                    match read.into_iter().next() {
+                        Some(post) => Citation::Got {
+                            who: post.who,
+                            name,
+                            text: post.text,
+                            serial: post.serial,
+                        },
+                        None => Citation::Unresolved,
+                    }
+                }
+                sqex_chat::feed::Cited::Withdrawn => Citation::Withdrawn,
+                sqex_chat::feed::Cited::Evicted => Citation::Evicted,
+                sqex_chat::feed::Cited::NoFeed => Citation::NoFeed,
+                sqex_chat::feed::Cited::Forged => Citation::Forged,
+                sqex_chat::feed::Cited::Elsewhere { domain, .. } => Citation::Elsewhere { domain },
+                sqex_chat::feed::Cited::Unresolved => Citation::Unresolved,
+            };
+            desk.feeds.resolved(who, serial, found);
+            publish(&*chat, state, desk, chat.me);
+        }
 
         Cmd::React { target, emoji } => {
             let Some(channel) = desk.open else { return };
