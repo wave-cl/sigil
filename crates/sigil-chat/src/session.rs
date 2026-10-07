@@ -894,6 +894,30 @@ pub struct ChatState {
     pub feeds_truncated: Vec<PubKey>,
     /// SIP-89: what each citation this client has looked up resolved to.
     pub citations: Vec<(PubKey, crate::feed::Serial, crate::feed::Citation)>,
+    /// SIP-90: who this exchange says asked to be findable, with when they
+    /// asked. Everybody in it opted in, which is what makes it not the
+    /// census SIP-88 refused.
+    pub listed_feeds: Vec<(PubKey, u64)>,
+    /// Whether this account has asked this exchange to list its feed.
+    pub my_feed_listed: bool,
+    /// Whether an exchange has ever answered this session's request for the
+    /// listing.
+    ///
+    /// **An empty list and an unanswered one are different facts.** SIP-88
+    /// says so about its own routes, and this is where the client would
+    /// otherwise lose it: an exchange that serves no directory refuses the
+    /// route, and a pane that showed the refusal as an empty list would be
+    /// telling a reader that nobody there publishes. Found by opening the
+    /// pane against an exchange that did not have the route yet, which drew
+    /// "Nobody here has asked to be listed."
+    pub listing_answered: bool,
+    /// Why the last ask for the listing did not answer, if it did not.
+    ///
+    /// Its own field rather than the general `trouble` for the reason
+    /// [`ChatState::join_trouble`] gives: that one is set by any failing
+    /// command, and a stale one above a list that answered reads as the list
+    /// being wrong.
+    pub listing_trouble: Option<Bother>,
     /// Posts found by the same search that finds messages. Kept apart from
     /// [`hits`](ChatState::hits) because a feed post is named by an account
     /// and a serial and a message by a channel and a `seq`, and SIP-89 §Two
@@ -1757,6 +1781,13 @@ pub enum Cmd {
         text: String,
         /// SIP-89: the post this one cites, if any.
         cites: Option<(PubKey, crate::feed::Serial)>,
+        /// SIP-88 §Attachments: files to go up with it, each uploaded
+        /// against this account's feed before the post is signed.
+        files: Vec<std::path::PathBuf>,
+        /// SIP-90: an emoji saying how this post regards what it cites.
+        /// Only meaningful with `cites`, which the wire enforces — a regard
+        /// with no subject is malformed.
+        regard: Option<String>,
     },
     /// SIP-88 §Withdrawal: take a post of ours off this exchange.
     ///
@@ -1773,6 +1804,13 @@ pub enum Cmd {
     ReadFeed(PubKey),
     /// Read further back in one account's feed, from the oldest held.
     EarlierInFeed(PubKey),
+    /// SIP-90: ask this exchange who asked to be findable.
+    ReadDirectory,
+    /// SIP-90: ask this exchange to list this account's feed, or stop.
+    ///
+    /// **Nobody is listed without asking**, which is the whole of what keeps
+    /// a directory from being the timestamped census SIP-88 refused.
+    SetListed(bool),
     /// SIP-89: look up the post a citation names.
     ///
     /// **Asked by the view, on display.** SIP-89 §Security considerations:
@@ -3023,7 +3061,7 @@ async fn run(
             // session because an exchange refused it once is a flat battery.
             || {
                 let s = state.borrow();
-                [&s.trouble, &s.join_trouble]
+                [&s.trouble, &s.join_trouble, &s.listing_trouble]
                     .into_iter()
                     .any(|t| t.as_ref().is_some_and(|t| t.at.is_some()))
             };
@@ -3255,6 +3293,7 @@ async fn run(
                     state.send_modify(|s| s.join_trouble = None);
                     moved = true;
                 }
+
                 if desk.restructure {
                     // **Cleared only on success.** Clearing it first meant a
                     // rebuild that failed -- which is what every rebuild does
@@ -5352,6 +5391,46 @@ async fn attach_file(
     // the exchange than the picture is -- and it is what a reader sees
     // before the blob has been fetched, or instead of it when the blob is
     // too big to fetch unasked.
+    if let Some((meta, preview)) = preview_of(path, attachment.effective_kind()) {
+        attachment.meta = meta;
+        attachment.preview = preview;
+    }
+    Ok(attachment)
+}
+
+/// SIP-88 §Attachments: upload a file against this account's own feed.
+///
+/// The twin of [`attach_file`], against the feed's routes rather than a
+/// channel's. **Its own function and not a flag**, because what is named is a
+/// different thing: SIP-88 forbids an account key and a channel identifier
+/// sharing a field.
+///
+/// The preview travels in the body as it does for a message — and here the
+/// body is in the clear, so the thumbnail is public with the rest of the
+/// post. That is a property of a feed and not a leak: everything in one is.
+async fn attach_to_own_feed(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    path: &std::path::Path,
+) -> Result<sqex_proto::blob::Attachment, String> {
+    let limits = chat.blob_limits().await.map_err(|e| e.to_string())?;
+    let prepared = chat
+        .prepare_file(path, limits.chunk as usize)
+        .map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let going = |done: u64, all: u64| {
+        let name = name.clone();
+        state.send_modify(|s| s.going = Some((name, done, all)));
+    };
+    // `expires_after` of 0: a post published without a timer. SIP-88 requires
+    // a blob's window be no greater than its post's, and nothing here sets a
+    // post timer yet, so nought is the only value that cannot be wrong.
+    let uploaded = chat.upload_to_feed(&prepared, 0, &going).await;
+    state.send_modify(|s| s.going = None);
+    let mut attachment = uploaded.map_err(|e| e.to_string())?;
     if let Some((meta, preview)) = preview_of(path, attachment.effective_kind()) {
         attachment.meta = meta;
         attachment.preview = preview;
@@ -7648,6 +7727,9 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(feeds_silent, desk.feeds.silent.clone());
         set!(feeds_truncated, desk.feeds.truncated.clone());
         set!(citations, desk.feeds.citations());
+        set!(listed_feeds, desk.feeds.listed.clone());
+        set!(my_feed_listed, desk.feeds.mine_listed);
+        set!(listing_answered, desk.feeds.listing_answered);
         set!(
             follows,
             chat.store()
@@ -8690,7 +8772,12 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::Reconnect => chat.reconnect_now(),
 
         // ---- SIP-88 feeds ------------------------------------------------
-        Cmd::Publish { text, cites } => publish_post(chat, state, desk, text, cites).await,
+        Cmd::Publish {
+            text,
+            cites,
+            files,
+            regard,
+        } => publish_post(chat, state, desk, text, cites, files, regard).await,
         Cmd::Withdraw(serial) => match chat.withdraw(serial.0).await {
             Ok(()) => {
                 desk.feeds.drop_feed(&chat.me);
@@ -8719,6 +8806,66 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
         Cmd::RefreshFeeds => refresh_feeds(chat, state, desk).await,
         Cmd::ReadFeed(account) => read_one_feed(chat, state, desk, account).await,
         Cmd::EarlierInFeed(account) => earlier_in_feed(chat, state, desk, account).await,
+        Cmd::ReadDirectory => match chat.listed_feeds(0, 256).await {
+            Ok(listing) => {
+                desk.feeds.listed = listing
+                    .rows
+                    .iter()
+                    .map(|r| (r.account, r.listed_at))
+                    .collect();
+                desk.feeds.listing_answered = true;
+                state.send_modify(|s| s.listing_trouble = None);
+                publish(&*chat, state, desk, chat.me);
+            }
+            // **Not an empty directory.** SIP-88's rule for its own routes:
+            // an exchange that does not serve one and an exchange whose
+            // directory is empty are different facts, and a client must not
+            // take the first for the second. So the refusal lands in a field
+            // the directory pane reads, and `listing_answered` stays false.
+            // **Standing, not an event.** An exchange that keeps no list
+            // refuses every time it is asked, so this is the state of the
+            // pane rather than something that happened a moment ago — and a
+            // refusal that faded after twelve seconds would leave the pane
+            // saying nothing at all about why it is empty, which is the fault
+            // this field exists to fix.
+            Err(e) => {
+                state.send_modify(|s| s.listing_trouble = Some(Bother::stays(e.to_string())));
+            }
+        },
+        Cmd::SetListed(on) => {
+            // Whole, because `Set` replaces the record: read what is there
+            // and put the other two back. SIP-88: "there is no partial
+            // update".
+            let head = match chat.feed_head().await {
+                Ok(h) => h,
+                Err(e) => return trouble(state, e),
+            };
+            let (retention, max_posts) = if head.found {
+                (head.retention_secs, head.max_posts)
+            } else {
+                (
+                    sqex_proto::feed::DEFAULT_RETENTION,
+                    sqex_proto::feed::MAX_POSTS,
+                )
+            };
+            match chat.set_feed(retention, max_posts, on).await {
+                Ok(()) => {
+                    desk.feeds.mine_listed = on;
+                    note(
+                        state,
+                        if on {
+                            "This exchange will list your feed for anybody who asks it.".into()
+                        } else {
+                            "Taken off this exchange's list. Anybody who already has your \
+                             key can still read your feed."
+                                .to_string()
+                        },
+                    );
+                    publish(&*chat, state, desk, chat.me);
+                }
+                Err(e) => trouble(state, e),
+            }
+        }
         Cmd::Cite(who, serial) => {
             use crate::feed::Citation;
             let found = match chat.resolve_quote(&who, serial.0).await {
@@ -8741,6 +8888,7 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
                     }
                 }
                 sqex_chat::feed::Cited::Withdrawn => Citation::Withdrawn,
+                sqex_chat::feed::Cited::Removed => Citation::Removed,
                 sqex_chat::feed::Cited::Evicted => Citation::Evicted,
                 sqex_chat::feed::Cited::NoFeed => Citation::NoFeed,
                 sqex_chat::feed::Cited::Forged => Citation::Forged,
@@ -10019,13 +10167,47 @@ async fn publish_post(
     desk: &mut Desk,
     text: String,
     cites: Option<(PubKey, crate::feed::Serial)>,
+    files: Vec<std::path::PathBuf>,
+    regard: Option<String>,
 ) {
     use sqex_proto::message::{Body, Part, Post};
-    let mut parts = vec![Part::Text(text)];
+    // The files first, each uploaded against this account's feed. **One that
+    // fails fails the post**, as a message's does: half a post is not the
+    // post, and a picture missing from one is a picture nobody can ask for
+    // later -- a feed has no way to send a correction to whoever read it.
+    let mut attachments = Vec::new();
+    for path in &files {
+        match attach_to_own_feed(chat, state, path).await {
+            Ok(a) => attachments.push(a),
+            Err(e) => return trouble(state, &e),
+        }
+    }
+    // A post that is only files carries no empty text part, which is the
+    // rule `Draft::parts` already follows for a message.
+    let mut parts = Vec::new();
+    if !text.is_empty() || attachments.is_empty() {
+        parts.push(Part::Text(text));
+    }
+    parts.extend(attachments.into_iter().map(Part::Attachment));
     if let Some((who, serial)) = cites {
         parts.push(Part::Quote(who, serial.0));
     }
-    let body = Body::Post(Post { parts, unknown: 0 });
+    // SIP-90. After the quote, because it is about it — and the wire refuses
+    // one without the other, so a regard that lost its citation fails here
+    // rather than reaching somebody as an opinion about nothing.
+    if let Some(emoji) = regard {
+        parts.push(Part::Regard(emoji));
+    }
+    let post = Post { parts, unknown: 0 };
+    // **Checked here, because nothing else will.** The exchange does not
+    // parse a body — SIP-19 forbids it in as many words — so a post breaking
+    // a per-kind rule is accepted, stored and served, and the reader at the
+    // far end is the one who finds out. `validate` is the only thing between
+    // a malformed post and everybody who follows this account.
+    if let Err(e) = post.validate() {
+        return trouble(state, e);
+    }
+    let body = Body::Post(post);
     // One attempt and one re-sign, which is what the library does: a refusal
     // costs nothing because the exchange numbered nothing, and two devices of
     // one account racing is the ordinary case rather than an error.
@@ -10047,6 +10229,23 @@ async fn read_one_feed(
     desk: &mut Desk,
     account: PubKey,
 ) {
+    // **The head first, for its seams.** `Headed` has carried them since
+    // SIP-88 was built and nothing here ever asked; a page of posts says
+    // nothing about who signed which, because the chain is unbroken across a
+    // hand-over by design -- `prev` links signing inputs and a signing input
+    // references no credential.
+    if let Ok(head) = chat.head_of(&account).await {
+        desk.feeds.seamed(
+            account,
+            head.seams
+                .iter()
+                .map(|s| crate::feed::Seam {
+                    at: s.at,
+                    from: s.from,
+                })
+                .collect(),
+        );
+    }
     match chat
         .read_feed(&account, 0, crate::feed::PER_FEED as u16)
         .await

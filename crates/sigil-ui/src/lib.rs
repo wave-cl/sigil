@@ -17,6 +17,7 @@ pub mod message;
 pub mod qr;
 pub mod roster;
 pub mod search_hit;
+pub mod tab_strip;
 pub mod video;
 pub mod working;
 
@@ -527,7 +528,7 @@ pub fn menu_width(ui: &mut egui::Ui) {
 }
 
 pub use call_card::{Call, CallPress, Mic, call_card, call_control};
-pub use feed_post::{Absent, Cited, FeedPost, PostPress, feed_post};
+pub use feed_post::{Absent, Cited, FeedPost, PostPress, Shown, feed_post};
 pub use qr::qr;
 pub use roster::{Row, roster};
 pub use search_hit::{SearchHit, search_hit};
@@ -536,3 +537,4 @@ pub use sigil::icon::{
     Icon, apply_button, icon_button, icon_button_as_named, icon_button_named, icon_button_tinted,
     icon_item, icon_item_as, icon_item_counted, icon_item_tinted,
 };
+pub use tab_strip::tab_strip;

@@ -65,6 +65,9 @@ fn plain() -> FeedPost<'static> {
         absent: None,
         unknown: 0,
         cites: None,
+        files: &[],
+        regard: None,
+        after_seam: None,
     }
 }
 
@@ -272,4 +275,62 @@ fn a_post_with_parts_this_version_cannot_read_says_so() {
         words.contains("cannot show"),
         "a post this reader could not read drew a blank: {words}"
     );
+}
+
+/// **A post says what it carries even with no picture to show.**
+///
+/// A thumbnail travels inside a feed post, so a picture is usually on the
+/// screen the moment the post is. "Usually" is not "always": a sender may
+/// omit it, and the attachment is still there to be fetched. SIP-19's rule
+/// for a post whose parts could not all be shown applies — say so rather than
+/// draw a blank.
+#[test]
+fn a_file_with_no_thumbnail_is_still_said() {
+    // Leaked on purpose: `drawn` builds a harness that outlives this frame,
+    // and one array in one test is cheaper than threading a lifetime through
+    // the helper for it.
+    let files: &'static [sigil_ui::Shown<'static>] = Box::leak(Box::new([sigil_ui::Shown {
+        described: "[picture, 2.1 MiB]",
+        picture: None,
+    }]));
+    let (words, wide) = drawn(FeedPost {
+        text: "look at this",
+        files,
+        ..plain()
+    });
+    assert!(
+        words.contains("[picture, 2.1 MiB]"),
+        "a post carrying a file said nothing about it: {words}"
+    );
+    assert!(
+        wide <= PHONE + 1.0,
+        "a post with a file draws {wide} points wide in a {PHONE}-point pane"
+    );
+}
+
+/// **A succeeded feed is not drawn as continuous.**
+///
+/// SIP-88 makes this a MUST and names it the rule most likely to ship
+/// missing, because nothing in the log will tell a reader: the chain stays
+/// unbroken across a hand-over by design — `prev` links signing inputs and a
+/// signing input references no credential. A stolen key is the capture of
+/// everything the account ever published, under that unbroken chain.
+#[test]
+fn a_feed_that_changed_hands_says_so_above_the_post_that_changed_it() {
+    let (words, _) = drawn(FeedPost {
+        after_seam: Some("Ada's old key"),
+        ..plain()
+    });
+    assert!(
+        words.contains("changed hands"),
+        "a feed that changed hands reads as one person's: {words}"
+    );
+    assert!(
+        words.contains("Ada's old key"),
+        "and it does not say who held it before: {words}"
+    );
+    // The control: an ordinary post carries no such line, so the warning
+    // means something where it appears.
+    let (ordinary, _) = drawn(plain());
+    assert!(!ordinary.contains("changed hands"), "{ordinary}");
 }

@@ -60,6 +60,14 @@ pub const CARD_MAX_WIDTH: f32 = 480.0;
 /// bounded by anything.
 pub const READING_MAX: f32 = 640.0;
 
+/// How big a SIP-90 regard's emoji is drawn.
+///
+/// Larger than body text and smaller than a heading: it is the whole of what
+/// the post says, so it has to read as the content rather than as a mark
+/// beside some — and a reaction rendered at body size is a reaction nobody
+/// sees.
+pub const REGARD_SIZE: f32 = 22.0;
+
 /// A text field's height.
 ///
 /// Bigger than a line of text on purpose: a field the height of its own

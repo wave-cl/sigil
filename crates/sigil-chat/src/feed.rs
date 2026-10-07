@@ -108,6 +108,29 @@ pub struct Posted {
     /// presenting an edit as though it were the original hides that the text
     /// changed after it was read.
     pub edited: bool,
+    /// SIP-88 §Succession: this post is the first after the feed changed
+    /// hands, and who held it before.
+    ///
+    /// **Carried on the post rather than drawn from a list beside it**, so
+    /// that a renderer cannot show the timeline and forget the seam: the
+    /// place a seam has to appear is between two posts, and this is the post
+    /// it appears above.
+    pub after_seam: Option<Seam>,
+    /// SIP-88 §Attachments: the files this post carries.
+    ///
+    /// The reference and not the bytes, as a message's is. **In the clear**,
+    /// unlike a message's: a feed body is never sealed, so the blob's key is
+    /// published with the post — which is what makes a published picture
+    /// readable by the strangers the feed is for, and is a property of
+    /// publishing rather than a leak.
+    pub files: Vec<sqex_proto::blob::Attachment>,
+    /// SIP-90: how this post regards what it cites.
+    ///
+    /// A post with a regard and no words **is** the reaction — there is no
+    /// reaction anywhere else, because nothing comes in to a feed. A reader
+    /// sees "Ada thought this was good", which is a fact they can check: it
+    /// is a signed post in a feed they follow.
+    pub regard: Option<String>,
 }
 
 /// Why a post's body is not here.
@@ -126,6 +149,25 @@ pub enum Gone {
     Withdrawn,
     /// A tombstone with nothing behind it, which is the exchange's own act.
     Removed,
+}
+
+/// SIP-88 §Succession: where a feed changed hands.
+///
+/// **A client MUST render one as a visible event and MUST NOT present a
+/// succeeded feed as continuous.** SIP-88 §Security considerations says why,
+/// and says this is the rule most likely to ship missing: a stolen account
+/// key is "the capture of everything the account ever published, under a
+/// chain that stays unbroken across the seam". The chain is *supposed* to
+/// stay unbroken — `prev` links signing inputs and a signing input references
+/// no credential — so nothing in the log itself will tell a reader that the
+/// person writing it changed. Only this will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seam {
+    /// The serial the feed had reached when it changed hands. The post at
+    /// this position and everything below it was written by `from`.
+    pub at: u64,
+    /// Who held the feed before this point.
+    pub from: PubKey,
 }
 
 /// A feed this client follows, and where it has got to.
@@ -254,8 +296,13 @@ pub enum Citation {
         text: String,
         serial: Serial,
     },
-    /// Its author took it off, or it passed its own timer.
+    /// Its author took it off, or it passed its own timer: a tombstone with
+    /// a `Redact` from that account behind it.
     Withdrawn,
+    /// **A tombstone with nothing behind it: the exchange's own act.**
+    /// SIP-88 §Withdrawal and SIP-32 both require that this not read as an
+    /// ordinary deletion by the author.
+    Removed,
     /// Below the feed's oldest: no longer held, and that is not the same as
     /// deleted by anybody or as never having existed.
     Evicted,
@@ -283,6 +330,9 @@ impl Citation {
             Citation::Got { .. } => None,
             Citation::Asking => Some("Looking for the post this carries…"),
             Citation::Withdrawn => Some("Its author took this post down."),
+            Citation::Removed => {
+                Some("This post is gone and its author did not say they took it down.")
+            }
             Citation::Evicted => Some("That feed no longer holds this post."),
             Citation::NoFeed => Some("That feed could not be found."),
             Citation::Forged => Some("This does not verify as that author's, so it is not shown."),
@@ -349,6 +399,9 @@ pub fn read_page(
                 cites: None,
                 unknown: 0,
                 edited: false,
+                files: Vec::new(),
+                regard: None,
+                after_seam: None,
             });
             continue;
         }
@@ -374,6 +427,9 @@ pub fn read_page(
                 cites: None,
                 unknown: 1,
                 edited: false,
+                files: Vec::new(),
+                regard: None,
+                after_seam: None,
             });
             continue;
         };
@@ -395,9 +451,13 @@ pub fn read_page(
             Body::Post(p) => {
                 let mut text = String::new();
                 let mut cites = None;
+                let mut files = Vec::new();
+                let mut regard = None;
                 for part in &p.parts {
                     match part {
                         Part::Text(t) => text = t.clone(),
+                        Part::Attachment(a) => files.push(a.clone()),
+                        Part::Regard(e) => regard = Some(e.clone()),
                         // SIP-89: at most one, and the account key is both
                         // the locator and the verifying key. Nothing of what
                         // it names is carried, and nothing of the cited
@@ -418,6 +478,9 @@ pub fn read_page(
                     cites,
                     unknown: p.unknown,
                     edited: false,
+                    files,
+                    regard,
+                    after_seam: None,
                 });
             }
             // No home in a feed, and **not** reported as unknown.
@@ -437,6 +500,27 @@ pub fn read_page(
         }
     }
     out
+}
+
+/// Mark the first post after each seam, so the timeline can draw it.
+///
+/// **The post *at* the seam's serial is the last of the old holder's.** A
+/// seam records the position the feed had reached when it changed hands, so
+/// the break goes above the first post with a higher serial — which is the
+/// post the new holder signed.
+pub fn mark_seams(posts: &mut [Posted], seams: &[Seam]) {
+    for seam in seams {
+        // The lowest serial above the seam that this client actually holds.
+        // A window that starts after a seam shows no break, which is right:
+        // there is no join visible in it.
+        if let Some(first) = posts
+            .iter_mut()
+            .filter(|p| p.serial.0 > seam.at)
+            .min_by_key(|p| p.serial)
+        {
+            first.after_seam = Some(*seam);
+        }
+    }
 }
 
 /// How many of one feed's posts this client keeps in memory.
@@ -480,6 +564,17 @@ pub struct Feeds {
     /// of reading closes. SIP-88 requires the reader be told rather than
     /// shown the remainder as though it were the whole.
     pub truncated: Vec<PubKey>,
+    /// SIP-88 §Succession: where each feed changed hands, oldest first.
+    seams: std::collections::HashMap<PubKey, Vec<Seam>>,
+    /// SIP-90: who this exchange says asked to be findable, and when they
+    /// asked. **Not a census**: everybody here opted in.
+    pub listed: Vec<(PubKey, u64)>,
+    /// Whether this account has asked to be listed here.
+    pub mine_listed: bool,
+    /// Whether this exchange has answered the listing at all. An empty
+    /// `listed` under a `false` here is an exchange that was not asked or
+    /// could not be; under a `true` it is an exchange where nobody opted in.
+    pub listing_answered: bool,
     /// SIP-89: what each citation seen so far resolved to.
     ///
     /// Kept so that a page of posts does not ask the same exchange the same
@@ -556,6 +651,20 @@ impl Feeds {
         self.held.contains_key(account)
     }
 
+    /// Where a feed changed hands, oldest first.
+    pub fn seams_of(&self, account: &PubKey) -> Vec<Seam> {
+        self.seams.get(account).cloned().unwrap_or_default()
+    }
+
+    /// Note a feed's seams, from a `/feed/head`.
+    pub fn seamed(&mut self, account: PubKey, seams: Vec<Seam>) {
+        if seams.is_empty() {
+            self.seams.remove(&account);
+        } else {
+            self.seams.insert(account, seams);
+        }
+    }
+
     /// What a citation resolved to, if it has been asked about.
     pub fn cited(&self, who: &PubKey, serial: Serial) -> Option<&Citation> {
         self.cited.get(&(*who, serial))
@@ -605,6 +714,9 @@ mod tests {
             cites: None,
             unknown: 0,
             edited: false,
+            files: Vec::new(),
+            regard: None,
+            after_seam: None,
         }
     }
 
@@ -714,6 +826,55 @@ mod tests {
         feeds.drop_feed(&key(1));
         let left: Vec<PubKey> = feeds.timeline().iter().map(|p| p.who).collect();
         assert_eq!(left, vec![key(2)], "the unfollowed feed is still drawn");
+    }
+
+    /// **SIP-88's MUST, and the one it says is most likely to ship
+    /// missing.** A seam goes above the first post the *new* holder signed,
+    /// not above the last one the old holder did — the seam records where
+    /// the feed had got to when it changed hands.
+    #[test]
+    fn a_seam_marks_the_first_post_its_new_holder_signed() {
+        let mut posts = vec![post(1, 4, 40, 40), post(1, 5, 50, 50), post(1, 6, 60, 60)];
+        let seam = Seam {
+            at: 4,
+            from: key(9),
+        };
+        mark_seams(&mut posts, &[seam]);
+        assert_eq!(
+            posts[0].after_seam, None,
+            "the last post the old holder signed is marked as the new one's"
+        );
+        assert_eq!(
+            posts[1].after_seam,
+            Some(seam),
+            "the first post after the hand-over carries no seam, so a reader \
+             sees one continuous feed written by two different people"
+        );
+        assert_eq!(
+            posts[2].after_seam, None,
+            "only the first, not every one after"
+        );
+    }
+
+    /// A window that begins after a seam shows no break, because there is no
+    /// join inside it. Marking one anyway would put a hand-over in the middle
+    /// of one person's posts.
+    #[test]
+    fn a_window_entirely_after_a_seam_draws_no_break() {
+        let mut posts = vec![post(1, 9, 90, 90), post(1, 10, 100, 100)];
+        mark_seams(
+            &mut posts,
+            &[Seam {
+                at: 4,
+                from: key(9),
+            }],
+        );
+        // The seam is below everything held, so the *first* post held is
+        // still the first above it -- which is the honest answer: a reader
+        // who scrolls back far enough will meet the break, and one who does
+        // not has not been told anything false.
+        assert_eq!(posts[0].after_seam.map(|s| s.at), Some(4));
+        assert_eq!(posts[1].after_seam, None);
     }
 
     /// A feed's serial is not a channel's sequence number, and the type says

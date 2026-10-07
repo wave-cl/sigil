@@ -108,6 +108,12 @@ pub enum Route {
     /// chats would be inviting exactly the confusion SIP-89 §Two spaces, one
     /// word warns about.
     Feed,
+    /// SIP-90: the accounts this exchange was asked to list.
+    ///
+    /// **Everybody in it opted in**, which is the whole of what separates a
+    /// directory from the timestamped census SIP-88 refused — and why the
+    /// pane says so rather than presenting it as "who is here".
+    FeedDirectory,
     /// One account's feed, newest first, and whether this identity follows
     /// it.
     ///
@@ -1815,9 +1821,26 @@ struct Pane {
     composing_post: String,
     /// SIP-89: the post being carried into the next one published, if any.
     citing: Option<(PubKey, crate::feed::Serial)>,
+    /// SIP-88 §Attachments: files waiting to go up with the next post.
+    ///
+    /// Its own list and not the composer's `staged`, because the two go to
+    /// different places under different rules — one is sealed to a
+    /// membership, the other is published in the clear to anybody — and a
+    /// list that carried a file from one to the other would do it silently.
+    posting_files: Vec<std::path::PathBuf>,
+
     /// Citations this pane has already asked the session to look up, so a
     /// page of posts asks once rather than once a frame.
     cited_asked: std::collections::HashSet<(PubKey, crate::feed::Serial)>,
+    /// Whether the feed composer is open. Always, where there is room for
+    /// it; on a phone it opens from the mark in the corner and closes again
+    /// once something is published.
+    post_open: bool,
+    /// Whether this pane has asked the exchange for its SIP-90 listing. Asked
+    /// once on opening the pane and then only when somebody presses Refresh:
+    /// a directory is a list of who opted in, not a feed, and nothing about
+    /// it changes quickly enough to poll.
+    asked_directory: bool,
     /// Why not every file picked was staged. Goes by itself; see
     /// [`ChatApp::forget_stale_troubles`].
     staging_trouble: Option<Bother>,
@@ -2073,7 +2096,10 @@ impl Default for Pane {
         Pane {
             composing_post: String::new(),
             citing: None,
+            posting_files: Vec::new(),
             cited_asked: std::collections::HashSet::new(),
+            post_open: false,
+            asked_directory: false,
             pairing: String::new(),
             exchange_via: false,
             report_reason: 1,
@@ -2327,6 +2353,9 @@ pub struct ChatApp {
     /// the composer, and a picture chosen for a room must not arrive as a
     /// message nobody asked to send.
     picturing: Option<(At, files::Pick)>,
+    /// SIP-88: a file being chosen for a feed post. Beside `picturing` and
+    /// not folded into it, for the reason the comment below that one gives.
+    posting: Option<(At, files::Pick)>,
     /// A picture being chosen for **this account's own** profile (SIP-21),
     /// as `picturing` is for a channel's. Two fields rather than one with a
     /// flag: they are answered by the same platform picker and the answers
@@ -2434,6 +2463,7 @@ impl ChatApp {
             wake: None,
             picking: None,
             picturing: None,
+            posting: None,
             own_picture: None,
             saving: None,
             away: false,
@@ -3395,6 +3425,7 @@ impl App for ChatApp {
             Route::Conversations => self.render(ctx, ui),
             Route::Directory => self.directory_view(ctx, ui),
             Route::Feed => self.feed_view(ctx, ui),
+            Route::FeedDirectory => self.feed_directory_view(ctx, ui),
             Route::OneFeed(who) => self.one_feed_view(ctx, ui, who),
             Route::Members => self.members_view(ctx, ui),
             Route::Settings => self.settings_view(ctx, ui),
@@ -3443,6 +3474,7 @@ impl App for ChatApp {
                 Route::Search => "Search",
                 Route::Me => "Settings",
                 Route::Feed => "Feed",
+                Route::FeedDirectory => "Feeds here",
                 // Whose feed, by the name this client knows them by, falling
                 // back to the key -- which is never wrong, and is the thing
                 // the feed actually is.
@@ -3918,6 +3950,12 @@ impl App for ChatApp {
                 Route::Feed => {
                     if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
                         self.send_as(Some(&at), Cmd::RefreshFeeds);
+                    }
+                    return;
+                }
+                Route::FeedDirectory => {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                        self.send_as(Some(&at), Cmd::ReadDirectory);
                     }
                     return;
                 }
@@ -9743,6 +9781,15 @@ impl ChatApp {
                 self.stage(&at, paths, ctx);
             }
         }
+        if let Some((at, pick)) = &self.posting
+            && let Some(answer) = pick.take()
+        {
+            let at = at.clone();
+            self.posting = None;
+            if let Some(paths) = answer {
+                self.pane(&at).posting_files.extend(paths);
+            }
+        }
         if let Some((at, pick)) = &self.picturing
             && let Some(answer) = pick.take()
         {
@@ -11727,6 +11774,21 @@ impl ChatApp {
         AppResponse::default()
     }
 
+    /// What a post's file is called, in words.
+    ///
+    /// SIP-18 says a reader must never dispatch on the mime type beyond
+    /// choosing how to display, so this says the kind and the size and
+    /// repeats the sender's own string only as a name.
+    fn describe_file(a: &sqex_proto::blob::Attachment) -> String {
+        let kind = match a.effective_kind() {
+            sqex_proto::blob::KIND_IMAGE => "picture",
+            sqex_proto::blob::KIND_VIDEO => "video",
+            sqex_proto::blob::KIND_VOICE => "voice note",
+            _ => "file",
+        };
+        format!("[{kind}, {}]", sigil_ui::human(a.size))
+    }
+
     /// A column of posts, capped to a readable measure and centred.
     ///
     /// Every feed render until now was a 360-point phone, where this does
@@ -11797,6 +11859,68 @@ impl ChatApp {
     /// SIP-88 §What an exchange does not do to a timeline: an exchange MUST
     /// NOT rank, filter, score or re-order what a reader sees -- and it
     /// *cannot*, because it holds no follow list and does not parse a body.
+    /// The mark in the corner that opens something to write in.
+    ///
+    /// Factored out of the conversation list, which learned all of this the
+    /// hard way: an `Area` on its own layer, because a scope in the pane
+    /// advances the parent's cursor and takes a button's height out of the
+    /// list on every pass; inside the safe rect, because no panel's inset
+    /// reaches a layer of its own; and not drawn at all where something
+    /// modal is over the pane, because egui gives the top modal layer every
+    /// press and a bright control that answers nobody is worse than none.
+    fn compose_mark(ui: &mut egui::Ui, pane: egui::Rect, said: &str, id: &str) -> bool {
+        let theme = ColorTheme::current(ui.ctx());
+        let side = tokens::BUTTON_LG;
+        let safe = sigil::Insets::safe_rect(ui.ctx());
+        let corner = egui::pos2(
+            pane.right().min(safe.right()) - side - tokens::SPACING_MD,
+            pane.bottom().min(safe.bottom()) - side - tokens::SPACING_MD,
+        );
+        let mut hit = false;
+        egui::Area::new(ui.id().with(id))
+            .order(egui::Order::Foreground)
+            .fixed_pos(corner)
+            .constrain_to(pane)
+            .show(ui.ctx(), |ui| {
+                ui.set_max_size(egui::vec2(side, side));
+                let (rect, press) =
+                    ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+                press.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, said)
+                });
+                if ui.is_rect_visible(rect) {
+                    let fill = if press.hovered() {
+                        theme.accent
+                    } else {
+                        theme.accent_muted
+                    };
+                    ui.painter().circle_filled(rect.center(), side / 2.0, fill);
+                    sigil::icon::draw(
+                        ui.painter(),
+                        rect.shrink(side / 4.0),
+                        sigil_ui::Icon::Compose,
+                        theme.text_primary,
+                    );
+                }
+                hit = press.clicked();
+            });
+        hit
+    }
+
+    /// The strip naming a feed's two places, with the one being drawn marked.
+    ///
+    /// Shared by both panes so the names, the order and the mark are one
+    /// thing: a strip that said "Following" on one screen and "Your feeds"
+    /// on the other would be two strips, and a reader would have to work out
+    /// that they are the same two places.
+    fn feed_tabs_ui(ui: &mut egui::Ui, here: usize) -> Option<usize> {
+        let pressed = sigil_ui::tab_strip(ui, &["Following", "Feeds here"], here);
+        // Pressing the tab already shown is how a timeline is sent back to
+        // the top everywhere else; here there is nothing to send it to, so
+        // it is answered as nothing rather than as a move to where we are.
+        pressed.filter(|i| *i != here)
+    }
+
     fn feed_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
         let theme = ColorTheme::current(ui.ctx());
         let Some(at) = self.showing_at(ctx) else {
@@ -11821,9 +11945,46 @@ impl ChatApp {
             });
         }
         Self::note_ui(&state, ui, &theme);
-        // The composer takes the same measure as the posts under it, so the
-        // box, the warning and the words all share one left edge.
-        Self::reading_column(ui, |ui| self.feed_composer_ui(ctx, at, ui, &theme));
+        // **The two places a feed has, named together.** SIP-88 serves no
+        // directory, so a person with nobody to follow has no way at all to
+        // find a feed except by being handed a key — and a way in that is
+        // behind a menu is one nobody with an empty timeline will find. The
+        // strip also says the other place exists, which is the half a button
+        // does not do.
+        // Over the column and not over the pane: on a desktop the posts are
+        // 640 points of a 1000-point window, and a strip across the whole
+        // width puts the other tab's name a hand's width from anything it
+        // belongs to.
+        if let Some(1) = Self::reading_column(ui, |ui| Self::feed_tabs_ui(ui, 0)) {
+            ctx.navigator.push_here(Route::FeedDirectory);
+        }
+
+        // **The composer is not the top of the timeline on a phone.** A box,
+        // a file control and the paragraph SIP-88 requires beside them is a
+        // third of a phone's screen spent on writing, above a list that is
+        // what the screen is for. On a phone it opens from the mark in the
+        // corner, which is where every phone puts composing; on a desktop
+        // there is room for it and it stays where it was.
+        let on_a_phone = bar_has_the_head(ui);
+        let writing = !on_a_phone || self.pane(at).post_open;
+        if writing {
+            // The composer takes the same measure as the posts under it, so
+            // the box, the warning and the words all share one left edge.
+            Self::reading_column(ui, |ui| self.feed_composer_ui(ctx, at, ui, &theme));
+            if on_a_phone
+                && Self::reading_column(ui, |ui| {
+                    sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Not now").clicked()
+                })
+            {
+                self.pane(at).post_open = false;
+            }
+        }
+        if on_a_phone && !writing {
+            let pane = ui.max_rect();
+            if Self::compose_mark(ui, pane, "Say something to everybody", "feed-compose") {
+                self.pane(at).post_open = true;
+            }
+        }
 
         // **What the poll could not find out, said before the posts.** A
         // reader looking at a timeline that has stopped filling has no way to
@@ -11856,14 +12017,22 @@ impl ChatApp {
                 .small(),
             );
         }
-        ui.separator();
+        // **Only where there is something above it to divide off.** The tab
+        // strip draws its own rule, so with the composer closed this landed
+        // directly under that one and the pane opened on two lines a
+        // millimetre apart — the same doubling the settings panes had, in
+        // another shape.
+        if writing || unasked > 0 || truncated > 0 {
+            ui.separator();
+        }
 
         if state.follows.is_empty() {
             ui.add_space(tokens::SPACING_LG);
             ui.colored_label(
                 theme.text_secondary,
                 "You are not following anybody yet. Open somebody's feed from a \
-                 conversation and follow them, and what they publish appears here.",
+                 conversation and follow them, or look at Feeds here, and what they \
+                 publish appears here.",
             );
             // **Said here, where a person is about to publish.** SIP-88
             // §Security considerations requires it, and gives the reason: a
@@ -11925,28 +12094,58 @@ impl ChatApp {
         // authority directly and "Exchange Administrator" does the social
         // engineering by itself.
         let person = state.people.get(&who).cloned();
+        let following = state.follows.iter().any(|f| f.account == who);
         Self::reading_column(ui, |ui| {
+            // **The face on one side and the one decision on the other.**
+            // Following is the thing this screen exists to let somebody
+            // change, and it was the first of three buttons in a block that
+            // wrapped onto two rows on a phone. The other two are marks in a
+            // row under it: they are things to do here, not the reason to be
+            // here.
             ui.horizontal(|ui| {
                 let face = person.as_ref().and_then(|p| p.picture.clone());
                 let picture = self.person_picture(at, ui.ctx(), who, face.as_ref());
                 sigil_ui::avatar(ui, &who.to_string(), picture.as_ref(), tokens::AVATAR_LG);
-                ui.add_space(tokens::SPACING_SM);
-                ui.scope(|ui| {
-                    ui.spacing_mut().interact_size.y = 0.0;
-                    ui.vertical(|ui| {
-                        if let Some(handle) = person.as_ref().and_then(|p| p.handle.clone()) {
-                            ui.colored_label(theme.text_secondary, handle);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if following {
+                        if ui
+                            .button("Following")
+                            .on_hover_text(
+                                "Press to stop. Who you follow is kept on this device and \
+                                 in your backup; no exchange is ever told.",
+                            )
+                            .clicked()
+                        {
+                            self.send_as(Some(at), Cmd::Unfollow(who));
                         }
-                        if let Some(title) = person.as_ref().and_then(|p| p.title.clone()) {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(title).color(theme.text_secondary),
-                                )
-                                .wrap(),
-                            );
-                        }
-                    });
+                    } else if ui
+                        .button("Follow")
+                        .on_hover_text(
+                            "Kept on this device and in your backup. No exchange is told \
+                             what you read.",
+                        )
+                        .clicked()
+                    {
+                        self.send_as(Some(at), Cmd::Follow(who));
+                    }
                 });
+            });
+            ui.add_space(tokens::SPACING_XS);
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.add(
+                    egui::Label::new(egui::RichText::new(self.feed_label(&who)).heading())
+                        .truncate(),
+                );
+                if let Some(handle) = person.as_ref().and_then(|p| p.handle.clone()) {
+                    ui.colored_label(theme.text_secondary, handle);
+                }
+                if let Some(title) = person.as_ref().and_then(|p| p.title.clone()) {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(title).color(theme.text_secondary))
+                            .wrap(),
+                    );
+                }
             });
             ui.add_space(tokens::SPACING_XS);
             // The key, in full and selectable. **This is the whole
@@ -11961,49 +12160,35 @@ impl ChatApp {
         });
         ui.add_space(tokens::SPACING_SM);
 
-        let following = state.follows.iter().any(|f| f.account == who);
-        ui.horizontal_wrapped(|ui| {
-            if following {
-                if ui
-                    .button("Following")
-                    .on_hover_text(
-                        "Press to stop. Who you follow is kept on this device and in \
-                         your backup; no exchange is ever told.",
-                    )
+        Self::reading_column(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if sigil::icon::icon_button_named(ui, sigil_ui::Icon::Refresh, "Read again")
                     .clicked()
                 {
-                    self.send_as(Some(at), Cmd::Unfollow(who));
+                    self.send_as(Some(at), Cmd::ReadFeed(who));
                 }
-            } else if ui
-                .button("Follow")
-                .on_hover_text(
-                    "Kept on this device and in your backup. No exchange is told what \
-                     you read.",
-                )
-                .clicked()
-            {
-                self.send_as(Some(at), Cmd::Follow(who));
-            }
-            if sigil::icon::named_control(ui, sigil_ui::Icon::Refresh, "Read again").clicked() {
-                self.send_as(Some(at), Cmd::ReadFeed(who));
-            }
-            // **The other half of SIP-88 §Nothing comes in.** That section
-            // does not leave a reader with nowhere to go -- it names where:
-            // "A reader responds in their own feed, by quoting (SIP-89), or
-            // privately, by direct message (SIP-16)." Quoting is on every
-            // post. This is the other one, and without it a feed had no way
-            // to answer its author at all.
-            if who != at.0
+                // **The other half of SIP-88 §Nothing comes in.** That section
+                // does not leave a reader with nowhere to go -- it names where:
+                // "A reader responds in their own feed, by quoting (SIP-89), or
+                // privately, by direct message (SIP-16)." Quoting is on every
+                // post. This is the other one, and without it a feed had no way
+                // to answer its author at all.
+                if who != at.0
+                    // **Its word on a phone**, which `named_control` gives it.
+                // A phone has no hover, and this is the one affordance
+                // SIP-88 §Nothing comes in points a reader at — a bare glyph
+                // beside another bare glyph is not where to find it.
                 && sigil::icon::named_control(ui, sigil_ui::Icon::Compose, "Write to them")
-                    .on_hover_text(
-                        "A direct message, which is sealed to the two of you. Nothing \
+                        .on_hover_text(
+                            "A direct message, which is sealed to the two of you. Nothing \
                          reaches a feed from outside it.",
-                    )
-                    .clicked()
-            {
-                self.send_as(Some(at), Cmd::OpenDm(who));
-                ctx.navigator.push_here(Route::Conversations);
-            }
+                        )
+                        .clicked()
+                {
+                    self.send_as(Some(at), Cmd::OpenDm(who));
+                    ctx.navigator.push_here(Route::Conversations);
+                }
+            });
         });
         ui.separator();
 
@@ -12034,6 +12219,242 @@ impl ChatApp {
                     }
                     if ui.button("Earlier").clicked() {
                         self.send_as(Some(at), Cmd::EarlierInFeed(who));
+                    }
+                })
+            });
+        AppResponse::default()
+    }
+
+    /// SIP-90: the accounts this exchange was asked to list.
+    ///
+    /// **The pane says that everybody in it opted in**, because that is the
+    /// whole of what separates this from the timestamped census SIP-88
+    /// refused to serve. A reader who takes it for "who is here" has been
+    /// told something false about everybody who is not in it.
+    fn feed_directory_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Feeds here");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh)
+                        .on_hover_text("Ask this exchange for its list again")
+                        .clicked()
+                    {
+                        self.send_as(Some(at), Cmd::ReadDirectory);
+                    }
+                });
+            });
+        }
+        Self::note_ui(&state, ui, &theme);
+        if let Some(0) = Self::reading_column(ui, |ui| Self::feed_tabs_ui(ui, 1)) {
+            ctx.navigator.back();
+        }
+
+        // Asked once on opening, and after that only when somebody asks. A
+        // pane that polled a directory would be reading a list that changes
+        // when a person decides something, not when a post arrives.
+        if !self.pane(at).asked_directory {
+            self.pane(at).asked_directory = true;
+            self.send_as(Some(at), Cmd::ReadDirectory);
+        }
+
+        let listed = state.listed_feeds.clone();
+        let mine_listed = state.my_feed_listed;
+        let answered = state.listing_answered;
+        let listing_trouble = state.listing_trouble.clone();
+        let now = self.now();
+        Self::reading_column(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Everybody on this list asked to be on it. It is not who is here \
+                         — somebody not listed may still have a feed, and anybody who \
+                         has their key can read it.",
+                    )
+                    .small()
+                    .color(theme.text_secondary),
+                )
+                .wrap(),
+            );
+            ui.add_space(tokens::SPACING_SM);
+
+            // **One's own listing is a decision and is drawn as one.** SIP-90
+            // makes it opt-in and says the client must not present it as a
+            // setting that was already made: the default is off, and nothing
+            // reaches the list until somebody here presses this.
+            ui.horizontal_wrapped(|ui| {
+                if mine_listed {
+                    if ui
+                        .button("Listed here")
+                        .on_hover_text(
+                            "Press to take it off. Your feed stays readable to anybody \
+                             who has your key either way — this is only whether this \
+                             exchange hands it out.",
+                        )
+                        .clicked()
+                    {
+                        self.send_as(Some(at), Cmd::SetListed(false));
+                    }
+                } else if ui
+                    .button("List my feed here")
+                    .on_hover_text(
+                        "This exchange will give your key to anybody who asks it for \
+                         the list. It cannot be unsaid to whoever already asked.",
+                    )
+                    .clicked()
+                {
+                    self.send_as(Some(at), Cmd::SetListed(true));
+                }
+            });
+            ui.separator();
+        });
+
+        // **Three facts, three sentences.** An exchange that refused the
+        // route, one that has not answered yet, and one where nobody opted
+        // in are different things, and the first drawn as the third tells a
+        // reader that nobody at that exchange publishes. This pane did
+        // exactly that against an exchange running a build without the route:
+        // the refusal went to the session's general trouble, which nothing
+        // here drew, and the pane said "Nobody here has asked to be listed."
+        if let Some(why) = &listing_trouble {
+            Self::reading_column(ui, |ui| {
+                ui.add_space(tokens::SPACING_LG);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "This exchange did not answer: {} That is not the same as \
+                             nobody being listed.",
+                            if why.said.ends_with('.') {
+                                why.said.clone()
+                            } else {
+                                format!("{}.", why.said)
+                            }
+                        ))
+                        .color(theme.destructive),
+                    )
+                    .wrap(),
+                );
+            });
+            return AppResponse::default();
+        }
+        if listed.is_empty() {
+            Self::reading_column(ui, |ui| {
+                ui.add_space(tokens::SPACING_LG);
+                ui.colored_label(
+                    theme.text_secondary,
+                    if answered {
+                        "Nobody here has asked to be listed."
+                    } else {
+                        "Waiting for this exchange to answer."
+                    },
+                );
+            });
+            return AppResponse::default();
+        }
+
+        // The scroll area takes the whole pane and the column is inside it,
+        // the way the timeline does it: a column that holds the scroll area
+        // instead leaves the pane below it undrawn.
+        egui::ScrollArea::vertical()
+            .id_salt("feed-directory")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                Self::reading_column(ui, |ui| {
+                    for (who, since) in &listed {
+                        let who = *who;
+                        let following = state.follows.iter().any(|f| f.account == who);
+                        let person = state.people.get(&who).cloned();
+                        ui.horizontal(|ui| {
+                            let face = person.as_ref().and_then(|p| p.picture.clone());
+                            let picture = self.person_picture(at, ui.ctx(), who, face.as_ref());
+                            sigil_ui::avatar(
+                                ui,
+                                &who.to_string(),
+                                picture.as_ref(),
+                                tokens::AVATAR_MD,
+                            );
+                            ui.add_space(tokens::SPACING_SM);
+                            // **The column is given a budget.** A
+                            // `horizontal` never wraps, and a `truncate` label
+                            // shortens to whatever is free *at the moment it
+                            // is drawn* — which, added left to right, is the
+                            // whole rest of the row, because the control after
+                            // it has not asked for its own yet. The first
+                            // render of this pane drew the key straight under
+                            // the Follow button.
+                            let control_width = {
+                                let size = ui.style().text_styles[&egui::TextStyle::Button].size;
+                                let widest = if following { "Following" } else { "Follow" };
+                                let text = ui.ctx().fonts_mut(|f| {
+                                    f.layout_no_wrap(
+                                        widest.to_string(),
+                                        egui::FontId::proportional(size),
+                                        theme.text_primary,
+                                    )
+                                    .size()
+                                    .x
+                                });
+                                text + ui.spacing().button_padding.x * 2.0
+                                    + ui.spacing().item_spacing.x
+                            };
+                            let budget =
+                                (ui.available_width() - control_width).max(tokens::AVATAR_MD);
+                            ui.scope(|ui| {
+                                ui.set_max_width(budget);
+                                ui.spacing_mut().interact_size.y = 0.0;
+                                ui.vertical(|ui| {
+                                    if ui.link(self.feed_label(&who)).clicked() {
+                                        ctx.navigator.push_here(Route::OneFeed(who));
+                                    }
+                                    // The key under the name, because a name
+                                    // here is self-declared and the key is the
+                                    // feed. SIP-88 has no other identifier.
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(who.to_string())
+                                                .monospace()
+                                                .small()
+                                                .color(theme.text_secondary),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.colored_label(
+                                        theme.text_secondary,
+                                        // This exchange's own record of when
+                                        // the account asked, which nothing
+                                        // signs — hence "listed since" and not
+                                        // a claim about the account.
+                                        egui::RichText::new(format!(
+                                            "listed since {}",
+                                            sigil_ui::brief(*since, now)
+                                        ))
+                                        .small(),
+                                    );
+                                });
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if following {
+                                        if ui.button("Following").clicked() {
+                                            self.send_as(Some(at), Cmd::Unfollow(who));
+                                        }
+                                    } else if ui.button("Follow").clicked() {
+                                        self.send_as(Some(at), Cmd::Follow(who));
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
                     }
                 })
             });
@@ -12071,7 +12492,31 @@ impl ChatApp {
                 }
             });
         }
-        let width = ui.available_width();
+        // SIP-88 §Attachments: what is going up with the next post, each a
+        // row with the way to take it back out before it is sent.
+        let waiting = self.pane(at).posting_files.clone();
+        if !waiting.is_empty() {
+            let mut drop_at = None;
+            for (i, path) in waiting.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        theme.text_secondary,
+                        egui::RichText::new(
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        )
+                        .small(),
+                    );
+                    if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Not that").clicked() {
+                        drop_at = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = drop_at {
+                self.pane(at).posting_files.remove(i);
+            }
+        }
         let (_, send) = sigil_ui::labelled_field(
             ui,
             "",
@@ -12079,7 +12524,17 @@ impl ChatApp {
             "Say something to everybody",
             Some(sigil_ui::Action::Mark(sigil_ui::Icon::Send, "Publish")),
         );
-        let _ = width;
+        if sigil::icon::named_control(ui, sigil_ui::Icon::Attach, "Attach a file")
+            .on_hover_text(
+                "It goes up with the post, in the clear, to anybody who reads your \
+                 feed. A file already in a private conversation is refused: publishing \
+                 it means uploading it again, so the public copy has its own key.",
+            )
+            .clicked()
+        {
+            self.posting = Some((at.clone(), files::pick_files()));
+            ui.ctx().request_repaint();
+        }
         ui.colored_label(
             theme.text_secondary,
             egui::RichText::new(
@@ -12090,17 +12545,27 @@ impl ChatApp {
         );
         if send {
             let text = self.pane(at).composing_post.trim().to_string();
-            if !text.is_empty() || citing.is_some() {
+            let files = self.pane(at).posting_files.clone();
+            if !text.is_empty() || citing.is_some() || !files.is_empty() {
                 self.send_as(
                     Some(at),
                     Cmd::Publish {
                         text,
                         cites: citing,
+                        files,
+                        // SIP-90: the composer writes words, not regards. A
+                        // regard is pressed on the post it is about.
+                        regard: None,
                     },
                 );
                 let pane = self.pane(at);
                 pane.composing_post.clear();
                 pane.citing = None;
+                pane.posting_files.clear();
+                // Put away once it has been said, on the form where it was
+                // opened by hand. Leaving it up over the timeline would make
+                // the mark that opened it a mark that does nothing.
+                pane.post_open = false;
             }
         }
         let _ = ctx;
@@ -12164,6 +12629,32 @@ impl ChatApp {
         // `person_picture`, not once a frame.
         let face = state.people.get(&post.who).and_then(|p| p.picture.clone());
         let picture = self.person_picture(at, ui.ctx(), post.who, face.as_ref());
+        // SIP-88 §Attachments: the thumbnails, which travelled inside the
+        // post and so need no fetch at all. Decoded once each and kept by
+        // content, the same treatment a person's picture gets and for the
+        // same reason — a timeline of twenty posts is twenty PNG decodes a
+        // frame otherwise.
+        let shown: Vec<(String, Option<egui::TextureHandle>)> = post
+            .files
+            .iter()
+            .map(|f| {
+                let texture = (!f.preview.is_empty())
+                    .then(|| self.channel_picture(at, ui.ctx(), f.blob, &f.preview))
+                    .flatten();
+                (Self::describe_file(f), texture)
+            })
+            .collect();
+        let drawn_files: Vec<sigil_ui::Shown<'_>> = shown
+            .iter()
+            .map(|(described, texture)| sigil_ui::Shown {
+                described,
+                picture: texture.as_ref(),
+            })
+            .collect();
+        // SIP-88 §Succession: who held this feed before the hand-over above
+        // this post, named the way everybody else is — by what this client
+        // calls them, falling back to the key.
+        let seam_said = post.after_seam.map(|s| self.feed_label(&s.from));
         let drawn = ui.scope(|ui| {
             sigil_ui::feed_post(
                 ui,
@@ -12181,6 +12672,9 @@ impl ChatApp {
                         crate::feed::Gone::Removed => sigil_ui::Absent::Removed,
                     }),
                     unknown: post.unknown,
+                    files: &drawn_files,
+                    regard: post.regard.as_deref(),
+                    after_seam: seam_said.as_deref(),
                     cites: cited
                         .as_ref()
                         .map(|(named, text, instead)| sigil_ui::Cited {
@@ -12215,8 +12709,25 @@ impl ChatApp {
     ) {
         match press {
             sigil_ui::PostPress::Author => ctx.navigator.push_here(Route::OneFeed(post.who)),
+            // SIP-90: published in *this* identity's feed, naming theirs.
+            // Nothing reaches the author: a feed has no way in.
+            sigil_ui::PostPress::Regard(emoji) => self.send_as(
+                Some(at),
+                Cmd::Publish {
+                    text: String::new(),
+                    cites: Some((post.who, post.serial)),
+                    files: Vec::new(),
+                    regard: Some(emoji.to_string()),
+                },
+            ),
             sigil_ui::PostPress::Quote => {
-                self.pane(at).citing = Some((post.who, post.serial));
+                let pane = self.pane(at);
+                pane.citing = Some((post.who, post.serial));
+                // **And open the box to write it in.** On a phone the
+                // composer is behind the mark in the corner, so a Quote that
+                // only set the citation took somebody to a timeline with a
+                // line about carrying a post and nowhere to carry it.
+                pane.post_open = true;
                 ctx.navigator.push_here(Route::Feed);
             }
             sigil_ui::PostPress::Withdraw => {

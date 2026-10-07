@@ -92,6 +92,10 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/feed/read", Chat),
     ("POST", "/feed/head", Chat),
     ("POST", "/feed/since", Chat),
+    // SIP-90: who at this exchange asked to be findable. Nobody is in it
+    // without asking, which is what keeps it from being the census SIP-88
+    // refused.
+    ("POST", "/feed/listed", Chat),
     ("POST", "/feed/withdraw", Chat),
     (
         "POST",
@@ -110,6 +114,12 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/blob/abort", Beneath),
     ("POST", "/blob/get", Chat),
     ("POST", "/blob/attach", Chat),
+    // SIP-88 §Attachments: the same three acts against a feed, at paths of
+    // their own because an account key and a channel identifier are both 32
+    // opaque bytes and nothing in a payload could tell them apart.
+    ("POST", "/blob/begin-feed", Chat),
+    ("POST", "/blob/attach-feed", Chat),
+    ("POST", "/blob/detach-feed", Chat),
     ("POST", "/blob/detach", Beneath),
     // SIP-18: a fetch that failed asks whether the blob is still there, which
     // is what tells a file past its retention window from a radio that
@@ -561,8 +571,11 @@ fn the_coverage_is_what_it_says_it_is() {
     // 131 -> 137 at sqex v0.125.0: SIP-88's six feed routes. Five of them are
     // reached, so `reached` moves by five; `/feed/set` is an author's own
     // retention policy and nothing offers it yet.
+    // 137 -> 140 at sqex v0.126.0: SIP-88 §Attachments, all three reached —
+    // a feed post can carry a picture now.
+    // 140 -> 141: SIP-90's opt-in feed directory.
     assert_eq!(
-        total, 137,
+        total, 141,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -570,11 +583,11 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 114,
+        client, 118,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 96,
+        reached, 100,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

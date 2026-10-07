@@ -97,6 +97,8 @@ async fn a_post_reaches_somebody_who_follows_it() {
     author_app.send(Cmd::Publish {
         text: "the first thing anybody said here".into(),
         cites: None,
+        files: Vec::new(),
+        regard: None,
     });
     assert!(
         until(|| author_app.state().my_feed > Serial(0), 20).await,
@@ -142,6 +144,8 @@ async fn a_post_reaches_somebody_who_follows_it() {
     author_app.send(Cmd::Publish {
         text: "and a second".into(),
         cites: None,
+        files: Vec::new(),
+        regard: None,
     });
     assert!(
         until(|| author_app.state().my_feed >= Serial(2), 20).await,
@@ -191,6 +195,8 @@ async fn unfollowing_takes_the_posts_off_the_timeline() {
     author_app.send(Cmd::Publish {
         text: "something to stop following".into(),
         cites: None,
+        files: Vec::new(),
+        regard: None,
     });
     assert!(
         until(|| author_app.state().my_feed > Serial(0), 20).await,
@@ -237,6 +243,8 @@ async fn a_withdrawn_post_keeps_its_place_and_loses_its_words() {
     app.send(Cmd::Publish {
         text: "said in haste".into(),
         cites: None,
+        files: Vec::new(),
+        regard: None,
     });
     assert!(
         until(|| app.state().my_feed > Serial(0), 20).await,
@@ -317,6 +325,8 @@ async fn a_quote_resolves_to_the_post_it_names() {
     first.send(Cmd::Publish {
         text: "the post being carried".into(),
         cites: None,
+        files: Vec::new(),
+        regard: None,
     });
     assert!(
         until(|| first.state().my_feed > Serial(0), 20).await,
@@ -330,6 +340,8 @@ async fn a_quote_resolves_to_the_post_it_names() {
     second.send(Cmd::Publish {
         text: "look at this".into(),
         cites: Some((author, Serial(1))),
+        files: Vec::new(),
+        regard: None,
     });
     assert!(
         until(|| second.state().my_feed > Serial(0), 20).await,
@@ -412,5 +424,245 @@ async fn a_citation_of_nothing_resolves_to_a_reason_and_not_to_a_post() {
     assert!(
         what.instead().is_some(),
         "it resolved to nothing a reader could be told: {what:?}"
+    );
+}
+
+/// **No two reasons a citation did not resolve say the same thing.**
+///
+/// SIP-89 §When it cannot be resolved gives eleven rows and one rule over
+/// all of them: the reader is told which, and "none of them is silence". A
+/// client that drew one sentence for every failure would satisfy every test
+/// that only checks that *something* was said — so this checks that the
+/// sentences differ, over the whole enum rather than over a sample.
+///
+/// The pair this is really for is withdrawn against removed: SIP-32 requires
+/// that an exchange dropping a post not pass as its author deleting it, and
+/// the two were one variant until the corroborating `Redact` existed to tell
+/// them apart.
+#[test]
+fn every_reason_a_citation_failed_reads_differently() {
+    use sigil_chat::feed::Citation;
+    let every = [
+        Citation::Asking,
+        Citation::Withdrawn,
+        Citation::Removed,
+        Citation::Evicted,
+        Citation::NoFeed,
+        Citation::Forged,
+        Citation::Elsewhere {
+            domain: "squic.org".into(),
+        },
+        Citation::Unresolved,
+    ];
+    let mut said: Vec<&'static str> = Vec::new();
+    for what in &every {
+        let sentence = what
+            .instead()
+            .unwrap_or_else(|| panic!("{what:?} resolved to silence"));
+        assert!(
+            !said.contains(&sentence),
+            "{what:?} says what another state already said: {sentence:?}"
+        );
+        said.push(sentence);
+    }
+    // And the one state that is not a failure draws the post instead.
+    assert!(
+        Citation::Got {
+            who: PubKey::new([0x11; 32]),
+            name: None,
+            text: "the words".into(),
+            serial: Serial(1),
+        }
+        .instead()
+        .is_none(),
+        "a citation that resolved is drawn as a reason rather than as the post"
+    );
+}
+
+/// **A picture published to a feed reaches a stranger who follows it.**
+///
+/// SIP-88 §Attachments is the whole path: the file is uploaded against the
+/// author's *feed* rather than a channel, the reference rides in the post —
+/// in the clear, because a feed body is never sealed — and the exchange
+/// serves the blob to anybody the feed's `Read` would be served to.
+///
+/// The thumbnail travels inside the post, so what a reader sees needs no
+/// fetch at all. That is what this asserts: the picture arrives with the
+/// words.
+#[tokio::test]
+async fn a_picture_published_to_a_feed_reaches_a_follower() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, author) = signer(96);
+    let (b_signer, reader_key) = signer(97);
+    let author_app = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let reader = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || author_app.state().me == Some(author) && reader.state().me == Some(reader_key),
+            15
+        )
+        .await,
+        "both sessions should come up: {:?}",
+        author_app.state().trouble
+    );
+
+    // A real PNG, so the preview path decodes something.
+    let picture = dir.path().join("a-picture.png");
+    let image = image::RgbaImage::from_pixel(32, 24, image::Rgba([10, 200, 90, 255]));
+    image.save(&picture).unwrap();
+
+    author_app.send(Cmd::Publish {
+        text: "look at this".into(),
+        cites: None,
+        files: vec![picture],
+        regard: None,
+    });
+    assert!(
+        until(|| author_app.state().my_feed > Serial(0), 30).await,
+        "the post with a picture never went up: {:?}",
+        author_app.state().trouble
+    );
+
+    reader.send(Cmd::Follow(author));
+    assert!(
+        until(|| !reader.state().timeline.is_empty(), 30).await,
+        "the post never reached the reader: {:?}",
+        reader.state().trouble
+    );
+    let seen = reader.state().timeline;
+    let post = &seen[0];
+    assert_eq!(post.text, "look at this");
+    assert_eq!(
+        post.files.len(),
+        1,
+        "the post arrived without its picture: {post:?}"
+    );
+    let file = &post.files[0];
+    assert_eq!(
+        file.effective_kind(),
+        sqex_proto::blob::KIND_IMAGE,
+        "the attachment is not a picture"
+    );
+    assert!(
+        !file.preview.is_empty(),
+        "no thumbnail travelled with the post, so a reader sees nothing until \
+         they fetch the whole blob"
+    );
+    assert!(file.size > 0, "the attachment claims no bytes: {file:?}");
+}
+
+/// **A regard is a post in the regarder's own feed, and nothing reaches the
+/// author.**
+///
+/// SIP-90's whole design: a reaction cannot land in the author's log because
+/// only the author may append to it, and it cannot be counted because no
+/// party can enumerate the feeds holding one. So it lands where the reactor
+/// may write — their own feed — and what a reader sees is the regards this
+/// client actually read, each with a name on it.
+#[tokio::test]
+async fn a_regard_lands_in_the_regarders_own_feed_and_nowhere_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, author) = signer(98);
+    let (b_signer, reader_key) = signer(99);
+    let author_app = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    let reader = start_at(endpoint, b_signer, &dir.path().join("b.db"));
+    assert!(
+        until(
+            || author_app.state().me == Some(author) && reader.state().me == Some(reader_key),
+            15
+        )
+        .await,
+        "both sessions should come up"
+    );
+
+    author_app.send(Cmd::Publish {
+        text: "the post being regarded".into(),
+        cites: None,
+        files: Vec::new(),
+        regard: None,
+    });
+    assert!(
+        until(|| author_app.state().my_feed > Serial(0), 20).await,
+        "nothing was published: {:?}",
+        author_app.state().trouble
+    );
+
+    reader.send(Cmd::Publish {
+        text: String::new(),
+        cites: Some((author, Serial(1))),
+        files: Vec::new(),
+        regard: Some("👍".into()),
+    });
+    assert!(
+        until(|| reader.state().my_feed > Serial(0), 20).await,
+        "the regard was not published: {:?}",
+        reader.state().trouble
+    );
+
+    // It is in the *reader's* feed, carrying the emoji and naming the post.
+    reader.send(Cmd::Follow(reader_key));
+    assert!(
+        until(|| !reader.state().timeline.is_empty(), 20).await,
+        "the regarder cannot see their own regard"
+    );
+    let mine = reader.state().timeline;
+    assert_eq!(mine[0].regard.as_deref(), Some("👍"), "{mine:?}");
+    assert_eq!(mine[0].cites, Some((author, Serial(1))));
+    assert!(
+        mine[0].text.is_empty(),
+        "a regard carries words, so it is a quote and not a regard"
+    );
+
+    // **And the author's feed is untouched.** Nothing comes in: SIP-88 has
+    // no inbound path, so a regard cannot have reached them even in
+    // principle, and this is the assertion that would catch somebody adding
+    // one.
+    assert_eq!(
+        author_app.state().my_feed,
+        Serial(1),
+        "the author's own feed moved when somebody else regarded a post in it"
+    );
+}
+
+/// **A regard with no subject is refused by the wire.**
+///
+/// A regard names what it is about or it is a mood. The exchange does not
+/// parse a body, so this is caught at the encoder — which is where SIP-19
+/// puts every other per-kind rule.
+#[tokio::test]
+async fn a_regard_with_nothing_to_regard_does_not_go_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, server_pub, _h) = server_in(dir.path()).await;
+    let endpoint = Endpoint {
+        address: addr,
+        server: PubKey::new(server_pub),
+    };
+    let (a_signer, me) = signer(100);
+    let app = start_at(endpoint, a_signer, &dir.path().join("a.db"));
+    assert!(
+        until(|| app.state().me == Some(me), 15).await,
+        "the session should come up"
+    );
+    app.send(Cmd::Publish {
+        text: String::new(),
+        cites: None,
+        files: Vec::new(),
+        regard: Some("👍".into()),
+    });
+    // It must not become a post. Given a moment to fail, the feed is still
+    // empty and the person has been told.
+    assert!(
+        !until(|| app.state().my_feed > Serial(0), 5).await,
+        "a regard about nothing was published"
     );
 }

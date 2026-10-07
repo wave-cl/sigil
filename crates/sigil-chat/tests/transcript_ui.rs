@@ -76,6 +76,10 @@ fn a_conversation() -> ChatState {
         feeds_truncated: Vec::new(),
         citations: Vec::new(),
         feed_hits: Vec::new(),
+        listed_feeds: Vec::new(),
+        my_feed_listed: false,
+        listing_answered: true,
+        listing_trouble: None,
         // SIP-87: the fixture is an ordinary SIP-17 channel, so the Settings
         // card offers minting rather than committing.
         agreed: false,
@@ -1160,6 +1164,7 @@ fn _every_route_is_measured(r: sigil_chat::Route) {
         | sigil_chat::Route::MailItem(..)
         | sigil_chat::Route::Call(_)
         | sigil_chat::Route::Feed
+        | sigil_chat::Route::FeedDirectory
         | sigil_chat::Route::OneFeed(_) => {}
     }
 }
@@ -1195,6 +1200,69 @@ fn runs_off_the_edge(h: &Harness<'static>, what: &str) -> Vec<String> {
         .filter(|(_, (x0, x1))| x1 - x0 > 0.0 && (*x1 > edge + 1.0 || *x0 < -1.0))
         .map(|(name, (x0, x1))| format!("{name:?} at {x0:.0}..{x1:.0}"))
         .collect()
+}
+
+/// **What was actually painted past the edge**, which the tree cannot say.
+///
+/// [`runs_off_the_edge`] reads accesskit bounding boxes, and egui clips those
+/// to the container that holds them: a row of marks laid out past the right
+/// edge of a phone reports boxes that stop neatly at the pane, and the guard
+/// sees nothing at all. That is not hypothetical — the feed's action row was
+/// drawn with its last glyph half off a 360-point screen, the snapshot showed
+/// it, and `no_phone_pane_is_wider_than_the_phone` passed over the same
+/// frame.
+///
+/// So this walks the paint list instead and asks what each shape's own
+/// bounds are, before any clip. A shape that reaches past the screen was
+/// asked for off the screen, whether or not anything cut it off. Truncated
+/// text does not trip it — `Label::truncate` shortens the galley rather than
+/// relying on a clip — and only the horizontal is checked, because a
+/// timeline is meant to run off the bottom.
+fn painted_off_the_edge(h: &Harness<'static>, what: &str) -> Vec<String> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(String, f32, f32)>) {
+        if let egui::Shape::Vec(inner) = shape {
+            for s in inner {
+                walk(s, out);
+            }
+            return;
+        }
+        let r = shape.visual_bounding_rect();
+        if !r.is_positive() || !r.x_range().span().is_finite() {
+            return;
+        }
+        let what = match shape {
+            egui::Shape::Text(t) => format!("text {:?}", t.galley.text()),
+            egui::Shape::Circle(_) => "circle".to_string(),
+            egui::Shape::Rect(_) => "rect".to_string(),
+            egui::Shape::Mesh(_) => "image".to_string(),
+            other => format!("{:?}", std::mem::discriminant(other)),
+        };
+        out.push((what, r.left(), r.right()));
+    }
+    let mut seen = Vec::new();
+    for c in &h.output().shapes {
+        walk(&c.shape, &mut seen);
+    }
+    assert!(
+        seen.len() > 3,
+        "{what}: only {} shapes painted, so this proves nothing",
+        seen.len()
+    );
+    let edge = PHONE_WIDTH;
+    seen.iter()
+        .filter(|(_, x0, x1)| *x1 > edge + 1.0 || *x0 < -1.0)
+        .map(|(name, x0, x1)| format!("{name} at {x0:.0}..{x1:.0}"))
+        .collect()
+}
+
+fn nothing_is_painted_off_the_edge(h: &Harness<'static>, what: &str) {
+    let over = painted_off_the_edge(h, what);
+    assert!(
+        over.is_empty(),
+        "{what}: {} shape(s) painted outside a {PHONE_WIDTH}-point screen:\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
 }
 
 fn nothing_runs_off_the_edge(h: &Harness<'static>, what: &str) {
@@ -1242,6 +1310,7 @@ fn no_phone_pane_is_wider_than_the_phone() {
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
             sigil_chat::Route::Feed,
+            sigil_chat::Route::FeedDirectory,
             // Somebody's own, which is the account these fixtures are.
             sigil_chat::Route::OneFeed(me()),
             // **The fallback, not the card.** `Route::Call` draws a card
@@ -1334,6 +1403,7 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
             sigil_chat::Route::Feed,
+            sigil_chat::Route::FeedDirectory,
             // Somebody's own, which is the account these fixtures are.
             sigil_chat::Route::OneFeed(me()),
             // **The fallback, not the card.** `Route::Call` draws a card
@@ -1448,6 +1518,7 @@ fn no_widget_runs_off_a_phone_when_the_text_is_turned_up() {
                 sigil_chat::Route::Search,
                 sigil_chat::Route::Me,
                 sigil_chat::Route::Feed,
+                sigil_chat::Route::FeedDirectory,
                 // Somebody's own, which is the account these fixtures are.
                 sigil_chat::Route::OneFeed(me()),
                 sigil_chat::Route::Mail,
@@ -10110,6 +10181,7 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
             sigil_chat::Route::Feed,
+            sigil_chat::Route::FeedDirectory,
             // Somebody's own, which is the account these fixtures are.
             sigil_chat::Route::OneFeed(me()),
             // **The fallback, not the card.** `Route::Call` draws a card
@@ -16680,6 +16752,9 @@ fn a_timeline() -> ChatState {
             cites: None,
             unknown: 0,
             edited: false,
+            files: Vec::new(),
+            regard: None,
+            after_seam: None,
         },
         sigil_chat::feed::Posted {
             who: them(),
@@ -16693,9 +16768,254 @@ fn a_timeline() -> ChatState {
             cites: None,
             unknown: 0,
             edited: false,
+            files: Vec::new(),
+            regard: None,
+            after_seam: None,
         },
     ];
     state
+}
+
+/// A directory with one account in it, already answered.
+fn a_directory() -> ChatState {
+    let mut state = a_timeline();
+    state.listed_feeds = vec![(them(), NOW - 86_400)];
+    state
+}
+
+/// **The directory draws the rows the session holds.**
+///
+/// The same wiring failure as the timeline: `listed_feeds` was filled by the
+/// session for a whole afternoon with nothing in sigil reading it.
+#[test]
+fn the_directory_draws_the_accounts_the_exchange_listed() {
+    let mut h = harness_phone(a_directory(), sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains(&them().to_string()),
+        "a listed account's key is not drawn: {said}"
+    );
+    // The control: an empty listing draws no key, so the assertion above is
+    // about the row and not about the pane mentioning a key somewhere.
+    let mut empty = harness_phone(a_timeline(), sigil_chat::Route::FeedDirectory);
+    empty.run();
+    empty.run();
+    let nothing = text_of(&empty);
+    assert!(
+        !nothing.contains(&them().to_string()),
+        "an empty directory draws a key anyway: {nothing}"
+    );
+    assert!(
+        nothing.contains("Nobody here has asked to be listed"),
+        "and it does not say that nobody asked: {nothing}"
+    );
+}
+
+/// **A refused route and an empty list do not read the same.**
+///
+/// SIP-88 makes this distinction about its own routes and the directory
+/// inherits it: an exchange that keeps no list refuses the request, and a
+/// pane that drew the refusal as an empty list would be telling a reader
+/// that nobody at that exchange publishes. This is not hypothetical — the
+/// first build of this pane did exactly that against a live exchange whose
+/// sqexd predated the route, because the refusal went to the session's
+/// general trouble and nothing here drew it.
+#[test]
+fn an_exchange_that_refused_the_list_does_not_read_as_an_empty_one() {
+    let mut refused = a_timeline();
+    refused.listing_answered = false;
+    refused.listing_trouble = Some(sigil_chat::Bother::now("no such route".to_string()));
+    let mut h = harness_phone(refused, sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("did not answer"),
+        "a refused request is not said: {said}"
+    );
+    assert!(
+        !said.contains("Nobody here has asked to be listed"),
+        "a refusal is drawn as nobody being listed: {said}"
+    );
+
+    // And the other way: an exchange that answered with nothing says nobody
+    // asked, and says nothing about a failure.
+    let mut nobody = a_timeline();
+    nobody.listing_answered = true;
+    let mut h = harness_phone(nobody, sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Nobody here has asked to be listed"),
+        "an exchange that answered with nothing does not say so: {said}"
+    );
+    assert!(!said.contains("did not answer"), "{said}");
+
+    // And the third: asked, not yet answered, which is neither of those.
+    let mut waiting = a_timeline();
+    waiting.listing_answered = false;
+    let mut h = harness_phone(waiting, sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Waiting for this exchange"),
+        "a list not answered yet is drawn as one that came back empty: {said}"
+    );
+}
+
+/// **The pane says the list is opt-in, and never that it is who is here.**
+///
+/// This is the whole of what separates SIP-90's directory from the
+/// timestamped census SIP-88 refused to serve. A reader who takes one for the
+/// other has been told something false about everybody absent from it — and
+/// nothing in the wire format carries the distinction, so if the pane does
+/// not say it, nothing does.
+#[test]
+fn the_directory_says_everybody_in_it_asked_to_be() {
+    let mut h = harness_phone(a_directory(), sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("asked to be on it"),
+        "the directory does not say it is opt-in: {said}"
+    );
+    assert!(
+        said.contains("not who is here"),
+        "and it does not say what it is not: {said}"
+    );
+}
+
+/// **Listing one's own feed is a decision taken here, not a state found.**
+///
+/// SIP-90 makes it opt-in with the default off. A pane that drew the control
+/// as already on, or that offered no control at all, would be the one failure
+/// mode the opt-in exists to prevent.
+#[test]
+fn listing_ones_own_feed_is_offered_and_is_off_until_pressed() {
+    let mut h = harness_phone(a_directory(), sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("List my feed here"),
+        "there is no way to ask this exchange to list your feed: {said}"
+    );
+    assert!(
+        !said.contains("Listed here"),
+        "an account that never asked is drawn as listed: {said}"
+    );
+
+    let mut state = a_directory();
+    state.my_feed_listed = true;
+    let mut on = harness_phone(state, sigil_chat::Route::FeedDirectory);
+    on.run();
+    on.run();
+    let said = text_of(&on);
+    assert!(
+        said.contains("Listed here"),
+        "an account that is listed is not shown as listed: {said}"
+    );
+}
+
+/// **The directory asks for the list on arriving, and asks once.**
+///
+/// A pane that waited for a press would be a pane that opens empty and says
+/// nobody asked to be listed — which is a different fact from "nothing has
+/// been asked yet", and the one a reader would take away. Asking once rather
+/// than every frame is the other half: a listing changes when a person
+/// decides something, not when a post arrives, so polling it would be a
+/// request nobody made, repeated.
+#[test]
+fn the_directory_asks_the_exchange_for_its_list_on_arriving() {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_at_recording(
+        a_timeline(),
+        sigil_chat::Route::FeedDirectory,
+        asked.clone(),
+    );
+    h.run();
+    h.run();
+    h.run();
+    let said = asked.borrow().join(" | ");
+    assert_eq!(
+        said.matches("ReadDirectory").count(),
+        1,
+        "the directory asked {} times over three frames: {said}",
+        said.matches("ReadDirectory").count()
+    );
+
+    // The control: the feed itself asks for no listing. Without this the
+    // assertion above would hold on a client that asked from everywhere.
+    let elsewhere = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut h = harness_at_recording(a_timeline(), sigil_chat::Route::Feed, elsewhere.clone());
+    h.run();
+    h.run();
+    let said = elsewhere.borrow().join(" | ");
+    assert!(
+        !said.contains("ReadDirectory"),
+        "the feed asked for the directory listing: {said}"
+    );
+}
+
+/// **Nothing on a feed is painted past the edge of a phone.**
+///
+/// The sibling of `no_phone_pane_is_wider_than_the_phone`, over the two
+/// routes that put a gutter down the left and then lay a row of marks in
+/// what is left. It reads the paint list rather than the accessibility tree
+/// for the reason [`painted_off_the_edge`] gives: the tree clips, and the
+/// row of regards was drawn half off the screen under a guard that passed.
+#[test]
+fn nothing_on_a_feed_is_painted_past_a_phones_edge() {
+    for (what, state, route) in [
+        ("the timeline", a_timeline(), sigil_chat::Route::Feed),
+        ("one feed", a_timeline(), sigil_chat::Route::OneFeed(them())),
+        (
+            "the directory",
+            a_directory(),
+            sigil_chat::Route::FeedDirectory,
+        ),
+    ] {
+        let mut h = harness_phone(state, route);
+        h.run();
+        h.run();
+        nothing_is_painted_off_the_edge(&h, what);
+    }
+}
+
+/// The directory fits a phone, rows and all.
+#[test]
+fn the_directory_fits_a_phone() {
+    let mut h = harness_phone(a_directory(), sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    // The floor: `nothing_runs_off_the_edge` asserts an empty list of
+    // offenders, which an empty pane satisfies. A row has to be on the screen
+    // for the measurement to be a measurement.
+    assert!(
+        text_of(&h).contains(&them().to_string()),
+        "no row was drawn, so the width below is measured over nothing"
+    );
+    nothing_runs_off_the_edge(&h, "the feed directory");
+}
+
+/// **There is a way in to it from the feed.** SIP-88 serves no directory, so
+/// without this a person with nobody to follow has no way to find a feed at
+/// all except by being handed a key.
+#[test]
+fn the_feed_offers_the_way_to_the_directory() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Feeds here"),
+        "the feed pane offers no way to the directory: {said}"
+    );
 }
 
 /// **The timeline draws what the session merged.**
@@ -16724,6 +17044,17 @@ fn the_timeline_draws_the_posts_the_session_holds() {
 #[test]
 fn the_box_a_post_is_written_in_says_who_can_read_it() {
     let mut h = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    // **Where the box is**, which on a phone is behind the mark in the
+    // corner. The MUST is about the place a post is composed, so the test
+    // goes there rather than asserting over a timeline — and it is the
+    // reason the composer may be moved at all: the sentence moves with it.
+    assert!(
+        !text_of(&h).contains("Anybody who has your key can read this"),
+        "the control failed: the composer was already open, so opening it proves nothing"
+    );
+    h.get_by_label("Say something to everybody").click();
     h.run();
     h.run();
     let said = text_of(&h);
@@ -16942,6 +17273,44 @@ fn phone_timeline() {
     h.snapshot("phone_timeline");
 }
 
+/// **A timeline with nobody in it still says the way out.**
+///
+/// SIP-88 serves no directory, so an empty timeline is the state somebody
+/// starts in and has no way out of by themselves. This also catches the
+/// doubled rule: with the composer closed the pane drew the tab strip's own
+/// line and its own directly under it.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_feed_following_nobody() {
+    let mut state = a_conversation();
+    state.follows = Vec::new();
+    state.timeline = Vec::new();
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_feed_following_nobody");
+}
+
+/// **The composer, where a phone keeps it**: behind the mark in the corner,
+/// opened. This is the picture that settles whether moving it off the top of
+/// the timeline cost anything — the box, the file control and the sentence
+/// SIP-88 requires beside them all have to be here.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_feed_composing() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.get_by_label("Say something to everybody").click();
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_feed_composing");
+}
+
 /// And one person's feed, with the follow control and the key that is the
 /// feed.
 #[test]
@@ -16953,6 +17322,34 @@ fn phone_one_feed() {
     h.remove_cursor();
     h.run();
     h.snapshot("phone_one_feed");
+}
+
+/// **The SIP-90 directory**, where what matters is a sentence rather than a
+/// shape: whether the pane that lists accounts reads as "these asked" and not
+/// as "these are here". That is a judgement about words on a screen, so it is
+/// settled in a picture.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_feed_directory() {
+    let mut h = harness_phone(a_directory(), sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_feed_directory");
+}
+
+/// And the same pane on a desktop, which draws it as a reading column rather
+/// than the whole width.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn feed_directory_desktop() {
+    let mut h = harness_at(a_directory(), sigil_chat::Route::FeedDirectory);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("feed_directory_desktop");
 }
 
 /// A post whose body is gone, both ways, in one picture: the two must not
@@ -17066,6 +17463,9 @@ fn a_feed_serial_does_not_resolve_against_a_channel() {
         cites: None,
         unknown: 0,
         edited: false,
+        files: Vec::new(),
+        regard: None,
+        after_seam: None,
     }];
 
     // The conversation: the message at seq 7 is there and is not withdrawn.
