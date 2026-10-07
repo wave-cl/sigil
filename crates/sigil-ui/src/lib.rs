@@ -10,6 +10,7 @@ pub mod conversation_row;
 pub mod dot;
 pub mod emoji;
 pub mod exchange;
+pub mod feed_post;
 pub mod gif;
 pub mod identicon;
 pub mod message;
@@ -526,6 +527,7 @@ pub fn menu_width(ui: &mut egui::Ui) {
 }
 
 pub use call_card::{Call, CallPress, Mic, call_card, call_control};
+pub use feed_post::{Absent, Cited, FeedPost, PostPress, feed_post};
 pub use qr::qr;
 pub use roster::{Row, roster};
 pub use search_hit::{SearchHit, search_hit};

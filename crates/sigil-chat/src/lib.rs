@@ -98,6 +98,22 @@ pub enum Route {
     /// Back leaves the call running, because the route is on the history and
     /// nothing about leaving a screen ends a call.
     Call(PubKey),
+    /// **The timeline** (SIP-88): every feed this identity follows, merged
+    /// newest first, with a box to publish from at the top of it.
+    ///
+    /// A place of its own rather than a pane of the conversation list,
+    /// because a feed is not a conversation: nothing in it is addressed to
+    /// anybody, nothing comes back, and what orders it is each author's own
+    /// serial rather than one exchange's sequence. Putting it beside the
+    /// chats would be inviting exactly the confusion SIP-89 §Two spaces, one
+    /// word warns about.
+    Feed,
+    /// One account's feed, newest first, and whether this identity follows
+    /// it.
+    ///
+    /// Keyed by the account, because the account key *is* the feed: SIP-88
+    /// has no feed identifier, no derivation and no instance.
+    OneFeed(PubKey),
 }
 
 /// What a search here can and cannot reach. Said every time, in the count
@@ -1770,6 +1786,15 @@ struct Pane {
     /// What the threads that decode staged files found, by path.
     previews: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Scanned)>>,
     previews_tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, Scanned)>>,
+    /// SIP-88: what is being written for this identity's own feed.
+    ///
+    /// Its own box and not the composer's, because the two post to different
+    /// places under different rules -- one is sealed to a membership, the
+    /// other is in the clear to anybody -- and a box that carried words from
+    /// one to the other would do it silently.
+    composing_post: String,
+    /// SIP-89: the post being carried into the next one published, if any.
+    citing: Option<(PubKey, crate::feed::Serial)>,
     /// Why not every file picked was staged. Goes by itself; see
     /// [`ChatApp::forget_stale_troubles`].
     staging_trouble: Option<Bother>,
@@ -2023,6 +2048,8 @@ impl Pane {
 impl Default for Pane {
     fn default() -> Self {
         Pane {
+            composing_post: String::new(),
+            citing: None,
             pairing: String::new(),
             exchange_via: false,
             report_reason: 1,
@@ -3331,6 +3358,8 @@ impl App for ChatApp {
         let response = match route {
             Route::Conversations => self.render(ctx, ui),
             Route::Directory => self.directory_view(ctx, ui),
+            Route::Feed => self.feed_view(ctx, ui),
+            Route::OneFeed(who) => self.one_feed_view(ctx, ui, who),
             Route::Members => self.members_view(ctx, ui),
             Route::Settings => self.settings_view(ctx, ui),
             Route::Devices => self.devices_view(ctx, ui),
@@ -3377,6 +3406,11 @@ impl App for ChatApp {
                 Route::MailItem(_, from) => return Some(sigil_ui::short(&from.to_string())),
                 Route::Search => "Search",
                 Route::Me => "Settings",
+                Route::Feed => "Feed",
+                // Whose feed, by the name this client knows them by, falling
+                // back to the key -- which is never wrong, and is the thing
+                // the feed actually is.
+                Route::OneFeed(who) => return Some(self.feed_label(&who)),
                 // The name the notification uses, so the shade and the screen
                 // agree about who this call is with. `None` when the call has
                 // ended under the card, which is the same pass that pops it.
@@ -3750,19 +3784,37 @@ impl App for ChatApp {
     /// show, so it is a destination of this app rather than an app of its
     /// own -- and the count is what makes it worth a row at all.
     fn sections(&self, ctx: &AppContext<'_>) -> Vec<sigil::Section> {
-        vec![sigil::Section {
-            icon: sigil::Icon::Mail,
-            title: "Mailbox".into(),
-            badge: self.mail_waiting(ctx),
-            hover: "SIP-5: something sealed to you and left at the exchange to collect when \
-                    you next connect. Held there, not in a conversation."
-                .into(),
-        }]
+        vec![
+            sigil::Section {
+                icon: sigil::Icon::Mail,
+                title: "Mailbox".into(),
+                badge: self.mail_waiting(ctx),
+                hover: "SIP-5: something sealed to you and left at the exchange to collect \
+                        when you next connect. Held there, not in a conversation."
+                    .into(),
+            },
+            sigil::Section {
+                icon: sigil::Icon::Quote,
+                title: "Feed".into(),
+                // **No badge.** A count here would be a count of posts
+                // waiting, and SIP-88 is a poll-latency medium with no wake:
+                // the number would be as old as the last poll and would read
+                // as current. A feed is somewhere you go, not something that
+                // interrupts you -- which is most of the difference between
+                // it and a conversation.
+                badge: 0,
+                hover: "SIP-88: what the people you follow have published, and a box to \
+                        publish from. Public to anybody with your key."
+                    .into(),
+            },
+        ]
     }
 
     fn open_section(&mut self, ctx: &mut AppContext<'_>, which: usize) {
-        if which == 0 {
-            ctx.navigator.push_here(Route::Mail);
+        match which {
+            0 => ctx.navigator.push_here(Route::Mail),
+            1 => ctx.navigator.push_here(Route::Feed),
+            _ => {}
         }
     }
 
@@ -3819,6 +3871,21 @@ impl App for ChatApp {
                 // A call has no exchange to choose: it is already connected,
                 // and switching one underneath it would mean nothing.
                 Route::Call(_) => return,
+                // The timeline's one action: ask which followed feeds have
+                // moved, now, rather than on the minute's poll. Where
+                // Devices and the mailbox put theirs.
+                Route::Feed => {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                        self.send_as(Some(&at), Cmd::RefreshFeeds);
+                    }
+                    return;
+                }
+                Route::OneFeed(who) => {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh).clicked() {
+                        self.send_as(Some(&at), Cmd::ReadFeed(who));
+                    }
+                    return;
+                }
                 // The one action a mailbox has: ask the exchange again.
                 // Where Devices puts its refresh, for the same reason -- a
                 // list you collect from needs a way to say "and now?".
@@ -11565,6 +11632,342 @@ impl ChatApp {
                 }
             });
         AppResponse::default()
+    }
+
+    /// What this client calls whoever's feed this is. The key where it knows
+    /// nothing, which is never wrong and is what the feed actually is.
+    fn feed_label(&self, who: &PubKey) -> String {
+        self.sessions
+            .values()
+            .find_map(|s| s.state().people.get(who).and_then(|p| p.name.clone()))
+            .unwrap_or_else(|| sigil_ui::short(&who.to_string()))
+    }
+
+    /// **The timeline**: every feed this identity follows, merged newest
+    /// first, with the box to publish from above it.
+    ///
+    /// The merge is this client's own and could not be anybody else's.
+    /// SIP-88 §What an exchange does not do to a timeline: an exchange MUST
+    /// NOT rank, filter, score or re-order what a reader sees -- and it
+    /// *cannot*, because it holds no follow list and does not parse a body.
+    fn feed_view(&mut self, ctx: &mut AppContext<'_>, ui: &mut egui::Ui) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading("Feed");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if sigil_ui::icon_button(ui, sigil_ui::Icon::Refresh)
+                        .on_hover_text("Ask which of the feeds you follow have moved")
+                        .clicked()
+                    {
+                        self.send_as(Some(at), Cmd::RefreshFeeds);
+                    }
+                });
+            });
+        }
+        Self::note_ui(&state, ui, &theme);
+        self.feed_composer_ui(ctx, at, ui, &theme);
+
+        // **What the poll could not find out, said before the posts.** A
+        // reader looking at a timeline that has stopped filling has no way to
+        // tell a quiet hour from an exchange that could not be asked, and
+        // SIP-88 calls that the most important sentence in its section.
+        let unasked = state.feeds_unasked.len();
+        if unasked > 0 {
+            ui.colored_label(
+                theme.warning,
+                egui::RichText::new(match unasked {
+                    1 => "One feed's home could not be asked, so what follows may be \
+                          missing it."
+                        .to_string(),
+                    n => format!(
+                        "{n} feeds' homes could not be asked, so what follows may be \
+                         missing them."
+                    ),
+                })
+                .small(),
+            );
+        }
+        let truncated = state.feeds_truncated.len();
+        if truncated > 0 {
+            ui.colored_label(
+                theme.warning,
+                egui::RichText::new(format!(
+                    "{truncated} of these feeds have dropped posts you had not read. \
+                     That is a gap nothing can fill."
+                ))
+                .small(),
+            );
+        }
+        ui.separator();
+
+        if state.follows.is_empty() {
+            ui.add_space(tokens::SPACING_LG);
+            ui.colored_label(
+                theme.text_secondary,
+                "You are not following anybody yet. Open somebody's feed from a \
+                 conversation and follow them, and what they publish appears here.",
+            );
+            // **Said here, where a person is about to publish.** SIP-88
+            // §Security considerations requires it, and gives the reason: a
+            // person who has withheld their SIP-21 profile will otherwise
+            // assume their feed is withheld on the same terms, and it is not.
+            return AppResponse::default();
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("timeline")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if state.timeline.is_empty() {
+                    ui.add_space(tokens::SPACING_LG);
+                    ui.colored_label(
+                        theme.text_secondary,
+                        "Nothing yet from the feeds you follow.",
+                    );
+                    return;
+                }
+                for post in &state.timeline {
+                    if let Some(press) = self.post_ui(ctx, at, post, ui) {
+                        self.act_on_post(ctx, at, post, press);
+                    }
+                }
+            });
+        AppResponse::default()
+    }
+
+    /// One account's feed, and whether this identity follows it.
+    fn one_feed_view(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        ui: &mut egui::Ui,
+        who: PubKey,
+    ) -> AppResponse {
+        let theme = ColorTheme::current(ui.ctx());
+        let Some(at) = self.showing_at(ctx) else {
+            return AppResponse::default();
+        };
+        let at = &at;
+        let state = self.state_of(Some(at));
+        if !bar_has_the_head(ui) {
+            ui.horizontal(|ui| {
+                if sigil_ui::icon_button(ui, sigil_ui::Icon::Back).clicked() {
+                    ctx.navigator.back();
+                }
+                ui.heading(self.feed_label(&who));
+            });
+        }
+        Self::note_ui(&state, ui, &theme);
+
+        // The key, in full and selectable. **This is the whole identifier**:
+        // SIP-88 has no feed identifier, no derivation and no instance, so
+        // the account key is the feed and a name beside it is a claim.
+        ui.add(
+            egui::Label::new(egui::RichText::new(who.to_string()).monospace().small())
+                .wrap()
+                .selectable(true),
+        );
+        ui.add_space(tokens::SPACING_SM);
+
+        let following = state.follows.iter().any(|f| f.account == who);
+        ui.horizontal_wrapped(|ui| {
+            if following {
+                if ui
+                    .button("Following")
+                    .on_hover_text(
+                        "Press to stop. Who you follow is kept on this device and in \
+                         your backup; no exchange is ever told.",
+                    )
+                    .clicked()
+                {
+                    self.send_as(Some(at), Cmd::Unfollow(who));
+                }
+            } else if ui
+                .button("Follow")
+                .on_hover_text(
+                    "Kept on this device and in your backup. No exchange is told what \
+                     you read.",
+                )
+                .clicked()
+            {
+                self.send_as(Some(at), Cmd::Follow(who));
+            }
+            if sigil::icon::named_control(ui, sigil_ui::Icon::Refresh, "Read again").clicked() {
+                self.send_as(Some(at), Cmd::ReadFeed(who));
+            }
+        });
+        ui.separator();
+
+        let posts: Vec<&crate::feed::Posted> =
+            state.timeline.iter().filter(|p| p.who == who).collect();
+        egui::ScrollArea::vertical()
+            .id_salt("one-feed")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if posts.is_empty() {
+                    ui.add_space(tokens::SPACING_LG);
+                    // **One answer for several facts, and said as one.** A
+                    // feed that is absent, withheld, or whose owner has
+                    // blocked this reader all answer `found: 0`, and SIP-21
+                    // forbids a client presenting a guess at which.
+                    ui.colored_label(
+                        theme.text_secondary,
+                        "Nothing here. Either they have published nothing, or this \
+                         exchange has nothing of theirs to serve.",
+                    );
+                    return;
+                }
+                for post in &posts {
+                    if let Some(press) = self.post_ui(ctx, at, post, ui) {
+                        self.act_on_post(ctx, at, post, press);
+                    }
+                }
+                if ui.button("Earlier").clicked() {
+                    self.send_as(Some(at), Cmd::EarlierInFeed(who));
+                }
+            });
+        AppResponse::default()
+    }
+
+    /// The box a post is written in, and the sentence that has to be beside
+    /// it.
+    ///
+    /// **SIP-88 requires the warning here and not in a settings screen**, in
+    /// as many words, and gives the reason twice: a feed is public with no
+    /// audience control of any kind, and a person who has withheld their
+    /// SIP-21 profile will otherwise assume their feed is withheld on the
+    /// same terms.
+    fn feed_composer_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        ui: &mut egui::Ui,
+        theme: &ColorTheme,
+    ) {
+        let citing = self.pane(at).citing;
+        if let Some((who, serial)) = citing {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    theme.text_secondary,
+                    egui::RichText::new(format!(
+                        "Carrying {}'s post {serial} into yours",
+                        self.feed_label(&who)
+                    ))
+                    .small(),
+                );
+                if sigil::icon::named_control(ui, sigil_ui::Icon::Close, "Not that").clicked() {
+                    self.pane(at).citing = None;
+                }
+            });
+        }
+        let width = ui.available_width();
+        let (_, send) = sigil_ui::labelled_field(
+            ui,
+            "",
+            &mut self.panes.entry(at.clone()).or_default().composing_post,
+            "Say something to everybody",
+            Some(sigil_ui::Action::Mark(sigil_ui::Icon::Send, "Publish")),
+        );
+        let _ = width;
+        ui.colored_label(
+            theme.text_secondary,
+            egui::RichText::new(
+                "Anybody who has your key can read this, whether you know them or not. \
+                 There is no audience to choose and no way to take it back.",
+            )
+            .small(),
+        );
+        if send {
+            let text = self.pane(at).composing_post.trim().to_string();
+            if !text.is_empty() || citing.is_some() {
+                self.send_as(
+                    Some(at),
+                    Cmd::Publish {
+                        text,
+                        cites: citing,
+                    },
+                );
+                let pane = self.pane(at);
+                pane.composing_post.clear();
+                pane.citing = None;
+            }
+        }
+        let _ = ctx;
+    }
+
+    /// Draw one post, with whatever its citation resolved to.
+    fn post_ui(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        post: &crate::feed::Posted,
+        ui: &mut egui::Ui,
+    ) -> Option<sigil_ui::PostPress> {
+        let _ = (ctx, at);
+        let key = post.who.to_string();
+        let at_said = sigil_ui::stamp(post.at);
+        let claimed = post.claimed.map(sigil_ui::stamp);
+        sigil_ui::feed_post(
+            ui,
+            &sigil_ui::FeedPost {
+                key: &key,
+                picture: None,
+                named: post.name.as_deref(),
+                mine: post.mine,
+                at: &at_said,
+                claimed: claimed.as_deref(),
+                text: &post.text,
+                edited: post.edited,
+                absent: post.gone.map(|g| match g {
+                    crate::feed::Gone::Withdrawn => sigil_ui::Absent::Withdrawn,
+                    crate::feed::Gone::Removed => sigil_ui::Absent::Removed,
+                }),
+                unknown: post.unknown,
+                // SIP-89 resolution is not built yet, and a citation is drawn
+                // as the labelled reference it is rather than as nothing.
+                cites: post.cites.map(|_| sigil_ui::Cited {
+                    named: None,
+                    text: None,
+                    instead: Some(
+                        "This carries somebody else's post. Opening it is not \
+                                   built yet.",
+                    ),
+                }),
+            },
+        )
+    }
+
+    /// What a press on a post does.
+    fn act_on_post(
+        &mut self,
+        ctx: &mut AppContext<'_>,
+        at: &At,
+        post: &crate::feed::Posted,
+        press: sigil_ui::PostPress,
+    ) {
+        match press {
+            sigil_ui::PostPress::Author => ctx.navigator.push_here(Route::OneFeed(post.who)),
+            sigil_ui::PostPress::Quote => {
+                self.pane(at).citing = Some((post.who, post.serial));
+                ctx.navigator.push_here(Route::Feed);
+            }
+            sigil_ui::PostPress::Withdraw => {
+                self.send_as(Some(at), Cmd::Withdraw(post.serial));
+            }
+            sigil_ui::PostPress::Cited => {
+                if let Some((who, _)) = post.cites {
+                    ctx.navigator.push_here(Route::OneFeed(who));
+                }
+            }
+        }
     }
 
     /// The open conversation's name, topic, retention, and how to end it.

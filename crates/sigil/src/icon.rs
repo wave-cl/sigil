@@ -189,6 +189,18 @@ icons! {
     /// already means something else does not stop meaning it because it was
     /// given a colour, and the row it was on redacts a message for everybody.
     Bin => "Delete",
+    /// SIP-89: carry somebody's post into your own feed.
+    ///
+    /// **Two arrows round a loop**, which is the one shape a reader already
+    /// has for this. [`Icon::Forward`] was the alternative and is wrong: it
+    /// means *next*, all over this app, and a glyph that already means
+    /// something else does not stop meaning it because the tooltip disagrees
+    /// -- the same argument [`Icon::Bin`] records against borrowing a cross.
+    ///
+    /// It is drawn as a loop rather than as quotation marks because what the
+    /// control does is republish, and quotation marks are what a *style*
+    /// does to text.
+    Quote => "Quote",
 }
 
 /// Paint one inside `rect`, in `colour`.
@@ -459,6 +471,22 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, colour: egui:
                 p(0.67, 0.84),
                 p(0.74, 0.33),
             ]);
+        }
+        Icon::Quote => {
+            // **Two commas, not two arrows.** The first draft was the
+            // re-post loop every timeline uses, and on this sheet it came
+            // out as a pair of flat opposed arrows -- which is
+            // [`Icon::Switch`], already meaning *switch identity*, three
+            // rows away. Two glyphs that differ only in the length of a
+            // riser are two glyphs nobody can tell apart at 34 points, and
+            // the one that loses is the rarer.
+            //
+            // A quotation mark has no competitor here and says what the
+            // control does: carry somebody's words into your own.
+            for x in [0.34, 0.66] {
+                painter.circle_stroke(p(x, 0.38), s * 0.08, stroke);
+                line(p(x - 0.05, 0.45), p(x - 0.11, 0.62));
+            }
         }
         Icon::Copy => {
             // Two sheets, the front one whole and the back one showing at

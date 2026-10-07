@@ -1156,7 +1156,9 @@ fn _every_route_is_measured(r: sigil_chat::Route) {
         | sigil_chat::Route::Me
         | sigil_chat::Route::Mail
         | sigil_chat::Route::MailItem(..)
-        | sigil_chat::Route::Call(_) => {}
+        | sigil_chat::Route::Call(_)
+        | sigil_chat::Route::Feed
+        | sigil_chat::Route::OneFeed(_) => {}
     }
 }
 
@@ -1237,6 +1239,9 @@ fn no_phone_pane_is_wider_than_the_phone() {
             sigil_chat::Route::Devices,
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
+            sigil_chat::Route::Feed,
+            // Somebody's own, which is the account these fixtures are.
+            sigil_chat::Route::OneFeed(me()),
             // **The fallback, not the card.** `Route::Call` draws a card
             // only while a call is held, and `CallHandle::for_test` wants a
             // tokio runtime these three do not have. With no call it
@@ -1326,6 +1331,9 @@ fn no_widget_on_any_route_is_drawn_off_the_screen() {
             sigil_chat::Route::Devices,
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
+            sigil_chat::Route::Feed,
+            // Somebody's own, which is the account these fixtures are.
+            sigil_chat::Route::OneFeed(me()),
             // **The fallback, not the card.** `Route::Call` draws a card
             // only while a call is held, and `CallHandle::for_test` wants a
             // tokio runtime these three do not have. With no call it
@@ -1437,6 +1445,9 @@ fn no_widget_runs_off_a_phone_when_the_text_is_turned_up() {
                 sigil_chat::Route::Devices,
                 sigil_chat::Route::Search,
                 sigil_chat::Route::Me,
+                sigil_chat::Route::Feed,
+                // Somebody's own, which is the account these fixtures are.
+                sigil_chat::Route::OneFeed(me()),
                 sigil_chat::Route::Mail,
                 // **The fallback, not a message.** These fixtures have nothing
                 // waiting, so this is the arm that replaces itself with the list,
@@ -10096,6 +10107,9 @@ fn nothing_on_a_phone_is_drawn_where_it_cannot_be_reached() {
             sigil_chat::Route::Devices,
             sigil_chat::Route::Search,
             sigil_chat::Route::Me,
+            sigil_chat::Route::Feed,
+            // Somebody's own, which is the account these fixtures are.
+            sigil_chat::Route::OneFeed(me()),
             // **The fallback, not the card.** `Route::Call` draws a card
             // only while a call is held, and `CallHandle::for_test` wants a
             // tokio runtime these three do not have. With no call it
@@ -16637,4 +16651,157 @@ fn phone_sending_a_file() {
     h.remove_cursor();
     h.run();
     h.snapshot("phone_sending_a_file");
+}
+
+// ---------------------------------------------------------------------------
+// SIP-88: the timeline, and one person's feed
+// ---------------------------------------------------------------------------
+
+/// A conversation fixture with a timeline in it.
+fn a_timeline() -> ChatState {
+    let mut state = a_conversation();
+    state.follows = vec![sigil_chat::feed::Follow {
+        account: them(),
+        held: sigil_chat::feed::Serial(2),
+        newest: sigil_chat::feed::Serial(2),
+    }];
+    state.timeline = vec![
+        sigil_chat::feed::Posted {
+            who: them(),
+            name: Some("Ada".into()),
+            mine: false,
+            serial: sigil_chat::feed::Serial(2),
+            at: NOW - 60,
+            claimed: None,
+            text: "the newer thing".into(),
+            gone: None,
+            cites: None,
+            unknown: 0,
+            edited: false,
+        },
+        sigil_chat::feed::Posted {
+            who: them(),
+            name: Some("Ada".into()),
+            mine: false,
+            serial: sigil_chat::feed::Serial(1),
+            at: NOW - 600,
+            claimed: None,
+            text: "the older thing".into(),
+            gone: None,
+            cites: None,
+            unknown: 0,
+            edited: false,
+        },
+    ];
+    state
+}
+
+/// **The timeline draws what the session merged.**
+///
+/// The merge itself is tested in `sigil_chat::feed`, and the widget in
+/// `sigil-ui`. This is the wiring between them — the half that has failed on
+/// its own before on this app: a value the session filled in that no view
+/// ever read.
+#[test]
+fn the_timeline_draws_the_posts_the_session_holds() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("the newer thing"), "{said}");
+    assert!(said.contains("the older thing"), "{said}");
+}
+
+/// **A feed is public, said where a post is written.**
+///
+/// SIP-88 §Security considerations requires this in as many words — "A client
+/// MUST make this plain where a feed is composed" — and gives the reason: a
+/// person who has withheld their SIP-21 profile will otherwise assume their
+/// feed is withheld on the same terms, and it is not. A settings screen does
+/// not satisfy it.
+#[test]
+fn the_box_a_post_is_written_in_says_who_can_read_it() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("Anybody who has your key can read this"),
+        "the composer does not say a feed is public: {said}"
+    );
+    assert!(
+        said.contains("no way to take it back"),
+        "and it does not say what withdrawal cannot do: {said}"
+    );
+}
+
+/// **A feed whose home could not be asked is said, not swallowed.**
+///
+/// SIP-88 calls this the most important sentence in its section: a batched
+/// route that cannot distinguish "nothing new" from "I could not ask" is one
+/// that silently stops delivering, with the client unable to notice. The
+/// client can notice; this is whether it says so.
+#[test]
+fn a_feed_that_could_not_be_asked_about_is_said_above_the_timeline() {
+    let mut state = a_timeline();
+    state.feeds_unasked = vec![them()];
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(
+        said.contains("could not be asked"),
+        "a timeline that may be missing a feed said nothing about it: {said}"
+    );
+    // And the control: with every home reachable, nothing is said, so the
+    // warning means something when it appears.
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("could not be asked"),
+        "the warning is drawn whether or not anything went wrong"
+    );
+}
+
+/// Following somebody is offered on their feed, and the control says what it
+/// is: the list is this device's and no exchange is told.
+#[test]
+fn a_feed_offers_to_be_followed_and_says_where_that_is_kept() {
+    // Somebody not followed: the offer is to follow.
+    let mut state = a_timeline();
+    state.follows.clear();
+    let mut h = harness_phone(state, sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("Follow"), "{said}");
+    assert!(
+        !said.contains("Following"),
+        "somebody not followed is shown as followed: {said}"
+    );
+
+    // And somebody followed: the offer is to stop.
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Following"),
+        "somebody followed is not shown as followed: {}",
+        text_of(&h)
+    );
+}
+
+/// **The key is on the feed, in full.** SIP-88 has no feed identifier and no
+/// derivation: the account key *is* the feed, and the name beside it is a
+/// self-declared claim attested by nobody.
+#[test]
+fn a_feed_shows_the_key_that_is_the_feed() {
+    let mut h = harness_phone(a_timeline(), sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains(&them().to_string()),
+        "the account key, which is the whole identifier, is not on the screen"
+    );
 }
