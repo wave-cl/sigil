@@ -17171,3 +17171,26 @@ fn a_timeline_is_a_column_on_a_desktop_and_the_whole_pane_on_a_phone() {
          to give away"
     );
 }
+
+/// **The feed on a light ground**, which no render had shown.
+///
+/// Every feed picture was dark. The two themes are two sets of colours rather
+/// than one set inverted, and a contrast that works on a dark ground can
+/// vanish on a light one with nothing else changing — which matters most for
+/// the amber line that says the exchange dropped a post without its author
+/// asking, since that is the one a reader must not miss.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_feed_absences_light() {
+    let mut state = a_timeline();
+    state.timeline[0].gone = Some(sigil_chat::feed::Gone::Withdrawn);
+    state.timeline[0].text = String::new();
+    state.timeline[1].gone = Some(sigil_chat::feed::Gone::Removed);
+    state.timeline[1].text = String::new();
+    let mut h = harness_phone_light(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_feed_absences_light");
+}
