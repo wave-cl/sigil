@@ -16878,3 +16878,37 @@ fn two_citations_that_failed_differently_do_not_read_the_same() {
         "an eviction is not said as one: {evicted}"
     );
 }
+
+/// **There is a way to somebody's feed, and it is from where you have their
+/// key.**
+///
+/// SIP-88 refused a feed directory, and gave the reason: "one feed per
+/// account, listed with a last-activity time and mirrored to every peer every
+/// sixty seconds, is a timestamped census of every active account." So a feed
+/// is reached by its key and there is nothing to browse — which means that if
+/// no screen offers the way in, nobody can follow anybody at all. The
+/// timeline's own empty state tells a person to open somebody's feed from a
+/// conversation, and this is whether that is true.
+#[test]
+fn a_members_row_offers_the_way_to_their_feed() {
+    let mut h = harness_phone(a_conversation(), sigil_chat::Route::Members);
+    h.run();
+    h.run();
+    // The row's own menu, which is where everything about one member lives.
+    let more: Vec<_> = h
+        .get_all_by_label_contains("may be done about them")
+        .collect();
+    assert!(
+        !more.is_empty(),
+        "no member row has a menu, so this says nothing: {}",
+        text_of(&h)
+    );
+    more[0].click();
+    h.run_steps(3);
+    assert!(
+        text_of(&h).contains("Their feed"),
+        "a member's menu offers no way to their feed, and there is no other \
+         way to reach one: {}",
+        text_of(&h)
+    );
+}

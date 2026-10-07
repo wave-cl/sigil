@@ -1069,6 +1069,8 @@ type At = (PubKey, String);
 #[derive(Clone, Copy)]
 enum MemberAct {
     Verify,
+    /// SIP-88: open their feed.
+    Feed,
     Kick,
     /// Make an admin, or stop being one.
     Grant(bool),
@@ -1198,6 +1200,7 @@ fn member_actions_ui(
             for (label, hover, act) in acts {
                 let icon = match act {
                     MemberAct::Verify => sigil_ui::Icon::Verified,
+                    MemberAct::Feed => sigil_ui::Icon::Quote,
                     MemberAct::Kick => sigil_ui::Icon::Close,
                     MemberAct::Grant(_) => sigil_ui::Icon::People,
                     MemberAct::Mute(true) => sigil_ui::Icon::BellOff,
@@ -1213,6 +1216,23 @@ fn member_actions_ui(
                 if pressed.on_hover_text(*hover).clicked() {
                     chose = Some(*act);
                 }
+            }
+            // **SIP-88: the way to somebody's feed, and the only one there
+            // is.** A feed is reached by its account key and there is no
+            // directory of them -- SIP-88 refused one, because "one feed per
+            // account, listed with a last-activity time and mirrored to every
+            // peer every sixty seconds, is a timestamped census of every
+            // active account". So the way in is from somewhere you already
+            // have somebody's key, and this is where a conversation keeps
+            // them.
+            if sigil_ui::icon_item(ui, sigil_ui::Icon::Quote, "Their feed")
+                .on_hover_text(
+                    "What they have published publicly (SIP-88). Following is kept on \
+                     this device; no exchange is told what you read.",
+                )
+                .clicked()
+            {
+                chose = Some(MemberAct::Feed);
             }
             // The whole key, which the row itself has no width for.
             if sigil_ui::icon_item(ui, sigil_ui::Icon::Copy, "Copy key").clicked() {
@@ -11451,6 +11471,12 @@ impl ChatApp {
                             });
                         });
                         match chose {
+                            // Their feed, which is reached by their key and
+                            // by nothing else.
+                            Some(MemberAct::Feed) => {
+                                ctx.navigator.push_here(Route::OneFeed(member.account));
+                                self.send_as(Some(at), Cmd::ReadFeed(member.account));
+                            }
                             Some(MemberAct::Verify) => {
                                 self.pane(at).dialog = Some(Dialog::Verify(member.account));
                                 self.send_as(Some(at), Cmd::Attested(member.account));
