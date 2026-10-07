@@ -87,6 +87,22 @@ const COVERAGE: &[(&str, &str, Reached)] = &[
     ("POST", "/prekey/count", Chat),
     ("POST", "/prekey/clear", Chat),
     ("POST", "/prekey/take", Beneath),
+    // ---- SIP-88: feeds ---------------------------------------------------
+    ("POST", "/feed/append", Chat),
+    ("POST", "/feed/read", Chat),
+    ("POST", "/feed/head", Chat),
+    ("POST", "/feed/since", Chat),
+    ("POST", "/feed/withdraw", Chat),
+    (
+        "POST",
+        "/feed/set",
+        NotYet(
+            "SIP-88 §What bounds a feed: an author's own retention and post cap. \
+             Nothing in sigil offers them yet, and the exchange's defaults -- a \
+             year and ten thousand posts -- are what SIP-88 chose for a feed \
+             nobody gardens",
+        ),
+    ),
     ("POST", "/blob/limits", Chat),
     ("POST", "/blob/begin", Chat),
     ("POST", "/blob/put", Chat),
@@ -542,8 +558,11 @@ fn the_coverage_is_what_it_says_it_is() {
     // than a number nobody looked at.
     // 130 -> 131 at sqex v0.119.0: SIP-30's `/admin/tail`, the operator's live
     // stream. Nothing here reaches it, so `reached` below does not move.
+    // 131 -> 137 at sqex v0.125.0: SIP-88's six feed routes. Five of them are
+    // reached, so `reached` moves by five; `/feed/set` is an author's own
+    // retention policy and nothing offers it yet.
     assert_eq!(
-        total, 131,
+        total, 137,
         "the exchange serves a different number of routes"
     );
     assert_eq!(
@@ -551,11 +570,11 @@ fn the_coverage_is_what_it_says_it_is() {
         "SIP-35, 43, 53, 54, 57, 59, 60 and 61 peering routes, which no client calls"
     );
     assert_eq!(
-        client, 108,
+        client, 114,
         "client-reachable routes: everything but exchange-to-exchange"
     );
     assert_eq!(
-        reached, 91,
+        reached, 96,
         "routes sigil reaches. Raise this when a stage lands; it is the only \
          honest measure of \"every endpoint implemented\""
     );

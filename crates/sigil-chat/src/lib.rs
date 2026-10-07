@@ -2,6 +2,7 @@
 
 pub mod announce;
 pub mod command;
+pub mod feed;
 pub mod files;
 pub mod frequent;
 pub mod mention;

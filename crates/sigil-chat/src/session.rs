@@ -862,6 +862,36 @@ pub struct ChatState {
     /// conversation and is rebuilt by every refresh. Merged, every
     /// confirmation would be on screen for less than a tick.
     pub note: Option<Note>,
+    /// SIP-88: the merged timeline of every feed this client follows, newest
+    /// first, already clamped by [`crate::feed::shown_at`].
+    ///
+    /// **Assembled here and nowhere else.** SIP-88 §What an exchange does not
+    /// do to a timeline says the exchange MUST NOT rank, filter, score or
+    /// re-order what a reader sees -- and that it *cannot*, because it holds
+    /// no follow list and does not parse a body. This is the other half of
+    /// that: the merge is the reader's own, by the one rule the specification
+    /// imposes and no other.
+    pub timeline: Vec<crate::feed::Posted>,
+    /// Who this client follows, and how far behind each is.
+    ///
+    /// The list is this client's and the exchange never holds it (SIP-88 §The
+    /// follow list), which is what keeps the reading graph -- broader than
+    /// the talking graph SIP-16 already calls the largest disclosure in the
+    /// stack -- off the exchange entirely.
+    pub follows: Vec<crate::feed::Follow>,
+    /// Where this account's own feed has got to.
+    pub my_feed: crate::feed::Serial,
+    /// Feeds whose home could not be asked at the last poll. **Not the same
+    /// as nothing new**, and a reader is told which.
+    pub feeds_unasked: Vec<PubKey>,
+    /// Feeds the exchange will say nothing about: absent, withheld, or whose
+    /// owner has blocked this reader. One answer for all three, and a client
+    /// MUST NOT present a guess at which (SIP-21).
+    pub feeds_silent: Vec<PubKey>,
+    /// Feeds whose oldest post is now above what this client held: a gap no
+    /// amount of reading closes, which a reader is shown rather than left to
+    /// read the remainder as though it were the whole.
+    pub feeds_truncated: Vec<PubKey>,
     /// The file going up right now: what it is called, bytes of it gone,
     /// and bytes in all.
     ///
@@ -1709,6 +1739,33 @@ pub enum Cmd {
     Earlier,
     /// Post to whatever is open.
     Send(String),
+    /// SIP-88: publish to this account's own feed.
+    ///
+    /// **Not `Send`.** A channel post is sealed to a membership and ordered
+    /// by an exchange; a feed post is in the clear, signed by this device,
+    /// numbered by this account, and readable by anybody who asks. Sharing
+    /// the command would be sharing the one thing a composer must not get
+    /// wrong.
+    Publish {
+        text: String,
+        /// SIP-89: the post this one cites, if any.
+        cites: Option<(PubKey, crate::feed::Serial)>,
+    },
+    /// SIP-88 §Withdrawal: take a post of ours off this exchange.
+    ///
+    /// It does not take it back. The client says so where the post is
+    /// composed, which SIP-88 requires in as many words.
+    Withdraw(crate::feed::Serial),
+    /// Follow a feed. Local: no exchange is told, ever.
+    Follow(PubKey),
+    /// Stop following. Also local.
+    Unfollow(PubKey),
+    /// Ask which followed feeds have moved, and read what is new.
+    RefreshFeeds,
+    /// Read one account's feed, newest first, whether or not it is followed.
+    ReadFeed(PubKey),
+    /// Read further back in one account's feed, from the oldest held.
+    EarlierInFeed(PubKey),
     /// Remember somebody, so they appear in the list before they write.
     AddContact(PubKey, String),
     /// Redial now, whatever the backoff had planned.
@@ -3116,6 +3173,16 @@ async fn run(
                 // SIP-48: keep the backup up to date, for an account that
                 // has one.
                 keep_the_backup_fresh(&mut chat, &state, &mut desk).await;
+                // SIP-88: which followed feeds have moved, in one request for
+                // all of them. On its own clock rather than the tick's,
+                // because a feed is not a conversation -- see `FEED_EVERY`.
+                // Only while the link is up: a refusal here would be a
+                // trouble a minute, saying nothing the link state does not.
+                if chat.link() == Link::Up && desk.feeds_polled.elapsed() >= FEED_EVERY {
+                    desk.feeds_polled = std::time::Instant::now();
+                    refresh_feeds(&mut chat, &state, &mut desk).await;
+                    (wake)();
+                }
                 // SIP-43: and whether what this device wrote here is what
                 // the exchange has for it.
                 if check_the_chain(&mut chat, &mut desk).await {
@@ -3460,6 +3527,11 @@ fn after_a_failed_fetch(head: Option<bool>, now: std::time::Instant) -> Unfetche
 /// The session's own view of the world, kept between ticks.
 struct Desk {
     channels: HashMap<[u8; 32], Known>,
+    /// SIP-88: the feeds this client reads, and what it holds of each.
+    feeds: crate::feed::Feeds,
+    /// When the followed feeds were last asked about. Starts in the past, so
+    /// the first connected pass polls rather than waiting a minute.
+    feeds_polled: std::time::Instant,
     /// Which conversation is on screen. Held here as well as in the published
     /// state so the task can read it without borrowing the watch channel.
     open: Option<[u8; 32]>,
@@ -3598,6 +3670,7 @@ struct Desk {
 impl Default for Desk {
     fn default() -> Self {
         Desk {
+            feeds: crate::feed::Feeds::default(),
             channels: HashMap::new(),
             peer_homes: HashMap::new(),
             my_home: None,
@@ -3639,9 +3712,25 @@ impl Default for Desk {
             wake_told: false,
             siblings: crate::siblings::Siblings::default(),
             seed: [0; 32],
+            feeds_polled: std::time::Instant::now()
+                .checked_sub(FEED_EVERY)
+                .unwrap_or_else(std::time::Instant::now),
         }
     }
 }
+
+/// How often this client asks which followed feeds have moved.
+///
+/// **A feed is a poll-latency medium and SIP-88 says so in a block quote.**
+/// There is no SIP-45 wake for one and there cannot be without handing the
+/// exchange the reading graph, so the only question is what interval to
+/// spend. A minute: slower than the conversation backstop, because a feed is
+/// not a conversation and nobody is waiting mid-sentence; fast enough that a
+/// timeline left open fills while somebody reads it.
+///
+/// One request covers every feed followed (`/feed/since`), so this costs a
+/// round trip a minute whether somebody follows one person or five hundred.
+pub const FEED_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long the conversation list can be wrong before the backstop fixes it.
 ///
@@ -7530,6 +7619,33 @@ fn publish(chat: &impl Local, state: &watch::Sender<ChatState>, desk: &Desk, me:
         set!(stranded, stranded);
         set!(peer_home, peer_home);
         set!(mail, desk.mail.clone());
+        // SIP-88. The merge is the reader's own: the exchange holds no follow
+        // list and does not parse a body, so it could not have done it.
+        set!(timeline, desk.feeds.timeline());
+        set!(my_feed, desk.feeds.mine);
+        set!(feeds_unasked, desk.feeds.unasked.clone());
+        set!(feeds_silent, desk.feeds.silent.clone());
+        set!(feeds_truncated, desk.feeds.truncated.clone());
+        set!(
+            follows,
+            chat.store()
+                .follows()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(account, held)| {
+                    let held = crate::feed::Serial(held);
+                    crate::feed::Follow {
+                        account,
+                        held,
+                        newest: desk
+                            .feeds
+                            .standing_of(&account)
+                            .map(|f| f.newest)
+                            .unwrap_or(held),
+                    }
+                })
+                .collect::<Vec<_>>()
+        );
         set!(my_home, desk.my_home.clone());
         set!(home_moved, desk.home_moved.clone());
         set!(events, events);
@@ -8550,6 +8666,37 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             Err(e) => trouble(state, e),
         },
         Cmd::Reconnect => chat.reconnect_now(),
+
+        // ---- SIP-88 feeds ------------------------------------------------
+        Cmd::Publish { text, cites } => publish_post(chat, state, desk, text, cites).await,
+        Cmd::Withdraw(serial) => match chat.withdraw(serial.0).await {
+            Ok(()) => {
+                desk.feeds.drop_feed(&chat.me);
+                read_one_feed(chat, state, desk, chat.me).await;
+                note(state, "Taken off this exchange.".into());
+            }
+            Err(e) => trouble(state, e),
+        },
+        // **Local, and the exchange is told nothing.** SIP-88 §The follow
+        // list: the reading graph never reaches an exchange, which is what
+        // this one line is protecting.
+        Cmd::Follow(account) => match chat.follow(&account) {
+            Ok(()) => {
+                read_one_feed(chat, state, desk, account).await;
+                note(state, "Following.".into());
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::Unfollow(account) => match chat.unfollow(&account) {
+            Ok(()) => {
+                desk.feeds.drop_feed(&account);
+                note(state, "Not following any more.".into());
+            }
+            Err(e) => trouble(state, e),
+        },
+        Cmd::RefreshFeeds => refresh_feeds(chat, state, desk).await,
+        Cmd::ReadFeed(account) => read_one_feed(chat, state, desk, account).await,
+        Cmd::EarlierInFeed(account) => earlier_in_feed(chat, state, desk, account).await,
 
         Cmd::React { target, emoji } => {
             let Some(channel) = desk.open else { return };
@@ -9807,6 +9954,155 @@ async fn load_reports(chat: &mut Chat, state: &watch::Sender<ChatState>, channel
         }
         Err(e) => trouble(state, e),
     }
+}
+
+/// SIP-88: publish to this account's own feed.
+///
+/// **The warning about what this is belongs at the composer**, not here --
+/// SIP-88 §Withdrawal requires it where a post is composed. This is the act.
+async fn publish_post(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    text: String,
+    cites: Option<(PubKey, crate::feed::Serial)>,
+) {
+    use sqex_proto::message::{Body, Part, Post};
+    let mut parts = vec![Part::Text(text)];
+    if let Some((who, serial)) = cites {
+        parts.push(Part::Quote(who, serial.0));
+    }
+    let body = Body::Post(Post { parts, unknown: 0 });
+    // One attempt and one re-sign, which is what the library does: a refusal
+    // costs nothing because the exchange numbered nothing, and two devices of
+    // one account racing is the ordinary case rather than an error.
+    match chat.publish(&body).await {
+        Ok(appended) => {
+            desk.feeds.mine = crate::feed::Serial(appended.serial);
+            let me = chat.me;
+            read_one_feed(chat, state, desk, me).await;
+            note(state, "Published.".into());
+        }
+        Err(e) => trouble(state, e),
+    }
+}
+
+/// Read one account's feed, newest first, and keep what came back.
+async fn read_one_feed(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    account: PubKey,
+) {
+    match chat
+        .read_feed(&account, 0, crate::feed::PER_FEED as u16)
+        .await
+    {
+        Ok(page) => {
+            keep_page(chat, desk, account, &page);
+            if publish(&*chat, state, desk, chat.me) {
+                // Drawn on the next pass; the caller's loop wakes the window.
+            }
+        }
+        Err(e) => trouble(state, e),
+    }
+}
+
+/// Read further back in a feed, from the oldest post held.
+async fn earlier_in_feed(
+    chat: &mut Chat,
+    state: &watch::Sender<ChatState>,
+    desk: &mut Desk,
+    account: PubKey,
+) {
+    // Backward from the oldest held, which is what "earlier" means. With
+    // nothing held this is a first read, and `0` means from `newest`.
+    let from = desk
+        .feeds
+        .of(&account)
+        .last()
+        .map(|p| p.serial.0)
+        .unwrap_or(0);
+    match chat
+        .read_feed(&account, from, crate::feed::PER_FEED as u16)
+        .await
+    {
+        Ok(page) => {
+            keep_page(chat, desk, account, &page);
+            publish(&*chat, state, desk, chat.me);
+        }
+        Err(e) => trouble(state, e),
+    }
+}
+
+/// Keep a page, and note where the feed stands.
+fn keep_page(chat: &Chat, desk: &mut Desk, account: PubKey, page: &sqex_proto::feed::Page) {
+    let me = chat.me;
+    // The name this client knows them by, which is SIP-21's self-declared one
+    // attested by nobody. `None` falls back to the key, which is never wrong.
+    let named = |k: &PubKey| Chat::display_name(chat, k);
+    let posts = crate::feed::read_page(&page.posts, &me, &named);
+    desk.feeds.keep(&account, posts);
+    let held = desk
+        .feeds
+        .standing_of(&account)
+        .map(|f| f.held)
+        .unwrap_or_default();
+    desk.feeds.stands(
+        account,
+        crate::feed::Serial(page.newest),
+        held.max(crate::feed::Serial(page.newest)),
+    );
+}
+
+/// SIP-88 `/feed/since`: which followed feeds have moved, in one request.
+///
+/// **Every outcome is kept, not only movement.** A feed whose home could not
+/// be asked is not a feed with nothing new, and SIP-88 says why at length: a
+/// client that conflates them has a timeline that silently stops filling.
+async fn refresh_feeds(chat: &mut Chat, state: &watch::Sender<ChatState>, desk: &mut Desk) {
+    let caught = match chat.feeds_since().await {
+        Ok(caught) => caught,
+        Err(e) => return trouble(state, e),
+    };
+    desk.feeds.unasked = caught.unasked.clone();
+    desk.feeds.silent = caught.gone.clone();
+    desk.feeds.truncated = caught.truncated.iter().map(|s| s.account).collect();
+    for standing in &caught.moved {
+        desk.feeds.stands(
+            standing.account,
+            crate::feed::Serial(standing.newest),
+            crate::feed::Serial(standing.held),
+        );
+        match chat
+            .read_feed_after(
+                &standing.account,
+                standing.held,
+                crate::feed::PER_FEED as u16,
+            )
+            .await
+        {
+            Ok(page) => {
+                keep_page(chat, desk, standing.account, &page);
+                // Read to where we got, so the next poll asks for what is
+                // after it rather than for the same posts again.
+                let _ = chat.read_to(&standing.account, page.newest);
+            }
+            Err(e) => trouble(state, e),
+        }
+    }
+    // A truncated feed is a gap nothing closes, so the window is re-read from
+    // the top rather than caught up to.
+    for standing in &caught.truncated {
+        if let Ok(page) = chat
+            .read_feed(&standing.account, 0, crate::feed::PER_FEED as u16)
+            .await
+        {
+            keep_page(chat, desk, standing.account, &page);
+            let _ = chat.read_to(&standing.account, page.newest);
+        }
+    }
+    publish(&*chat, state, desk, chat.me);
 }
 
 fn note(state: &watch::Sender<ChatState>, said: String) {

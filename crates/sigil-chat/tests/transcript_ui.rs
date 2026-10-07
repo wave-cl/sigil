@@ -66,6 +66,14 @@ fn a_conversation() -> ChatState {
         folds: 0,
         // Nothing going up: the cases that want the bar set it themselves.
         going: None,
+        // SIP-88: no feeds in the fixture. The tests about them build their
+        // own, so that a conversation's tests say nothing about a timeline.
+        timeline: Vec::new(),
+        follows: Vec::new(),
+        my_feed: sigil_chat::feed::Serial(0),
+        feeds_unasked: Vec::new(),
+        feeds_silent: Vec::new(),
+        feeds_truncated: Vec::new(),
         // SIP-87: the fixture is an ordinary SIP-17 channel, so the Settings
         // card offers minting rather than committing.
         agreed: false,
