@@ -453,6 +453,9 @@ fn every_reason_a_citation_failed_reads_differently() {
             domain: "squic.org".into(),
         },
         Citation::Unresolved,
+        Citation::Unverifiable,
+        Citation::TooDeep,
+        Citation::Circular,
     ];
     let mut said: Vec<&'static str> = Vec::new();
     for what in &every {

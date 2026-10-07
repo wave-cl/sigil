@@ -317,6 +317,18 @@ pub enum Citation {
     Elsewhere { domain: String },
     /// Nothing could be asked: the home is unreachable, or unknown.
     Unresolved,
+    /// **Signed by a device the author has since withdrawn.** SIP-89 makes
+    /// this distinct from [`Citation::Forged`] and names reporting it as
+    /// forged the thing a client must not do: the key is the author's own,
+    /// and whether withdrawing it was routine or was the whole point is not
+    /// something a reader can settle.
+    Unverifiable,
+    /// A quote of a quote, at SIP-89's `QUOTE_DEPTH`: labelled and not
+    /// followed, because each hop discloses the reader to another exchange.
+    TooDeep,
+    /// A post citing itself or its own future, which cannot resolve and was
+    /// not asked about.
+    Circular,
 }
 
 impl Citation {
@@ -340,6 +352,14 @@ impl Citation {
                 Some("That feed lives at another exchange, which this client did not ask.")
             }
             Citation::Unresolved => Some("That feed could not be reached."),
+            Citation::Unverifiable => Some(
+                "Signed by a device its author has since taken off their account, so this \
+                 cannot be shown as theirs.",
+            ),
+            Citation::TooDeep => {
+                Some("That post quotes another, which this client did not go on to fetch.")
+            }
+            Citation::Circular => Some("That post cites itself, which cannot be shown."),
         }
     }
 }

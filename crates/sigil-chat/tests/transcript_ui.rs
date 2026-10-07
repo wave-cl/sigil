@@ -17352,6 +17352,67 @@ fn feed_directory_desktop() {
     h.snapshot("feed_directory_desktop");
 }
 
+/// **The three states SIP-89 asks for that this client did not have**, in a
+/// picture, because the one that matters is a sentence and not a shape: a
+/// post signed by a device its author withdrew must not read as a forgery,
+/// and whether it does is a question about words on a screen.
+///
+/// Also the longest of the new lines at a phone's width, which is where a
+/// careful sentence turns into four cramped ones.
+#[test]
+#[ignore = "needs a renderer; run via scripts/snapshot-test"]
+fn phone_feed_citation_states() {
+    let mut state = a_timeline();
+    state.timeline[0].cites = Some((me(), sigil_chat::feed::Serial(4)));
+    state.timeline[1].cites = Some((me(), sigil_chat::feed::Serial(5)));
+    state.citations = vec![
+        (
+            me(),
+            sigil_chat::feed::Serial(4),
+            sigil_chat::feed::Citation::Unverifiable,
+        ),
+        (
+            me(),
+            sigil_chat::feed::Serial(5),
+            sigil_chat::feed::Citation::TooDeep,
+        ),
+    ];
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    h.remove_cursor();
+    h.run();
+    h.snapshot("phone_feed_citation_states");
+}
+
+/// And that the new states fit, measured rather than looked at: the width
+/// guard over the paint list, which is the one that can see a sentence laid
+/// out past the edge.
+#[test]
+fn the_new_citation_states_fit_a_phone() {
+    for what in [
+        sigil_chat::feed::Citation::Unverifiable,
+        sigil_chat::feed::Citation::TooDeep,
+        sigil_chat::feed::Citation::Circular,
+    ] {
+        let mut state = a_timeline();
+        state.timeline[0].cites = Some((me(), sigil_chat::feed::Serial(4)));
+        state.citations = vec![(me(), sigil_chat::feed::Serial(4), what.clone())];
+        let mut h = harness_phone(state, sigil_chat::Route::Feed);
+        h.run();
+        h.run();
+        // The floor: the sentence has to be on the screen for the width
+        // below to be measured over anything.
+        let said = text_of(&h);
+        let line = what.instead().expect("every failed state says something");
+        assert!(
+            said.contains(line.split(',').next().unwrap_or(line)),
+            "{what:?} drew nothing: {said}"
+        );
+        nothing_is_painted_off_the_edge(&h, "a citation state");
+    }
+}
+
 /// A post whose body is gone, both ways, in one picture: the two must not
 /// read alike, and a picture is where "must not read alike" is actually
 /// settled.

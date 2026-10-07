@@ -8867,34 +8867,8 @@ async fn apply(chat: &mut Chat, cmd: Cmd, state: &watch::Sender<ChatState>, desk
             }
         }
         Cmd::Cite(who, serial) => {
-            use crate::feed::Citation;
-            let found = match chat.resolve_quote(&who, serial.0).await {
-                sqex_chat::feed::Cited::Got(stored) => {
-                    let name = Chat::display_name(chat, &stored.post.account);
-                    let me = chat.me;
-                    let named = |k: &PubKey| Chat::display_name(chat, k);
-                    // Read through the same path a page is, so a citation of
-                    // a withdrawn or unreadable post says what the timeline
-                    // would say about it rather than a second thing.
-                    let read = crate::feed::read_page(std::slice::from_ref(&stored), &me, &named);
-                    match read.into_iter().next() {
-                        Some(post) => Citation::Got {
-                            who: post.who,
-                            name,
-                            text: post.text,
-                            serial: post.serial,
-                        },
-                        None => Citation::Unresolved,
-                    }
-                }
-                sqex_chat::feed::Cited::Withdrawn => Citation::Withdrawn,
-                sqex_chat::feed::Cited::Removed => Citation::Removed,
-                sqex_chat::feed::Cited::Evicted => Citation::Evicted,
-                sqex_chat::feed::Cited::NoFeed => Citation::NoFeed,
-                sqex_chat::feed::Cited::Forged => Citation::Forged,
-                sqex_chat::feed::Cited::Elsewhere { domain, .. } => Citation::Elsewhere { domain },
-                sqex_chat::feed::Cited::Unresolved => Citation::Unresolved,
-            };
+            let resolved = chat.resolve_quote(&who, serial.0).await;
+            let found = as_citation(chat, resolved);
             desk.feeds.resolved(who, serial, found);
             publish(&*chat, state, desk, chat.me);
         }
@@ -10372,6 +10346,54 @@ pub(crate) fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// One SIP-89 resolution, as a reader's state.
+///
+/// **Succession is flattened here rather than carried into the interface.**
+/// `Cited::Succeeded` wraps whatever the successor's feed gave, and what a
+/// reader wants to see is that answer — the post, or the reason there is
+/// none. Which key answered is already visible: a quote names nobody until it
+/// resolves (SIP-89 keeps the author out of the part on purpose), so the name
+/// drawn beside a resolved citation *is* the successor's, which is the truth
+/// about who holds the account now. Nesting it would have put a sentence
+/// about keys in front of a reader who asked to see a post.
+///
+/// A chain of successions flattens the same way, because the resolver already
+/// spent the depth budget following it.
+fn as_citation(chat: &Chat, found: sqex_chat::feed::Cited) -> crate::feed::Citation {
+    use crate::feed::Citation;
+    match found {
+        sqex_chat::feed::Cited::Got(stored) => {
+            let name = Chat::display_name(chat, &stored.post.account);
+            let me = chat.me;
+            let named = |k: &PubKey| Chat::display_name(chat, k);
+            // Read through the same path a page is, so a citation of a
+            // withdrawn or unreadable post says what the timeline would say
+            // about it rather than a second thing.
+            let read = crate::feed::read_page(std::slice::from_ref(&stored), &me, &named);
+            match read.into_iter().next() {
+                Some(post) => Citation::Got {
+                    who: post.who,
+                    name,
+                    text: post.text,
+                    serial: post.serial,
+                },
+                None => Citation::Unresolved,
+            }
+        }
+        sqex_chat::feed::Cited::Withdrawn => Citation::Withdrawn,
+        sqex_chat::feed::Cited::Removed => Citation::Removed,
+        sqex_chat::feed::Cited::Evicted => Citation::Evicted,
+        sqex_chat::feed::Cited::NoFeed => Citation::NoFeed,
+        sqex_chat::feed::Cited::Forged => Citation::Forged,
+        sqex_chat::feed::Cited::Elsewhere { domain, .. } => Citation::Elsewhere { domain },
+        sqex_chat::feed::Cited::Unresolved => Citation::Unresolved,
+        sqex_chat::feed::Cited::Unverifiable => Citation::Unverifiable,
+        sqex_chat::feed::Cited::Succeeded { found, .. } => as_citation(chat, *found),
+        sqex_chat::feed::Cited::TooDeep => Citation::TooDeep,
+        sqex_chat::feed::Cited::Circular => Citation::Circular,
+    }
 }
 
 fn trouble(state: &watch::Sender<ChatState>, e: impl std::fmt::Display) {
