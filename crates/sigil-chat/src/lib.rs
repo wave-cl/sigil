@@ -11855,14 +11855,47 @@ impl ChatApp {
         }
         Self::note_ui(&state, ui, &theme);
 
-        // The key, in full and selectable. **This is the whole identifier**:
-        // SIP-88 has no feed identifier, no derivation and no instance, so
-        // the account key is the feed and a name beside it is a claim.
-        ui.add(
-            egui::Label::new(egui::RichText::new(who.to_string()).monospace().small())
-                .wrap()
-                .selectable(true),
-        );
+        // Who this is, as far as anything here can say. **Every line of it
+        // is self-declared** (SIP-21), so each is drawn as ordinary text with
+        // the key under it, and the title is never a badge or a mark beside a
+        // verification — SIP-21 makes those MUSTs, because a title asserts
+        // authority directly and "Exchange Administrator" does the social
+        // engineering by itself.
+        let person = state.people.get(&who).cloned();
+        Self::reading_column(ui, |ui| {
+            ui.horizontal(|ui| {
+                let face = person.as_ref().and_then(|p| p.picture.clone());
+                let picture = self.person_picture(at, ui.ctx(), who, face.as_ref());
+                sigil_ui::avatar(ui, &who.to_string(), picture.as_ref(), tokens::AVATAR_LG);
+                ui.add_space(tokens::SPACING_SM);
+                ui.scope(|ui| {
+                    ui.spacing_mut().interact_size.y = 0.0;
+                    ui.vertical(|ui| {
+                        if let Some(handle) = person.as_ref().and_then(|p| p.handle.clone()) {
+                            ui.colored_label(theme.text_secondary, handle);
+                        }
+                        if let Some(title) = person.as_ref().and_then(|p| p.title.clone()) {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(title).color(theme.text_secondary),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    });
+                });
+            });
+            ui.add_space(tokens::SPACING_XS);
+            // The key, in full and selectable. **This is the whole
+            // identifier**: SIP-88 has no feed identifier, no derivation and
+            // no instance, so the account key is the feed and every name
+            // above it is a claim.
+            ui.add(
+                egui::Label::new(egui::RichText::new(who.to_string()).monospace().small())
+                    .wrap()
+                    .selectable(true),
+            );
+        });
         ui.add_space(tokens::SPACING_SM);
 
         let following = state.follows.iter().any(|f| f.account == who);
@@ -11890,6 +11923,23 @@ impl ChatApp {
             }
             if sigil::icon::named_control(ui, sigil_ui::Icon::Refresh, "Read again").clicked() {
                 self.send_as(Some(at), Cmd::ReadFeed(who));
+            }
+            // **The other half of SIP-88 §Nothing comes in.** That section
+            // does not leave a reader with nowhere to go -- it names where:
+            // "A reader responds in their own feed, by quoting (SIP-89), or
+            // privately, by direct message (SIP-16)." Quoting is on every
+            // post. This is the other one, and without it a feed had no way
+            // to answer its author at all.
+            if who != at.0
+                && sigil::icon::named_control(ui, sigil_ui::Icon::Compose, "Write to them")
+                    .on_hover_text(
+                        "A direct message, which is sealed to the two of you. Nothing \
+                         reaches a feed from outside it.",
+                    )
+                    .clicked()
+            {
+                self.send_as(Some(at), Cmd::OpenDm(who));
+                ctx.navigator.push_here(Route::Conversations);
             }
         });
         ui.separator();

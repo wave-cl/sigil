@@ -17194,3 +17194,71 @@ fn phone_feed_absences_light() {
     h.run();
     h.snapshot("phone_feed_absences_light");
 }
+
+/// **A feed offers the way to answer its author, which SIP-88 names.**
+///
+/// §Nothing comes in is often read as "a feed is a dead end". It is not what
+/// it says: "A reader responds in their own feed, by quoting (SIP-89), or
+/// privately, by direct message (SIP-16)." Quoting is on every post. This is
+/// the other path, and without it a feed had no way to answer anybody.
+#[test]
+fn a_feed_offers_the_way_to_write_to_whoever_it_belongs_to() {
+    let (mut h, routes) = harness_phone_routes(a_timeline(), sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    assert!(
+        text_of(&h).contains("Write to them"),
+        "a feed offers no way to answer its author: {}",
+        text_of(&h)
+    );
+    h.get_by_label_contains("Write to them").click();
+    h.run_steps(3);
+    assert!(
+        routes.borrow().contains(&sigil_chat::Route::Conversations),
+        "writing to them went nowhere: {:?}",
+        routes.borrow()
+    );
+}
+
+/// And it is not offered on one's own feed, where it would open a
+/// conversation with oneself.
+#[test]
+fn a_feed_does_not_offer_to_write_to_its_own_owner() {
+    let mut state = a_timeline();
+    state.me = Some(me());
+    let mut h = harness_phone(state, sigil_chat::Route::OneFeed(me()));
+    h.run();
+    h.run();
+    assert!(
+        !text_of(&h).contains("Write to them"),
+        "your own feed offers to write to you: {}",
+        text_of(&h)
+    );
+}
+
+/// **A feed says who it belongs to**: their picture, their handle and the
+/// standing they claim — each self-declared (SIP-21), each drawn as ordinary
+/// text, and the key under all of it.
+#[test]
+fn a_feed_says_who_it_belongs_to_and_what_they_claim() {
+    let mut state = a_timeline();
+    state.people.insert(
+        them(),
+        sigil_chat::Person {
+            name: Some("Ada".into()),
+            title: Some("counts things".into()),
+            handle: Some("ada@squic.org".into()),
+            picture: None,
+        },
+    );
+    let mut h = harness_phone(state, sigil_chat::Route::OneFeed(them()));
+    h.run();
+    h.run();
+    let said = text_of(&h);
+    assert!(said.contains("ada@squic.org"), "no handle: {said}");
+    assert!(said.contains("counts things"), "no title: {said}");
+    assert!(
+        said.contains(&them().to_string()),
+        "the key, which is the one thing nobody chose, is gone: {said}"
+    );
+}
