@@ -17004,3 +17004,96 @@ fn a_feed_is_headed_by_the_name_its_posts_carry() {
         "a feed this client knows nothing about is headed by nothing at all"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SIP-89 §Two spaces, one word
+// ---------------------------------------------------------------------------
+
+/// **A feed serial does not resolve against a channel, and a channel's
+/// sequence number does not resolve against a feed.**
+///
+/// This is the test SIP-89 §Two spaces, one word asks for, and both SIP-88
+/// and SIP-89 record it as unwritten for the same reason: "Nothing built here
+/// renders a feed and a channel in one view, so the silent mis-resolution is
+/// unreachable and the test that would catch it is unwritten. It is the first
+/// debt a client that folds the two incurs."
+///
+/// This client folds them — a `Route::Feed` and a `Route::Conversations` in
+/// one app, over one session and one store — so the debt is due. SIP-19's
+/// `Edit`, `Redact`, `Reply` and `Reaction` all carry a `target: u64`; in a
+/// channel it is a SIP-16 sequence number and in a feed it is a SIP-88
+/// serial, and both are small integers that usually exist. A client that lets
+/// them share a path applies one to the other "silently and plausibly".
+///
+/// The fixture puts a feed post and a channel message at **the same number**,
+/// marks the feed one as withdrawn, and asks whether the channel message
+/// noticed. It is in the types as well — `feed::Serial` is a newtype, so the
+/// mistake does not compile — and this is the behavioural half, which is what
+/// survives somebody later deciding the newtype is a nuisance.
+///
+/// **It passes by construction today, and that is said rather than implied.**
+/// The timeline and the transcript are two code paths that share no lookup,
+/// so there is nowhere for one number to be resolved against the other and no
+/// control that makes this test fail without inventing the fault first. What
+/// it is, honestly, is a tripwire for the day somebody writes the shared
+/// target resolver that SIP-89 is warning about — the day it stops passing by
+/// construction is the day it starts being worth something. That is the test
+/// the specification asks for, and the reason it asks before the fault
+/// exists.
+#[test]
+fn a_feed_serial_does_not_resolve_against_a_channel() {
+    const SHARED: u64 = 7;
+
+    let mut state = a_timeline();
+    // A channel message at seq 7, with words of its own.
+    let mut line = state.lines[0].clone();
+    line.seq = SHARED;
+    line.text = "a message in the conversation".into();
+    line.redacted = false;
+    line.edited = false;
+    state.lines = vec![line];
+    // And a feed post at serial 7, withdrawn by its author.
+    state.timeline = vec![sigil_chat::feed::Posted {
+        who: them(),
+        name: Some("Ada".into()),
+        mine: false,
+        serial: sigil_chat::feed::Serial(SHARED),
+        at: NOW - 60,
+        claimed: None,
+        text: String::new(),
+        gone: Some(sigil_chat::feed::Gone::Withdrawn),
+        cites: None,
+        unknown: 0,
+        edited: false,
+    }];
+
+    // The conversation: the message at seq 7 is there and is not withdrawn.
+    let mut h = harness_phone(state.clone(), sigil_chat::Route::Conversations);
+    h.run();
+    h.run();
+    let conversation = text_of(&h);
+    assert!(
+        conversation.contains("a message in the conversation"),
+        "the channel message is not drawn at all, so this proves nothing: {conversation}"
+    );
+    assert!(
+        !conversation.contains("took this post off"),
+        "a feed post's withdrawal at serial {SHARED} reached the channel message at \
+         seq {SHARED}: {conversation}"
+    );
+
+    // The feed: the post at serial 7 is withdrawn, and the channel's words
+    // are nowhere near it.
+    let mut h = harness_phone(state, sigil_chat::Route::Feed);
+    h.run();
+    h.run();
+    let feed = text_of(&h);
+    assert!(
+        feed.contains("took this post off"),
+        "the feed post's withdrawal is not drawn, so this proves nothing: {feed}"
+    );
+    assert!(
+        !feed.contains("a message in the conversation"),
+        "a channel message at seq {SHARED} was drawn in the feed at serial {SHARED}: {feed}"
+    );
+}
