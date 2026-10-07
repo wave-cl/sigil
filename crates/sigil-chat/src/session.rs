@@ -894,6 +894,11 @@ pub struct ChatState {
     pub feeds_truncated: Vec<PubKey>,
     /// SIP-89: what each citation this client has looked up resolved to.
     pub citations: Vec<(PubKey, crate::feed::Serial, crate::feed::Citation)>,
+    /// Posts found by the same search that finds messages. Kept apart from
+    /// [`hits`](ChatState::hits) because a feed post is named by an account
+    /// and a serial and a message by a channel and a `seq`, and SIP-89 §Two
+    /// spaces, one word is about exactly that pair being confused.
+    pub feed_hits: Vec<crate::feed::Found>,
     /// The file going up right now: what it is called, bytes of it gone,
     /// and bytes in all.
     ///
@@ -6499,8 +6504,13 @@ fn search_local(
         // time, not the first.
         hits.sort_by_key(|h| std::cmp::Reverse(h.at));
     }
+    // And the feeds this client holds, which is the same local act over
+    // local data -- see `feed::search`.
+    let named = |k: &PubKey| chat.display_name(k).unwrap_or_else(|| short(k));
+    let found = crate::feed::search(&desk.feeds, query, &named);
     state.send_modify(|s| {
         s.hits = hits;
+        s.feed_hits = found;
         s.searched_messages = true;
     });
 }
@@ -7807,7 +7817,7 @@ mod stub_tests {
 /// Compared a character at a time from each character boundary, which is
 /// quadratic in the worst case and fine for a message: the alternative,
 /// searching a lowercased copy, gives an index into the wrong string.
-fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+pub(crate) fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
     if needle.is_empty() {
         return None;
     }

@@ -75,6 +75,7 @@ fn a_conversation() -> ChatState {
         feeds_silent: Vec::new(),
         feeds_truncated: Vec::new(),
         citations: Vec::new(),
+        feed_hits: Vec::new(),
         // SIP-87: the fixture is an ordinary SIP-17 channel, so the Settings
         // card offers minting rather than committing.
         agreed: false,
@@ -17261,4 +17262,97 @@ fn a_feed_says_who_it_belongs_to_and_what_they_claim() {
         said.contains(&them().to_string()),
         "the key, which is the one thing nobody chose, is gone: {said}"
     );
+}
+
+/// **Searching finds posts as well as messages, and says which are which.**
+///
+/// SIP-88's "there is no search" is about the network: no route asks for
+/// one, and no index exists anywhere. This client's search has always been
+/// the other thing — "Searches what this client has opened. The exchange
+/// holds ciphertext and cannot search it" — and searching held posts is the
+/// same local act over local data.
+///
+/// The two are drawn under separate headings because they do not open the
+/// same way, and because a feed post is named by an account and a serial
+/// where a message is named by a channel and a `seq`. One list of both would
+/// be a list where pressing a row does one of two things.
+#[test]
+fn a_search_finds_posts_and_keeps_them_apart_from_messages() {
+    let mut state = a_timeline();
+    state.hits = Vec::new();
+    state.searched_messages = true;
+    state.feed_hits = vec![sigil_chat::feed::Found {
+        who: them(),
+        whose: "Ada".into(),
+        serial: sigil_chat::feed::Serial(2),
+        text: "the newer thing".into(),
+        found: 4..9,
+        at: NOW - 60,
+    }];
+    let mut h = harness_phone(state, sigil_chat::Route::Search);
+    h.run();
+    h.run();
+    // The card shows nothing until something is typed, so this types into
+    // the box: the session answers with what it found, and the fixture
+    // stands in for that answer.
+    let field = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .map(|n| n.rect())
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the search box");
+    press_at(&mut h, field.center());
+    h.run_steps(2);
+    h.input_mut().events.push(egui::Event::Text("newer".into()));
+    h.run_steps(3);
+    let said = text_of(&h);
+    assert!(
+        said.contains("in the feeds you follow"),
+        "a post was found and the result does not say where: {said}"
+    );
+    assert!(
+        said.contains("the newer thing"),
+        "the post that matched is not shown: {said}"
+    );
+    assert!(
+        !said.contains("Nothing here matched"),
+        "posts were found and the card says nothing matched: {said}"
+    );
+}
+
+/// **The Feed row says how many posts are waiting.**
+///
+/// An earlier version drew no badge, arguing the number would be as old as
+/// the last poll while reading as current. The chats list's unread counts
+/// have exactly that property and are shown, so the argument did not
+/// survive. What is actually true is that a feed has no SIP-45 wake, so the
+/// count moves on the poll rather than the instant — a difference in
+/// latency, not in honesty.
+#[test]
+fn the_feed_row_says_how_many_posts_are_waiting() {
+    let mut state = a_timeline();
+    state.follows = vec![sigil_chat::feed::Follow {
+        account: them(),
+        held: sigil_chat::feed::Serial(2),
+        newest: sigil_chat::feed::Serial(5),
+    }];
+    let app = ChatApp::new();
+    // The count itself, which is what the rail draws: three unread of five.
+    assert_eq!(
+        state.follows.iter().map(|f| f.behind()).sum::<u64>(),
+        3,
+        "the count of what is waiting is wrong"
+    );
+    // And a feed read to its newest is waiting on nothing.
+    state.follows[0].held = sigil_chat::feed::Serial(5);
+    assert_eq!(state.follows[0].behind(), 0);
+    // An exchange reporting a newest *below* what we hold is SIP-88's
+    // `state: 0x04` — always a fault — and must not become a negative
+    // number that underflows into four billion waiting posts.
+    state.follows[0].newest = sigil_chat::feed::Serial(1);
+    assert_eq!(
+        state.follows[0].behind(),
+        0,
+        "a feed whose exchange is behind reports a wrapped count"
+    );
+    drop(app);
 }

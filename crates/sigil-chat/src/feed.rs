@@ -167,6 +167,65 @@ pub fn timeline(mut posts: Vec<Posted>) -> Vec<Posted> {
     posts
 }
 
+/// One post found by searching what this client holds.
+///
+/// **Its own type and not `session::Hit`.** A `Hit` names a channel and a
+/// `seq`; this names an account and a [`Serial`]. Putting a serial into a
+/// channel hit's `seq` is the precise mistake SIP-89 §Two spaces, one word
+/// forbids, and a search that mixed them would hand the transcript a number
+/// from the wrong space to open — silently and plausibly, because both are
+/// small integers that usually exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub who: PubKey,
+    /// Whoever's feed it is, as this client names them.
+    pub whose: String,
+    pub serial: Serial,
+    pub text: String,
+    /// Where in `text` the match is, so the row can show that part.
+    pub found: std::ops::Range<usize>,
+    pub at: u64,
+}
+
+/// Search the posts this client holds.
+///
+/// **Local, over what is already here, and no exchange is asked.** SIP-88
+/// says "there is no search", and means the network has none: there is no
+/// route to ask and no index anywhere. This is the same thing sigil's
+/// conversation search already is and says of itself — "Searches what this
+/// client has opened. The exchange holds ciphertext and cannot search it."
+/// Nothing here reaches past this device, so nothing here is the search
+/// SIP-88 refuses.
+pub fn search(feeds: &Feeds, needle: &str, named: &dyn Fn(&PubKey) -> String) -> Vec<Found> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for post in feeds.timeline() {
+        // A withdrawn post has no words to find, and finding one by words it
+        // no longer carries would be showing a body the exchange has dropped.
+        if post.gone.is_some() {
+            continue;
+        }
+        let Some(found) = crate::session::find_ignoring_case(&post.text, &needle) else {
+            continue;
+        };
+        out.push(Found {
+            who: post.who,
+            whose: post.name.clone().unwrap_or_else(|| named(&post.who)),
+            serial: post.serial,
+            text: post.text.clone(),
+            found,
+            at: post.at,
+        });
+    }
+    // Newest first, as the conversation search is: a word said often wants
+    // the last time rather than the first.
+    out.sort_by_key(|f| std::cmp::Reverse(f.at));
+    out
+}
+
 /// What a SIP-89 citation resolved to, in the words a reader is given.
 ///
 /// **Each state is its own variant and a caller cannot collapse them.**

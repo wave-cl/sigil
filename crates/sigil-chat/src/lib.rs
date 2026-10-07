@@ -2198,6 +2198,12 @@ pub struct ChatApp {
     /// lands in whichever app the shell has in front and neither of those
     /// two moments is guaranteed to be this one.
     show_call: Option<PubKey>,
+    /// A feed a search result asked for, taken on the next pass.
+    ///
+    /// Asked for here and navigated to where a navigator exists, which is
+    /// how `show_call` beside it already works: a function that draws does
+    /// not get to move the reader.
+    wants_feed: Option<PubKey>,
     /// The route last given to the platform, so it is told on change rather
     /// than on every frame. `None` when no call is up.
     told_route: Option<bool>,
@@ -2401,6 +2407,7 @@ impl ChatApp {
             starts: 0,
             told_calling: None,
             show_call: None,
+            wants_feed: None,
             told_route: None,
             mics: Vec::new(),
             mics_read: None,
@@ -3369,6 +3376,11 @@ impl App for ChatApp {
             // Only while there is still a call to go to -- "back to the call"
             // is meaningless once it has ended, and a card for a dead call
             // would be popped on the very next pass anyway.
+            // A feed a search result chose, taken where there is a
+            // navigator to take it.
+            if let Some(who) = self.wants_feed.take() {
+                ctx.navigator.push_here(Route::OneFeed(who));
+            }
             if let Some(me) = self.show_call.take()
                 && self.calls.contains_key(&me)
                 && except != Some(me)
@@ -3820,13 +3832,18 @@ impl App for ChatApp {
             sigil::Section {
                 icon: sigil::Icon::Quote,
                 title: "Feed".into(),
-                // **No badge.** A count here would be a count of posts
-                // waiting, and SIP-88 is a poll-latency medium with no wake:
-                // the number would be as old as the last poll and would read
-                // as current. A feed is somewhere you go, not something that
-                // interrupts you -- which is most of the difference between
-                // it and a conversation.
-                badge: 0,
+                // **How many posts are waiting**, from what the last poll
+                // reported minus what this client has read.
+                //
+                // An earlier version of this drew nothing, arguing that the
+                // number would be "as old as the last poll while reading as
+                // current". That argument does not survive the row above it:
+                // the chats list's unread counts have exactly the same
+                // property and are shown. What is true is only that a feed
+                // has no SIP-45 wake, so the count moves on the poll rather
+                // than the instant -- which is a difference in latency and
+                // not in honesty.
+                badge: self.feeds_waiting(ctx),
                 hover: "SIP-88: what the people you follow have published, and a box to \
                         publish from. Public to anybody with your key."
                     .into(),
@@ -7313,6 +7330,11 @@ impl ChatApp {
     }
 
     /// What a search turned up, in place of the list.
+    ///
+    /// Returns the feed a press chose, if one did: this has never had a
+    /// navigator and giving it one to reach through would be handing a
+    /// drawing function the power to move the reader.
+    #[must_use]
     fn hits_ui(
         &mut self,
         at: &At,
@@ -7320,12 +7342,12 @@ impl ChatApp {
         ui: &mut egui::Ui,
         theme: &ColorTheme,
         now: u64,
-    ) {
+    ) -> Option<PubKey> {
         // Said every time, in the count and again on hovering it, not once
         // in a help page: an empty result here means "not in what this
         // client has opened", which is a different fact from "never said",
         // and only this client can tell them apart.
-        if state.hits.is_empty() {
+        if state.hits.is_empty() && state.feed_hits.is_empty() {
             ui.colored_label(
                 theme.text_secondary,
                 if state.searched_messages {
@@ -7337,7 +7359,45 @@ impl ChatApp {
             if state.searched_messages {
                 ui.colored_label(theme.text_muted, egui::RichText::new(ONLY_HERE).small());
             }
-            return;
+            return None;
+        }
+        // **Feeds first and under their own heading.** A post and a message
+        // are not the same kind of thing and do not open the same way, and
+        // one list of both would be a list where pressing a row does one of
+        // two things depending on which it was. The heading is also where a
+        // reader learns a feed was searched at all.
+        let mut chose_feed = None;
+        if !state.feed_hits.is_empty() {
+            let n = state.feed_hits.len();
+            ui.colored_label(
+                theme.text_muted,
+                egui::RichText::new(format!("{n} in the feeds you follow",)).small(),
+            );
+            ui.add_space(tokens::SPACING_XS);
+            let found: Vec<crate::feed::Found> = state.feed_hits.clone();
+            for hit in &found {
+                let id = hit.who.to_string();
+                let face = state.people.get(&hit.who).and_then(|p| p.picture.clone());
+                let picture = self.person_picture(at, ui.ctx(), hit.who, face.as_ref());
+                let row = sigil_ui::SearchHit {
+                    id: &id,
+                    picture: picture.as_ref(),
+                    label: &hit.whose,
+                    who: "in their feed",
+                    text: &hit.text,
+                    found: hit.found.clone(),
+                    at: &sigil_ui::brief(hit.at, now),
+                };
+                if sigil_ui::search_hit(ui, &row, false).clicked() {
+                    chose_feed = Some(hit.who);
+                    self.send_as(Some(at), Cmd::ReadFeed(hit.who));
+                }
+            }
+            ui.add_space(tokens::SPACING_SM);
+            ui.separator();
+        }
+        if state.hits.is_empty() {
+            return chose_feed;
         }
         let n = state.hits.len();
         ui.colored_label(
@@ -7389,6 +7449,7 @@ impl ChatApp {
                     }
                 }
             });
+        chose_feed
     }
 
     /// Go to a search result: open its conversation with the message in the
@@ -7612,7 +7673,9 @@ impl ChatApp {
         // phone: there the search is its own card, and what it found is
         // shown there.
         if !phone && !self.pane(at).searching.trim().is_empty() {
-            self.hits_ui(at, state, ui, theme, now);
+            if let Some(who) = self.hits_ui(at, state, ui, theme, now) {
+                self.wants_feed = Some(who);
+            }
             return;
         }
 
@@ -14421,6 +14484,24 @@ impl ChatApp {
     }
 
     /// How many are waiting, as the exchange last said.
+    /// How many posts are waiting across every feed this identity follows.
+    ///
+    /// Saturating per feed, because an exchange reporting a `newest` below
+    /// what this client holds is SIP-88's `state: 0x04` -- "which is always a
+    /// fault" -- rather than a negative number to subtract.
+    fn feeds_waiting(&self, ctx: &AppContext<'_>) -> u32 {
+        let Some(me) = Self::showing(ctx) else {
+            return 0;
+        };
+        self.sessions
+            .iter()
+            .filter(|((who, _), _)| *who == me)
+            .flat_map(|(_, s)| s.state().follows)
+            .map(|f| f.behind())
+            .sum::<u64>()
+            .min(u32::MAX as u64) as u32
+    }
+
     fn mail_waiting(&self, ctx: &AppContext<'_>) -> u32 {
         self.showing_at(ctx)
             .map(|at| self.state_of(Some(&at)).mail.len() as u32)
@@ -14714,7 +14795,9 @@ impl ChatApp {
         if self.pane(at).searching.trim().is_empty() {
             ui.colored_label(theme.text_muted, egui::RichText::new(ONLY_HERE).small());
         } else {
-            self.hits_ui(at, &state, ui, &theme, now);
+            if let Some(who) = self.hits_ui(at, &state, ui, &theme, now) {
+                self.wants_feed = Some(who);
+            }
         }
         // A hit was pressed, or Enter took the newest: the conversation is
         // what was asked for, and it is on the card behind this one.
